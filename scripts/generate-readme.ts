@@ -9,7 +9,6 @@
  * Generated sections:
  *   - Usage (static content)
  *   - Commands (from citty renderUsage)
- *   - AI Agents (from ai-guide.ts)
  *
  * Non-generated sections (manually maintained):
  *   - Features/Modules
@@ -25,11 +24,11 @@ import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { renderUsage } from "citty";
-import { aiDocsCommand } from "../src/commands/ai-docs";
 import { diffCommand } from "../src/commands/diff";
 import { initCommand } from "../src/commands/init";
+import { pullCommand } from "../src/commands/pull";
 import { pushCommand } from "../src/commands/push";
-import { generateReadmeSection as generateAiAgentsSection } from "../src/docs/ai-guide";
+import { trackCommand } from "../src/commands/track";
 
 const README_PATH = resolve(import.meta.dirname, "../README.md");
 
@@ -42,10 +41,6 @@ const MARKERS = {
   commands: {
     start: "<!-- COMMANDS:START -->",
     end: "<!-- COMMANDS:END -->",
-  },
-  aiAgents: {
-    start: "<!-- AI_AGENTS:START -->",
-    end: "<!-- AI_AGENTS:END -->",
   },
 } as const;
 
@@ -102,6 +97,13 @@ async function generateCommandsSection(): Promise<string> {
   sections.push(cleanUsageOutput(await renderUsage(pushCommand)));
   sections.push("```\n");
 
+  // pull command
+  sections.push("### `pull`\n");
+  sections.push(`${getCommandDescription(pullCommand.meta)}\n`);
+  sections.push("```");
+  sections.push(cleanUsageOutput(await renderUsage(pullCommand)));
+  sections.push("```\n");
+
   // diff command
   sections.push("### `diff`\n");
   sections.push(`${getCommandDescription(diffCommand.meta)}\n`);
@@ -109,11 +111,11 @@ async function generateCommandsSection(): Promise<string> {
   sections.push(cleanUsageOutput(await renderUsage(diffCommand)));
   sections.push("```\n");
 
-  // ai-docs command
-  sections.push("### `ai-docs`\n");
-  sections.push(`${getCommandDescription(aiDocsCommand.meta)}\n`);
+  // track command
+  sections.push("### `track`\n");
+  sections.push(`${getCommandDescription(trackCommand.meta)}\n`);
   sections.push("```");
-  sections.push(cleanUsageOutput(await renderUsage(aiDocsCommand)));
+  sections.push(cleanUsageOutput(await renderUsage(trackCommand)));
   sections.push("```\n");
 
   return sections.join("\n");
@@ -164,7 +166,6 @@ async function main(): Promise<void> {
   // Generate sections
   const usageSection = generateUsageSection();
   const commandsSection = await generateCommandsSection();
-  const aiAgentsSection = generateAiAgentsSection();
 
   // Update README
   let readme = await readFile(README_PATH, "utf-8");
@@ -172,7 +173,6 @@ async function main(): Promise<void> {
 
   readme = updateSection(readme, MARKERS.usage.start, MARKERS.usage.end, usageSection);
   readme = updateSection(readme, MARKERS.commands.start, MARKERS.commands.end, commandsSection);
-  readme = updateSection(readme, MARKERS.aiAgents.start, MARKERS.aiAgents.end, aiAgentsSection);
 
   const updated = readme !== originalReadme;
 

@@ -197,7 +197,7 @@ export const pushCommand = defineCommand({
     files: {
       type: "string",
       description:
-        "Comma-separated file paths to include in PR (non-interactive file selection for AI agents)",
+        "Comma-separated file paths to include in PR (skips file selection prompt)",
     },
   },
   async run({ args }) {

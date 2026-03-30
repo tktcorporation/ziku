@@ -105,7 +105,26 @@ OPTIONS
   `-m, --message`    PR title
   `-y, -f, --yes`    Skip confirmation prompts
          `--edit`    Edit PR title and description before creating
-        `--files`    Comma-separated file paths to include in PR (non-interactive file selection for AI agents)
+        `--files`    Comma-separated file paths to include in PR (skips file selection prompt)
+```
+
+### `pull`
+
+Pull latest template updates
+
+```
+Pull latest template updates (pull)
+
+USAGE `pull [OPTIONS] [DIR]`
+
+ARGUMENTS
+
+  `DIR="."`    Project directory
+
+OPTIONS
+
+  `-f, --force`    Skip confirmations
+   `--continue`    Continue after resolving merge conflicts
 ```
 
 ### `diff`
@@ -126,40 +145,30 @@ OPTIONS
   `-v, --verbose`    Show detailed diff
 ```
 
-### `ai-docs`
+### `track`
 
-Show documentation for AI coding agents
+Add file patterns to the tracking whitelist in modules.jsonc
 
 ```
-Show documentation for AI coding agents (ai-docs)
+Add file patterns to the tracking whitelist in modules.jsonc (track)
 
-USAGE `ai-docs `
+USAGE `track [OPTIONS] [PATTERNS]`
+
+ARGUMENTS
+
+  `PATTERNS`    File paths or glob patterns to track (e.g., .cloud/rules/*.md)
+
+OPTIONS
+
+  `-d, --dir="."`    Project directory (default: current directory)
+   `-m, --module`    Module ID to add patterns to (auto-detected from path if omitted)
+         `--name`    Module name (used when creating a new module)
+  `--description`    Module description (used when creating a new module)
+     `-l, --list`    List all currently tracked modules and patterns
 ```
 
 <!-- COMMANDS:END -->
 
-<!-- AI_AGENTS:START -->
-
-## For AI Agents
-
-AI coding agents can use the non-interactive workflow:
-
-```bash
-# Push specific files as a PR
-npx ziku push --yes --files "path1,path2" -m "feat: add config"
-
-# Add new files to tracking, then push
-npx ziku track ".cloud/rules/*.md"
-npx ziku push --yes --files ".cloud/rules/naming.md" -m "feat: add rules"
-```
-
-For detailed documentation, run:
-
-```bash
-npx ziku ai-docs
-```
-
-<!-- AI_AGENTS:END -->
 
 <!-- FILES:START -->
 
