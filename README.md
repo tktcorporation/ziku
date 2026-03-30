@@ -27,6 +27,79 @@ Templates go stale the moment you scaffold them. Each project improves upon the 
 
 Your template stays alive, fed by every project that uses it.
 
+<!-- GETTING_STARTED:START -->
+
+## Getting Started
+
+### 1. Set up your template repository
+
+ziku uses a GitHub repository as the template source. By default, it looks for `{your-org}/.github` based on your git remote.
+
+If the repository doesn't exist yet, `npx ziku` will offer to create it for you interactively. You can also create it manually or specify a different source:
+
+```bash
+# Auto-detect from git remote (recommended)
+npx ziku
+
+# Use a specific template repository
+npx ziku --from my-org/my-templates
+```
+
+### 2. Add `.devenv/modules.jsonc` to your template
+
+The template repository needs a `.devenv/modules.jsonc` file that defines which modules and file patterns ziku manages. If this file is missing, ziku will offer to create a PR that adds one with a default configuration.
+
+Example `modules.jsonc`:
+
+```jsonc
+{
+  "$schema": "https://ziku.dev/schema/modules.json",
+  "modules": [
+    {
+      "id": ".",
+      "name": "Root",
+      "description": "Root configuration files (MCP, mise, etc.)",
+      "patterns": [
+        ".mcp.json",
+        ".mise.toml"
+      ]
+    },
+    {
+      "id": ".github",
+      "name": "GitHub",
+      "description": "GitHub Actions workflows",
+      "patterns": [
+        ".github/workflows/*.yml",
+        ".github/labeler.yml"
+      ]
+    }
+  ]
+}
+```
+
+### 3. Apply the template to your project
+
+```bash
+npx ziku
+```
+
+Select the modules you want, and ziku copies the matching files into your project. A `.devenv.json` config and `.devenv/modules.jsonc` are created locally to track what was installed.
+
+### 4. Keep it in sync
+
+```bash
+# Push local improvements back to the template
+npx ziku push -m "Add new workflow"
+
+# Pull latest template updates
+npx ziku pull
+
+# Check what's different
+npx ziku diff
+```
+
+<!-- GETTING_STARTED:END -->
+
 <!-- USAGE:START -->
 
 ## Usage
