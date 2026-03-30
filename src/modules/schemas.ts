@@ -136,4 +136,3 @@ export const prResultSchema = z.object({
   branch: z.string(),
 });
 export type PrResult = z.infer<typeof prResultSchema>;
-
