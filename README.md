@@ -53,7 +53,7 @@ Example `modules.jsonc`:
 
 ```jsonc
 {
-  "$schema": "https://ziku.dev/schema/modules.json",
+  "$schema": "https://raw.githubusercontent.com/tktcorporation/ziku/main/schema/modules.json",
   "modules": [
     {
       "id": ".",

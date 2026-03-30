@@ -9,9 +9,16 @@ import { moduleSchema } from "./schemas";
 const MODULES_FILE = ".devenv/modules.jsonc";
 
 /**
+ * modules.jsonc の $schema URL。
+ * raw.githubusercontent.com 経由でリポジトリ内の schema/modules.json を参照する。
+ */
+export const MODULES_SCHEMA_URL =
+  "https://raw.githubusercontent.com/tktcorporation/ziku/main/schema/modules.json";
+
+/**
  * modules.jsonc のスキーマ
  */
-const modulesFileSchema = z.object({
+export const modulesFileSchema = z.object({
   $schema: z.string().optional(),
   modules: z.array(moduleSchema),
 });

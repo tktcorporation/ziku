@@ -25,14 +25,17 @@ import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { renderUsage } from "citty";
+import { z } from "zod";
 import { diffCommand } from "../src/commands/diff";
 import { generateInitialModulesJsonc, initCommand } from "../src/commands/init";
 import { pullCommand } from "../src/commands/pull";
 import { pushCommand } from "../src/commands/push";
 import { trackCommand } from "../src/commands/track";
+import { modulesFileSchema } from "../src/modules/loader";
 import { DEFAULT_TEMPLATE_REPO } from "../src/utils/git-remote";
 
 const README_PATH = resolve(import.meta.dirname, "../README.md");
+const SCHEMA_PATH = resolve(import.meta.dirname, "../schema/modules.json");
 
 // Marker definitions
 const MARKERS = {
@@ -233,7 +236,10 @@ function updateSection(
 async function main(): Promise<void> {
   const isCheck = process.argv.includes("--check");
 
-  console.log("📝 Generating README documentation...\n");
+  console.log("📝 Generating documentation...\n");
+
+  // Generate JSON Schema from Zod schema
+  const jsonSchema = JSON.stringify(z.toJSONSchema(modulesFileSchema), null, 2);
 
   // Generate sections
   const gettingStartedSection = generateGettingStartedSection();
@@ -253,23 +259,43 @@ async function main(): Promise<void> {
   readme = updateSection(readme, MARKERS.usage.start, MARKERS.usage.end, usageSection);
   readme = updateSection(readme, MARKERS.commands.start, MARKERS.commands.end, commandsSection);
 
-  const updated = readme !== originalReadme;
+  const readmeUpdated = readme !== originalReadme;
+
+  // Check schema file
+  let schemaUpdated = false;
+  try {
+    const existingSchema = await readFile(SCHEMA_PATH, "utf-8");
+    schemaUpdated = existingSchema !== `${jsonSchema}\n`;
+  } catch {
+    schemaUpdated = true; // file doesn't exist yet
+  }
+
+  const updated = readmeUpdated || schemaUpdated;
 
   if (isCheck) {
     if (updated) {
-      console.error("\n❌ README.md is out of date.");
+      if (readmeUpdated) console.error("  - README.md is out of date");
+      if (schemaUpdated) console.error("  - schema/modules.json is out of date");
+      console.error("\n❌ Documentation is out of date.");
       console.error("   Run `pnpm run docs` to update.\n");
       process.exit(1);
     }
-    console.log("\n✅ README.md is up to date.\n");
+    console.log("\n✅ Documentation is up to date.\n");
     return;
   }
 
-  if (updated) {
+  if (readmeUpdated) {
     await writeFile(README_PATH, readme);
-    console.log("\n✅ README.md updated.\n");
+    console.log("  ✅ README.md updated.");
+  }
+  if (schemaUpdated) {
+    await writeFile(SCHEMA_PATH, `${jsonSchema}\n`);
+    console.log("  ✅ schema/modules.json updated.");
+  }
+  if (!updated) {
+    console.log("\n✅ Documentation is already up to date.\n");
   } else {
-    console.log("\n✅ README.md is already up to date.\n");
+    console.log("");
   }
 }
 
