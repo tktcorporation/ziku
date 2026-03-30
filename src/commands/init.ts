@@ -2,7 +2,6 @@ import { existsSync, mkdirSync } from "node:fs";
 import { defineCommand } from "citty";
 import { join, resolve } from "pathe";
 import {
-  defaultModules,
   getModuleById,
   getModulesFilePath,
   getPatternsByModuleIds,
@@ -17,11 +16,11 @@ import type {
 } from "../modules/schemas";
 import { BermError } from "../errors";
 import {
+  confirmScaffoldDevenvPR,
   inputTemplateSource,
   selectMissingTemplateAction,
   selectModules,
   selectOverwriteStrategy,
-  selectScaffoldDevenvAction,
 } from "../ui/prompts";
 import { DEFAULT_TEMPLATE_REPO, detectGitHubOwner } from "../utils/git-remote";
 import {
@@ -513,58 +512,90 @@ async function handleMissingTemplate(
 /**
  * テンプレートに .devenv/modules.jsonc がない場合のハンドリング
  *
- * テンプレートリポジトリは存在するが .devenv 構成がない場合、
- * PR で追加するか、ローカルでデフォルトを使うか選ばせる。
+ * modules.jsonc はテンプレートリポジトリに必須。存在しない場合は
+ * PR で追加するか、エラーにする。ローカルフォールバックは行わない。
  */
 async function handleMissingDevenv(
   owner: string,
   repo: string,
   nonInteractive: boolean,
-): Promise<TemplateModule[]> {
+): Promise<never> {
   if (nonInteractive) {
-    log.warn(
-      `Template ${pc.cyan(`${owner}/${repo}`)} has no .devenv/modules.jsonc, using built-in defaults`,
+    throw new BermError(
+      `Template ${owner}/${repo} has no .devenv/modules.jsonc`,
+      "Add .devenv/modules.jsonc to the template repository first, or run interactively to create a PR",
     );
-    return defaultModules;
   }
 
-  const action = await selectScaffoldDevenvAction(owner, repo);
+  const confirmed = await confirmScaffoldDevenvPR(owner, repo);
 
-  switch (action) {
-    case "scaffold-pr": {
-      const token = getGitHubToken();
-      if (!token) {
-        throw new BermError(
-          "GitHub token required to create a PR",
-          "Set GITHUB_TOKEN or GH_TOKEN, or run: gh auth login",
-        );
-      }
-
-      const modulesContent = generateDefaultModulesJsonc();
-      log.step(`Creating PR to add .devenv/modules.jsonc to ${pc.cyan(`${owner}/${repo}`)}...`);
-      const result = await createDevenvScaffoldPR(token, owner, repo, modulesContent);
-      log.success(`Created PR: ${pc.cyan(result.url)}`);
-      log.info(pc.dim("Continuing with built-in defaults for now."));
-      return defaultModules;
-    }
-
-    case "scaffold-local":
-    case "continue-without":
-      return defaultModules;
+  if (!confirmed) {
+    throw new BermError(
+      ".devenv/modules.jsonc is required",
+      "Add it to the template repository manually, then run ziku init again",
+    );
   }
+
+  const token = getGitHubToken();
+  if (!token) {
+    throw new BermError(
+      "GitHub token required to create a PR",
+      "Set GITHUB_TOKEN or GH_TOKEN, or run: gh auth login",
+    );
+  }
+
+  const modulesContent = generateInitialModulesJsonc();
+  log.step(`Creating PR to add .devenv/modules.jsonc to ${pc.cyan(`${owner}/${repo}`)}...`);
+  const result = await createDevenvScaffoldPR(token, owner, repo, modulesContent);
+  log.success(`Created PR: ${pc.cyan(result.url)}`);
+
+  throw new BermError("Merge the PR first, then run ziku init again", `PR: ${result.url}`);
 }
 
 /**
- * デフォルトの modules.jsonc コンテンツを生成する
+ * 初期の modules.jsonc コンテンツを生成する（スキャフォールド用）
+ *
+ * テンプレートリポジトリに .devenv/modules.jsonc を追加する際に使用。
+ * よくあるモジュール構成をテンプレートとして提供する。
  */
-function generateDefaultModulesJsonc(): string {
+export function generateInitialModulesJsonc(): string {
+  const initialModules: TemplateModule[] = [
+    {
+      id: ".",
+      name: "Root",
+      description: "Root configuration files (MCP, mise, etc.)",
+      patterns: [".mcp.json", ".mise.toml"],
+    },
+    {
+      id: ".devcontainer",
+      name: "DevContainer",
+      description: "VS Code DevContainer setup",
+      patterns: [
+        ".devcontainer/devcontainer.json",
+        ".devcontainer/.gitignore",
+        ".devcontainer/setup-*.sh",
+      ],
+    },
+    {
+      id: ".github",
+      name: "GitHub",
+      description: "GitHub Actions workflows",
+      patterns: [".github/workflows/*.yml", ".github/labeler.yml"],
+    },
+    {
+      id: ".claude",
+      name: "Claude",
+      description: "Claude Code project settings",
+      patterns: [".claude/settings.json"],
+    },
+  ];
+
   const content = {
     $schema: "https://ziku.dev/schema/modules.json",
-    modules: defaultModules.map((m) => ({
+    modules: initialModules.map((m) => ({
       id: m.id,
       name: m.name,
       description: m.description,
-      ...(m.setupDescription ? { setupDescription: m.setupDescription } : {}),
       patterns: m.patterns,
     })),
   };

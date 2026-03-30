@@ -126,49 +126,27 @@ export async function inputTemplateSource(defaultValue?: string): Promise<string
 }
 
 /** .devenv スキャフォールディング時のアクション */
-export type ScaffoldDevenvAction = "scaffold-pr" | "scaffold-local" | "continue-without";
-
 /**
- * テンプレートリポジトリに .devenv/modules.jsonc が存在しない場合のアクション選択
+ * テンプレートリポジトリに .devenv/modules.jsonc が存在しない場合の確認
  *
- * 背景: テンプレートリポジトリが存在するが .devenv 構成がない場合、
- * デフォルトの modules.jsonc を生成して PR を作るか、ローカルでデフォルトを使うか選ばせる。
+ * modules.jsonc はテンプレートリポジトリに必須。存在しない場合は
+ * PR で追加するかどうかを確認する。
  */
-export async function selectScaffoldDevenvAction(
-  owner: string,
-  repo: string,
-): Promise<ScaffoldDevenvAction> {
+export async function confirmScaffoldDevenvPR(owner: string, repo: string): Promise<boolean> {
   p.log.warn(
     `Template ${pc.cyan(`${owner}/${repo}`)} does not contain ${pc.cyan(".devenv/modules.jsonc")}`,
   );
   p.log.message(
     pc.dim(
-      "This file defines which modules and file patterns ziku manages.\nYou can create it now to enable full template synchronization.",
+      "This file defines which modules and file patterns ziku manages.\nIt must exist in the template repository to continue.",
     ),
   );
 
-  const action = await p.select({
-    message: "How would you like to proceed?",
-    options: [
-      {
-        value: "scaffold-pr" as const,
-        label: `Create PR to ${owner}/${repo}`,
-        hint: "Generate .devenv/modules.jsonc and submit as a PR (requires GitHub token)",
-      },
-      {
-        value: "scaffold-local" as const,
-        label: "Use default modules locally",
-        hint: "Continue with built-in defaults, no changes to the template repo",
-      },
-      {
-        value: "continue-without" as const,
-        label: "Continue without .devenv",
-        hint: "Use built-in defaults (same as above, you can set up later)",
-      },
-    ],
+  const confirmed = await p.confirm({
+    message: `Create a PR to add .devenv/modules.jsonc to ${owner}/${repo}?`,
   });
-  handleCancel(action);
-  return action as ScaffoldDevenvAction;
+  handleCancel(confirmed);
+  return confirmed as boolean;
 }
 
 // ─── push ─────────────────────────────────────────────────────
