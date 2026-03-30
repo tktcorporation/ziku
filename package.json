@@ -37,7 +37,6 @@
     "version": "changeset version && npm run docs",
     "release": "changeset publish"
   },
-  "packageManager": "pnpm@10.25.0",
   "dependencies": {
     "@clack/prompts": "^1.0.1",
     "@octokit/rest": "^22.0.1",
@@ -56,6 +55,8 @@
     "zod": "^4.1.13"
   },
   "devDependencies": {
+    "@changesets/changelog-github": "^0.5.2",
+    "@changesets/cli": "^2.29.8",
     "@types/node": "^22.19.2",
     "@vitest/coverage-v8": "^4.0.15",
     "memfs": "^4.51.1",
@@ -64,11 +65,10 @@
     "oxlint-tsgolint": "latest",
     "tsdown": "^0.18.1",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.15",
-    "@changesets/cli": "^2.29.8",
-    "@changesets/changelog-github": "^0.5.2"
+    "vitest": "^4.0.15"
   },
   "engines": {
     "node": ">=20.0.0"
-  }
+  },
+  "packageManager": "pnpm@10.25.0"
 }
