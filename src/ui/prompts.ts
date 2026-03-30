@@ -65,6 +65,71 @@ export async function selectOverwriteStrategy(options?: {
   return strategy as OverwriteStrategy;
 }
 
+// ─── init (missing template) ─────────────────────────────────
+
+/** テンプレートリポジトリが見つからない場合のアクション */
+export type MissingTemplateAction = "use-default" | "create-repo" | "specify-source";
+
+/**
+ * テンプレートリポジトリが見つからない場合のアクション選択
+ *
+ * 背景: `{owner}/.github` が存在しない場合、ユーザーにリカバリ方法を提示する。
+ * デフォルトテンプレートの利用が最もシンプルで初心者向き。
+ */
+export async function selectMissingTemplateAction(
+  owner: string,
+  repo: string,
+): Promise<MissingTemplateAction> {
+  p.log.warn(`Template repository ${pc.cyan(`${owner}/${repo}`)} was not found.`);
+  p.log.message(
+    pc.dim(
+      "This repository is used as a dev environment template source.\nYou can create one or use the default template to get started.",
+    ),
+  );
+
+  const action = await p.select({
+    message: "How would you like to proceed?",
+    options: [
+      {
+        value: "use-default" as const,
+        label: "Use default template",
+        hint: "tktcorporation/.github — quick start",
+      },
+      {
+        value: "create-repo" as const,
+        label: `Create ${owner}/${repo}`,
+        hint: "Fork default template to your account (requires GitHub token)",
+      },
+      {
+        value: "specify-source" as const,
+        label: "Specify a different template",
+        hint: "Enter owner/repo manually",
+      },
+    ],
+  });
+  handleCancel(action);
+  return action as MissingTemplateAction;
+}
+
+/**
+ * カスタムテンプレートソースの入力
+ */
+export async function inputTemplateSource(): Promise<string> {
+  const source = await p.text({
+    message: "Template source (owner/repo)",
+    placeholder: "my-org/my-templates",
+    validate: (value) => {
+      if (!value?.trim()) return "Source is required";
+      const slashIndex = value.indexOf("/");
+      if (slashIndex === -1 || slashIndex === 0 || slashIndex === value.length - 1) {
+        return "Expected format: owner/repo";
+      }
+    },
+  });
+  handleCancel(source);
+  return source as string;
+}
+
 // ─── push ─────────────────────────────────────────────────────
 
 /**

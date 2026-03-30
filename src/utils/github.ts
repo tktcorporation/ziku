@@ -168,6 +168,71 @@ export function getGhCliToken(): string | undefined {
 }
 
 /**
+ * GitHub リポジトリの存在を確認する。
+ *
+ * 背景: ziku init でテンプレートリポジトリが存在しない場合に、
+ * giget のエラーメッセージではなく分かりやすいガイダンスを表示するため、
+ * 事前にリポジトリの存在をチェックする。
+ * 認証不要（公開リポジトリの場合）。HEAD リクエストで軽量に確認。
+ */
+export async function checkRepoExists(owner: string, repo: string): Promise<boolean> {
+  try {
+    const url = `https://api.github.com/repos/${owner}/${repo}`;
+    const res = await fetch(url, { method: "HEAD" });
+    return res.ok;
+  } catch {
+    // ネットワークエラー等の場合は存在チェックをスキップ（楽観的に続行）
+    return true;
+  }
+}
+
+/**
+ * テンプレートリポジトリをデフォルトテンプレートから新規作成する。
+ *
+ * 背景: org に `.github` テンプレートリポジトリが存在しない場合、
+ * デフォルトテンプレート（tktcorporation/.github）をフォークして
+ * org 配下に新規作成する。
+ */
+export async function scaffoldTemplateRepo(
+  token: string,
+  targetOwner: string,
+  targetRepo: string,
+  sourceOwner: string,
+  sourceRepo: string,
+): Promise<{ url: string }> {
+  const { Octokit } = await import("@octokit/rest");
+  const octokit = new Octokit({ auth: token });
+
+  // org か personal かを判定
+  let isOrg = false;
+  try {
+    await octokit.orgs.get({ org: targetOwner });
+    isOrg = true;
+  } catch {
+    // personal account
+  }
+
+  if (isOrg) {
+    // org にフォーク
+    const { data: fork } = await octokit.repos.createFork({
+      owner: sourceOwner,
+      repo: sourceRepo,
+      organization: targetOwner,
+      name: targetRepo,
+    });
+    return { url: fork.html_url };
+  }
+
+  // personal account にフォーク
+  const { data: fork } = await octokit.repos.createFork({
+    owner: sourceOwner,
+    repo: sourceRepo,
+    name: targetRepo,
+  });
+  return { url: fork.html_url };
+}
+
+/**
  * テンプレートリポジトリの最新コミット SHA を取得する。
  *
  * 背景: init/pull 時に baseRef として保存し、後で 3-way マージのベース取得に使用する。

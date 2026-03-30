@@ -16,13 +16,23 @@ import type {
   TemplateModule,
 } from "../modules/schemas";
 import { BermError } from "../errors";
-import { selectModules, selectOverwriteStrategy } from "../ui/prompts";
+import {
+  inputTemplateSource,
+  selectMissingTemplateAction,
+  selectModules,
+  selectOverwriteStrategy,
+} from "../ui/prompts";
 import {
   DEFAULT_TEMPLATE_OWNER,
   DEFAULT_TEMPLATE_REPO,
   detectGitHubOwner,
 } from "../utils/git-remote";
-import { resolveLatestCommitSha } from "../utils/github";
+import {
+  checkRepoExists,
+  getGitHubToken,
+  resolveLatestCommitSha,
+  scaffoldTemplateRepo,
+} from "../utils/github";
 import { hashFiles } from "../utils/hash";
 import {
   buildTemplateSource,
@@ -91,8 +101,11 @@ export const initCommand = defineCommand({
       log.message(pc.dim(`Created directory: ${targetDir}`));
     }
 
-    // テンプレートソースを解決
-    const { sourceOwner, sourceRepo } = resolveTemplateSource(args.from as string | undefined);
+    // テンプレートソースを解決（テンプレートリポジトリの存在チェック含む）
+    const { sourceOwner, sourceRepo } = await resolveTemplateSourceWithCheck(
+      args.from as string | undefined,
+      args.yes as boolean,
+    );
     const templateSourceStr = buildTemplateSource({
       owner: sourceOwner,
       repo: sourceRepo,
@@ -383,14 +396,136 @@ function displayModuleDescriptions(
 }
 
 /**
- * テンプレートソースを解決する。
+ * テンプレートソースを解決する（存在チェック付き）。
+ *
+ * 優先順位:
+ *   1. --from owner/repo が指定されていればそのまま使用
+ *   2. git remote origin から owner を検出 → {owner}/.github
+ *   3. フォールバック: tktcorporation/.github
+ *
+ * 解決後、テンプレートリポジトリの存在を確認し、見つからない場合は
+ * ユーザーにリカバリ方法を提示する。
+ */
+async function resolveTemplateSourceWithCheck(
+  from: string | undefined,
+  nonInteractive: boolean,
+): Promise<{
+  sourceOwner: string;
+  sourceRepo: string;
+}> {
+  const resolved = resolveTemplateSource(from);
+
+  // --from で明示指定された場合は存在チェックのみ（リカバリなし）
+  if (from) {
+    const exists = await checkRepoExists(resolved.sourceOwner, resolved.sourceRepo);
+    if (!exists) {
+      throw new BermError(
+        `Template repository "${resolved.sourceOwner}/${resolved.sourceRepo}" not found`,
+        "Check the --from value or create the repository first",
+      );
+    }
+    return resolved;
+  }
+
+  // デフォルトテンプレートの場合は存在チェック不要
+  if (
+    resolved.sourceOwner === DEFAULT_TEMPLATE_OWNER &&
+    resolved.sourceRepo === DEFAULT_TEMPLATE_REPO
+  ) {
+    return resolved;
+  }
+
+  // 自動検出されたソースの存在チェック
+  const exists = await checkRepoExists(resolved.sourceOwner, resolved.sourceRepo);
+  if (exists) {
+    return resolved;
+  }
+
+  // 非インタラクティブモードではデフォルトにフォールバック
+  if (nonInteractive) {
+    log.warn(
+      `Template ${pc.cyan(`${resolved.sourceOwner}/${resolved.sourceRepo}`)} not found, using default`,
+    );
+    return {
+      sourceOwner: DEFAULT_TEMPLATE_OWNER,
+      sourceRepo: DEFAULT_TEMPLATE_REPO,
+    };
+  }
+
+  // インタラクティブモード: ユーザーにアクション選択を促す
+  return handleMissingTemplate(resolved.sourceOwner, resolved.sourceRepo);
+}
+
+/**
+ * テンプレートリポジトリが見つからない場合のインタラクティブハンドリング
+ */
+async function handleMissingTemplate(
+  owner: string,
+  repo: string,
+): Promise<{ sourceOwner: string; sourceRepo: string }> {
+  const action = await selectMissingTemplateAction(owner, repo);
+
+  switch (action) {
+    case "use-default":
+      return {
+        sourceOwner: DEFAULT_TEMPLATE_OWNER,
+        sourceRepo: DEFAULT_TEMPLATE_REPO,
+      };
+
+    case "create-repo": {
+      const token = getGitHubToken();
+      if (!token) {
+        throw new BermError(
+          "GitHub token required to create a repository",
+          "Set GITHUB_TOKEN or GH_TOKEN, or run: gh auth login",
+        );
+      }
+
+      log.step(`Creating ${pc.cyan(`${owner}/${repo}`)} from default template...`);
+      const { url } = await scaffoldTemplateRepo(
+        token,
+        owner,
+        repo,
+        DEFAULT_TEMPLATE_OWNER,
+        DEFAULT_TEMPLATE_REPO,
+      );
+      log.success(`Created template repository: ${pc.cyan(url)}`);
+      log.info(pc.dim("Waiting for repository to be ready..."));
+      // フォーク同期を待つ
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+
+      return { sourceOwner: owner, sourceRepo: repo };
+    }
+
+    case "specify-source": {
+      const source = await inputTemplateSource();
+      const slashIndex = source.indexOf("/");
+      const newOwner = source.slice(0, slashIndex);
+      const newRepo = source.slice(slashIndex + 1);
+
+      // 指定されたソースの存在チェック
+      const exists = await checkRepoExists(newOwner, newRepo);
+      if (!exists) {
+        throw new BermError(
+          `Template repository "${newOwner}/${newRepo}" not found`,
+          "Check the repository name and try again",
+        );
+      }
+
+      return { sourceOwner: newOwner, sourceRepo: newRepo };
+    }
+  }
+}
+
+/**
+ * テンプレートソースを解決する（純粋な解決ロジック、存在チェックなし）。
  *
  * 優先順位:
  *   1. --from owner/repo が指定されていればそのまま使用
  *   2. git remote origin から owner を検出 → {owner}/.github
  *   3. フォールバック: tktcorporation/.github
  */
-function resolveTemplateSource(from: string | undefined): {
+export function resolveTemplateSource(from: string | undefined): {
   sourceOwner: string;
   sourceRepo: string;
 } {

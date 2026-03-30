@@ -36,11 +36,16 @@ vi.mock("../../utils/hash", () => ({
 
 vi.mock("../../utils/github", () => ({
   resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
+  checkRepoExists: vi.fn(() => Promise.resolve(true)),
+  getGitHubToken: vi.fn(() => undefined),
+  scaffoldTemplateRepo: vi.fn(() => Promise.resolve({ url: "https://github.com/test/repo" })),
 }));
 
 vi.mock("../../ui/prompts", () => ({
   selectModules: vi.fn(),
   selectOverwriteStrategy: vi.fn(),
+  selectMissingTemplateAction: vi.fn(),
+  inputTemplateSource: vi.fn(),
 }));
 
 vi.mock("../../ui/renderer", () => ({
