@@ -13,10 +13,21 @@ import pc from "picocolors";
 declare const __VERSION__: string;
 const version = typeof __VERSION__ !== "undefined" ? __VERSION__ : "dev";
 
+/** 各コマンドの非インタラクティブ用法ヒント */
+const nonInteractiveHints: Record<string, string> = {
+  init: "Non-interactive: ziku init --yes  or  ziku init --modules <ids> -s skip",
+  push: "Non-interactive: ziku push --yes --files <paths> -m <title>",
+  pull: "Non-interactive: ziku pull --force",
+  diff: "Non-interactive: ziku diff --verbose",
+};
+
 /** CLI の開始表示 */
 export function intro(command?: string): void {
   const title = command ? `ziku ${command}` : "ziku";
   p.intro(`${pc.bgCyan(pc.black(` ${title} `))} ${pc.dim(`v${version}`)}`);
+  if (command && nonInteractiveHints[command]) {
+    p.log.message(pc.dim(nonInteractiveHints[command]));
+  }
 }
 
 /** CLI の終了表示 */
