@@ -140,7 +140,7 @@ describe("track command - core logic", () => {
       );
 
       vol.fromJSON({
-        "/project/.devenv/modules.jsonc": initialContent,
+        "/project/.ziku/modules.jsonc": initialContent,
       });
 
       const { rawContent } = await loadModulesFile("/project");
@@ -149,7 +149,7 @@ describe("track command - core logic", () => {
       ]);
       await saveModulesFile("/project", updated);
 
-      const saved = vol.readFileSync("/project/.devenv/modules.jsonc", "utf8") as string;
+      const saved = vol.readFileSync("/project/.ziku/modules.jsonc", "utf8") as string;
       const parsed = JSON.parse(saved);
       expect(parsed.modules).toHaveLength(2);
       expect(parsed.modules[1].id).toBe(".cloud");
@@ -174,7 +174,7 @@ describe("trackCommand", () => {
 
   it("--list のみで patterns なしでも動作する（required: false）", async () => {
     vol.fromJSON({
-      "/project/.devenv/modules.jsonc": JSON.stringify({
+      "/project/.ziku/modules.jsonc": JSON.stringify({
         modules: [{ id: ".", name: "Root", description: "Root", patterns: [".mcp.json"] }],
       }),
     });

@@ -41,7 +41,7 @@ describe("loadModulesFile", () => {
     });
 
     vol.fromJSON({
-      "/project/.devenv/modules.jsonc": modulesContent,
+      "/project/.ziku/modules.jsonc": modulesContent,
     });
 
     const result = await loadModulesFile("/project");
@@ -66,7 +66,7 @@ describe("loadModulesFile", () => {
     }`;
 
     vol.fromJSON({
-      "/project/.devenv/modules.jsonc": modulesContent,
+      "/project/.ziku/modules.jsonc": modulesContent,
     });
 
     const result = await loadModulesFile("/project");
@@ -89,7 +89,7 @@ describe("loadModulesFile", () => {
     });
 
     vol.fromJSON({
-      "/project/.devenv/modules.jsonc": modulesContent,
+      "/project/.ziku/modules.jsonc": modulesContent,
     });
 
     const result = await loadModulesFile("/project");
@@ -101,13 +101,13 @@ describe("loadModulesFile", () => {
     vol.fromJSON({});
 
     await expect(loadModulesFile("/project")).rejects.toThrow(
-      ".devenv/modules.jsonc が見つかりません",
+      ".ziku/modules.jsonc が見つかりません",
     );
   });
 
   it("不正な JSON の場合はエラー", async () => {
     vol.fromJSON({
-      "/project/.devenv/modules.jsonc": "{ invalid json }",
+      "/project/.ziku/modules.jsonc": "{ invalid json }",
     });
 
     await expect(loadModulesFile("/project")).rejects.toThrow();
@@ -115,7 +115,7 @@ describe("loadModulesFile", () => {
 
   it("スキーマに合わない場合はエラー", async () => {
     vol.fromJSON({
-      "/project/.devenv/modules.jsonc": JSON.stringify({
+      "/project/.ziku/modules.jsonc": JSON.stringify({
         modules: [
           {
             id: ".devcontainer",
@@ -144,7 +144,7 @@ describe("loadModulesFile", () => {
     });
 
     vol.fromJSON({
-      "/project/.devenv/modules.jsonc": modulesContent,
+      "/project/.ziku/modules.jsonc": modulesContent,
     });
 
     const result = await loadModulesFile("/project");
@@ -361,36 +361,36 @@ describe("saveModulesFile", () => {
 
   it("モジュールファイルを保存できる", async () => {
     vol.fromJSON({
-      "/project/.devenv": null, // ディレクトリを作成
+      "/project/.ziku": null, // ディレクトリを作成
     });
 
     const content = JSON.stringify({ modules: [] });
     await saveModulesFile("/project", content);
 
-    const saved = vol.readFileSync("/project/.devenv/modules.jsonc", "utf8");
+    const saved = vol.readFileSync("/project/.ziku/modules.jsonc", "utf8");
     expect(saved).toBe(content);
   });
 
   it("既存ファイルを上書きできる", async () => {
     vol.fromJSON({
-      "/project/.devenv/modules.jsonc": "old content",
+      "/project/.ziku/modules.jsonc": "old content",
     });
 
     const newContent = JSON.stringify({ modules: [{ id: "new" }] });
     await saveModulesFile("/project", newContent);
 
-    const saved = vol.readFileSync("/project/.devenv/modules.jsonc", "utf8");
+    const saved = vol.readFileSync("/project/.ziku/modules.jsonc", "utf8");
     expect(saved).toBe(newContent);
   });
 });
 
 describe("getModulesFilePath", () => {
   it("正しいパスを返す", () => {
-    expect(getModulesFilePath("/project")).toBe("/project/.devenv/modules.jsonc");
+    expect(getModulesFilePath("/project")).toBe("/project/.ziku/modules.jsonc");
   });
 
   it("末尾スラッシュなしでも正しく動作する", () => {
-    expect(getModulesFilePath("/path/to/project")).toBe("/path/to/project/.devenv/modules.jsonc");
+    expect(getModulesFilePath("/path/to/project")).toBe("/path/to/project/.ziku/modules.jsonc");
   });
 });
 
@@ -401,7 +401,7 @@ describe("modulesFileExists", () => {
 
   it("ファイルが存在する場合は true を返す", () => {
     vol.fromJSON({
-      "/project/.devenv/modules.jsonc": "{}",
+      "/project/.ziku/modules.jsonc": "{}",
     });
 
     expect(modulesFileExists("/project")).toBe(true);
@@ -415,7 +415,7 @@ describe("modulesFileExists", () => {
 
   it("ディレクトリのみ存在してファイルがない場合は false を返す", () => {
     vol.fromJSON({
-      "/project/.devenv": null,
+      "/project/.ziku": null,
     });
 
     expect(modulesFileExists("/project")).toBe(false);

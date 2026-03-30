@@ -46,7 +46,7 @@ function formatFileStat(file: {
  * process.exit() でも確実に一時ディレクトリを削除するための同期クリーンアップを登録する。
  *
  * 背景: handleCancel() が process.exit(0) を呼ぶため async finally ブロックが
- * スキップされ、.devenv-temp が残る問題への対策。process.on('exit') は
+ * スキップされ、.ziku-temp が残る問題への対策。process.on('exit') は
  * process.exit() でも発火するが同期処理のみ実行可能なため rmSync を使用。
  *
  * 削除条件: handleCancel() が process.exit() を使わなくなった場合。
@@ -67,7 +67,7 @@ function registerSyncCleanup(tempDir: string): () => void {
   };
 }
 
-const MODULES_FILE_PATH = ".devenv/modules.jsonc";
+const MODULES_FILE_PATH = ".ziku/modules.jsonc";
 const README_PATH = "README.md";
 
 interface LocalModuleAdditions {
@@ -203,11 +203,11 @@ export const pushCommand = defineCommand({
     intro("push");
 
     const targetDir = resolve(args.dir);
-    const configPath = join(targetDir, ".devenv.json");
+    const configPath = join(targetDir, ".ziku.json");
 
-    // .devenv.json の存在確認
+    // .ziku.json の存在確認
     if (!existsSync(configPath)) {
-      throw new BermError(".devenv.json not found.", "Run 'ziku init' first.");
+      throw new BermError(".ziku.json not found.", "Run 'ziku init' first.");
     }
 
     // 設定読み込み
@@ -216,7 +216,7 @@ export const pushCommand = defineCommand({
     const parseResult = configSchema.safeParse(configData);
 
     if (!parseResult.success) {
-      throw new BermError("Invalid .devenv.json format", parseResult.error.message);
+      throw new BermError("Invalid .ziku.json format", parseResult.error.message);
     }
 
     const config: DevEnvConfig = parseResult.data;
@@ -240,7 +240,7 @@ export const pushCommand = defineCommand({
 
     // テンプレートを一時ディレクトリにダウンロード
     const templateSource = buildTemplateSource(config.source);
-    const tempDir = join(targetDir, ".devenv-temp");
+    const tempDir = join(targetDir, ".ziku-temp");
     const unregisterCleanup = registerSyncCleanup(tempDir);
 
     try {
@@ -265,8 +265,8 @@ export const pushCommand = defineCommand({
         modulesRawContent = loaded.rawContent;
       } else {
         throw new BermError(
-          "No .devenv/modules.jsonc found",
-          "Run `ziku init` to set up the project, or add .devenv/modules.jsonc to the template",
+          "No .ziku/modules.jsonc found",
+          "Run `ziku init` to set up the project, or add .ziku/modules.jsonc to the template",
         );
       }
 

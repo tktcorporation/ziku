@@ -1,4 +1,4 @@
-# @tktco/berm
+# @tktco/ziku
 
 ## 0.22.6
 
@@ -6,12 +6,12 @@
 
 - [#174](https://github.com/tktcorporation/.github/pull/174) [`5f465cf`](https://github.com/tktcorporation/.github/commit/5f465cf801858841de3544af24c86f54f6843432) Thanks [@tktcorporation](https://github.com/tktcorporation)! - fix: pull のオートマージが base ダウンロード時にテンプレートを上書きしてマージが空振りするバグを修正
 
-  downloadTemplateToTemp が常に同じ一時ディレクトリ (.devenv-temp) を使用していたため、
+  downloadTemplateToTemp が常に同じ一時ディレクトリ (.ziku-temp) を使用していたため、
   base バージョンのダウンロード時に先にダウンロードしたテンプレートを上書きしていた。
   これにより base === template となり、パッチが空になってローカルファイルが変更されずに
   「Auto-merged」と表示される問題が発生していた。
 
-  label 引数を追加し、base ダウンロード時に別ディレクトリ (.devenv-temp-base) を使用するよう修正。
+  label 引数を追加し、base ダウンロード時に別ディレクトリ (.ziku-temp-base) を使用するよう修正。
   合わせて merge.ts を merge/ ディレクトリに分割してリファクタリング。
 
 ## 0.22.5
@@ -122,7 +122,7 @@
 
 ### Minor Changes
 
-- [#123](https://github.com/tktcorporation/.github/pull/123) [`b014816`](https://github.com/tktcorporation/.github/commit/b014816f0a74f301a5c1a3034f2e98cf81863b0e) Thanks [@tktcorporation](https://github.com/tktcorporation)! - `berm push` に `--files` フラグを追加。カンマ区切りでファイルパスを指定し、ノンインタラクティブに特定ファイルのみをプッシュ可能に。AI エージェントが `--no-select --yes` で全差分をプッシュしてしまう問題を解決。
+- [#123](https://github.com/tktcorporation/.github/pull/123) [`b014816`](https://github.com/tktcorporation/.github/commit/b014816f0a74f301a5c1a3034f2e98cf81863b0e) Thanks [@tktcorporation](https://github.com/tktcorporation)! - `ziku push` に `--files` フラグを追加。カンマ区切りでファイルパスを指定し、ノンインタラクティブに特定ファイルのみをプッシュ可能に。AI エージェントが `--no-select --yes` で全差分をプッシュしてしまう問題を解決。
 
 ## 0.18.0
 
@@ -134,13 +134,13 @@
 
 ### Patch Changes
 
-- [#110](https://github.com/tktcorporation/.github/pull/110) [`0154ead`](https://github.com/tktcorporation/.github/commit/0154ead9176bae8e2494db67bdf67c1f465b0292) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Improve `berm push` UX to feel more like `git push`
+- [#110](https://github.com/tktcorporation/.github/pull/110) [`0154ead`](https://github.com/tktcorporation/.github/commit/0154ead9176bae8e2494db67bdf67c1f465b0292) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Improve `ziku push` UX to feel more like `git push`
 
   - Show git-style "To owner/repo → branch" header with file stats (`+N -M`) in push summary
   - Highlight commit hash (baseRef) in conflict warnings so users know exactly which version conflicts with
   - Post-push success output now shows branch name and PR number in git-push format
   - `--select` mode shows line-count hints (`+N -M`) alongside each file in the multiselect
-  - Unresolved conflict messages now include a clear hint to run `berm pull`
+  - Unresolved conflict messages now include a clear hint to run `ziku pull`
 
 - [#110](https://github.com/tktcorporation/.github/pull/110) [`85d2c87`](https://github.com/tktcorporation/.github/commit/85d2c87ef1e01091c5e4936f1e5052f4c7c76ab7) Thanks [@tktcorporation](https://github.com/tktcorporation)! - refactor(pull): upstream fixes — remove duplicate conflict logic and type workarounds
   - Use `hasConflictMarkers()` from merge.ts in `runContinue` instead of raw `includes("<<<<<<<")`.
@@ -166,7 +166,7 @@
 
 - [#106](https://github.com/tktcorporation/.github/pull/106) [`885c8ae`](https://github.com/tktcorporation/.github/commit/885c8ae8d19c3ebee7e90705cd42ab3eff8726b7) Thanks [@tktcorporation](https://github.com/tktcorporation)! - push: 確認前に差分プレビューを表示 & Ctrl+C 時の一時ディレクトリクリーンアップ
   - Push summary の後、"Create PR?" の前にファイルごとの unified diff を表示するようにした。変更内容を確認してから判断できる。
-  - Ctrl+C (process.exit) で終了した場合に .devenv-temp が残る問題を修正。process.on('exit') で同期クリーンアップを登録。
+  - Ctrl+C (process.exit) で終了した場合に .ziku-temp が残る問題を修正。process.on('exit') で同期クリーンアップを登録。
 
 ## 0.16.0
 
@@ -186,7 +186,7 @@
   - Use `--edit` to interactively edit title/body, or `-m` to set title directly
   - File selection is skipped by default (all files included). Use `--select` to pick files
   - Summary is displayed before PR creation with a single confirmation prompt
-  - init/pull now store `baseRef` (commit SHA) in `.devenv.json` for 3-way merge
+  - init/pull now store `baseRef` (commit SHA) in `.ziku.json` for 3-way merge
   - push/pull conflicts are resolved via 3-way merge using `baseRef` to re-download the base template
   - Auto-merge succeeds silently; unresolvable conflicts prompt the user for confirmation
 
@@ -194,17 +194,17 @@
 
 ### Minor Changes
 
-- [#98](https://github.com/tktcorporation/.github/pull/98) [`1c04012`](https://github.com/tktcorporation/.github/commit/1c0401254f57691c852fbea2c1d6f84ad0546a21) Thanks [@tktcorporation](https://github.com/tktcorporation)! - feat(berm): add `berm pull` command with 3-way merge engine
+- [#98](https://github.com/tktcorporation/.github/pull/98) [`1c04012`](https://github.com/tktcorporation/.github/commit/1c0401254f57691c852fbea2c1d6f84ad0546a21) Thanks [@tktcorporation](https://github.com/tktcorporation)! - feat(ziku): add `ziku pull` command with 3-way merge engine
 
-  テンプレートの最新変更をローカルに取り込む `berm pull` コマンドを追加。
+  テンプレートの最新変更をローカルに取り込む `ziku pull` コマンドを追加。
   3-way マージエンジンにより、ローカルの変更を保持しつつテンプレート更新を適用する。
   コンフリクト時はマーカーを挿入し、ユーザーが手動解決できる。
 
-  - 新規: `berm pull` コマンド
+  - 新規: `ziku pull` コマンド
   - 新規: 3-way マージエンジン (`utils/merge.ts`)
   - 新規: ファイルハッシュユーティリティ (`utils/hash.ts`)
-  - 改善: `berm init` が baseHashes を `.devenv.json` に記録
-  - 改善: `berm push` がテンプレート側の変更を検出し pull を促す
+  - 改善: `ziku init` が baseHashes を `.ziku.json` に記録
+  - 改善: `ziku push` がテンプレート側の変更を検出し pull を促す
   - 改善: DevEnvConfig スキーマに `baseRef` / `baseHashes` を追加
 
 - [#98](https://github.com/tktcorporation/.github/pull/98) [`3421f14`](https://github.com/tktcorporation/.github/commit/3421f147d32668920665607f83c13916f897da6a) Thanks [@tktcorporation](https://github.com/tktcorporation)! - UX 改善: コマンドがコンテキストに応じたスマートなデフォルトを提案するように
@@ -229,7 +229,7 @@
 
 - [#92](https://github.com/tktcorporation/.github/pull/92) [`a1d859e`](https://github.com/tktcorporation/.github/commit/a1d859e00650fa16237c4315f3a30fba6d976cec) Thanks [@tktcorporation](https://github.com/tktcorporation)! - feat: add --from flag to init command for configurable template source
 
-  `berm init --from owner/repo` でテンプレートソースを指定可能に。
+  `ziku init --from owner/repo` でテンプレートソースを指定可能に。
   未指定時は git remote origin からオーナーを自動検出し `{owner}/.github` を使用。
   検出できない場合はデフォルトの `tktcorporation/.github` にフォールバック。
 
@@ -237,7 +237,7 @@
 
 ### Patch Changes
 
-- [#88](https://github.com/tktcorporation/.github/pull/88) [`8add69e`](https://github.com/tktcorporation/.github/commit/8add69e276683020ee855b5d3e8566f2a1b28054) Thanks [@tktcorporation](https://github.com/tktcorporation)! - `push --execute` で PR 作成成功後に `.devenv-push-manifest.yaml` を自動削除するように変更
+- [#88](https://github.com/tktcorporation/.github/pull/88) [`8add69e`](https://github.com/tktcorporation/.github/commit/8add69e276683020ee855b5d3e8566f2a1b28054) Thanks [@tktcorporation](https://github.com/tktcorporation)! - `push --execute` で PR 作成成功後に `.ziku-push-manifest.yaml` を自動削除するように変更
 
 ## 0.11.1
 
@@ -257,7 +257,7 @@
 
 - [#76](https://github.com/tktcorporation/.github/pull/76) [`4dff0e4`](https://github.com/tktcorporation/.github/commit/4dff0e4ec9d453d847329a1bed31221a2cf6d625) Thanks [@tktcorporation](https://github.com/tktcorporation)! - diff/push コマンドで未トラックファイル検出時に track コマンドの存在を案内し、AI ガイドに track コマンドの重要性を追記
 
-- [#78](https://github.com/tktcorporation/.github/pull/78) [`f722b36`](https://github.com/tktcorporation/.github/commit/f722b36e22860c74aca5275bfce611a9e5c5d251) Thanks [@tktcorporation](https://github.com/tktcorporation)! - init コマンドでテンプレートの .devenv/modules.jsonc をターゲットプロジェクトにコピーするように修正。これにより init → track のワークフローが正しく動作するようになります。
+- [#78](https://github.com/tktcorporation/.github/pull/78) [`f722b36`](https://github.com/tktcorporation/.github/commit/f722b36e22860c74aca5275bfce611a9e5c5d251) Thanks [@tktcorporation](https://github.com/tktcorporation)! - init コマンドでテンプレートの .ziku/modules.jsonc をターゲットプロジェクトにコピーするように修正。これにより init → track のワークフローが正しく動作するようになります。
 
 ## 0.10.0
 
@@ -265,9 +265,9 @@
 
 - [#74](https://github.com/tktcorporation/.github/pull/74) [`64b3475`](https://github.com/tktcorporation/.github/commit/64b3475c39362cadc4a332fa3eeb91c7f5d8c12f) Thanks [@tktcorporation](https://github.com/tktcorporation)! - feat: add `track` command for non-interactive file tracking management
 
-  AI エージェントが非インタラクティブにファイルパターンを `.devenv/modules.jsonc` のホワイトリストに追加できる `track` コマンドを追加。
+  AI エージェントが非インタラクティブにファイルパターンを `.ziku/modules.jsonc` のホワイトリストに追加できる `track` コマンドを追加。
 
-  - `npx @tktco/berm track ".cloud/rules/*.md"` でパターン追加（モジュール自動検出）
+  - `npx @tktco/ziku track ".cloud/rules/*.md"` でパターン追加（モジュール自動検出）
   - `--module` オプションで明示的にモジュール指定可能
   - 存在しないモジュールは自動作成（`--name`, `--description` でカスタマイズ可能）
   - `--list` で現在の追跡モジュール・パターン一覧を表示
@@ -285,13 +285,13 @@
 
 - [#69](https://github.com/tktcorporation/.github/pull/69) [`6ea205a`](https://github.com/tktcorporation/.github/commit/6ea205a2632b73cd20ba798e7ce7cea08e92fcb9) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Show AI agent hint in default command output
 
-  When running `berm` without arguments, the output now includes a hint for AI agents pointing them to the `ai-docs` command for non-interactive usage documentation.
+  When running `ziku` without arguments, the output now includes a hint for AI agents pointing them to the `ai-docs` command for non-interactive usage documentation.
 
 ## 0.9.0
 
 ### Minor Changes
 
-- [#65](https://github.com/tktcorporation/.github/pull/65) [`03464f3`](https://github.com/tktcorporation/.github/commit/03464f39cf516de0e0018c58a5ab37246fa94764) Thanks [@tktcorporation](https://github.com/tktcorporation)! - feat(berm): add ai-docs command for LLM-friendly documentation
+- [#65](https://github.com/tktcorporation/.github/pull/65) [`03464f3`](https://github.com/tktcorporation/.github/commit/03464f39cf516de0e0018c58a5ab37246fa94764) Thanks [@tktcorporation](https://github.com/tktcorporation)! - feat(ziku): add ai-docs command for LLM-friendly documentation
   - Add `ai-docs` subcommand that outputs comprehensive documentation for AI coding agents
   - Create unified documentation source (src/docs/ai-guide.ts) for both CLI and README
   - Add "For AI Agents" section to README with non-interactive workflow instructions
@@ -303,7 +303,7 @@
 
 - [#61](https://github.com/tktcorporation/.github/pull/61) [`41ea99b`](https://github.com/tktcorporation/.github/commit/41ea99b9c0ed8f9fbe88c976735577cece92636c) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Add AI-agent friendly manifest-based push workflow
 
-  - `--prepare` option: Generates a YAML manifest file (`.devenv-push-manifest.yaml`) for reviewing and editing file selections
+  - `--prepare` option: Generates a YAML manifest file (`.ziku-push-manifest.yaml`) for reviewing and editing file selections
   - `--execute` option: Creates a PR based on the manifest file without interactive prompts
 
   This enables AI agents (like Claude Code) to handle the push workflow by reading/editing the manifest file, rather than requiring interactive CLI input.
@@ -320,7 +320,7 @@
 
   これにより、ローカルで編集した gitignore 対象ファイル（環境設定など）がテンプレート同期時に上書きされることを防止します。
 
-- [#50](https://github.com/tktcorporation/.github/pull/50) [`f70e506`](https://github.com/tktcorporation/.github/commit/f70e50601bcedb3a19054463b11b6e77d83df3c8) Thanks [@tktcorporation](https://github.com/tktcorporation)! - fix(berm): fix stdin conflict between @inquirer/prompts and interactive diff viewer
+- [#50](https://github.com/tktcorporation/.github/pull/50) [`f70e506`](https://github.com/tktcorporation/.github/commit/f70e50601bcedb3a19054463b11b6e77d83df3c8) Thanks [@tktcorporation](https://github.com/tktcorporation)! - fix(ziku): fix stdin conflict between @inquirer/prompts and interactive diff viewer
   - Clear existing keypress listeners before setting up interactive viewer to prevent conflicts with @inquirer/prompts
   - Call stdin.resume() to ensure stdin is in correct state after @inquirer/prompts usage
   - Properly restore stdin state in cleanup for subsequent prompts
@@ -329,14 +329,14 @@
 
 ### Minor Changes
 
-- [#45](https://github.com/tktcorporation/.github/pull/45) [`4557ba0`](https://github.com/tktcorporation/.github/commit/4557ba09b019d2f8f0dbaad3f274d6c4e56c9731) Thanks [@tktcorporation](https://github.com/tktcorporation)! - feat(berm): improve diff display with summary box and interactive viewer
+- [#45](https://github.com/tktcorporation/.github/pull/45) [`4557ba0`](https://github.com/tktcorporation/.github/commit/4557ba09b019d2f8f0dbaad3f274d6c4e56c9731) Thanks [@tktcorporation](https://github.com/tktcorporation)! - feat(ziku): improve diff display with summary box and interactive viewer
 
   - Add new diff-viewer.ts with modern box-styled summary display
   - Show file changes grouped by type (added/modified/deleted) with line stats
   - Add interactive diff viewer with n/p navigation between files
   - Improve file selection UI with stats display
 
-- [#45](https://github.com/tktcorporation/.github/pull/45) [`09b8e2e`](https://github.com/tktcorporation/.github/commit/09b8e2ebc31d44e1a771ef034fc8c5ed7a1e8edc) Thanks [@tktcorporation](https://github.com/tktcorporation)! - feat(berm): add word-level diff and syntax highlighting
+- [#45](https://github.com/tktcorporation/.github/pull/45) [`09b8e2e`](https://github.com/tktcorporation/.github/commit/09b8e2ebc31d44e1a771ef034fc8c5ed7a1e8edc) Thanks [@tktcorporation](https://github.com/tktcorporation)! - feat(ziku): add word-level diff and syntax highlighting
   - Word-level diff: highlight changed words with background colors
   - Syntax highlighting: automatic language detection based on file extension
   - Supports 30+ languages including TypeScript, JavaScript, JSON, YAML, etc.
@@ -413,7 +413,7 @@
 
   ### モジュール定義の外部化
 
-  - モジュール定義をコードから `.devenv/modules.jsonc` に外部化
+  - モジュール定義をコードから `.ziku/modules.jsonc` に外部化
   - テンプレートリポジトリの modules.jsonc から動的に読み込み
   - `customPatterns` を廃止し modules.jsonc に統合
 
@@ -458,18 +458,18 @@
 
   ```bash
   # 差分を確認
-  npx @tktco/berm diff
+  npx @tktco/ziku diff
 
   # ローカル変更を PR として送信
-  npx @tktco/berm push --message "feat: DevContainer設定を更新"
+  npx @tktco/ziku push --message "feat: DevContainer設定を更新"
 
   # ドライラン
-  npx @tktco/berm push --dry-run
+  npx @tktco/ziku push --dry-run
   ```
 
 - [#10](https://github.com/tktcorporation/.github/pull/10) [`d932401`](https://github.com/tktcorporation/.github/commit/d93240170c298d5469e4c7646c383ac8e6aed90c) Thanks [@tktcorporation](https://github.com/tktcorporation)! - CLI 出力を改善
   - すべてのファイル操作に上書き戦略を適用
-  - .devenv.json は常に更新（設定管理ファイルとして特別扱い）
+  - .ziku.json は常に更新（設定管理ファイルとして特別扱い）
   - セットアップ後にモジュール別説明を表示
   - 全スキップ時は「変更はありませんでした」と表示
   - ts-pattern で網羅的なパターンマッチング
@@ -499,5 +499,5 @@
 
 - [`c3dcb7a`](https://github.com/tktcorporation/.github/commit/c3dcb7a158a4eedc331fef98433537ed9969c20d) Thanks [@tktcorporation](https://github.com/tktcorporation)! - fix: ignore "init" argument as directory name
 
-  When running `npx berm init`, the "init" was interpreted as the target directory.
+  When running `npx ziku init`, the "init" was interpreted as the target directory.
   Now "init" is ignored and files are extracted to the current directory.

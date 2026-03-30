@@ -300,7 +300,7 @@ describe("prResultSchema", () => {
     const result = {
       url: "https://github.com/owner/repo/pull/123",
       number: 123,
-      branch: "devenv-sync-1234567890",
+      branch: "ziku-sync-1234567890",
     };
     expect(prResultSchema.parse(result)).toEqual(result);
   });

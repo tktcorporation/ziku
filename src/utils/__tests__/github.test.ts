@@ -136,7 +136,7 @@ describe("createPullRequest", () => {
 
     expect(result.url).toBe("https://github.com/owner/repo/pull/123");
     expect(result.number).toBe(123);
-    expect(result.branch).toMatch(/^devenv-sync-\d+$/);
+    expect(result.branch).toMatch(/^ziku-sync-\d+$/);
   });
 
   it("既存の fork を使用する", async () => {
@@ -273,7 +273,7 @@ describe("createPullRequest", () => {
 
     expect(mockPullsCreate).toHaveBeenCalledWith(
       expect.objectContaining({
-        head: expect.stringMatching(/^testuser:devenv-sync-\d+$/),
+        head: expect.stringMatching(/^testuser:ziku-sync-\d+$/),
       }),
     );
   });

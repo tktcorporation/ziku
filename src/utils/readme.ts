@@ -76,7 +76,7 @@ function generateFilesSection(modules: TemplateModule[]): string {
   }
 
   lines.push("### 設定ファイル\n");
-  lines.push("- `.devenv.json` - このツールの設定（適用したモジュール情報）\n");
+  lines.push("- `.ziku.json` - このツールの設定（適用したモジュール情報）\n");
 
   return lines.join("\n");
 }
@@ -203,7 +203,7 @@ export async function detectAndUpdateReadme(
   templateDir: string,
 ): Promise<GenerateReadmeResult | null> {
   const readmePath = join(targetDir, "README.md");
-  const modulesPath = join(templateDir, ".devenv/modules.jsonc");
+  const modulesPath = join(templateDir, ".ziku/modules.jsonc");
 
   // README にマーカーがあるか確認
   if (!existsSync(readmePath)) {

@@ -42,7 +42,7 @@ vi.mock("../../utils/github", () => ({
     Promise.resolve({
       url: "https://github.com/test/repo/pull/1",
       number: 1,
-      branch: "devenv",
+      branch: "ziku",
     }),
   ),
 }));
@@ -152,11 +152,11 @@ describe("initCommand", () => {
     mockFetchTemplates.mockResolvedValue([]);
     mockWriteFileWithStrategy.mockResolvedValue({
       action: "created",
-      path: ".devenv.json",
+      path: ".ziku.json",
     });
     mockCopyFile.mockResolvedValue({
       action: "skipped",
-      path: ".devenv/modules.jsonc",
+      path: ".ziku/modules.jsonc",
     });
     mockHashFiles.mockResolvedValue({});
   });
@@ -316,7 +316,7 @@ describe("initCommand", () => {
     it("modules.jsonc をテンプレートからコピーする", async () => {
       vol.fromJSON({
         "/test": null,
-        "/tmp/template/.devenv/modules.jsonc": '{"modules":[]}',
+        "/tmp/template/.ziku/modules.jsonc": '{"modules":[]}',
       });
 
       mockSelectModules.mockResolvedValueOnce(["root"]);
@@ -325,7 +325,7 @@ describe("initCommand", () => {
       mockFetchTemplates.mockResolvedValue([]);
       mockCopyFile.mockResolvedValue({
         action: "copied",
-        path: ".devenv/modules.jsonc",
+        path: ".ziku/modules.jsonc",
       });
 
       await (initCommand.run as any)({
@@ -336,10 +336,10 @@ describe("initCommand", () => {
 
       // copyFile が modules.jsonc に対して呼ばれる
       expect(mockCopyFile).toHaveBeenCalledWith(
-        "/tmp/template/.devenv/modules.jsonc",
-        expect.stringContaining(".devenv/modules.jsonc"),
+        "/tmp/template/.ziku/modules.jsonc",
+        expect.stringContaining(".ziku/modules.jsonc"),
         "prompt",
-        ".devenv/modules.jsonc",
+        ".ziku/modules.jsonc",
       );
     });
 
@@ -649,7 +649,7 @@ describe("initCommand", () => {
       );
     });
 
-    it(".devenv.json に baseHashes が含まれる", async () => {
+    it(".ziku.json に baseHashes が含まれる", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -673,7 +673,7 @@ describe("initCommand", () => {
 
       // writeFileWithStrategy に baseHashes が含まれた JSON が渡される
       const configCall = mockWriteFileWithStrategy.mock.calls.find(
-        (call) => call[0].relativePath === ".devenv.json",
+        (call) => call[0].relativePath === ".ziku.json",
       );
       expect(configCall).toBeDefined();
       const configContent = JSON.parse(configCall![0].content);
@@ -697,7 +697,7 @@ describe("initCommand", () => {
       });
 
       const configCall = mockWriteFileWithStrategy.mock.calls.find(
-        (call) => call[0].relativePath === ".devenv.json",
+        (call) => call[0].relativePath === ".ziku.json",
       );
       expect(configCall).toBeDefined();
       const configContent = JSON.parse(configCall![0].content);

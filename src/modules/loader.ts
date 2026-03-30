@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { TemplateModule } from "./schemas";
 import { moduleSchema } from "./schemas";
 
-const MODULES_FILE = ".devenv/modules.jsonc";
+const MODULES_FILE = ".ziku/modules.jsonc";
 
 /**
  * modules.jsonc のスキーマ

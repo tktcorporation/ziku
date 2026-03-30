@@ -49,7 +49,7 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
   const baseSha = baseBranchRef.commit.sha;
 
   // 4. 新しいブランチ名を生成
-  const branchName = `devenv-sync-${Date.now()}`;
+  const branchName = `ziku-sync-${Date.now()}`;
 
   // 5. fork に新しいブランチを作成
   await octokit.git.createRef({
@@ -190,7 +190,7 @@ export async function checkRepoExists(owner: string, repo: string): Promise<bool
  * テンプレートリポジトリを新規作成する。
  *
  * 背景: org に `.github` テンプレートリポジトリが存在しない場合、
- * 空のリポジトリを作成し、README と .devenv/modules.jsonc を初期コミットする。
+ * 空のリポジトリを作成し、README と .ziku/modules.jsonc を初期コミットする。
  */
 export async function scaffoldTemplateRepo(
   token: string,
@@ -229,9 +229,9 @@ export async function scaffoldTemplateRepo(
 }
 
 /**
- * テンプレートリポジトリに .devenv/modules.jsonc を追加する PR を作成する。
+ * テンプレートリポジトリに .ziku/modules.jsonc を追加する PR を作成する。
  *
- * 背景: テンプレートリポジトリが存在するが .devenv 構成がない場合、
+ * 背景: テンプレートリポジトリが存在するが .ziku 構成がない場合、
  * デフォルトのモジュール定義を含む modules.jsonc を PR として提出する。
  */
 export async function createDevenvScaffoldPR(
@@ -243,11 +243,11 @@ export async function createDevenvScaffoldPR(
   return createPullRequest(token, {
     owner,
     repo,
-    files: [{ path: ".devenv/modules.jsonc", content: modulesJsoncContent }],
-    title: "chore: add .devenv/modules.jsonc for ziku",
+    files: [{ path: ".ziku/modules.jsonc", content: modulesJsoncContent }],
+    title: "chore: add .ziku/modules.jsonc for ziku",
     body: `## Summary
 
-Add \`.devenv/modules.jsonc\` to enable ziku template management.
+Add \`.ziku/modules.jsonc\` to enable ziku template management.
 
 This file defines the modules and file patterns that ziku tracks for
 bi-directional synchronization between this template and downstream projects.

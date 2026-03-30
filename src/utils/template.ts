@@ -62,7 +62,7 @@ export type CopyResult = FileOperationResult;
  * DevEnvConfig の source フィールドから giget 用のテンプレートソース文字列を構築する。
  *
  * 背景: giget は "gh:owner/repo" または "gh:owner/repo#ref" 形式を期待する。
- * .devenv.json の source: { owner, repo, ref? } をこの形式に変換する。
+ * .ziku.json の source: { owner, repo, ref? } をこの形式に変換する。
  */
 export function buildTemplateSource(source: { owner: string; repo: string; ref?: string }): string {
   const base = `gh:${source.owner}/${source.repo}`;
@@ -84,7 +84,7 @@ export async function downloadTemplateToTemp(
   source?: string,
   label?: string,
 ): Promise<{ templateDir: string; cleanup: () => void }> {
-  const tempDir = join(targetDir, label ? `.devenv-temp-${label}` : ".devenv-temp");
+  const tempDir = join(targetDir, label ? `.ziku-temp-${label}` : ".ziku-temp");
 
   ensureGigetCacheDir();
   const { dir: templateDir } = await downloadTemplate(source ?? TEMPLATE_SOURCE, {
@@ -175,7 +175,7 @@ export async function fetchTemplates(options: DownloadOptions): Promise<FileOper
 
   // 事前ダウンロード済みか、新規ダウンロードか
   const shouldDownload = !preDownloadedDir;
-  const tempDir = join(targetDir, ".devenv-temp");
+  const tempDir = join(targetDir, ".ziku-temp");
 
   let templateDir: string;
 

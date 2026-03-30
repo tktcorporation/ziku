@@ -557,7 +557,7 @@ describe("pullCommand", () => {
     });
 
     it("base ダウンロードが template ディレクトリを上書きしない（一時ディレクトリ分離）", async () => {
-      // 背景: downloadTemplateToTemp が常に同じ .devenv-temp を使うため、
+      // 背景: downloadTemplateToTemp が常に同じ .ziku-temp を使うため、
       // base ダウンロード時に template を上書きし、base === template となって
       // マージが空振り（ローカル内容そのまま）するバグがあった。
       // ラベル引数で一時ディレクトリを分離することで解決。

@@ -67,7 +67,7 @@ export const trackCommand = defineCommand({
     // modules.jsonc の存在確認
     if (!modulesFileExists(targetDir)) {
       throw new BermError(
-        ".devenv/modules.jsonc not found.",
+        ".ziku/modules.jsonc not found.",
         "Run 'ziku init' first to set up the project.",
       );
     }
@@ -160,6 +160,6 @@ export const trackCommand = defineCommand({
       ...patterns.map((p) => `  ${pc.green("+")} ${p}`),
     ];
     log.message(details.join("\n"));
-    outro("Updated .devenv/modules.jsonc");
+    outro("Updated .ziku/modules.jsonc");
   },
 });

@@ -35,11 +35,11 @@ export const diffCommand = defineCommand({
     intro("diff");
 
     const targetDir = resolve(args.dir);
-    const configPath = join(targetDir, ".devenv.json");
+    const configPath = join(targetDir, ".ziku.json");
 
-    // .devenv.json の存在確認
+    // .ziku.json の存在確認
     if (!existsSync(configPath)) {
-      throw new BermError(".devenv.json not found.", "Run 'ziku init' first.");
+      throw new BermError(".ziku.json not found.", "Run 'ziku init' first.");
     }
 
     // 設定読み込み
@@ -48,7 +48,7 @@ export const diffCommand = defineCommand({
     const parseResult = configSchema.safeParse(configData);
 
     if (!parseResult.success) {
-      throw new BermError("Invalid .devenv.json format", parseResult.error.message);
+      throw new BermError("Invalid .ziku.json format", parseResult.error.message);
     }
 
     const config: DevEnvConfig = parseResult.data;
@@ -63,7 +63,7 @@ export const diffCommand = defineCommand({
 
     // テンプレートを一時ディレクトリにダウンロード
     const templateSource = buildTemplateSource(config.source);
-    const tempDir = join(targetDir, ".devenv-temp");
+    const tempDir = join(targetDir, ".ziku-temp");
 
     try {
       const { dir: templateDir } = await withSpinner("Downloading template from GitHub...", () =>
@@ -83,8 +83,8 @@ export const diffCommand = defineCommand({
         moduleList = loaded.modules;
       } else {
         throw new BermError(
-          "No .devenv/modules.jsonc found",
-          "Run `ziku init` to set up the project, or add .devenv/modules.jsonc to the template",
+          "No .ziku/modules.jsonc found",
+          "Run `ziku init` to set up the project, or add .ziku/modules.jsonc to the template",
         );
       }
 
