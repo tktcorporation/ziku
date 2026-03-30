@@ -21,6 +21,7 @@ process.env.NO_COLOR = "1";
 process.env.FORCE_COLOR = "0";
 process.env.COLUMNS = "80";
 
+import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
@@ -246,9 +247,16 @@ async function main(): Promise<void> {
   const usageSection = generateUsageSection();
   const commandsSection = await generateCommandsSection();
 
-  // Update README
+  // Read originals
   let readme = await readFile(README_PATH, "utf-8");
   const originalReadme = readme;
+
+  let originalSchema = "";
+  try {
+    originalSchema = await readFile(SCHEMA_PATH, "utf-8");
+  } catch {
+    // file doesn't exist yet
+  }
 
   readme = updateSection(
     readme,
@@ -261,18 +269,20 @@ async function main(): Promise<void> {
 
   const readmeUpdated = readme !== originalReadme;
 
-  // Check schema file
-  let schemaUpdated = false;
-  try {
-    const existingSchema = await readFile(SCHEMA_PATH, "utf-8");
-    schemaUpdated = existingSchema !== `${jsonSchema}\n`;
-  } catch {
-    schemaUpdated = true; // file doesn't exist yet
-  }
+  // Generate formatted JSON Schema (write, run formatter, read back canonical form)
+  await writeFile(SCHEMA_PATH, `${jsonSchema}\n`);
+  execFileSync("npx", ["oxfmt", "--write", SCHEMA_PATH], { stdio: "ignore" });
+  const formattedSchema = await readFile(SCHEMA_PATH, "utf-8");
+  const schemaUpdated = originalSchema !== formattedSchema;
 
   const updated = readmeUpdated || schemaUpdated;
 
   if (isCheck) {
+    // Restore original schema if it was overwritten for formatting
+    if (originalSchema) {
+      await writeFile(SCHEMA_PATH, originalSchema);
+    }
+
     if (updated) {
       if (readmeUpdated) console.error("  - README.md is out of date");
       if (schemaUpdated) console.error("  - schema/modules.json is out of date");
@@ -284,12 +294,12 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Schema file is already written and formatted above
   if (readmeUpdated) {
     await writeFile(README_PATH, readme);
     console.log("  ✅ README.md updated.");
   }
   if (schemaUpdated) {
-    await writeFile(SCHEMA_PATH, `${jsonSchema}\n`);
     console.log("  ✅ schema/modules.json updated.");
   }
   if (!updated) {

@@ -29,18 +29,11 @@
             }
           }
         },
-        "required": [
-          "id",
-          "name",
-          "description",
-          "patterns"
-        ],
+        "required": ["id", "name", "description", "patterns"],
         "additionalProperties": false
       }
     }
   },
-  "required": [
-    "modules"
-  ],
+  "required": ["modules"],
   "additionalProperties": false
 }
