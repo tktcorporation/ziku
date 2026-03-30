@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getGhCliToken, getGitHubToken } from "../github";
+import { checkRepoExists, getGhCliToken, getGitHubToken } from "../github";
 
 // Octokit をモック
 const mockGetAuthenticated = vi.fn();
@@ -10,6 +10,9 @@ const mockGitCreateRef = vi.fn();
 const mockReposGetContent = vi.fn();
 const mockReposCreateOrUpdateFileContents = vi.fn();
 const mockPullsCreate = vi.fn();
+const mockOrgsGet = vi.fn();
+const mockReposCreateInOrg = vi.fn();
+const mockReposCreateForAuthenticatedUser = vi.fn();
 
 vi.mock("@octokit/rest", () => ({
   Octokit: class MockOctokit {
@@ -22,6 +25,8 @@ vi.mock("@octokit/rest", () => ({
       getBranch: mockReposGetBranch,
       getContent: mockReposGetContent,
       createOrUpdateFileContents: mockReposCreateOrUpdateFileContents,
+      createInOrg: mockReposCreateInOrg,
+      createForAuthenticatedUser: mockReposCreateForAuthenticatedUser,
     };
     git = {
       createRef: mockGitCreateRef,
@@ -29,11 +34,14 @@ vi.mock("@octokit/rest", () => ({
     pulls = {
       create: mockPullsCreate,
     };
+    orgs = {
+      get: mockOrgsGet,
+    };
   },
 }));
 
 // モック後にインポート
-const { createPullRequest } = await import("../github");
+const { createPullRequest, scaffoldTemplateRepo } = await import("../github");
 
 describe("getGitHubToken", () => {
   const originalEnv = process.env;
@@ -284,5 +292,80 @@ describe("createPullRequest", () => {
         content: expectedBase64,
       }),
     );
+  });
+});
+
+describe("checkRepoExists", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("リポジトリが存在する場合は true を返す", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true });
+
+    const result = await checkRepoExists("owner", "repo");
+    expect(result).toBe(true);
+    expect(globalThis.fetch).toHaveBeenCalledWith("https://api.github.com/repos/owner/repo", {
+      method: "HEAD",
+    });
+  });
+
+  it("リポジトリが存在しない場合は false を返す", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 404 });
+
+    const result = await checkRepoExists("owner", "nonexistent");
+    expect(result).toBe(false);
+  });
+
+  it("ネットワークエラーの場合は true を返す（楽観的続行）", async () => {
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("Network error"));
+
+    const result = await checkRepoExists("owner", "repo");
+    expect(result).toBe(true);
+  });
+});
+
+describe("scaffoldTemplateRepo", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("org にテンプレートリポジトリを作成する", async () => {
+    mockOrgsGet.mockResolvedValue({ data: { login: "my-org" } });
+    mockReposCreateInOrg.mockResolvedValue({
+      data: { html_url: "https://github.com/my-org/.github" },
+    });
+
+    const result = await scaffoldTemplateRepo("token", "my-org", ".github");
+
+    expect(result.url).toBe("https://github.com/my-org/.github");
+    expect(mockReposCreateInOrg).toHaveBeenCalledWith(
+      expect.objectContaining({
+        org: "my-org",
+        name: ".github",
+        auto_init: true,
+      }),
+    );
+  });
+
+  it("個人アカウントにテンプレートリポジトリを作成する", async () => {
+    mockOrgsGet.mockRejectedValue(new Error("Not an org"));
+    mockReposCreateForAuthenticatedUser.mockResolvedValue({
+      data: { html_url: "https://github.com/user/.github" },
+    });
+
+    const result = await scaffoldTemplateRepo("token", "user", ".github");
+
+    expect(result.url).toBe("https://github.com/user/.github");
+    expect(mockReposCreateForAuthenticatedUser).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: ".github",
+        auto_init: true,
+      }),
+    );
+    // createInOrg は呼ばれない
+    expect(mockReposCreateInOrg).not.toHaveBeenCalled();
   });
 });

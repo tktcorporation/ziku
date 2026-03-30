@@ -15,8 +15,7 @@ vi.mock("node:fs/promises", async () => {
 
 // 外部依存をモック
 vi.mock("../../utils/git-remote", () => ({
-  detectGitHubOwner: vi.fn(() => null),
-  DEFAULT_TEMPLATE_OWNER: "tktcorporation",
+  detectGitHubOwner: vi.fn(() => "test-org"),
   DEFAULT_TEMPLATE_REPO: ".github",
 }));
 
@@ -36,11 +35,24 @@ vi.mock("../../utils/hash", () => ({
 
 vi.mock("../../utils/github", () => ({
   resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
+  checkRepoExists: vi.fn(() => Promise.resolve(true)),
+  getGitHubToken: vi.fn(() => undefined),
+  scaffoldTemplateRepo: vi.fn(() => Promise.resolve({ url: "https://github.com/test/repo" })),
+  createDevenvScaffoldPR: vi.fn(() =>
+    Promise.resolve({
+      url: "https://github.com/test/repo/pull/1",
+      number: 1,
+      branch: "devenv",
+    }),
+  ),
 }));
 
 vi.mock("../../ui/prompts", () => ({
   selectModules: vi.fn(),
   selectOverwriteStrategy: vi.fn(),
+  selectMissingTemplateAction: vi.fn(),
+  inputTemplateSource: vi.fn(),
+  confirmScaffoldDevenvPR: vi.fn(() => Promise.resolve(true)),
 }));
 
 vi.mock("../../ui/renderer", () => ({
@@ -67,8 +79,44 @@ vi.mock("../../modules/index", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../modules/index")>();
   return {
     ...original,
-    modulesFileExists: vi.fn(() => false),
-    loadModulesFile: vi.fn(),
+    modulesFileExists: vi.fn(() => true),
+    loadModulesFile: vi.fn(() =>
+      Promise.resolve({
+        modules: [
+          {
+            id: ".",
+            name: "Root",
+            description: "Root config",
+            patterns: [".mcp.json", ".mise.toml"],
+          },
+          {
+            id: ".devcontainer",
+            name: "DevContainer",
+            description: "DevContainer",
+            patterns: [".devcontainer/**"],
+          },
+          {
+            id: ".github",
+            name: "GitHub",
+            description: "GitHub",
+            patterns: [".github/**"],
+          },
+          {
+            id: ".claude",
+            name: "Claude",
+            description: "Claude",
+            patterns: [".claude/**"],
+          },
+          {
+            id: "devcontainer",
+            name: "DevContainer",
+            description: "DevContainer",
+            patterns: [".devcontainer/**"],
+          },
+        ],
+        rawContent: '{"modules":[]}',
+      }),
+    ),
   };
 });
 
@@ -568,13 +616,21 @@ describe("initCommand", () => {
       );
     });
 
-    it("git remote 検出失敗時はデフォルトにフォールバック", async () => {
+    it("git remote 検出失敗時はユーザーにソース入力を促す", async () => {
       vol.fromJSON({
         "/test": null,
       });
 
       mockDetectGitHubOwner.mockReturnValueOnce(null);
 
+      const { inputTemplateSource } = await import("../../ui/prompts");
+      const mockInputTemplateSource = vi.mocked(inputTemplateSource);
+      const { checkRepoExists } = await import("../../utils/github");
+      const mockCheckRepoExists = vi.mocked(checkRepoExists);
+
+      // ユーザーが custom-org/templates を入力
+      mockInputTemplateSource.mockResolvedValueOnce("custom-org/templates");
+      mockCheckRepoExists.mockResolvedValueOnce(true);
       mockSelectModules.mockResolvedValueOnce(["."]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
@@ -586,9 +642,10 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
+      expect(mockInputTemplateSource).toHaveBeenCalled();
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),
-        "gh:tktcorporation/.github",
+        "gh:custom-org/templates",
       );
     });
 

@@ -1,9 +1,6 @@
 import { execFileSync } from "node:child_process";
 
-/** フォールバック用のデフォルトテンプレートオーナー */
-export const DEFAULT_TEMPLATE_OWNER = "tktcorporation";
-
-/** フォールバック用のデフォルトテンプレートリポジトリ名 */
+/** テンプレートリポジトリのデフォルト名 */
 export const DEFAULT_TEMPLATE_REPO = ".github";
 
 /**

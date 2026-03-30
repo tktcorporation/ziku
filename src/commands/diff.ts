@@ -4,7 +4,7 @@ import { defineCommand } from "citty";
 import { downloadTemplate } from "giget";
 import { join, resolve } from "pathe";
 import { BermError } from "../errors";
-import { defaultModules, loadModulesFile, modulesFileExists } from "../modules";
+import { loadModulesFile, modulesFileExists } from "../modules";
 import type { DevEnvConfig, TemplateModule } from "../modules/schemas";
 import { configSchema } from "../modules/schemas";
 import { renderFileDiff } from "../ui/diff-view";
@@ -78,8 +78,14 @@ export const diffCommand = defineCommand({
       if (modulesFileExists(templateDir)) {
         const loaded = await loadModulesFile(templateDir);
         moduleList = loaded.modules;
+      } else if (modulesFileExists(targetDir)) {
+        const loaded = await loadModulesFile(targetDir);
+        moduleList = loaded.modules;
       } else {
-        moduleList = defaultModules;
+        throw new BermError(
+          "No .devenv/modules.jsonc found",
+          "Run `ziku init` to set up the project, or add .devenv/modules.jsonc to the template",
+        );
       }
 
       // Step 2: 差分を検出

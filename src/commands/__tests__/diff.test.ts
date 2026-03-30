@@ -39,9 +39,26 @@ vi.mock("../../utils/untracked", () => ({
 
 // modules をモック
 vi.mock("../../modules", () => ({
-  defaultModules: [],
-  loadModulesFile: vi.fn(),
-  modulesFileExists: vi.fn().mockReturnValue(false),
+  loadModulesFile: vi.fn(() =>
+    Promise.resolve({
+      modules: [
+        {
+          id: "root",
+          name: "Root",
+          description: "Root",
+          patterns: [".root/**"],
+        },
+        {
+          id: "github",
+          name: "GitHub",
+          description: "GitHub",
+          patterns: [".github/**"],
+        },
+      ],
+      rawContent: '{"modules":[]}',
+    }),
+  ),
+  modulesFileExists: vi.fn().mockReturnValue(true),
 }));
 
 // ui/diff-view をモック
@@ -75,6 +92,7 @@ const { downloadTemplate } = await import("giget");
 const { detectDiff, hasDiff } = await import("../../utils/diff");
 const { log, outro, logDiffSummary } = await import("../../ui/renderer");
 const { renderFileDiff } = await import("../../ui/diff-view");
+
 import { BermError } from "../../errors";
 
 const mockDownloadTemplate = vi.mocked(downloadTemplate);
@@ -292,7 +310,13 @@ describe("diffCommand", () => {
       });
 
       const diffWithChanges = {
-        files: [{ path: "new-file.txt", type: "added" as const, localContent: "content" }],
+        files: [
+          {
+            path: "new-file.txt",
+            type: "added" as const,
+            localContent: "content",
+          },
+        ],
         summary: { added: 1, modified: 0, deleted: 0, unchanged: 0 },
       };
 
@@ -314,7 +338,13 @@ describe("diffCommand", () => {
       });
 
       const diffWithChanges = {
-        files: [{ path: "new-file.txt", type: "added" as const, localContent: "content" }],
+        files: [
+          {
+            path: "new-file.txt",
+            type: "added" as const,
+            localContent: "content",
+          },
+        ],
         summary: { added: 1, modified: 0, deleted: 0, unchanged: 0 },
       };
 
@@ -340,7 +370,11 @@ describe("diffCommand", () => {
         type: "unchanged" as const,
         localContent: "same",
       };
-      const addedFile = { path: "added.txt", type: "added" as const, localContent: "new" };
+      const addedFile = {
+        path: "added.txt",
+        type: "added" as const,
+        localContent: "new",
+      };
       const modifiedFile = {
         path: "modified.txt",
         type: "modified" as const,

@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import ignore, { type Ignore } from "ignore";
 import { join } from "pathe";
 import { globSync } from "tinyglobby";
-import { defaultModules, getModuleById } from "../modules";
+import { getModuleById } from "../modules";
 import type { DevEnvConfig, TemplateModule } from "../modules/schemas";
 import { getEffectivePatterns, resolvePatterns } from "./patterns";
 
@@ -126,9 +126,9 @@ export async function detectUntrackedFiles(options: {
   targetDir: string;
   moduleIds: string[];
   config?: DevEnvConfig;
-  moduleList?: TemplateModule[];
+  moduleList: TemplateModule[];
 }): Promise<UntrackedFilesByFolder[]> {
-  const { targetDir, moduleIds, config, moduleList = defaultModules } = options;
+  const { targetDir, moduleIds, config, moduleList } = options;
 
   // インストール済みモジュール ID のセット
   const installedModuleIds = new Set(moduleIds);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_TEMPLATE_OWNER, DEFAULT_TEMPLATE_REPO, parseGitHubOwner } from "../git-remote";
+import { DEFAULT_TEMPLATE_REPO, parseGitHubOwner } from "../git-remote";
 
 describe("parseGitHubOwner", () => {
   it("HTTPS URL (.git 付き) からオーナーを抽出", () => {
@@ -32,10 +32,6 @@ describe("parseGitHubOwner", () => {
 });
 
 describe("default constants", () => {
-  it("デフォルトオーナーが定義されている", () => {
-    expect(DEFAULT_TEMPLATE_OWNER).toBe("tktcorporation");
-  });
-
   it("デフォルトリポジトリが定義されている", () => {
     expect(DEFAULT_TEMPLATE_REPO).toBe(".github");
   });

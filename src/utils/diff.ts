@@ -2,7 +2,8 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createPatch } from "diff";
 import { join } from "pathe";
-import { defaultModules, getModuleById } from "../modules";
+import pc from "picocolors";
+import { getModuleById } from "../modules";
 import type {
   DevEnvConfig,
   DiffResult,
@@ -10,24 +11,23 @@ import type {
   FileDiff,
   TemplateModule,
 } from "../modules/schemas";
+import { log } from "../ui/renderer";
 import { filterByGitignore, loadMergedGitignore } from "./gitignore";
 import { getEffectivePatterns, resolvePatterns } from "./patterns";
-import pc from "picocolors";
-import { log } from "../ui/renderer";
 
 export interface DiffOptions {
   targetDir: string;
   templateDir: string;
   moduleIds: string[];
   config?: DevEnvConfig;
-  moduleList?: TemplateModule[];
+  moduleList: TemplateModule[];
 }
 
 /**
  * ローカルとテンプレート間の差分を検出
  */
 export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
-  const { targetDir, templateDir, moduleIds, config, moduleList = defaultModules } = options;
+  const { targetDir, templateDir, moduleIds, config, moduleList } = options;
 
   const files: FileDiff[] = [];
   let added = 0;

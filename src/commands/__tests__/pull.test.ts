@@ -79,8 +79,20 @@ vi.mock("../../modules/index", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../modules/index")>();
   return {
     ...original,
-    modulesFileExists: vi.fn(() => false),
-    loadModulesFile: vi.fn(),
+    modulesFileExists: vi.fn(() => true),
+    loadModulesFile: vi.fn(() =>
+      Promise.resolve({
+        modules: [
+          {
+            id: ".",
+            name: "Root",
+            description: "Root",
+            patterns: [".mcp.json", ".mise.toml"],
+          },
+        ],
+        rawContent: '{"modules":[]}',
+      }),
+    ),
   };
 });
 
@@ -468,7 +480,10 @@ describe("pullCommand", () => {
       // baseHashes/baseRef は更新されない（pendingMerge に保留）
       expect(mockSaveConfig).not.toHaveBeenCalledWith(
         expect.any(String),
-        expect.objectContaining({ baseHashes: expect.any(Object), pendingMerge: undefined }),
+        expect.objectContaining({
+          baseHashes: expect.any(Object),
+          pendingMerge: undefined,
+        }),
       );
     });
 

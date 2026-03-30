@@ -5,12 +5,7 @@ import { downloadTemplate } from "giget";
 import { parse } from "jsonc-parser";
 import { join, resolve } from "pathe";
 import { BermError } from "../errors";
-import {
-  addPatternToModulesFileWithCreate,
-  defaultModules,
-  loadModulesFile,
-  modulesFileExists,
-} from "../modules";
+import { addPatternToModulesFileWithCreate, loadModulesFile, modulesFileExists } from "../modules";
 import type { DevEnvConfig, TemplateModule } from "../modules/schemas";
 import { configSchema } from "../modules/schemas";
 import {
@@ -265,8 +260,15 @@ export const pushCommand = defineCommand({
         const loaded = await loadModulesFile(templateDir);
         moduleList = loaded.modules;
         modulesRawContent = loaded.rawContent;
+      } else if (modulesFileExists(targetDir)) {
+        const loaded = await loadModulesFile(targetDir);
+        moduleList = loaded.modules;
+        modulesRawContent = loaded.rawContent;
       } else {
-        moduleList = defaultModules;
+        throw new BermError(
+          "No .devenv/modules.jsonc found",
+          "Run `ziku init` to set up the project, or add .devenv/modules.jsonc to the template",
+        );
       }
 
       // ローカルのモジュール追加を検出してマージ

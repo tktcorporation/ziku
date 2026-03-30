@@ -10,10 +10,9 @@ import {
 import { homedir, tmpdir } from "node:os";
 import * as p from "@clack/prompts";
 import { downloadTemplate } from "giget";
-import pc from "picocolors";
 import { dirname, join, resolve } from "pathe";
+import pc from "picocolors";
 import { match } from "ts-pattern";
-import { getModuleById } from "../modules/index";
 import type {
   DevEnvConfig,
   FileOperationResult,
@@ -107,7 +106,7 @@ export interface DownloadOptions {
   modules: string[];
   overwriteStrategy: OverwriteStrategy;
   config?: DevEnvConfig;
-  moduleList?: TemplateModule[]; // 外部からロードしたモジュールリスト
+  moduleList: TemplateModule[]; // 外部からロードしたモジュールリスト
   templateDir?: string; // 事前にダウンロードしたテンプレートディレクトリ
 }
 
@@ -197,10 +196,7 @@ export async function fetchTemplates(options: DownloadOptions): Promise<FileOper
 
     // 選択されたモジュールのファイルをパターンベースでコピー
     for (const moduleId of modules) {
-      // moduleList が指定されていればそちらから、なければデフォルトから取得
-      const moduleDef = moduleList
-        ? moduleList.find((m) => m.id === moduleId)
-        : getModuleById(moduleId);
+      const moduleDef = moduleList.find((m) => m.id === moduleId);
       if (!moduleDef) continue;
 
       // 有効なパターンを取得

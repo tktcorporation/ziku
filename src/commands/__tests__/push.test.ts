@@ -67,7 +67,11 @@ vi.mock("../../utils/merge", () => ({
     deletedFiles: [],
     unchanged: [],
   })),
-  threeWayMerge: vi.fn(() => ({ content: "merged", hasConflicts: false, conflictDetails: [] })),
+  threeWayMerge: vi.fn(() => ({
+    content: "merged",
+    hasConflicts: false,
+    conflictDetails: [],
+  })),
   asBaseContent: vi.fn((s: string) => s),
   asLocalContent: vi.fn((s: string) => s),
   asTemplateContent: vi.fn((s: string) => s),
@@ -91,9 +95,26 @@ vi.mock("../../ui/prompts", () => ({
 
 // modules をモック
 vi.mock("../../modules", () => ({
-  defaultModules: [],
-  modulesFileExists: vi.fn(() => false),
-  loadModulesFile: vi.fn(),
+  modulesFileExists: vi.fn(() => true),
+  loadModulesFile: vi.fn(() =>
+    Promise.resolve({
+      modules: [
+        {
+          id: "root",
+          name: "Root",
+          description: "Root",
+          patterns: [".root/**"],
+        },
+        {
+          id: "github",
+          name: "GitHub",
+          description: "GitHub",
+          patterns: [".github/**"],
+        },
+      ],
+      rawContent: '{"modules":[]}',
+    }),
+  ),
   addPatternToModulesFile: vi.fn(),
   getModuleById: vi.fn((id: string) => ({
     id,

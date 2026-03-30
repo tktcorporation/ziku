@@ -65,6 +65,90 @@ export async function selectOverwriteStrategy(options?: {
   return strategy as OverwriteStrategy;
 }
 
+// ─── init (template resolution) ──────────────────────────────
+
+/** テンプレートリポジトリが見つからない場合のアクション */
+export type MissingTemplateAction = "create-repo" | "specify-source";
+
+/**
+ * テンプレートリポジトリが見つからない場合のアクション選択
+ *
+ * 背景: `{owner}/.github` が存在しない場合、ユーザーにリカバリ方法を提示する。
+ */
+export async function selectMissingTemplateAction(
+  owner: string,
+  repo: string,
+): Promise<MissingTemplateAction> {
+  p.log.warn(`Template repository ${pc.cyan(`${owner}/${repo}`)} was not found.`);
+  p.log.message(
+    pc.dim(
+      "This repository is used as a dev environment template source.\nYou can create one or specify an existing repository.",
+    ),
+  );
+
+  const action = await p.select({
+    message: "How would you like to proceed?",
+    options: [
+      {
+        value: "create-repo" as const,
+        label: `Create ${owner}/${repo}`,
+        hint: "Create an empty template repository (requires GitHub token)",
+      },
+      {
+        value: "specify-source" as const,
+        label: "Specify a different repository",
+        hint: "Enter owner/repo manually",
+      },
+    ],
+  });
+  handleCancel(action);
+  return action as MissingTemplateAction;
+}
+
+/**
+ * テンプレートソースの入力
+ */
+export async function inputTemplateSource(defaultValue?: string): Promise<string> {
+  const source = await p.text({
+    message: "Template source (owner/repo)",
+    defaultValue,
+    placeholder: defaultValue ?? "my-org/my-templates",
+    validate: (value) => {
+      if (!value?.trim()) return "Source is required";
+      const slashIndex = value.indexOf("/");
+      if (slashIndex === -1 || slashIndex === 0 || slashIndex === value.length - 1) {
+        return "Expected format: owner/repo";
+      }
+    },
+  });
+  handleCancel(source);
+  return source as string;
+}
+
+/** .devenv スキャフォールディング時のアクション */
+/**
+ * テンプレートリポジトリに .devenv/modules.jsonc が存在しない場合の確認
+ *
+ * modules.jsonc はテンプレートリポジトリに必須。存在しない場合は
+ * PR で追加するかどうかを確認する。
+ */
+export async function confirmScaffoldDevenvPR(owner: string, repo: string): Promise<boolean> {
+  p.log.warn(
+    `Template ${pc.cyan(`${owner}/${repo}`)} does not contain ${pc.cyan(".devenv/modules.jsonc")}`,
+  );
+  p.log.message(
+    pc.dim(
+      "This file defines which modules and file patterns ziku manages.\nIt must exist in the template repository to continue.",
+    ),
+  );
+
+  const confirmed = await p.confirm({
+    message: `Create a PR to add .devenv/modules.jsonc to ${owner}/${repo}?`,
+  });
+  handleCancel(confirmed);
+  return confirmed as boolean;
+}
+
 // ─── push ─────────────────────────────────────────────────────
 
 /**

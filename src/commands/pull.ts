@@ -3,7 +3,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { defineCommand } from "citty";
 import { dirname, join, resolve } from "pathe";
 import { BermError } from "../errors";
-import { defaultModules, loadModulesFile, modulesFileExists } from "../modules";
+import { loadModulesFile, modulesFileExists } from "../modules";
 import type { DevEnvConfig, TemplateModule } from "../modules/schemas";
 import { selectDeletedFiles } from "../ui/prompts";
 import { intro, log, outro, pc, withSpinner } from "../ui/renderer";
@@ -90,8 +90,14 @@ export const pullCommand = defineCommand({
       if (modulesFileExists(templateDir)) {
         const loaded = await loadModulesFile(templateDir);
         moduleList = loaded.modules;
+      } else if (modulesFileExists(targetDir)) {
+        const loaded = await loadModulesFile(targetDir);
+        moduleList = loaded.modules;
       } else {
-        moduleList = defaultModules;
+        throw new BermError(
+          "No .devenv/modules.jsonc found",
+          "Run `ziku init` to set up the project, or add .devenv/modules.jsonc to the template",
+        );
       }
 
       // Step 3: ハッシュ計算
