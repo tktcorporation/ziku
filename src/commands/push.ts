@@ -24,7 +24,7 @@ import {
 } from "../ui/prompts";
 import { calculateDiffStats, formatStats } from "../ui/diff-view";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
-import { detectDiff, getPushableFiles } from "../utils/diff";
+import { detectDiff } from "../utils/diff";
 import { createPullRequest, getGitHubToken } from "../utils/github";
 import { detectAndUpdateReadme } from "../utils/readme";
 import { buildTemplateSource } from "../utils/template";

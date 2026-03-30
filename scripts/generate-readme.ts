@@ -7,10 +7,13 @@
  *   pnpm run docs:check  # Check only (for CI)
  *
  * Generated sections:
- *   - Usage (from command definitions)
- *   - Modules (from modules.jsonc)
+ *   - Usage (static content)
  *   - Commands (from citty renderUsage)
- *   - What You Get (from modules.jsonc)
+ *   - AI Agents (from ai-guide.ts)
+ *
+ * Non-generated sections (manually maintained):
+ *   - Features/Modules
+ *   - What You Get / Files
  */
 
 // Prevent environment-dependent renderUsage output differences
@@ -22,7 +25,6 @@ import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { renderUsage } from "citty";
-import { parse } from "jsonc-parser";
 import { aiDocsCommand } from "../src/commands/ai-docs";
 import { diffCommand } from "../src/commands/diff";
 import { initCommand } from "../src/commands/init";
@@ -30,17 +32,12 @@ import { pushCommand } from "../src/commands/push";
 import { generateReadmeSection as generateAiAgentsSection } from "../src/docs/ai-guide";
 
 const README_PATH = resolve(import.meta.dirname, "../README.md");
-const MODULES_PATH = resolve(import.meta.dirname, "../../../.devenv/modules.jsonc");
 
 // Marker definitions
 const MARKERS = {
   usage: {
     start: "<!-- USAGE:START -->",
     end: "<!-- USAGE:END -->",
-  },
-  features: {
-    start: "<!-- FEATURES:START -->",
-    end: "<!-- FEATURES:END -->",
   },
   commands: {
     start: "<!-- COMMANDS:START -->",
@@ -50,32 +47,7 @@ const MARKERS = {
     start: "<!-- AI_AGENTS:START -->",
     end: "<!-- AI_AGENTS:END -->",
   },
-  files: {
-    start: "<!-- FILES:START -->",
-    end: "<!-- FILES:END -->",
-  },
 } as const;
-
-interface TemplateModule {
-  id: string;
-  name: string;
-  description: string;
-  setupDescription?: string;
-  patterns: string[];
-}
-
-interface ModulesFile {
-  modules: TemplateModule[];
-}
-
-/**
- * Load modules.jsonc
- */
-async function loadModules(): Promise<TemplateModule[]> {
-  const content = await readFile(MODULES_PATH, "utf-8");
-  const parsed = parse(content) as ModulesFile;
-  return parsed.modules;
-}
 
 /**
  * Generate Usage section
@@ -96,22 +68,6 @@ function generateUsageSection(): string {
   lines.push("# Check what's different");
   lines.push("npx ziku diff");
   lines.push("```\n");
-  return lines.join("\n");
-}
-
-/**
- * Generate Modules section
- */
-function generateFeaturesSection(modules: TemplateModule[]): string {
-  const lines: string[] = [];
-  lines.push("## Modules\n");
-  lines.push("Pick what you need:\n");
-
-  for (const mod of modules) {
-    lines.push(`- **${mod.name}** - ${mod.description}`);
-  }
-
-  lines.push("");
   return lines.join("\n");
 }
 
@@ -175,38 +131,6 @@ function cleanUsageOutput(usage: string): string {
 }
 
 /**
- * Generate What You Get section
- */
-/**
- * モジュールのディレクトリ単位の概要のみを表示する。個別パターンは列挙しない。
- *
- * 背景: 個別パターンを列挙すると、既存モジュール内にファイルを1つ追加するだけで
- * docs:check が失敗してしまう。パターン詳細は modules.jsonc が正規の置き場であり、
- * README に二重管理する必要はない。
- *
- * モジュール追加（新フォルダ単位）はREADME変更を伴うが、
- * 既存モジュール内のパターン追加はREADMEに影響しない。
- */
-function generateFilesSection(modules: TemplateModule[]): string {
-  const lines: string[] = [];
-  lines.push("## What You Get\n");
-  lines.push("Files generated based on selected modules:\n");
-
-  for (const mod of modules) {
-    const dirName = mod.id === "." ? "Root (`./`)" : `\`${mod.id}/\``;
-    lines.push(`- **${dirName}** — ${mod.description}`);
-  }
-
-  lines.push("");
-  lines.push(
-    "> See [`.devenv/modules.jsonc`](./.devenv/modules.jsonc) for the full list of tracked file patterns.",
-  );
-  lines.push("");
-
-  return lines.join("\n");
-}
-
-/**
  * Update README section between markers
  */
 function updateSection(
@@ -237,26 +161,18 @@ async function main(): Promise<void> {
 
   console.log("📝 Generating README documentation...\n");
 
-  // Load modules.jsonc
-  const modules = await loadModules();
-  console.log(`  📦 Loaded ${modules.length} modules`);
-
   // Generate sections
   const usageSection = generateUsageSection();
-  const featuresSection = generateFeaturesSection(modules);
   const commandsSection = await generateCommandsSection();
   const aiAgentsSection = generateAiAgentsSection();
-  const filesSection = generateFilesSection(modules);
 
   // Update README
   let readme = await readFile(README_PATH, "utf-8");
   const originalReadme = readme;
 
   readme = updateSection(readme, MARKERS.usage.start, MARKERS.usage.end, usageSection);
-  readme = updateSection(readme, MARKERS.features.start, MARKERS.features.end, featuresSection);
   readme = updateSection(readme, MARKERS.commands.start, MARKERS.commands.end, commandsSection);
   readme = updateSection(readme, MARKERS.aiAgents.start, MARKERS.aiAgents.end, aiAgentsSection);
-  readme = updateSection(readme, MARKERS.files.start, MARKERS.files.end, filesSection);
 
   const updated = readme !== originalReadme;
 
