@@ -2,7 +2,6 @@
 import * as p from "@clack/prompts";
 import { defineCommand, runMain } from "citty";
 import { version } from "../package.json";
-import { aiDocsCommand } from "./commands/ai-docs";
 import { diffCommand } from "./commands/diff";
 import { initCommand } from "./commands/init";
 import { pullCommand } from "./commands/pull";
@@ -23,7 +22,6 @@ const main = defineCommand({
     pull: pullCommand,
     diff: diffCommand,
     track: trackCommand,
-    "ai-docs": aiDocsCommand,
   },
 });
 
@@ -49,11 +47,7 @@ const commandMap: Record<"init" | "push" | "pull" | "diff", CommandType> = {
 async function promptCommand(): Promise<void> {
   intro();
 
-  p.log.message(
-    pc.dim(
-      `Are you an AI agent? Run ${pc.cyan("npx ziku ai-docs")} for non-interactive usage guide.`,
-    ),
-  );
+  p.log.message(pc.dim(`Run ${pc.cyan("ziku <command> --help")} for non-interactive usage.`));
 
   const command = await p.select({
     message: "What would you like to do?",
@@ -101,18 +95,9 @@ async function run(): Promise<void> {
     const args = process.argv.slice(2);
     const hasSubCommand =
       args.length > 0 &&
-      [
-        "init",
-        "push",
-        "pull",
-        "diff",
-        "track",
-        "ai-docs",
-        "--help",
-        "-h",
-        "--version",
-        "-v",
-      ].includes(args[0]);
+      ["init", "push", "pull", "diff", "track", "--help", "-h", "--version", "-v"].includes(
+        args[0],
+      );
 
     if (!hasSubCommand && args.length > 0 && !args[0].startsWith("-")) {
       // npx ziku . のような形式は init コマンドとして実行
