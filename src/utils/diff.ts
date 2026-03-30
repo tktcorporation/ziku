@@ -2,172 +2,178 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createPatch } from "diff";
 import { join } from "pathe";
-import { defaultModules, getModuleById } from "../modules";
+import pc from "picocolors";
+import { getModuleById } from "../modules";
 import type {
-  DevEnvConfig,
-  DiffResult,
-  DiffType,
-  FileDiff,
-  TemplateModule,
+	DevEnvConfig,
+	DiffResult,
+	DiffType,
+	FileDiff,
+	TemplateModule,
 } from "../modules/schemas";
+import { log } from "../ui/renderer";
 import { filterByGitignore, loadMergedGitignore } from "./gitignore";
 import { getEffectivePatterns, resolvePatterns } from "./patterns";
-import pc from "picocolors";
-import { log } from "../ui/renderer";
 
 export interface DiffOptions {
-  targetDir: string;
-  templateDir: string;
-  moduleIds: string[];
-  config?: DevEnvConfig;
-  moduleList?: TemplateModule[];
+	targetDir: string;
+	templateDir: string;
+	moduleIds: string[];
+	config?: DevEnvConfig;
+	moduleList: TemplateModule[];
 }
 
 /**
  * ローカルとテンプレート間の差分を検出
  */
 export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
-  const { targetDir, templateDir, moduleIds, config, moduleList = defaultModules } = options;
+	const { targetDir, templateDir, moduleIds, config, moduleList } = options;
 
-  const files: FileDiff[] = [];
-  let added = 0;
-  let modified = 0;
-  let deleted = 0;
-  let unchanged = 0;
+	const files: FileDiff[] = [];
+	let added = 0;
+	let modified = 0;
+	let deleted = 0;
+	let unchanged = 0;
 
-  // ローカルとテンプレート両方の .gitignore をマージして読み込み
-  // クレデンシャル等の機密情報の誤流出を防止
-  const gitignore = await loadMergedGitignore([targetDir, templateDir]);
+	// ローカルとテンプレート両方の .gitignore をマージして読み込み
+	// クレデンシャル等の機密情報の誤流出を防止
+	const gitignore = await loadMergedGitignore([targetDir, templateDir]);
 
-  for (const moduleId of moduleIds) {
-    const mod = getModuleById(moduleId, moduleList);
-    if (!mod) {
-      log.warn(`Module "${pc.cyan(moduleId)}" not found`);
-      continue;
-    }
+	for (const moduleId of moduleIds) {
+		const mod = getModuleById(moduleId, moduleList);
+		if (!mod) {
+			log.warn(`Module "${pc.cyan(moduleId)}" not found`);
+			continue;
+		}
 
-    // 有効なパターンを取得
-    const patterns = getEffectivePatterns(moduleId, mod.patterns, config);
+		// 有効なパターンを取得
+		const patterns = getEffectivePatterns(moduleId, mod.patterns, config);
 
-    // テンプレート側のファイル一覧を取得し、gitignore でフィルタリング
-    const templateFiles = filterByGitignore(resolvePatterns(templateDir, patterns), gitignore);
-    // ローカル側のファイル一覧を取得し、gitignore でフィルタリング
-    const localFiles = filterByGitignore(resolvePatterns(targetDir, patterns), gitignore);
+		// テンプレート側のファイル一覧を取得し、gitignore でフィルタリング
+		const templateFiles = filterByGitignore(
+			resolvePatterns(templateDir, patterns),
+			gitignore,
+		);
+		// ローカル側のファイル一覧を取得し、gitignore でフィルタリング
+		const localFiles = filterByGitignore(
+			resolvePatterns(targetDir, patterns),
+			gitignore,
+		);
 
-    const allFiles = new Set([...templateFiles, ...localFiles]);
+		const allFiles = new Set([...templateFiles, ...localFiles]);
 
-    for (const filePath of allFiles) {
-      const localPath = join(targetDir, filePath);
-      const templatePath = join(templateDir, filePath);
+		for (const filePath of allFiles) {
+			const localPath = join(targetDir, filePath);
+			const templatePath = join(templateDir, filePath);
 
-      const localExists = existsSync(localPath);
-      const templateExists = existsSync(templatePath);
+			const localExists = existsSync(localPath);
+			const templateExists = existsSync(templatePath);
 
-      let type: DiffType;
-      let localContent: string | undefined;
-      let templateContent: string | undefined;
+			let type: DiffType;
+			let localContent: string | undefined;
+			let templateContent: string | undefined;
 
-      if (localExists) {
-        localContent = await readFile(localPath, "utf-8");
-      }
-      if (templateExists) {
-        templateContent = await readFile(templatePath, "utf-8");
-      }
+			if (localExists) {
+				localContent = await readFile(localPath, "utf-8");
+			}
+			if (templateExists) {
+				templateContent = await readFile(templatePath, "utf-8");
+			}
 
-      if (localExists && templateExists) {
-        // 両方に存在 → 内容比較
-        if (localContent === templateContent) {
-          type = "unchanged";
-          unchanged++;
-        } else {
-          type = "modified";
-          modified++;
-        }
-      } else if (localExists && !templateExists) {
-        // ローカルのみ → 追加（テンプレートにはない）
-        type = "added";
-        added++;
-      } else {
-        // テンプレートのみ → 削除（ローカルにはない）
-        type = "deleted";
-        deleted++;
-      }
+			if (localExists && templateExists) {
+				// 両方に存在 → 内容比較
+				if (localContent === templateContent) {
+					type = "unchanged";
+					unchanged++;
+				} else {
+					type = "modified";
+					modified++;
+				}
+			} else if (localExists && !templateExists) {
+				// ローカルのみ → 追加（テンプレートにはない）
+				type = "added";
+				added++;
+			} else {
+				// テンプレートのみ → 削除（ローカルにはない）
+				type = "deleted";
+				deleted++;
+			}
 
-      files.push({
-        path: filePath,
-        type,
-        localContent,
-        templateContent,
-      });
-    }
-  }
+			files.push({
+				path: filePath,
+				type,
+				localContent,
+				templateContent,
+			});
+		}
+	}
 
-  return {
-    files: files.sort((a, b) => a.path.localeCompare(b.path)),
-    summary: { added, modified, deleted, unchanged },
-  };
+	return {
+		files: files.sort((a, b) => a.path.localeCompare(b.path)),
+		summary: { added, modified, deleted, unchanged },
+	};
 }
 
 /**
  * 差分をフォーマットして表示用文字列を生成
  */
 export function formatDiff(diff: DiffResult, verbose = false): string {
-  const lines: string[] = [];
+	const lines: string[] = [];
 
-  // サマリー表示
-  const summaryParts: string[] = [];
-  if (diff.summary.added > 0) {
-    summaryParts.push(pc.green(`+${diff.summary.added} added`));
-  }
-  if (diff.summary.modified > 0) {
-    summaryParts.push(pc.yellow(`~${diff.summary.modified} modified`));
-  }
-  if (diff.summary.deleted > 0) {
-    summaryParts.push(pc.red(`-${diff.summary.deleted} deleted`));
-  }
-  if (diff.summary.unchanged > 0) {
-    summaryParts.push(pc.dim(`${diff.summary.unchanged} unchanged`));
-  }
+	// サマリー表示
+	const summaryParts: string[] = [];
+	if (diff.summary.added > 0) {
+		summaryParts.push(pc.green(`+${diff.summary.added} added`));
+	}
+	if (diff.summary.modified > 0) {
+		summaryParts.push(pc.yellow(`~${diff.summary.modified} modified`));
+	}
+	if (diff.summary.deleted > 0) {
+		summaryParts.push(pc.red(`-${diff.summary.deleted} deleted`));
+	}
+	if (diff.summary.unchanged > 0) {
+		summaryParts.push(pc.dim(`${diff.summary.unchanged} unchanged`));
+	}
 
-  if (summaryParts.length > 0) {
-    lines.push(`  ${summaryParts.join(pc.dim(" │ "))}`);
-    lines.push("");
-  }
+	if (summaryParts.length > 0) {
+		lines.push(`  ${summaryParts.join(pc.dim(" │ "))}`);
+		lines.push("");
+	}
 
-  // 詳細
-  const changedFiles = diff.files.filter((f) => f.type !== "unchanged");
-  if (changedFiles.length > 0) {
-    for (const file of changedFiles) {
-      const { icon, color } = getStatusStyle(file.type);
-      lines.push(`  ${icon} ${color(file.path)}`);
+	// 詳細
+	const changedFiles = diff.files.filter((f) => f.type !== "unchanged");
+	if (changedFiles.length > 0) {
+		for (const file of changedFiles) {
+			const { icon, color } = getStatusStyle(file.type);
+			lines.push(`  ${icon} ${color(file.path)}`);
 
-      if (verbose && file.type === "modified") {
-        lines.push(pc.dim("    └─ Content differs from template"));
-      }
-    }
-  } else {
-    lines.push(pc.dim("  No changes detected"));
-  }
+			if (verbose && file.type === "modified") {
+				lines.push(pc.dim("    └─ Content differs from template"));
+			}
+		}
+	} else {
+		lines.push(pc.dim("  No changes detected"));
+	}
 
-  return lines.join("\n");
+	return lines.join("\n");
 }
 
 interface StatusStyle {
-  icon: string;
-  color: (s: string) => string;
+	icon: string;
+	color: (s: string) => string;
 }
 
 function getStatusStyle(type: DiffType): StatusStyle {
-  switch (type) {
-    case "added":
-      return { icon: pc.green("+"), color: pc.green };
-    case "modified":
-      return { icon: pc.yellow("~"), color: pc.yellow };
-    case "deleted":
-      return { icon: pc.red("-"), color: pc.red };
-    case "unchanged":
-      return { icon: pc.dim(" "), color: pc.dim };
-  }
+	switch (type) {
+		case "added":
+			return { icon: pc.green("+"), color: pc.green };
+		case "modified":
+			return { icon: pc.yellow("~"), color: pc.yellow };
+		case "deleted":
+			return { icon: pc.red("-"), color: pc.red };
+		case "unchanged":
+			return { icon: pc.dim(" "), color: pc.dim };
+	}
 }
 
 /**
@@ -175,30 +181,40 @@ function getStatusStyle(type: DiffType): StatusStyle {
  * (ローカルで追加・変更されたファイル)
  */
 export function getPushableFiles(diff: DiffResult): FileDiff[] {
-  return diff.files.filter((f) => f.type === "added" || f.type === "modified");
+	return diff.files.filter((f) => f.type === "added" || f.type === "modified");
 }
 
 /**
  * 差分があるかどうかを判定
  */
 export function hasDiff(diff: DiffResult): boolean {
-  return diff.summary.added > 0 || diff.summary.modified > 0 || diff.summary.deleted > 0;
+	return (
+		diff.summary.added > 0 ||
+		diff.summary.modified > 0 ||
+		diff.summary.deleted > 0
+	);
 }
 
 /**
  * FileDiff から unified diff 形式の文字列を生成
  */
 export function generateUnifiedDiff(fileDiff: FileDiff): string {
-  const { path, type, localContent, templateContent } = fileDiff;
+	const { path, type, localContent, templateContent } = fileDiff;
 
-  switch (type) {
-    case "added":
-      return createPatch(path, "", localContent || "", "template", "local");
-    case "modified":
-      return createPatch(path, templateContent || "", localContent || "", "template", "local");
-    default:
-      return "";
-  }
+	switch (type) {
+		case "added":
+			return createPatch(path, "", localContent || "", "template", "local");
+		case "modified":
+			return createPatch(
+				path,
+				templateContent || "",
+				localContent || "",
+				"template",
+				"local",
+			);
+		default:
+			return "";
+	}
 }
 
 /**
@@ -206,16 +222,16 @@ export function generateUnifiedDiff(fileDiff: FileDiff): string {
  * (テスト互換性のため、直接 ANSI エスケープシーケンスを使用)
  */
 export function colorizeUnifiedDiff(diff: string): string {
-  return diff
-    .split("\n")
-    .map((line) => {
-      if (line.startsWith("+++") || line.startsWith("---")) {
-        return `\x1b[1m${line}\x1b[0m`; // Bold
-      }
-      if (line.startsWith("+")) return `\x1b[32m${line}\x1b[0m`; // Green
-      if (line.startsWith("-")) return `\x1b[31m${line}\x1b[0m`; // Red
-      if (line.startsWith("@@")) return `\x1b[36m${line}\x1b[0m`; // Cyan
-      return line;
-    })
-    .join("\n");
+	return diff
+		.split("\n")
+		.map((line) => {
+			if (line.startsWith("+++") || line.startsWith("---")) {
+				return `\x1b[1m${line}\x1b[0m`; // Bold
+			}
+			if (line.startsWith("+")) return `\x1b[32m${line}\x1b[0m`; // Green
+			if (line.startsWith("-")) return `\x1b[31m${line}\x1b[0m`; // Red
+			if (line.startsWith("@@")) return `\x1b[36m${line}\x1b[0m`; // Cyan
+			return line;
+		})
+		.join("\n");
 }
