@@ -15,8 +15,7 @@ vi.mock("node:fs/promises", async () => {
 
 // 外部依存をモック
 vi.mock("../../utils/git-remote", () => ({
-  detectGitHubOwner: vi.fn(() => null),
-  DEFAULT_TEMPLATE_OWNER: "tktcorporation",
+  detectGitHubOwner: vi.fn(() => "test-org"),
   DEFAULT_TEMPLATE_REPO: ".github",
 }));
 
@@ -39,6 +38,9 @@ vi.mock("../../utils/github", () => ({
   checkRepoExists: vi.fn(() => Promise.resolve(true)),
   getGitHubToken: vi.fn(() => undefined),
   scaffoldTemplateRepo: vi.fn(() => Promise.resolve({ url: "https://github.com/test/repo" })),
+  createDevenvScaffoldPR: vi.fn(() =>
+    Promise.resolve({ url: "https://github.com/test/repo/pull/1", number: 1, branch: "devenv" }),
+  ),
 }));
 
 vi.mock("../../ui/prompts", () => ({
@@ -46,6 +48,7 @@ vi.mock("../../ui/prompts", () => ({
   selectOverwriteStrategy: vi.fn(),
   selectMissingTemplateAction: vi.fn(),
   inputTemplateSource: vi.fn(),
+  selectScaffoldDevenvAction: vi.fn(() => Promise.resolve("scaffold-local")),
 }));
 
 vi.mock("../../ui/renderer", () => ({
@@ -573,13 +576,21 @@ describe("initCommand", () => {
       );
     });
 
-    it("git remote 検出失敗時はデフォルトにフォールバック", async () => {
+    it("git remote 検出失敗時はユーザーにソース入力を促す", async () => {
       vol.fromJSON({
         "/test": null,
       });
 
       mockDetectGitHubOwner.mockReturnValueOnce(null);
 
+      const { inputTemplateSource } = await import("../../ui/prompts");
+      const mockInputTemplateSource = vi.mocked(inputTemplateSource);
+      const { checkRepoExists } = await import("../../utils/github");
+      const mockCheckRepoExists = vi.mocked(checkRepoExists);
+
+      // ユーザーが custom-org/templates を入力
+      mockInputTemplateSource.mockResolvedValueOnce("custom-org/templates");
+      mockCheckRepoExists.mockResolvedValueOnce(true);
       mockSelectModules.mockResolvedValueOnce(["."]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
@@ -591,9 +602,10 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
+      expect(mockInputTemplateSource).toHaveBeenCalled();
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),
-        "gh:tktcorporation/.github",
+        "gh:custom-org/templates",
       );
     });
 

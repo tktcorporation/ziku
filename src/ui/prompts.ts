@@ -65,16 +65,15 @@ export async function selectOverwriteStrategy(options?: {
   return strategy as OverwriteStrategy;
 }
 
-// ─── init (missing template) ─────────────────────────────────
+// ─── init (template resolution) ──────────────────────────────
 
 /** テンプレートリポジトリが見つからない場合のアクション */
-export type MissingTemplateAction = "use-default" | "create-repo" | "specify-source";
+export type MissingTemplateAction = "create-repo" | "specify-source";
 
 /**
  * テンプレートリポジトリが見つからない場合のアクション選択
  *
  * 背景: `{owner}/.github` が存在しない場合、ユーザーにリカバリ方法を提示する。
- * デフォルトテンプレートの利用が最もシンプルで初心者向き。
  */
 export async function selectMissingTemplateAction(
   owner: string,
@@ -83,7 +82,7 @@ export async function selectMissingTemplateAction(
   p.log.warn(`Template repository ${pc.cyan(`${owner}/${repo}`)} was not found.`);
   p.log.message(
     pc.dim(
-      "This repository is used as a dev environment template source.\nYou can create one or use the default template to get started.",
+      "This repository is used as a dev environment template source.\nYou can create one or specify an existing repository.",
     ),
   );
 
@@ -91,18 +90,13 @@ export async function selectMissingTemplateAction(
     message: "How would you like to proceed?",
     options: [
       {
-        value: "use-default" as const,
-        label: "Use default template",
-        hint: "tktcorporation/.github — quick start",
-      },
-      {
         value: "create-repo" as const,
         label: `Create ${owner}/${repo}`,
-        hint: "Fork default template to your account (requires GitHub token)",
+        hint: "Create an empty template repository (requires GitHub token)",
       },
       {
         value: "specify-source" as const,
-        label: "Specify a different template",
+        label: "Specify a different repository",
         hint: "Enter owner/repo manually",
       },
     ],
@@ -112,12 +106,13 @@ export async function selectMissingTemplateAction(
 }
 
 /**
- * カスタムテンプレートソースの入力
+ * テンプレートソースの入力
  */
-export async function inputTemplateSource(): Promise<string> {
+export async function inputTemplateSource(defaultValue?: string): Promise<string> {
   const source = await p.text({
     message: "Template source (owner/repo)",
-    placeholder: "my-org/my-templates",
+    defaultValue,
+    placeholder: defaultValue ?? "my-org/my-templates",
     validate: (value) => {
       if (!value?.trim()) return "Source is required";
       const slashIndex = value.indexOf("/");
@@ -128,6 +123,52 @@ export async function inputTemplateSource(): Promise<string> {
   });
   handleCancel(source);
   return source as string;
+}
+
+/** .devenv スキャフォールディング時のアクション */
+export type ScaffoldDevenvAction = "scaffold-pr" | "scaffold-local" | "continue-without";
+
+/**
+ * テンプレートリポジトリに .devenv/modules.jsonc が存在しない場合のアクション選択
+ *
+ * 背景: テンプレートリポジトリが存在するが .devenv 構成がない場合、
+ * デフォルトの modules.jsonc を生成して PR を作るか、ローカルでデフォルトを使うか選ばせる。
+ */
+export async function selectScaffoldDevenvAction(
+  owner: string,
+  repo: string,
+): Promise<ScaffoldDevenvAction> {
+  p.log.warn(
+    `Template ${pc.cyan(`${owner}/${repo}`)} does not contain ${pc.cyan(".devenv/modules.jsonc")}`,
+  );
+  p.log.message(
+    pc.dim(
+      "This file defines which modules and file patterns ziku manages.\nYou can create it now to enable full template synchronization.",
+    ),
+  );
+
+  const action = await p.select({
+    message: "How would you like to proceed?",
+    options: [
+      {
+        value: "scaffold-pr" as const,
+        label: `Create PR to ${owner}/${repo}`,
+        hint: "Generate .devenv/modules.jsonc and submit as a PR (requires GitHub token)",
+      },
+      {
+        value: "scaffold-local" as const,
+        label: "Use default modules locally",
+        hint: "Continue with built-in defaults, no changes to the template repo",
+      },
+      {
+        value: "continue-without" as const,
+        label: "Continue without .devenv",
+        hint: "Use built-in defaults (same as above, you can set up later)",
+      },
+    ],
+  });
+  handleCancel(action);
+  return action as ScaffoldDevenvAction;
 }
 
 // ─── push ─────────────────────────────────────────────────────

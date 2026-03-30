@@ -21,14 +21,12 @@ import {
   selectMissingTemplateAction,
   selectModules,
   selectOverwriteStrategy,
+  selectScaffoldDevenvAction,
 } from "../ui/prompts";
-import {
-  DEFAULT_TEMPLATE_OWNER,
-  DEFAULT_TEMPLATE_REPO,
-  detectGitHubOwner,
-} from "../utils/git-remote";
+import { DEFAULT_TEMPLATE_REPO, detectGitHubOwner } from "../utils/git-remote";
 import {
   checkRepoExists,
+  createDevenvScaffoldPR,
   getGitHubToken,
   resolveLatestCommitSha,
   scaffoldTemplateRepo,
@@ -126,7 +124,8 @@ export const initCommand = defineCommand({
         const { modules: loadedModules } = await loadModulesFile(templateDir);
         moduleList = loadedModules;
       } else {
-        moduleList = defaultModules;
+        // .devenv/modules.jsonc がテンプレートに存在しない場合のハンドリング
+        moduleList = await handleMissingDevenv(sourceOwner, sourceRepo, args.yes as boolean);
       }
 
       // Step 2: モジュール選択
@@ -398,13 +397,12 @@ function displayModuleDescriptions(
 /**
  * テンプレートソースを解決する（存在チェック付き）。
  *
- * 優先順位:
- *   1. --from owner/repo が指定されていればそのまま使用
- *   2. git remote origin から owner を検出 → {owner}/.github
- *   3. フォールバック: tktcorporation/.github
+ * フロー:
+ *   1. --from owner/repo → そのまま使用、存在しなければエラー
+ *   2. git remote origin → {owner}/.github を候補とし、存在チェック
+ *   3. 候補が見つからない / 存在しない → ユーザーに入力・作成を促す
  *
- * 解決後、テンプレートリポジトリの存在を確認し、見つからない場合は
- * ユーザーにリカバリ方法を提示する。
+ * デフォルトテンプレートへのフォールバックは行わない。
  */
 async function resolveTemplateSourceWithCheck(
   from: string | undefined,
@@ -413,10 +411,9 @@ async function resolveTemplateSourceWithCheck(
   sourceOwner: string;
   sourceRepo: string;
 }> {
-  const resolved = resolveTemplateSource(from);
-
-  // --from で明示指定された場合は存在チェックのみ（リカバリなし）
+  // --from で明示指定
   if (from) {
+    const resolved = parseFromArg(from);
     const exists = await checkRepoExists(resolved.sourceOwner, resolved.sourceRepo);
     if (!exists) {
       throw new BermError(
@@ -427,33 +424,56 @@ async function resolveTemplateSourceWithCheck(
     return resolved;
   }
 
-  // デフォルトテンプレートの場合は存在チェック不要
-  if (
-    resolved.sourceOwner === DEFAULT_TEMPLATE_OWNER &&
-    resolved.sourceRepo === DEFAULT_TEMPLATE_REPO
-  ) {
-    return resolved;
+  // git remote から候補を検出
+  const detectedOwner = detectGitHubOwner();
+  if (detectedOwner) {
+    const candidate = { sourceOwner: detectedOwner, sourceRepo: DEFAULT_TEMPLATE_REPO };
+    const exists = await checkRepoExists(candidate.sourceOwner, candidate.sourceRepo);
+    if (exists) {
+      return candidate;
+    }
+
+    // 非インタラクティブモードではリポジトリが見つからなければエラー
+    if (nonInteractive) {
+      throw new BermError(
+        `Template repository "${candidate.sourceOwner}/${candidate.sourceRepo}" not found`,
+        `Create it first, or specify --from owner/repo`,
+      );
+    }
+
+    // インタラクティブ: リポジトリが見つからない → アクション選択
+    return handleMissingTemplate(candidate.sourceOwner, candidate.sourceRepo);
   }
 
-  // 自動検出されたソースの存在チェック
-  const exists = await checkRepoExists(resolved.sourceOwner, resolved.sourceRepo);
-  if (exists) {
-    return resolved;
-  }
-
-  // 非インタラクティブモードではデフォルトにフォールバック
+  // git remote がない場合
   if (nonInteractive) {
-    log.warn(
-      `Template ${pc.cyan(`${resolved.sourceOwner}/${resolved.sourceRepo}`)} not found, using default`,
+    throw new BermError(
+      "Cannot detect template source: no git remote origin found",
+      "Specify --from owner/repo",
     );
-    return {
-      sourceOwner: DEFAULT_TEMPLATE_OWNER,
-      sourceRepo: DEFAULT_TEMPLATE_REPO,
-    };
   }
 
-  // インタラクティブモード: ユーザーにアクション選択を促す
-  return handleMissingTemplate(resolved.sourceOwner, resolved.sourceRepo);
+  // インタラクティブ: ユーザーに入力を促す
+  log.warn("Could not detect template source from git remote.");
+  return promptTemplateSource();
+}
+
+/**
+ * ユーザーにテンプレートソースを入力させ、存在チェックを行う
+ */
+async function promptTemplateSource(): Promise<{ sourceOwner: string; sourceRepo: string }> {
+  const source = await inputTemplateSource();
+  const slashIndex = source.indexOf("/");
+  const owner = source.slice(0, slashIndex);
+  const repo = source.slice(slashIndex + 1);
+
+  const exists = await checkRepoExists(owner, repo);
+  if (!exists) {
+    // 存在しないリポジトリ → 作成を提案
+    return handleMissingTemplate(owner, repo);
+  }
+
+  return { sourceOwner: owner, sourceRepo: repo };
 }
 
 /**
@@ -466,12 +486,6 @@ async function handleMissingTemplate(
   const action = await selectMissingTemplateAction(owner, repo);
 
   switch (action) {
-    case "use-default":
-      return {
-        sourceOwner: DEFAULT_TEMPLATE_OWNER,
-        sourceRepo: DEFAULT_TEMPLATE_REPO,
-      };
-
     case "create-repo": {
       const token = getGitHubToken();
       if (!token) {
@@ -481,40 +495,97 @@ async function handleMissingTemplate(
         );
       }
 
-      log.step(`Creating ${pc.cyan(`${owner}/${repo}`)} from default template...`);
-      const { url } = await scaffoldTemplateRepo(
-        token,
-        owner,
-        repo,
-        DEFAULT_TEMPLATE_OWNER,
-        DEFAULT_TEMPLATE_REPO,
-      );
+      log.step(`Creating ${pc.cyan(`${owner}/${repo}`)}...`);
+      const { url } = await scaffoldTemplateRepo(token, owner, repo);
       log.success(`Created template repository: ${pc.cyan(url)}`);
       log.info(pc.dim("Waiting for repository to be ready..."));
-      // フォーク同期を待つ
       await new Promise((resolve) => setTimeout(resolve, 5000));
 
       return { sourceOwner: owner, sourceRepo: repo };
     }
 
     case "specify-source": {
-      const source = await inputTemplateSource();
-      const slashIndex = source.indexOf("/");
-      const newOwner = source.slice(0, slashIndex);
-      const newRepo = source.slice(slashIndex + 1);
+      return promptTemplateSource();
+    }
+  }
+}
 
-      // 指定されたソースの存在チェック
-      const exists = await checkRepoExists(newOwner, newRepo);
-      if (!exists) {
+/**
+ * テンプレートに .devenv/modules.jsonc がない場合のハンドリング
+ *
+ * テンプレートリポジトリは存在するが .devenv 構成がない場合、
+ * PR で追加するか、ローカルでデフォルトを使うか選ばせる。
+ */
+async function handleMissingDevenv(
+  owner: string,
+  repo: string,
+  nonInteractive: boolean,
+): Promise<TemplateModule[]> {
+  if (nonInteractive) {
+    log.warn(
+      `Template ${pc.cyan(`${owner}/${repo}`)} has no .devenv/modules.jsonc, using built-in defaults`,
+    );
+    return defaultModules;
+  }
+
+  const action = await selectScaffoldDevenvAction(owner, repo);
+
+  switch (action) {
+    case "scaffold-pr": {
+      const token = getGitHubToken();
+      if (!token) {
         throw new BermError(
-          `Template repository "${newOwner}/${newRepo}" not found`,
-          "Check the repository name and try again",
+          "GitHub token required to create a PR",
+          "Set GITHUB_TOKEN or GH_TOKEN, or run: gh auth login",
         );
       }
 
-      return { sourceOwner: newOwner, sourceRepo: newRepo };
+      const modulesContent = generateDefaultModulesJsonc();
+      log.step(`Creating PR to add .devenv/modules.jsonc to ${pc.cyan(`${owner}/${repo}`)}...`);
+      const result = await createDevenvScaffoldPR(token, owner, repo, modulesContent);
+      log.success(`Created PR: ${pc.cyan(result.url)}`);
+      log.info(pc.dim("Continuing with built-in defaults for now."));
+      return defaultModules;
     }
+
+    case "scaffold-local":
+    case "continue-without":
+      return defaultModules;
   }
+}
+
+/**
+ * デフォルトの modules.jsonc コンテンツを生成する
+ */
+function generateDefaultModulesJsonc(): string {
+  const content = {
+    $schema: "https://ziku.dev/schema/modules.json",
+    modules: defaultModules.map((m) => ({
+      id: m.id,
+      name: m.name,
+      description: m.description,
+      ...(m.setupDescription ? { setupDescription: m.setupDescription } : {}),
+      patterns: m.patterns,
+    })),
+  };
+  return JSON.stringify(content, null, 2);
+}
+
+/**
+ * --from 引数をパースする
+ */
+function parseFromArg(from: string): { sourceOwner: string; sourceRepo: string } {
+  const slashIndex = from.indexOf("/");
+  if (slashIndex === -1 || slashIndex === 0 || slashIndex === from.length - 1) {
+    throw new BermError(
+      `Invalid --from format: "${from}"`,
+      "Expected: owner/repo (e.g., my-org/my-templates)",
+    );
+  }
+  return {
+    sourceOwner: from.slice(0, slashIndex),
+    sourceRepo: from.slice(slashIndex + 1),
+  };
 }
 
 /**
@@ -523,24 +594,14 @@ async function handleMissingTemplate(
  * 優先順位:
  *   1. --from owner/repo が指定されていればそのまま使用
  *   2. git remote origin から owner を検出 → {owner}/.github
- *   3. フォールバック: tktcorporation/.github
+ *   3. 解決不可（null を返す）
  */
 export function resolveTemplateSource(from: string | undefined): {
   sourceOwner: string;
   sourceRepo: string;
-} {
+} | null {
   if (from) {
-    const slashIndex = from.indexOf("/");
-    if (slashIndex === -1 || slashIndex === 0 || slashIndex === from.length - 1) {
-      throw new BermError(
-        `Invalid --from format: "${from}"`,
-        "Expected: owner/repo (e.g., my-org/my-templates)",
-      );
-    }
-    return {
-      sourceOwner: from.slice(0, slashIndex),
-      sourceRepo: from.slice(slashIndex + 1),
-    };
+    return parseFromArg(from);
   }
 
   const detectedOwner = detectGitHubOwner();
@@ -551,8 +612,5 @@ export function resolveTemplateSource(from: string | undefined): {
     };
   }
 
-  return {
-    sourceOwner: DEFAULT_TEMPLATE_OWNER,
-    sourceRepo: DEFAULT_TEMPLATE_REPO,
-  };
+  return null;
 }

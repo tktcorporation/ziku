@@ -11,6 +11,8 @@ const mockReposGetContent = vi.fn();
 const mockReposCreateOrUpdateFileContents = vi.fn();
 const mockPullsCreate = vi.fn();
 const mockOrgsGet = vi.fn();
+const mockReposCreateInOrg = vi.fn();
+const mockReposCreateForAuthenticatedUser = vi.fn();
 
 vi.mock("@octokit/rest", () => ({
   Octokit: class MockOctokit {
@@ -23,6 +25,8 @@ vi.mock("@octokit/rest", () => ({
       getBranch: mockReposGetBranch,
       getContent: mockReposGetContent,
       createOrUpdateFileContents: mockReposCreateOrUpdateFileContents,
+      createInOrg: mockReposCreateInOrg,
+      createForAuthenticatedUser: mockReposCreateForAuthenticatedUser,
     };
     git = {
       createRef: mockGitCreateRef,
@@ -328,56 +332,40 @@ describe("scaffoldTemplateRepo", () => {
     vi.clearAllMocks();
   });
 
-  it("org にテンプレートリポジトリをフォークする", async () => {
+  it("org にテンプレートリポジトリを作成する", async () => {
     mockOrgsGet.mockResolvedValue({ data: { login: "my-org" } });
-    mockReposCreateFork.mockResolvedValue({
+    mockReposCreateInOrg.mockResolvedValue({
       data: { html_url: "https://github.com/my-org/.github" },
     });
 
-    const result = await scaffoldTemplateRepo(
-      "token",
-      "my-org",
-      ".github",
-      "tktcorporation",
-      ".github",
-    );
+    const result = await scaffoldTemplateRepo("token", "my-org", ".github");
 
     expect(result.url).toBe("https://github.com/my-org/.github");
-    expect(mockReposCreateFork).toHaveBeenCalledWith(
+    expect(mockReposCreateInOrg).toHaveBeenCalledWith(
       expect.objectContaining({
-        owner: "tktcorporation",
-        repo: ".github",
-        organization: "my-org",
+        org: "my-org",
         name: ".github",
+        auto_init: true,
       }),
     );
   });
 
-  it("個人アカウントにテンプレートリポジトリをフォークする", async () => {
+  it("個人アカウントにテンプレートリポジトリを作成する", async () => {
     mockOrgsGet.mockRejectedValue(new Error("Not an org"));
-    mockReposCreateFork.mockResolvedValue({
+    mockReposCreateForAuthenticatedUser.mockResolvedValue({
       data: { html_url: "https://github.com/user/.github" },
     });
 
-    const result = await scaffoldTemplateRepo(
-      "token",
-      "user",
-      ".github",
-      "tktcorporation",
-      ".github",
-    );
+    const result = await scaffoldTemplateRepo("token", "user", ".github");
 
     expect(result.url).toBe("https://github.com/user/.github");
-    expect(mockReposCreateFork).toHaveBeenCalledWith(
+    expect(mockReposCreateForAuthenticatedUser).toHaveBeenCalledWith(
       expect.objectContaining({
-        owner: "tktcorporation",
-        repo: ".github",
         name: ".github",
+        auto_init: true,
       }),
     );
-    // organization パラメータは含まれない
-    expect(mockReposCreateFork).not.toHaveBeenCalledWith(
-      expect.objectContaining({ organization: "user" }),
-    );
+    // createInOrg は呼ばれない
+    expect(mockReposCreateInOrg).not.toHaveBeenCalled();
   });
 });
