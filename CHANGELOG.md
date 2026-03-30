@@ -1,5 +1,21 @@
 # @tktco/berm
 
+## 0.23.0
+
+### Minor Changes
+
+- [#2](https://github.com/tktcorporation/ziku/pull/2) [`e4ee35b`](https://github.com/tktcorporation/ziku/commit/e4ee35baf2aa9294faafbbc537bdcf1a00eece53) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Improve setup UX when template repository is missing or lacks `.devenv` configuration.
+
+  - Check template repo existence before downloading, with interactive recovery options
+  - When template repo not found: prompt to create it or specify another source
+  - When template has no `.devenv/modules.jsonc`: offer to scaffold via PR or use built-in defaults
+  - Remove hardcoded default template fallback (`tktcorporation/.github`)
+  - Non-interactive mode errors clearly instead of silently falling back
+
+- [#1](https://github.com/tktcorporation/ziku/pull/1) [`aa192c9`](https://github.com/tktcorporation/ziku/commit/aa192c99a0c749189c9785a910db8f67a9cd357d) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Remove `push --prepare` and `--execute` manifest workflow. Use `push --files` with `--yes` for non-interactive push instead.
+
+- [#4](https://github.com/tktcorporation/ziku/pull/4) [`bf72668`](https://github.com/tktcorporation/ziku/commit/bf7266802352b9e73c10a5cac352f76e7566334d) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Remove `ai-docs` command in favor of built-in `--help` flags. Each interactive command now shows non-interactive usage hints automatically.
+
 ## 0.22.6
 
 ### Patch Changes
