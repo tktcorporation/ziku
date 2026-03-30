@@ -26,15 +26,6 @@ import { calculateDiffStats, formatStats } from "../ui/diff-view";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
 import { detectDiff, getPushableFiles } from "../utils/diff";
 import { createPullRequest, getGitHubToken } from "../utils/github";
-import {
-  deleteManifest,
-  generateManifest,
-  getSelectedFilePaths,
-  getSelectedUntrackedFiles,
-  loadManifest,
-  MANIFEST_FILENAME,
-  saveManifest,
-} from "../utils/manifest";
 import { detectAndUpdateReadme } from "../utils/readme";
 import { buildTemplateSource } from "../utils/template";
 import { detectUntrackedFiles } from "../utils/untracked";
@@ -175,240 +166,6 @@ async function detectLocalModuleAdditions(
   };
 }
 
-/**
- * --execute モード: マニフェストファイルを使ってPRを作成
- */
-async function runExecuteMode(
-  targetDir: string,
-  config: DevEnvConfig,
-  messageOverride?: string,
-): Promise<void> {
-  // Step 1: マニフェスト読み込み
-  log.step("Loading manifest...");
-
-  let manifest;
-  try {
-    manifest = await loadManifest(targetDir);
-  } catch (error) {
-    throw new BermError((error as Error).message);
-  }
-
-  const selectedFilePaths = getSelectedFilePaths(manifest);
-  const selectedUntracked = getSelectedUntrackedFiles(manifest);
-
-  if (selectedFilePaths.length === 0 && selectedUntracked.size === 0) {
-    log.info("No files selected in manifest. Nothing to push.");
-    log.message(
-      pc.dim(`Edit ${MANIFEST_FILENAME} and set 'selected: true' for files you want to include.`),
-    );
-    return;
-  }
-
-  log.success(`${selectedFilePaths.length} files selected from manifest`);
-  if (selectedUntracked.size > 0) {
-    const untrackedCount = Array.from(selectedUntracked.values()).reduce(
-      (sum, files) => sum + files.length,
-      0,
-    );
-    log.success(`${untrackedCount} untracked files will be added to patterns`);
-  }
-
-  // Step 2: テンプレートダウンロード（差分取得用）
-  log.step("Fetching template...");
-
-  const templateSource = buildTemplateSource(config.source);
-  const tempDir = join(targetDir, ".devenv-temp");
-  const unregisterCleanup = registerSyncCleanup(tempDir);
-
-  try {
-    const { dir: templateDir } = await withSpinner("Downloading template from GitHub...", () =>
-      downloadTemplate(templateSource, {
-        dir: tempDir,
-        force: true,
-      }),
-    );
-
-    // modules.jsonc を読み込み
-    let moduleList: TemplateModule[];
-    let modulesRawContent: string | undefined;
-
-    if (modulesFileExists(templateDir)) {
-      const loaded = await loadModulesFile(templateDir);
-      moduleList = loaded.modules;
-      modulesRawContent = loaded.rawContent;
-    } else {
-      moduleList = defaultModules;
-    }
-
-    // ローカルのモジュール追加を検出してマージ
-    const effectiveModuleIds = [...config.modules];
-    let updatedModulesContent: string | undefined;
-
-    if (modulesRawContent) {
-      const localAdditions = await detectLocalModuleAdditions(
-        targetDir,
-        moduleList,
-        modulesRawContent,
-      );
-      moduleList = localAdditions.mergedModuleList;
-      updatedModulesContent = localAdditions.updatedModulesContent;
-      for (const id of localAdditions.newModuleIds) {
-        if (!effectiveModuleIds.includes(id)) {
-          effectiveModuleIds.push(id);
-        }
-      }
-    }
-
-    // 選択された未追跡ファイルのパターンを moduleList に反映
-    // （interactive モードと同様に detectDiff の前に実行する）
-    if (selectedUntracked.size > 0 && modulesRawContent) {
-      let currentContent = updatedModulesContent || modulesRawContent;
-      for (const [moduleId, filePaths] of selectedUntracked) {
-        currentContent = addPatternToModulesFileWithCreate(currentContent, moduleId, filePaths);
-      }
-      updatedModulesContent = currentContent;
-
-      // 更新されたモジュールリストを再パースして反映
-      const parsedUpdated = parse(updatedModulesContent) as {
-        modules: TemplateModule[];
-      };
-      moduleList = parsedUpdated.modules;
-    }
-
-    // Step 3: ファイル内容を取得
-    log.step("Preparing files...");
-
-    // 差分を検出（更新済み moduleList を使用するため、未追跡ファイルも pushable に含まれる）
-    const diff = await withSpinner("Analyzing differences...", () =>
-      detectDiff({
-        targetDir,
-        templateDir,
-        moduleIds: effectiveModuleIds,
-        config,
-        moduleList,
-      }),
-    );
-
-    // マニフェストと現在の差分の整合性チェック
-    const currentPushableFiles = getPushableFiles(diff);
-    const currentFilePaths = new Set(currentPushableFiles.map((f) => f.path));
-    const manifestFilePaths = new Set(manifest.files.map((f) => f.path));
-
-    // マニフェストにあるが現在存在しないファイル
-    const missingFiles = selectedFilePaths.filter((p) => !currentFilePaths.has(p));
-    // 現在存在するがマニフェストにないファイル（新規追加）
-    const newFiles = currentPushableFiles
-      .filter((f) => !manifestFilePaths.has(f.path))
-      .map((f) => f.path);
-
-    if (missingFiles.length > 0 || newFiles.length > 0) {
-      log.warn("Manifest is out of sync with current changes:");
-      if (missingFiles.length > 0) {
-        log.message(
-          pc.dim(`  Missing files (in manifest but no longer changed): ${missingFiles.join(", ")}`),
-        );
-      }
-      if (newFiles.length > 0) {
-        log.message(pc.dim(`  New files (changed but not in manifest): ${newFiles.join(", ")}`));
-      }
-      log.message(pc.dim("  Consider running 'ziku push --prepare' to regenerate the manifest."));
-    }
-
-    // 選択されたファイルの内容を取得
-    // マニフェストの files と untracked files の両方をフィルタ対象にする
-    const pushableFiles = getPushableFiles(diff);
-    const allSelectedPaths = [
-      ...selectedFilePaths,
-      ...Array.from(selectedUntracked.values()).flat(),
-    ];
-    const selectedFiles = pushableFiles.filter((f) => allSelectedPaths.includes(f.path));
-
-    const files: { path: string; content: string }[] = selectedFiles.map((f) => ({
-      path: f.path,
-      content: f.localContent || "",
-    }));
-
-    // modules.jsonc の変更があれば追加
-    if (updatedModulesContent) {
-      const modulesInManifest = selectedFilePaths.includes(MODULES_FILE_PATH);
-      if (modulesInManifest || selectedUntracked.size > 0) {
-        const existingIdx = files.findIndex((f) => f.path === MODULES_FILE_PATH);
-        if (existingIdx !== -1) {
-          files[existingIdx].content = updatedModulesContent;
-        } else {
-          files.push({
-            path: MODULES_FILE_PATH,
-            content: updatedModulesContent,
-          });
-        }
-      }
-    }
-
-    // README 更新チェック
-    const readmeResult = await detectAndUpdateReadme(targetDir, templateDir);
-    if (readmeResult?.updated) {
-      files.push({
-        path: README_PATH,
-        content: readmeResult.content,
-      });
-    }
-
-    if (files.length === 0) {
-      log.info("No files to push after processing.");
-      return;
-    }
-
-    // GitHub トークン取得
-    let token = manifest.github.token || getGitHubToken();
-    if (!token) {
-      throw new BermError(
-        "GitHub token not found.",
-        "Set GITHUB_TOKEN or GH_TOKEN environment variable, or add token to manifest.",
-      );
-    }
-
-    // PR タイトル・本文
-    const title = messageOverride || manifest.pr.title;
-    const body = manifest.pr.body;
-
-    // Step 4: PR を作成
-    log.step("Creating pull request...");
-
-    const result = await withSpinner("Creating PR on GitHub...", () =>
-      createPullRequest(token, {
-        owner: config.source.owner,
-        repo: config.source.repo,
-        files,
-        title,
-        body,
-        baseBranch: config.source.ref || "main",
-      }),
-    );
-
-    // マニフェストファイルを自動削除（PR作成に成功したので不要）
-    await deleteManifest(targetDir);
-
-    // 成功メッセージ — git push の "To repo branch" 形式に準拠
-    log.success("Pull request created!");
-    log.message(
-      [
-        `${pc.dim("To")} ${pc.bold(`${config.source.owner}/${config.source.repo}`)}`,
-        `  ${pc.green(result.branch)}  ${pc.dim(`(${files.length} file${files.length !== 1 ? "s" : ""} changed)`)}`,
-        "",
-        `  ${pc.bold(`PR #${result.number}`)}  ${pc.cyan(result.url)}`,
-      ].join("\n"),
-    );
-    log.message(pc.dim(`Cleaned up ${MANIFEST_FILENAME}`));
-    outro(`Review and merge at ${pc.cyan(result.url)}`);
-  } finally {
-    unregisterCleanup();
-    // 一時ディレクトリを削除
-    if (existsSync(tempDir)) {
-      await rm(tempDir, { recursive: true, force: true });
-    }
-  }
-}
-
 export const pushCommand = defineCommand({
   meta: {
     name: "push",
@@ -442,18 +199,6 @@ export const pushCommand = defineCommand({
       description: "Edit PR title and description before creating",
       default: false,
     },
-    prepare: {
-      type: "boolean",
-      alias: "p",
-      description: "Generate a manifest file for AI-agent friendly workflow (no PR created)",
-      default: false,
-    },
-    execute: {
-      type: "boolean",
-      alias: "e",
-      description: "Execute push using the manifest file generated by --prepare",
-      default: false,
-    },
     files: {
       type: "string",
       description:
@@ -462,24 +207,6 @@ export const pushCommand = defineCommand({
   },
   async run({ args }) {
     intro("push");
-
-    // --prepare と --execute の相互排他チェック
-    if (args.prepare && args.execute) {
-      throw new BermError(
-        "Cannot use --prepare and --execute together.",
-        "Use --prepare to generate a manifest, then --execute to create the PR.",
-      );
-    }
-
-    // --prepare と --dry-run の組み合わせは警告（prepareはそもそもPRを作らない）
-    if (args.prepare && args.dryRun) {
-      log.warn("--dry-run is ignored with --prepare (--prepare doesn't create a PR).");
-    }
-
-    // --execute と --edit の組み合わせは無視（executeはマニフェストベース）
-    if (args.execute && args.edit) {
-      log.message(pc.dim("Note: --edit is ignored in --execute mode (uses manifest)."));
-    }
 
     const targetDir = resolve(args.dir);
     const configPath = join(targetDir, ".devenv.json");
@@ -512,12 +239,6 @@ export const pushCommand = defineCommand({
         "Resolve conflicts in these files, then run `ziku pull --continue`:\n" +
           config.pendingMerge.conflicts.map((f) => `  • ${f}`).join("\n"),
       );
-    }
-
-    // --execute モード: マニフェストファイルを使ってPRを作成
-    if (args.execute) {
-      await runExecuteMode(targetDir, config, args.message);
-      return;
     }
 
     // Step 1: テンプレートをダウンロード
@@ -733,7 +454,7 @@ export const pushCommand = defineCommand({
       }
 
       // ホワイトリスト外ファイルの検出と情報表示
-      if (!args.yes && !args.prepare && modulesRawContent) {
+      if (!args.yes && modulesRawContent) {
         const untrackedByFolder = await detectUntrackedFiles({
           targetDir,
           moduleIds: effectiveModuleIds,
@@ -786,68 +507,6 @@ export const pushCommand = defineCommand({
         }
 
         log.info("No PR was created (dry run)");
-        return;
-      }
-
-      // --prepare モード: マニフェストファイルを生成
-      if (args.prepare) {
-        const untrackedByFolder =
-          !args.yes && modulesRawContent
-            ? await detectUntrackedFiles({
-                targetDir,
-                moduleIds: effectiveModuleIds,
-                config,
-                moduleList,
-              })
-            : [];
-
-        const manifest = generateManifest({
-          targetDir,
-          diff,
-          pushableFiles,
-          untrackedByFolder,
-          defaultTitle: args.message,
-          modulesFileChange: updatedModulesContent ? MODULES_FILE_PATH : undefined,
-        });
-
-        const manifestPath = await saveManifest(targetDir, manifest);
-
-        log.success("Manifest file generated!");
-        log.message(
-          [
-            `File:   ${pc.cyan(manifestPath)}`,
-            `Files:  ${pushableFiles.length} files ready to push`,
-            ...(updatedModulesContent
-              ? ["Modules: modules.jsonc will be updated (new modules/patterns detected)"]
-              : []),
-            ...(untrackedByFolder.length > 0
-              ? (() => {
-                  const untrackedCount = untrackedByFolder.reduce(
-                    (sum, f) => sum + f.files.length,
-                    0,
-                  );
-                  return [`Untracked: ${untrackedCount} files detected (not selected by default)`];
-                })()
-              : []),
-          ].join("\n"),
-        );
-
-        if (untrackedByFolder.length > 0) {
-          log.info(
-            `${pc.bold("Hint:")} To sync untracked files to the template, first add them to tracking:`,
-          );
-          log.message(
-            pc.dim(
-              [
-                `  npx ziku track "<pattern>"  # Add file patterns to the sync whitelist`,
-                `  npx ziku track --list        # List currently tracked patterns`,
-                `  Then re-run 'push --prepare' to include them in the manifest.`,
-              ].join("\n"),
-            ),
-          );
-        }
-
-        outro(`Edit ${MANIFEST_FILENAME}, then run 'ziku push --execute' to create the PR`);
         return;
       }
 

@@ -8,7 +8,6 @@
  */
 
 import { version } from "../../package.json";
-import { MANIFEST_FILENAME } from "../utils/manifest";
 
 export interface DocSection {
   title: string;
@@ -50,13 +49,8 @@ npx ziku init --modules .,devcontainer        # Specific modules only
 npx ziku init --modules .github -s skip       # Specific modules with skip strategy
 npx ziku init --yes --overwrite-strategy skip # All modules with skip strategy
 
-# Non-interactive push workflow for AI agents (simple)
+# Non-interactive push workflow for AI agents
 npx ziku push --yes --files "path1,path2" -m "feat: ..."  # Push specific files only
-
-# Non-interactive push workflow for AI agents (manifest-based)
-npx ziku push --prepare    # Generate manifest
-# Edit ${MANIFEST_FILENAME}              # Select files
-npx ziku push --execute    # Create PR
 
 # Add files to tracking (non-interactive)
 npx ziku track ".cloud/rules/*.md"            # Add pattern (auto-detect module)
@@ -66,6 +60,10 @@ npx ziku track --list                         # List tracked modules/patterns
 # Show differences and detect untracked files
 npx ziku diff              # Show differences (also reports untracked files)
 
+# Pull latest template changes
+npx ziku pull              # Sync template updates
+npx ziku pull --continue   # Resume after resolving conflicts
+
 # Other commands
 npx ziku init [dir]        # Apply template (interactive)
 npx ziku ai-docs           # Show this guide
@@ -73,7 +71,9 @@ npx ziku ai-docs           # Show this guide
     },
     {
       title: "Init Command for AI Agents",
-      content: `The \`init\` command supports non-interactive options for AI agents:
+      content: `> **AI agents:** This command is interactive by default, but all prompts can be skipped with \`--yes\` or \`--modules\` + \`--overwrite-strategy\`.
+
+The \`init\` command supports non-interactive options for AI agents:
 
 ### Options
 
@@ -122,98 +122,41 @@ npx ziku diff
 npx ziku track "<file-or-glob-pattern>"
 
 # 3. Now push will include these files
-npx ziku push --prepare
+npx ziku push --yes --files "path1,path2" -m "feat: add new files"
 \`\`\`
 
 **Key points:**
 - \`diff\` will report untracked files and suggest using \`track\`
-- \`push --prepare\` will list untracked files in the manifest (with \`selected: false\` by default)
 - \`track\` is non-interactive and designed for AI agents — no prompts required
-- After running \`track\`, re-run \`push --prepare\` to include the newly tracked files`,
+- After running \`track\`, the newly tracked files will be available for \`push\``,
     },
     {
       title: "Push Workflow for AI Agents",
-      content: `When contributing template improvements, use one of these workflows:
+      content: `> **AI agents:** This command is interactive by default, but all prompts can be skipped with \`--yes\` and \`--files\`.
 
-### Simple: Direct Push with \`--files\`
-
-For quick, targeted pushes where you know exactly which files to include:
+When contributing template improvements:
 
 \`\`\`bash
-# Push only specific files (non-interactive, no manifest needed)
+# Push specific files (non-interactive)
 npx ziku push --yes --files ".claude/statusline.sh,.claude/settings.json" -m "feat: add statusline"
 \`\`\`
 
-- \`--files\`: Comma-separated list of file paths to include (only files with actual changes are eligible)
-- \`--yes\`: Skips confirmation prompts
-- \`-m\`: Sets the PR title
-- Files not found in pushable changes will be warned but won't block the push
-- This is the recommended approach for AI agents when you know which files to push
+### Options
 
-### Manifest-based: \`--prepare\` + \`--execute\`
+| Option | Alias | Description |
+|--------|-------|-------------|
+| \`--files\` | | Comma-separated file paths to include (only files with actual changes are eligible) |
+| \`--yes\` | \`-y\` | Skip confirmation prompts |
+| \`-m\` | \`--message\` | Set the PR title |
+| \`--edit\` | | Edit PR title and description before creating |
+| \`-n\` | \`--dryRun\` | Preview only, don't create PR |
 
-For complex pushes where you need to review changes first:
+### Workflow
 
-### Phase 1: Prepare
-
-\`\`\`bash
-npx ziku push --prepare
-\`\`\`
-
-This generates \`${MANIFEST_FILENAME}\` containing:
-- List of changed files with \`selected: true/false\`
-- PR title and body fields
-- Summary of changes
-
-### Phase 2: Edit Manifest
-
-Edit the generated \`${MANIFEST_FILENAME}\`:
-
-\`\`\`yaml
-pr:
-  title: "feat: add new workflow for CI"
-  body: |
-    ## Summary
-    Added new CI workflow for automated testing.
-
-    ## Changes
-    - Added .github/workflows/ci.yml
-
-files:
-  - path: .github/workflows/ci.yml
-    type: added
-    selected: true    # Include this file
-  - path: .github/labeler.yml
-    type: modified
-    selected: false   # Exclude this file
-\`\`\`
-
-### Phase 3: Execute
-
-\`\`\`bash
-# Set GitHub token (required)
-export GITHUB_TOKEN="your-token"
-
-# Create the PR
-npx ziku push --execute
-\`\`\``,
-    },
-    {
-      title: "Manifest File Reference",
-      content: `The manifest file (\`${MANIFEST_FILENAME}\`) structure:
-
-| Field | Description |
-|-------|-------------|
-| \`version\` | Manifest format version (always \`1\`) |
-| \`generated_at\` | ISO 8601 timestamp |
-| \`github.token\` | GitHub token (prefer env var) |
-| \`pr.title\` | PR title (editable) |
-| \`pr.body\` | PR description (editable) |
-| \`files[].path\` | File path |
-| \`files[].type\` | \`added\` / \`modified\` / \`deleted\` |
-| \`files[].selected\` | Include in PR (\`true\`/\`false\`) |
-| \`untracked_files[]\` | Files outside whitelist (default: \`selected: false\`) |
-| \`summary\` | Change statistics |`,
+1. Use \`npx ziku diff\` to review changes first
+2. Use \`--files\` to specify exactly which files to include
+3. Files not found in pushable changes will be warned but won't block the push
+4. Set \`GITHUB_TOKEN\` or \`GH_TOKEN\` environment variable for authentication`,
     },
     {
       title: "Environment Variables",
@@ -273,14 +216,14 @@ npx ziku track --list
     {
       title: "Best Practices for AI Agents",
       content: `1. **Use \`--modules\` and \`--overwrite-strategy\`** for granular non-interactive init (e.g., \`init --modules .github,.claude -s skip\`)
-2. **Use \`--files\` for simple pushes** — specify exactly which files to include (e.g., \`push --yes --files "path1,path2" -m "feat: ..."\`)
-3. **Use \`--prepare\` then \`--execute\`** for complex pushes where you need to review the full diff first
-4. **Review the diff first** with \`npx ziku diff\` — this also reports untracked files
-5. **Check for untracked files** — if \`diff\` or \`push --prepare\` reports untracked files, use \`track\` to add them before pushing
-6. **Use \`track\` command** to add new files to the sync whitelist (non-interactive, no prompts)
+2. **Use \`--files\` for targeted pushes** — specify exactly which files to include (e.g., \`push --yes --files "path1,path2" -m "feat: ..."\`)
+3. **Review the diff first** with \`npx ziku diff\` — this also reports untracked files
+4. **Check for untracked files** — if \`diff\` reports untracked files, use \`track\` to add them before pushing
+5. **Use \`track\` command** to add new files to the sync whitelist (non-interactive, no prompts)
+6. **Use \`pull\` to sync template updates** — resolves conflicts with 3-way merge when possible
 7. **Set meaningful PR titles** that follow conventional commits (e.g., \`feat:\`, \`fix:\`, \`docs:\`)
-8. **Deselect unrelated changes** by using \`--files\` or setting \`selected: false\` in manifest
-9. **Use environment variables** for tokens instead of hardcoding in manifest`,
+8. **Use \`--files\` to select specific changes** — only include relevant files in the PR
+9. **Use environment variables** for tokens (\`GITHUB_TOKEN\` or \`GH_TOKEN\`)`,
     },
     {
       title: "Track + Push: Adding New Files to Template",
@@ -299,23 +242,20 @@ echo "naming conventions..." > .cloud/rules/naming.md
 npx ziku track ".cloud/rules/*.md"
 
 # 3. Push detects local module additions automatically
-npx ziku push --prepare
+npx ziku push --yes --files ".cloud/rules/naming.md" -m "feat: add naming rules"
 \`\`\`
 
 ### What happens internally
 
 1. \`track\` adds patterns to **local** \`.devenv/modules.jsonc\` (creates new modules if needed)
-2. \`push --prepare\` downloads the template and compares its \`modules.jsonc\` with local
+2. \`push\` downloads the template and compares its \`modules.jsonc\` with local
 3. New modules and patterns are detected and merged into the detection scope
-4. The manifest includes:
-   - New files (\`.cloud/rules/naming.md\`) as \`type: added\` with \`selected: true\`
-   - \`.devenv/modules.jsonc\` as \`type: modified\` with \`selected: true\`
-5. \`push --execute\` creates a PR that adds both the files AND the updated module definitions
+4. The PR includes both the files AND the updated module definitions
 
 ### Key behavior
 
 - **No need to manually edit modules.jsonc** — \`track\` handles it
-- **push detects local changes** — no extra flags needed; just run \`push --prepare\` after \`track\`
+- **push detects local changes** — no extra flags needed; just run \`push\` after \`track\`
 - **New modules are auto-created** — if \`.cloud\` doesn't exist in the template, it's added
 - **Existing module patterns can also be extended** — \`track\` works for both new and existing modules`,
     },
@@ -331,13 +271,12 @@ export function generateReadmeSection(): string {
   lines.push("## For AI Agents\n");
   lines.push("AI coding agents can use the non-interactive workflow:\n");
   lines.push("```bash");
-  lines.push("# 1. Generate manifest file");
-  lines.push("npx ziku push --prepare");
+  lines.push("# Push specific files as a PR");
+  lines.push('npx ziku push --yes --files "path1,path2" -m "feat: add config"');
   lines.push("");
-  lines.push(`# 2. Edit ${MANIFEST_FILENAME} to select files and set PR details`);
-  lines.push("");
-  lines.push("# 3. Create PR from manifest");
-  lines.push("npx ziku push --execute");
+  lines.push("# Add new files to tracking, then push");
+  lines.push('npx ziku track ".cloud/rules/*.md"');
+  lines.push('npx ziku push --yes --files ".cloud/rules/naming.md" -m "feat: add rules"');
   lines.push("```\n");
   lines.push("For detailed documentation, run:\n");
   lines.push("```bash");
