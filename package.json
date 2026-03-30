@@ -1,0 +1,74 @@
+{
+  "name": "ziku",
+  "version": "0.22.6",
+  "description": "Interactive CLI to scaffold development environment templates",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tktcorporation/ziku.git"
+  },
+  "bin": {
+    "ziku": "./dist/index.mjs"
+  },
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "type": "module",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsdown --watch",
+    "lint": "oxlint .",
+    "lint:fix": "oxlint --fix .",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "typecheck": "oxlint --type-aware --type-check",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm run build && npm run test:run && npm run docs:check",
+    "prepack": "npm run build",
+    "docs": "npx tsx scripts/generate-readme.ts",
+    "docs:check": "npx tsx scripts/generate-readme.ts --check",
+    "version": "changeset version && npm run docs",
+    "release": "changeset publish"
+  },
+  "packageManager": "pnpm@10.25.0",
+  "dependencies": {
+    "@clack/prompts": "^1.0.1",
+    "@octokit/rest": "^22.0.1",
+    "citty": "^0.1.6",
+    "defu": "^6.1.4",
+    "diff": "^8.0.3",
+    "giget": "^2.0.0",
+    "ignore": "^7.0.5",
+    "jsonc-parser": "^3.3.1",
+    "pathe": "^2.0.3",
+    "picocolors": "^1.1.1",
+    "smol-toml": "^1.6.1",
+    "tinyglobby": "^0.2.15",
+    "ts-pattern": "^5.9.0",
+    "yaml": "^2.8.3",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.2",
+    "@vitest/coverage-v8": "^4.0.15",
+    "memfs": "^4.51.1",
+    "oxfmt": "^0.19.0",
+    "oxlint": "^1.0.0",
+    "oxlint-tsgolint": "latest",
+    "tsdown": "^0.18.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.15",
+    "@changesets/cli": "^2.29.8",
+    "@changesets/changelog-github": "^0.5.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

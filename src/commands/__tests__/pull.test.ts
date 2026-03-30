@@ -1,0 +1,837 @@
+import { vol } from "memfs";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { BermError } from "../../errors";
+
+// fs モジュールをモック
+vi.mock("node:fs", async () => {
+  const memfs = await import("memfs");
+  return memfs.fs;
+});
+
+vi.mock("node:fs/promises", async () => {
+  const memfs = await import("memfs");
+  return memfs.fs.promises;
+});
+
+vi.mock("../../utils/template", () => ({
+  downloadTemplateToTemp: vi.fn(),
+  buildTemplateSource: vi.fn(
+    (source: { owner: string; repo: string }) => `gh:${source.owner}/${source.repo}`,
+  ),
+}));
+
+vi.mock("../../utils/config", () => ({
+  loadConfig: vi.fn(),
+  saveConfig: vi.fn(),
+}));
+
+vi.mock("../../utils/hash", () => ({
+  hashFiles: vi.fn(),
+}));
+
+vi.mock("../../utils/merge", () => ({
+  classifyFiles: vi.fn(),
+  threeWayMerge: vi.fn(),
+  hasConflictMarkers: vi.fn((content: string) => ({
+    found: content.includes("<<<<<<<"),
+    lines: [],
+  })),
+  asBaseContent: vi.fn((s: string) => s),
+  asLocalContent: vi.fn((s: string) => s),
+  asTemplateContent: vi.fn((s: string) => s),
+}));
+
+vi.mock("../../utils/github", () => ({
+  resolveLatestCommitSha: vi.fn(() => Promise.resolve("latest123")),
+}));
+
+vi.mock("../../utils/patterns", () => ({
+  getEffectivePatterns: vi.fn((_id: string, patterns: string[]) => patterns),
+}));
+
+vi.mock("../../ui/prompts", () => ({
+  selectDeletedFiles: vi.fn(),
+}));
+
+vi.mock("../../ui/renderer", () => ({
+  intro: vi.fn(),
+  outro: vi.fn(),
+  log: {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    success: vi.fn(),
+    step: vi.fn(),
+    message: vi.fn(),
+  },
+  pc: {
+    cyan: (s: string) => s,
+    green: (s: string) => s,
+    yellow: (s: string) => s,
+    red: (s: string) => s,
+    bold: (s: string) => s,
+    dim: (s: string) => s,
+  },
+  withSpinner: vi.fn(async (_text: string, fn: () => Promise<unknown>) => fn()),
+}));
+
+vi.mock("../../modules/index", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../modules/index")>();
+  return {
+    ...original,
+    modulesFileExists: vi.fn(() => false),
+    loadModulesFile: vi.fn(),
+  };
+});
+
+// モック後にインポート
+const { pullCommand } = await import("../pull");
+const { selectDeletedFiles } = await import("../../ui/prompts");
+const mockSelectDeletedFiles = vi.mocked(selectDeletedFiles);
+const { downloadTemplateToTemp } = await import("../../utils/template");
+const { loadConfig, saveConfig } = await import("../../utils/config");
+const { hashFiles } = await import("../../utils/hash");
+const { classifyFiles, threeWayMerge } = await import("../../utils/merge");
+const { log } = await import("../../ui/renderer");
+
+const mockDownloadTemplateToTemp = vi.mocked(downloadTemplateToTemp);
+const mockLoadConfig = vi.mocked(loadConfig);
+const mockSaveConfig = vi.mocked(saveConfig);
+const mockHashFiles = vi.mocked(hashFiles);
+const mockClassifyFiles = vi.mocked(classifyFiles);
+const mockThreeWayMerge = vi.mocked(threeWayMerge);
+const mockLog = vi.mocked(log);
+
+const baseConfig = {
+  version: "0.1.0",
+  installedAt: "2024-01-01T00:00:00.000Z",
+  modules: ["."],
+  source: { owner: "tktcorporation", repo: ".github" },
+  baseHashes: { ".mcp.json": "abc123" },
+};
+
+describe("pullCommand", () => {
+  beforeEach(() => {
+    vol.reset();
+    vi.clearAllMocks();
+
+    mockDownloadTemplateToTemp.mockResolvedValue({
+      templateDir: "/tmp/template",
+      cleanup: vi.fn(),
+    });
+    mockLoadConfig.mockResolvedValue(baseConfig);
+    mockHashFiles.mockResolvedValue({});
+    mockSaveConfig.mockResolvedValue(undefined);
+  });
+
+  describe("meta", () => {
+    it("コマンドメタデータが正しい", () => {
+      expect((pullCommand.meta as { name: string }).name).toBe("pull");
+      expect((pullCommand.meta as { description: string }).description).toBe(
+        "Pull latest template updates",
+      );
+    });
+  });
+
+  describe("run", () => {
+    it("初期化されていない場合はエラー", async () => {
+      mockLoadConfig.mockRejectedValueOnce(new Error("ENOENT"));
+
+      await expect(
+        (pullCommand.run as any)({
+          args: { dir: "/test", force: false },
+          rawArgs: [],
+          cmd: pullCommand,
+        }),
+      ).rejects.toThrow(BermError);
+    });
+
+    it("変更がない場合は 'Already up to date' を表示", async () => {
+      vol.fromJSON({ "/test": null });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        unchanged: [".mcp.json"],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockLog.success).toHaveBeenCalledWith("Already up to date");
+    });
+
+    it("自動更新ファイルをコピー", async () => {
+      vol.fromJSON({
+        "/test/.mcp.json": '{"old": true}',
+        "/tmp/template/.mcp.json": '{"new": true}',
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [".mcp.json"],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // ファイルが更新されていることを確認
+      const content = vol.readFileSync("/test/.mcp.json", "utf-8");
+      expect(content).toBe('{"new": true}');
+      expect(mockLog.success).toHaveBeenCalledWith("Updated 1 file(s)");
+    });
+
+    it("新規ファイルを追加", async () => {
+      vol.fromJSON({
+        "/test": null,
+        "/tmp/template/.new-file": "new content",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [".new-file"],
+        deletedFiles: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      const content = vol.readFileSync("/test/.new-file", "utf-8");
+      expect(content).toBe("new content");
+      expect(mockLog.success).toHaveBeenCalledWith("Added 1 new file(s)");
+    });
+
+    it("コンフリクトファイルにマーカーを挿入（base なし）", async () => {
+      vol.fromJSON({
+        "/test/.mcp.json": "local content",
+        "/tmp/template/.mcp.json": "template content",
+      });
+
+      // baseHashes にエントリがないケース（readBaseContent が undefined を返す）
+      mockLoadConfig.mockResolvedValueOnce({
+        ...baseConfig,
+        baseHashes: {},
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [".mcp.json"],
+        newFiles: [],
+        deletedFiles: [],
+        unchanged: [],
+      });
+
+      // base がない場合も threeWayMerge が呼ばれる（空文字列が base として渡される）
+      mockThreeWayMerge.mockReturnValueOnce({
+        content: "<<<<<<< LOCAL\nlocal content\n=======\ntemplate content\n>>>>>>> TEMPLATE",
+        hasConflicts: true,
+        conflictDetails: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      const content = vol.readFileSync("/test/.mcp.json", "utf-8");
+      expect(content).toContain("<<<<<<< LOCAL");
+      expect(content).toContain("local content");
+      expect(content).toContain("=======");
+      expect(content).toContain("template content");
+      expect(content).toContain(">>>>>>> TEMPLATE");
+      expect(mockLog.warn).toHaveBeenCalledWith(
+        expect.stringContaining("manual resolution needed"),
+      );
+      // threeWayMerge にファイルパスが渡される（named params）
+      expect(mockThreeWayMerge).toHaveBeenCalledWith({
+        base: "",
+        local: "local content",
+        template: "template content",
+        filePath: ".mcp.json",
+      });
+    });
+
+    it("--force で selectDeletedFiles プロンプトをスキップ", async () => {
+      vol.fromJSON({ "/test": null });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [".old-file"],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // --force パスではプロンプトを表示しない
+      expect(mockSelectDeletedFiles).not.toHaveBeenCalled();
+    });
+
+    it("削除ファイルがある場合に selectDeletedFiles を呼ぶ", async () => {
+      vol.fromJSON({ "/test": null });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: ["old-file.txt"],
+        unchanged: [],
+      });
+      mockSelectDeletedFiles.mockResolvedValueOnce([]);
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockSelectDeletedFiles).toHaveBeenCalledWith(["old-file.txt"]);
+    });
+
+    it("--force のとき selectDeletedFiles を呼ばずに全削除する", async () => {
+      vol.fromJSON({
+        "/test/old-file.txt": "old content",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: ["old-file.txt"],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockSelectDeletedFiles).not.toHaveBeenCalled();
+      expect(vol.existsSync("/test/old-file.txt")).toBe(false);
+    });
+
+    it("selectDeletedFiles で選択したファイルのみ削除する", async () => {
+      vol.fromJSON({
+        "/test/a.txt": "aaa",
+        "/test/b.txt": "bbb",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: ["a.txt", "b.txt"],
+        unchanged: [],
+      });
+      mockSelectDeletedFiles.mockResolvedValueOnce(["a.txt"]);
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(vol.existsSync("/test/a.txt")).toBe(false);
+      expect(vol.existsSync("/test/b.txt")).toBe(true);
+    });
+
+    it("設定の baseHashes が更新される", async () => {
+      vol.fromJSON({ "/test": null });
+
+      const newTemplateHashes = { ".mcp.json": "newhash123" };
+      // hashFiles は2回呼ばれる（template, local）
+      mockHashFiles.mockResolvedValueOnce(newTemplateHashes);
+      mockHashFiles.mockResolvedValueOnce({});
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [".mcp.json"],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        unchanged: [],
+      });
+
+      // autoUpdate 用のテンプレートファイルを用意
+      vol.fromJSON({
+        "/test": null,
+        "/tmp/template/.mcp.json": "updated",
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockSaveConfig).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          baseHashes: newTemplateHashes,
+        }),
+      );
+    });
+
+    it("cleanup が必ず呼ばれる", async () => {
+      vol.fromJSON({ "/test": null });
+
+      const mockCleanup = vi.fn();
+      mockDownloadTemplateToTemp.mockResolvedValue({
+        templateDir: "/tmp/template",
+        cleanup: mockCleanup,
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        unchanged: [".mcp.json"],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockCleanup).toHaveBeenCalled();
+    });
+
+    it("コンフリクト時に pendingMerge を保存して中断", async () => {
+      vol.fromJSON({
+        "/test/.mcp.json": "local content",
+        "/tmp/template/.mcp.json": "template content",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [".mcp.json"],
+        newFiles: [],
+        deletedFiles: [],
+        unchanged: [],
+      });
+
+      mockThreeWayMerge.mockReturnValueOnce({
+        content: "<<<<<<< LOCAL\nlocal\n=======\ntemplate\n>>>>>>> TEMPLATE",
+        hasConflicts: true,
+        conflictDetails: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, continue: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockSaveConfig).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          pendingMerge: expect.objectContaining({
+            conflicts: [".mcp.json"],
+          }),
+        }),
+      );
+      // baseHashes/baseRef は更新されない（pendingMerge に保留）
+      expect(mockSaveConfig).not.toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ baseHashes: expect.any(Object), pendingMerge: undefined }),
+      );
+    });
+
+    it("--continue: pendingMerge がない場合はエラー", async () => {
+      mockLoadConfig.mockResolvedValueOnce({
+        ...baseConfig,
+        pendingMerge: undefined,
+      });
+
+      await expect(
+        (pullCommand.run as any)({
+          args: { dir: "/test", force: false, continue: true },
+          rawArgs: [],
+          cmd: pullCommand,
+        }),
+      ).rejects.toThrow(BermError);
+    });
+
+    it("--continue: コンフリクトマーカーが残っている場合はエラー", async () => {
+      vol.fromJSON({
+        "/test/.mcp.json": "<<<<<<< LOCAL\nlocal\n=======\ntemplate\n>>>>>>> TEMPLATE",
+      });
+
+      mockLoadConfig.mockResolvedValueOnce({
+        ...baseConfig,
+        pendingMerge: {
+          conflicts: [".mcp.json"],
+          templateHashes: { ".mcp.json": "hash123" },
+          latestRef: "latest123",
+        },
+      });
+
+      await expect(
+        (pullCommand.run as any)({
+          args: { dir: "/test", force: false, continue: true },
+          rawArgs: [],
+          cmd: pullCommand,
+        }),
+      ).rejects.toThrow(BermError);
+    });
+
+    it("--continue: 全解決済みなら baseHashes/baseRef を更新して pendingMerge を削除", async () => {
+      vol.fromJSON({
+        "/test/.mcp.json": "resolved content (no conflict markers)",
+      });
+
+      mockLoadConfig.mockResolvedValueOnce({
+        ...baseConfig,
+        pendingMerge: {
+          conflicts: [".mcp.json"],
+          templateHashes: { ".mcp.json": "newhash" },
+          latestRef: "newref123",
+        },
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, continue: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockSaveConfig).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          baseHashes: { ".mcp.json": "newhash" },
+          baseRef: "newref123",
+          pendingMerge: undefined,
+        }),
+      );
+      expect(mockLog.success).toHaveBeenCalledWith("All conflicts resolved");
+    });
+
+    it("base ダウンロードが template ディレクトリを上書きしない（一時ディレクトリ分離）", async () => {
+      // 背景: downloadTemplateToTemp が常に同じ .devenv-temp を使うため、
+      // base ダウンロード時に template を上書きし、base === template となって
+      // マージが空振り（ローカル内容そのまま）するバグがあった。
+      // ラベル引数で一時ディレクトリを分離することで解決。
+      vol.fromJSON({
+        "/test/settings.json": '{"local": true}',
+        "/tmp/template/settings.json": '{"template": true}',
+        "/tmp/base/settings.json": '{"base": true}',
+      });
+
+      mockLoadConfig.mockResolvedValueOnce({
+        ...baseConfig,
+        baseRef: "abc123",
+        baseHashes: { "settings.json": "old-hash" },
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: ["settings.json"],
+        newFiles: [],
+        deletedFiles: [],
+        unchanged: [],
+      });
+
+      // template 用と base 用で異なるディレクトリが返される
+      mockDownloadTemplateToTemp
+        .mockResolvedValueOnce({
+          templateDir: "/tmp/template",
+          cleanup: vi.fn(),
+        })
+        .mockResolvedValueOnce({
+          templateDir: "/tmp/base",
+          cleanup: vi.fn(),
+        });
+
+      mockThreeWayMerge.mockReturnValueOnce({
+        content: '{"merged": true}',
+        hasConflicts: false,
+        conflictDetails: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // threeWayMerge に正しい引数が渡される:
+      // base は base ディレクトリから、template は template ディレクトリから読まれる
+      expect(mockThreeWayMerge).toHaveBeenCalledWith({
+        base: '{"base": true}',
+        local: '{"local": true}',
+        template: '{"template": true}',
+        filePath: "settings.json",
+      });
+
+      // base ダウンロード時に "base" ラベルが使用されることを確認
+      expect(mockDownloadTemplateToTemp).toHaveBeenCalledTimes(2);
+      expect(mockDownloadTemplateToTemp).toHaveBeenNthCalledWith(
+        2,
+        "/test",
+        expect.stringContaining("#abc123"),
+        "base",
+      );
+    });
+
+    it("エラー時も cleanup が呼ばれる", async () => {
+      const mockCleanup = vi.fn();
+      mockDownloadTemplateToTemp.mockResolvedValue({
+        templateDir: "/tmp/template",
+        cleanup: mockCleanup,
+      });
+
+      // hashFiles でエラーを起こす
+      mockHashFiles.mockRejectedValueOnce(new Error("Hash error"));
+
+      await expect(
+        (pullCommand.run as any)({
+          args: { dir: "/test", force: false },
+          rawArgs: [],
+          cmd: pullCommand,
+        }),
+      ).rejects.toThrow("Hash error");
+
+      expect(mockCleanup).toHaveBeenCalled();
+    });
+
+    it("コンフリクトファイルが自動マージ成功した場合に success ログを出す", async () => {
+      vol.fromJSON({
+        "/test/.mcp.json": "local content",
+        "/tmp/template/.mcp.json": "template content",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [".mcp.json"],
+        newFiles: [],
+        deletedFiles: [],
+        unchanged: [],
+      });
+
+      // 自動マージ成功（hasConflicts: false）
+      mockThreeWayMerge.mockReturnValueOnce({
+        content: "auto-merged content",
+        hasConflicts: false,
+        conflictDetails: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // 自動マージ成功のメッセージが出力される
+      expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining("Auto-merged"));
+      expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining(".mcp.json"));
+      // pendingMerge は保存されない（正常完了パス）
+      expect(mockSaveConfig).not.toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ pendingMerge: expect.anything() }),
+      );
+    });
+
+    it("複数コンフリクトで一部自動マージ・一部未解決の場合に各ログが出る", async () => {
+      vol.fromJSON({
+        "/test/a.json": "local a",
+        "/test/b.txt": "local b",
+        "/tmp/template/a.json": "template a",
+        "/tmp/template/b.txt": "template b",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: ["a.json", "b.txt"],
+        newFiles: [],
+        deletedFiles: [],
+        unchanged: [],
+      });
+
+      // a.json: 自動マージ成功
+      mockThreeWayMerge.mockReturnValueOnce({
+        content: "merged a",
+        hasConflicts: false,
+        conflictDetails: [],
+      });
+      // b.txt: コンフリクト（テキストマーカー）
+      mockThreeWayMerge.mockReturnValueOnce({
+        content: "<<<<<<< LOCAL\nlocal b\n=======\ntemplate b\n>>>>>>> TEMPLATE",
+        hasConflicts: true,
+        conflictDetails: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // a.json は自動マージ成功
+      expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining("Auto-merged"));
+      expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining("a.json"));
+      // b.txt はコンフリクト
+      expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining("b.txt"));
+      // 未解決コンフリクトがあるので pendingMerge が保存される
+      expect(mockSaveConfig).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          pendingMerge: expect.objectContaining({
+            conflicts: ["b.txt"],
+          }),
+        }),
+      );
+    });
+
+    it("全コンフリクトが自動マージ成功した場合は pendingMerge なしで正常完了", async () => {
+      vol.fromJSON({
+        "/test/a.json": "local a",
+        "/test/b.json": "local b",
+        "/tmp/template/a.json": "template a",
+        "/tmp/template/b.json": "template b",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: ["a.json", "b.json"],
+        newFiles: [],
+        deletedFiles: [],
+        unchanged: [],
+      });
+
+      mockThreeWayMerge.mockReturnValueOnce({
+        content: "merged a",
+        hasConflicts: false,
+        conflictDetails: [],
+      });
+      mockThreeWayMerge.mockReturnValueOnce({
+        content: "merged b",
+        hasConflicts: false,
+        conflictDetails: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // 両方自動マージ成功
+      expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining("a.json"));
+      expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining("b.json"));
+      // pendingMerge なしで正常完了
+      expect(mockSaveConfig).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          baseHashes: expect.any(Object),
+        }),
+      );
+      expect(mockSaveConfig).not.toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          pendingMerge: expect.anything(),
+        }),
+      );
+    });
+
+    it("コンフリクト時はマーカー付きで warn を出す", async () => {
+      vol.fromJSON({
+        "/test/config.json": '{"version": "2.0"}',
+        "/tmp/template/config.json": '{"version": "3.0"}',
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: ["config.json"],
+        newFiles: [],
+        deletedFiles: [],
+        unchanged: [],
+      });
+
+      // threeWayMerge は構造マージでコンフリクトがある場合、テキストマージにフォールバックし
+      // コンフリクトマーカーを挿入する
+      mockThreeWayMerge.mockReturnValueOnce({
+        content: '<<<<<<< LOCAL\n{"version": "2.0"}\n=======\n{"version": "3.0"}\n>>>>>>> TEMPLATE',
+        hasConflicts: true,
+        conflictDetails: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // コンフリクトの warn（manual resolution needed）
+      expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining("config.json"));
+      expect(mockLog.warn).toHaveBeenCalledWith(
+        expect.stringContaining("manual resolution needed"),
+      );
+    });
+
+    it("新規ファイル追加時にディレクトリを自動作成", async () => {
+      vol.fromJSON({
+        "/test": null,
+        "/tmp/template/.devcontainer/config.json": '{"key": "value"}',
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [".devcontainer/config.json"],
+        deletedFiles: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(vol.existsSync("/test/.devcontainer")).toBe(true);
+      const content = vol.readFileSync("/test/.devcontainer/config.json", "utf-8");
+      expect(content).toBe('{"key": "value"}');
+    });
+  });
+});
