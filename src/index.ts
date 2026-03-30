@@ -47,11 +47,7 @@ const commandMap: Record<"init" | "push" | "pull" | "diff", CommandType> = {
 async function promptCommand(): Promise<void> {
   intro();
 
-  p.log.message(
-    pc.dim(
-      `Run ${pc.cyan("ziku <command> --help")} for non-interactive usage.`,
-    ),
-  );
+  p.log.message(pc.dim(`Run ${pc.cyan("ziku <command> --help")} for non-interactive usage.`));
 
   const command = await p.select({
     message: "What would you like to do?",
@@ -99,17 +95,9 @@ async function run(): Promise<void> {
     const args = process.argv.slice(2);
     const hasSubCommand =
       args.length > 0 &&
-      [
-        "init",
-        "push",
-        "pull",
-        "diff",
-        "track",
-        "--help",
-        "-h",
-        "--version",
-        "-v",
-      ].includes(args[0]);
+      ["init", "push", "pull", "diff", "track", "--help", "-h", "--version", "-v"].includes(
+        args[0],
+      );
 
     if (!hasSubCommand && args.length > 0 && !args[0].startsWith("-")) {
       // npx ziku . のような形式は init コマンドとして実行
