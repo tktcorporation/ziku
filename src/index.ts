@@ -8,7 +8,7 @@ import { pullCommand } from "./commands/pull";
 import { pushCommand } from "./commands/push";
 import { trackCommand } from "./commands/track";
 import { BermError } from "./errors";
-import { intro, logBermError } from "./ui/renderer";
+import { intro, logBermError, pc } from "./ui/renderer";
 
 const main = defineCommand({
   meta: {
@@ -46,6 +46,12 @@ const commandMap: Record<"init" | "push" | "pull" | "diff", CommandType> = {
  */
 async function promptCommand(): Promise<void> {
   intro();
+
+  p.log.message(
+    pc.dim(
+      `Run ${pc.cyan("ziku <command> --help")} for non-interactive usage.`,
+    ),
+  );
 
   const command = await p.select({
     message: "What would you like to do?",
