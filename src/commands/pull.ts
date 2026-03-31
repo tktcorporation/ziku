@@ -95,8 +95,8 @@ export const pullCommand = defineCommand({
         moduleList = loaded.modules;
       } else {
         throw new BermError(
-          "No .devenv/modules.jsonc found",
-          "Run `ziku init` to set up the project, or add .devenv/modules.jsonc to the template",
+          "No .ziku/modules.jsonc found",
+          "Run `ziku init` to set up the project, or add .ziku/modules.jsonc to the template",
         );
       }
 

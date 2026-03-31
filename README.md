@@ -254,7 +254,7 @@ Files generated based on selected modules:
 - **`.github/`** — GitHub Actions and labeler workflows
 - **`.claude/`** — Claude Code project settings
 
-> See [`.devenv/modules.jsonc`](./.devenv/modules.jsonc) for the full list of tracked file patterns.
+> See [`.ziku/modules.jsonc`](./.ziku/modules.jsonc) for the full list of tracked file patterns.
 
 <!-- FILES:END -->
 

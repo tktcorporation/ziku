@@ -25,7 +25,7 @@ describe("generateReadme", () => {
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.devenv/modules.jsonc",
+      modulesPath: "/project/.ziku/modules.jsonc",
     });
 
     expect(result.updated).toBe(false);
@@ -36,12 +36,12 @@ describe("generateReadme", () => {
     const originalReadme = "# My Project\n\nSome content";
     vol.fromJSON({
       "/project/README.md": originalReadme,
-      "/project/.devenv/modules.jsonc": JSON.stringify({ modules: [] }),
+      "/project/.ziku/modules.jsonc": JSON.stringify({ modules: [] }),
     });
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.devenv/modules.jsonc",
+      modulesPath: "/project/.ziku/modules.jsonc",
     });
 
     expect(result.updated).toBe(false);
@@ -65,12 +65,12 @@ Other content`;
 
     vol.fromJSON({
       "/project/README.md": readme,
-      "/project/.devenv/modules.jsonc": modulesJson,
+      "/project/.ziku/modules.jsonc": modulesJson,
     });
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.devenv/modules.jsonc",
+      modulesPath: "/project/.ziku/modules.jsonc",
     });
 
     expect(result.updated).toBe(true);
@@ -99,12 +99,12 @@ Old files
 
     vol.fromJSON({
       "/project/README.md": readme,
-      "/project/.devenv/modules.jsonc": modulesJson,
+      "/project/.ziku/modules.jsonc": modulesJson,
     });
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.devenv/modules.jsonc",
+      modulesPath: "/project/.ziku/modules.jsonc",
     });
 
     expect(result.updated).toBe(true);
@@ -125,7 +125,7 @@ Old content
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.devenv/modules.jsonc",
+      modulesPath: "/project/.ziku/modules.jsonc",
     });
 
     // モジュールがないので更新されない
@@ -141,12 +141,12 @@ Old commands
 
     vol.fromJSON({
       "/project/README.md": readme,
-      "/project/.devenv/modules.jsonc": JSON.stringify({ modules: [] }),
+      "/project/.ziku/modules.jsonc": JSON.stringify({ modules: [] }),
     });
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.devenv/modules.jsonc",
+      modulesPath: "/project/.ziku/modules.jsonc",
       generateCommandsSection: async () => "## Commands\n\n- `pnpm dev`\n",
     });
 
@@ -181,12 +181,12 @@ Old files
 
     vol.fromJSON({
       "/project/README.md": readme,
-      "/project/.devenv/modules.jsonc": modulesJson,
+      "/project/.ziku/modules.jsonc": modulesJson,
     });
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.devenv/modules.jsonc",
+      modulesPath: "/project/.ziku/modules.jsonc",
     });
 
     expect(result.updated).toBe(true);
@@ -213,12 +213,12 @@ Old files
 
     vol.fromJSON({
       "/project/README.md": readme,
-      "/project/.devenv/modules.jsonc": modulesJson,
+      "/project/.ziku/modules.jsonc": modulesJson,
     });
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.devenv/modules.jsonc",
+      modulesPath: "/project/.ziku/modules.jsonc",
     });
 
     expect(result.content).toContain("(パターン)");
@@ -242,12 +242,12 @@ describe("updateReadmeFile", () => {
 
     vol.fromJSON({
       "/project/README.md": readme,
-      "/project/.devenv/modules.jsonc": modulesJson,
+      "/project/.ziku/modules.jsonc": modulesJson,
     });
 
     const result = await updateReadmeFile({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.devenv/modules.jsonc",
+      modulesPath: "/project/.ziku/modules.jsonc",
     });
 
     expect(result.updated).toBe(true);
@@ -261,12 +261,12 @@ describe("updateReadmeFile", () => {
 
     vol.fromJSON({
       "/project/README.md": readme,
-      "/project/.devenv/modules.jsonc": JSON.stringify({ modules: [] }),
+      "/project/.ziku/modules.jsonc": JSON.stringify({ modules: [] }),
     });
 
     await updateReadmeFile({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.devenv/modules.jsonc",
+      modulesPath: "/project/.ziku/modules.jsonc",
     });
 
     const savedContent = vol.readFileSync("/project/README.md", "utf8");
@@ -300,7 +300,7 @@ describe("detectAndUpdateReadme", () => {
   it("FEATURES マーカーがあれば更新する", async () => {
     vol.fromJSON({
       "/project/README.md": "# My Project\n\n<!-- FEATURES:START -->\n<!-- FEATURES:END -->",
-      "/template/.devenv/modules.jsonc": JSON.stringify({
+      "/template/.ziku/modules.jsonc": JSON.stringify({
         modules: [{ id: ".", name: "Root", description: "Test", patterns: [] }],
       }),
     });
@@ -314,7 +314,7 @@ describe("detectAndUpdateReadme", () => {
   it("FILES マーカーがあれば更新する", async () => {
     vol.fromJSON({
       "/project/README.md": "# My Project\n\n<!-- FILES:START -->\n<!-- FILES:END -->",
-      "/template/.devenv/modules.jsonc": JSON.stringify({
+      "/template/.ziku/modules.jsonc": JSON.stringify({
         modules: [{ id: ".", name: "Root", description: "Test", patterns: [".mcp.json"] }],
       }),
     });

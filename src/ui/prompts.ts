@@ -41,7 +41,7 @@ export async function selectModules(moduleList: TemplateModule[]): Promise<strin
 /**
  * 上書き戦略の選択（プロジェクト状態に応じたスマートデフォルト付き）
  *
- * 背景: 新規プロジェクトでは overwrite が自然だが、再実行時（.devenv.json 既存）は
+ * 背景: 新規プロジェクトでは overwrite が自然だが、再実行時（.ziku.json 既存）は
  * カスタマイズ済みファイルを誤って上書きしないよう skip をデフォルトにする。
  * ユーザーが毎回3択を読んで判断する必要をなくす。
  */
@@ -125,16 +125,16 @@ export async function inputTemplateSource(defaultValue?: string): Promise<string
   return source as string;
 }
 
-/** .devenv スキャフォールディング時のアクション */
+/** .ziku スキャフォールディング時のアクション */
 /**
- * テンプレートリポジトリに .devenv/modules.jsonc が存在しない場合の確認
+ * テンプレートリポジトリに .ziku/modules.jsonc が存在しない場合の確認
  *
  * modules.jsonc はテンプレートリポジトリに必須。存在しない場合は
  * PR で追加するかどうかを確認する。
  */
 export async function confirmScaffoldDevenvPR(owner: string, repo: string): Promise<boolean> {
   p.log.warn(
-    `Template ${pc.cyan(`${owner}/${repo}`)} does not contain ${pc.cyan(".devenv/modules.jsonc")}`,
+    `Template ${pc.cyan(`${owner}/${repo}`)} does not contain ${pc.cyan(".ziku/modules.jsonc")}`,
   );
   p.log.message(
     pc.dim(
@@ -143,7 +143,7 @@ export async function confirmScaffoldDevenvPR(owner: string, repo: string): Prom
   );
 
   const confirmed = await p.confirm({
-    message: `Create a PR to add .devenv/modules.jsonc to ${owner}/${repo}?`,
+    message: `Create a PR to add .ziku/modules.jsonc to ${owner}/${repo}?`,
   });
   handleCancel(confirmed);
   return confirmed as boolean;

@@ -124,7 +124,7 @@ export const initCommand = defineCommand({
         const { modules: loadedModules } = await loadModulesFile(templateDir);
         moduleList = loadedModules;
       } else {
-        // .devenv/modules.jsonc がテンプレートに存在しない場合のハンドリング
+        // .ziku/modules.jsonc がテンプレートに存在しない場合のハンドリング
         moduleList = await handleMissingDevenv(sourceOwner, sourceRepo, args.yes as boolean);
       }
 
@@ -186,8 +186,8 @@ export const initCommand = defineCommand({
         answers = { modules: selectedModules, overwriteStrategy };
       } else {
         const selectedModules = await selectModules(moduleList);
-        // .devenv.json が既に存在する場合は再実行と判断し、skip をデフォルトに推奨する
-        const configExists = existsSync(resolve(targetDir, ".devenv.json"));
+        // .ziku.json が既に存在する場合は再実行と判断し、skip をデフォルトに推奨する
+        const configExists = existsSync(resolve(targetDir, ".ziku.json"));
         const overwriteStrategy = await selectOverwriteStrategy({ isReinit: configExists });
         answers = { modules: selectedModules, overwriteStrategy };
       }
@@ -259,7 +259,7 @@ export const initCommand = defineCommand({
           "Setup complete!",
           "",
           `${pc.bold("Next steps:")}`,
-          `  ${pc.cyan("git add . && git commit -m 'chore: add devenv config'")}`,
+          `  ${pc.cyan("git add . && git commit -m 'chore: add ziku config'")}`,
           `  ${pc.dim("Commit the changes")}`,
           `  ${pc.cyan("npx ziku diff")}`,
           `  ${pc.dim("Check for updates from upstream")}`,
@@ -299,7 +299,7 @@ async function createEnvExample(
 }
 
 /**
- * 設定ファイル (.devenv.json) を生成する。常に上書き。
+ * 設定ファイル (.ziku.json) を生成する。常に上書き。
  *
  * 背景: baseHashes を記録することで、pull 時に「ユーザーがローカルで変更したか」を
  * ファイル全体のコピーを保持せずに判定できる。
@@ -329,12 +329,12 @@ async function createDevEnvConfig(
     config.baseHashes = source.baseHashes;
   }
 
-  // .devenv.json は常に上書き（設定管理ファイルなので）
+  // .ziku.json は常に上書き（設定管理ファイルなので）
   return writeFileWithStrategy({
-    destPath: resolve(targetDir, ".devenv.json"),
+    destPath: resolve(targetDir, ".ziku.json"),
     content: JSON.stringify(config, null, 2),
     strategy: "overwrite",
-    relativePath: ".devenv.json",
+    relativePath: ".ziku.json",
   });
 }
 
@@ -346,7 +346,7 @@ async function copyModulesJsonc(
   targetDir: string,
   strategy: OverwriteStrategy,
 ): Promise<FileOperationResult> {
-  const modulesRelPath = ".devenv/modules.jsonc";
+  const modulesRelPath = ".ziku/modules.jsonc";
   const srcPath = join(templateDir, modulesRelPath);
   const destPath = getModulesFilePath(targetDir);
 
@@ -511,7 +511,7 @@ async function handleMissingTemplate(
 }
 
 /**
- * テンプレートに .devenv/modules.jsonc がない場合のハンドリング
+ * テンプレートに .ziku/modules.jsonc がない場合のハンドリング
  *
  * modules.jsonc はテンプレートリポジトリに必須。存在しない場合は
  * PR で追加するか、エラーにする。ローカルフォールバックは行わない。
@@ -523,8 +523,8 @@ async function handleMissingDevenv(
 ): Promise<never> {
   if (nonInteractive) {
     throw new BermError(
-      `Template ${owner}/${repo} has no .devenv/modules.jsonc`,
-      "Add .devenv/modules.jsonc to the template repository first, or run interactively to create a PR",
+      `Template ${owner}/${repo} has no .ziku/modules.jsonc`,
+      "Add .ziku/modules.jsonc to the template repository first, or run interactively to create a PR",
     );
   }
 
@@ -532,7 +532,7 @@ async function handleMissingDevenv(
 
   if (!confirmed) {
     throw new BermError(
-      ".devenv/modules.jsonc is required",
+      ".ziku/modules.jsonc is required",
       "Add it to the template repository manually, then run ziku init again",
     );
   }
@@ -546,7 +546,7 @@ async function handleMissingDevenv(
   }
 
   const modulesContent = generateInitialModulesJsonc();
-  log.step(`Creating PR to add .devenv/modules.jsonc to ${pc.cyan(`${owner}/${repo}`)}...`);
+  log.step(`Creating PR to add .ziku/modules.jsonc to ${pc.cyan(`${owner}/${repo}`)}...`);
   const result = await createDevenvScaffoldPR(token, owner, repo, modulesContent);
   log.success(`Created PR: ${pc.cyan(result.url)}`);
 
@@ -556,7 +556,7 @@ async function handleMissingDevenv(
 /**
  * 初期の modules.jsonc コンテンツを生成する（スキャフォールド用）
  *
- * テンプレートリポジトリに .devenv/modules.jsonc を追加する際に使用。
+ * テンプレートリポジトリに .ziku/modules.jsonc を追加する際に使用。
  * よくあるモジュール構成をテンプレートとして提供する。
  */
 export function generateInitialModulesJsonc(): string {
