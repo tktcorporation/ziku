@@ -594,10 +594,22 @@ export const MODULE_PRESETS: TemplateModule[] = [
     patterns: [".claude/**"],
   },
   {
-    id: ".",
-    name: "Root",
-    description: "Root configuration files (e.g., .editorconfig, .prettierrc)",
-    patterns: [".editorconfig", ".prettierrc", ".prettierrc.*"],
+    id: ".editorconfig",
+    name: "EditorConfig",
+    description: "Editor formatting rules",
+    patterns: [".editorconfig"],
+  },
+  {
+    id: ".mcp.json",
+    name: "MCP",
+    description: "Model Context Protocol configuration",
+    patterns: [".mcp.json"],
+  },
+  {
+    id: ".mise.toml",
+    name: "mise",
+    description: "mise (dev tool version manager) configuration",
+    patterns: [".mise.toml"],
   },
 ];
 
