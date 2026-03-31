@@ -1,5 +1,15 @@
 # @tktco/ziku
 
+## 0.24.0
+
+### Minor Changes
+
+- [#5](https://github.com/tktcorporation/ziku/pull/5) [`163789e`](https://github.com/tktcorporation/ziku/commit/163789e37a454b5b6e927a09347b1d39319511b6) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Rename .devenv / devenv to .ziku / ziku throughout the codebase
+
+### Patch Changes
+
+- [#6](https://github.com/tktcorporation/ziku/pull/6) [`4814d9f`](https://github.com/tktcorporation/ziku/commit/4814d9fac0d7f0cd5e60ef3f4d21500de6a4f138) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Add auto-generated Getting Started guide to README and generate JSON Schema for modules.jsonc from Zod schema
+
 ## 0.23.0
 
 ### Minor Changes
