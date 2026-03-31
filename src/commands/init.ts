@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { defineCommand } from "citty";
 import { join, resolve } from "pathe";
 import {
@@ -22,8 +22,9 @@ import {
   selectMissingTemplateAction,
   selectModules,
   selectOverwriteStrategy,
+  selectTemplateModules,
 } from "../ui/prompts";
-import { DEFAULT_TEMPLATE_REPO, detectGitHubOwner } from "../utils/git-remote";
+import { DEFAULT_TEMPLATE_REPO, detectGitHubOwner, detectGitHubRepo } from "../utils/git-remote";
 import {
   checkRepoExists,
   createDevenvScaffoldPR,
@@ -104,6 +105,13 @@ export const initCommand = defineCommand({
       args.from as string | undefined,
       args.yes as boolean,
     );
+
+    // テンプレートリポジトリ自体で実行されているか判定
+    if (isCurrentRepoTemplate(targetDir, sourceOwner, sourceRepo)) {
+      await handleTemplateRepoInit(targetDir, args.yes as boolean);
+      return;
+    }
+
     const templateSourceStr = buildTemplateSource({
       owner: sourceOwner,
       repo: sourceRepo,
@@ -545,7 +553,8 @@ async function handleMissingDevenv(
     );
   }
 
-  const modulesContent = generateInitialModulesJsonc();
+  const selectedIds = await selectTemplateModules(MODULE_PRESETS);
+  const modulesContent = generateInitialModulesJsonc(selectedIds);
   log.step(`Creating PR to add .ziku/modules.jsonc to ${pc.cyan(`${owner}/${repo}`)}...`);
   const result = await createDevenvScaffoldPR(token, owner, repo, modulesContent);
   log.success(`Created PR: ${pc.cyan(result.url)}`);
@@ -554,46 +563,72 @@ async function handleMissingDevenv(
 }
 
 /**
+ * 初期モジュールのプリセットカタログ。
+ *
+ * テンプレートリポジトリのスキャフォールド時にユーザーが選択可能なモジュール一覧。
+ * PR 作成パスとローカル生成パスの両方で共通して使用される。
+ */
+export const MODULE_PRESETS: TemplateModule[] = [
+  {
+    id: ".devcontainer",
+    name: "DevContainer",
+    description: "VS Code DevContainer setup",
+    patterns: [".devcontainer/**"],
+  },
+  {
+    id: ".github",
+    name: "GitHub",
+    description: "GitHub Actions workflows and configuration",
+    patterns: [".github/**"],
+  },
+  {
+    id: ".vscode",
+    name: "VS Code",
+    description: "VS Code workspace settings and extensions",
+    patterns: [".vscode/**"],
+  },
+  {
+    id: ".claude",
+    name: "Claude",
+    description: "Claude Code project settings",
+    patterns: [".claude/**"],
+  },
+  {
+    id: ".editorconfig",
+    name: "EditorConfig",
+    description: "Editor formatting rules",
+    patterns: [".editorconfig"],
+  },
+  {
+    id: ".mcp.json",
+    name: "MCP",
+    description: "Model Context Protocol configuration",
+    patterns: [".mcp.json"],
+  },
+  {
+    id: ".mise.toml",
+    name: "mise",
+    description: "mise (dev tool version manager) configuration",
+    patterns: [".mise.toml"],
+  },
+];
+
+/**
  * 初期の modules.jsonc コンテンツを生成する（スキャフォールド用）
  *
  * テンプレートリポジトリに .ziku/modules.jsonc を追加する際に使用。
- * よくあるモジュール構成をテンプレートとして提供する。
+ * MODULE_PRESETS から選択されたモジュールのみを含む。
+ *
+ * @param selectedIds - 含めるモジュール ID の配列。未指定時は全プリセットを含む。
  */
-export function generateInitialModulesJsonc(): string {
-  const initialModules: TemplateModule[] = [
-    {
-      id: ".",
-      name: "Root",
-      description: "Root configuration files (MCP, mise, etc.)",
-      patterns: [".mcp.json", ".mise.toml"],
-    },
-    {
-      id: ".devcontainer",
-      name: "DevContainer",
-      description: "VS Code DevContainer setup",
-      patterns: [
-        ".devcontainer/devcontainer.json",
-        ".devcontainer/.gitignore",
-        ".devcontainer/setup-*.sh",
-      ],
-    },
-    {
-      id: ".github",
-      name: "GitHub",
-      description: "GitHub Actions workflows",
-      patterns: [".github/workflows/*.yml", ".github/labeler.yml"],
-    },
-    {
-      id: ".claude",
-      name: "Claude",
-      description: "Claude Code project settings",
-      patterns: [".claude/settings.json"],
-    },
-  ];
+export function generateInitialModulesJsonc(selectedIds?: string[]): string {
+  const modules = selectedIds
+    ? MODULE_PRESETS.filter((m) => selectedIds.includes(m.id))
+    : MODULE_PRESETS;
 
   const content = {
     $schema: MODULES_SCHEMA_URL,
-    modules: initialModules.map((m) => ({
+    modules: modules.map((m) => ({
       id: m.id,
       name: m.name,
       description: m.description,
@@ -601,6 +636,68 @@ export function generateInitialModulesJsonc(): string {
     })),
   };
   return JSON.stringify(content, null, 2);
+}
+
+/**
+ * 現在のリポジトリがテンプレートリポジトリ自体かどうかを判定する。
+ *
+ * 背景: テンプレートリポジトリ内で `ziku init` を実行した場合、
+ * GitHub からダウンロードする代わりにローカルで `.ziku/modules.jsonc` を生成する。
+ */
+export function isCurrentRepoTemplate(
+  targetDir: string,
+  sourceOwner: string,
+  sourceRepo: string,
+): boolean {
+  const currentRepo = detectGitHubRepo(targetDir);
+  if (!currentRepo) return false;
+  return (
+    currentRepo.owner.toLowerCase() === sourceOwner.toLowerCase() &&
+    currentRepo.repo.toLowerCase() === sourceRepo.toLowerCase()
+  );
+}
+
+/**
+ * テンプレートリポジトリ自体で init を実行した場合のハンドリング。
+ *
+ * `.ziku/modules.jsonc` がなければ生成し、既にあれば通知する。
+ */
+async function handleTemplateRepoInit(targetDir: string, nonInteractive: boolean): Promise<void> {
+  log.info(`Detected: running inside the template repository`);
+
+  if (modulesFileExists(targetDir)) {
+    log.success(".ziku/modules.jsonc already exists");
+    outro("Template repository is already configured.");
+    return;
+  }
+
+  log.step("Generating .ziku/modules.jsonc...");
+
+  let selectedIds: string[] | undefined;
+  if (!nonInteractive) {
+    selectedIds = await selectTemplateModules(MODULE_PRESETS);
+  }
+
+  const modulesContent = generateInitialModulesJsonc(selectedIds);
+  const modulesDir = join(targetDir, ".ziku");
+  if (!existsSync(modulesDir)) {
+    mkdirSync(modulesDir, { recursive: true });
+  }
+  const modulesPath = getModulesFilePath(targetDir);
+  writeFileSync(modulesPath, modulesContent);
+
+  log.success("Created .ziku/modules.jsonc");
+
+  outro(
+    [
+      "Template initialized!",
+      "",
+      `${pc.bold("Next steps:")}`,
+      `  ${pc.cyan("1.")} Review and customize ${pc.dim(".ziku/modules.jsonc")}`,
+      `  ${pc.cyan("2.")} ${pc.cyan("git add .ziku/ && git commit -m 'chore: add ziku config'")}`,
+      `  ${pc.dim("Then other projects can use this template with")} ${pc.cyan("npx ziku init")}`,
+    ].join("\n"),
+  );
 }
 
 /**

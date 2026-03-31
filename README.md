@@ -56,21 +56,11 @@ Example `modules.jsonc`:
   "$schema": "https://raw.githubusercontent.com/tktcorporation/ziku/main/schema/modules.json",
   "modules": [
     {
-      "id": ".",
-      "name": "Root",
-      "description": "Root configuration files (MCP, mise, etc.)",
-      "patterns": [
-        ".mcp.json",
-        ".mise.toml"
-      ]
-    },
-    {
       "id": ".github",
       "name": "GitHub",
-      "description": "GitHub Actions workflows",
+      "description": "GitHub Actions workflows and configuration",
       "patterns": [
-        ".github/workflows/*.yml",
-        ".github/labeler.yml"
+        ".github/**"
       ]
     }
   ]

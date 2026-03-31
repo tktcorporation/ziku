@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_TEMPLATE_REPO, parseGitHubOwner } from "../git-remote";
+import { DEFAULT_TEMPLATE_REPO, parseGitHubOwner, parseGitHubRepo } from "../git-remote";
 
 describe("parseGitHubOwner", () => {
   it("HTTPS URL (.git 付き) からオーナーを抽出", () => {
@@ -28,6 +28,55 @@ describe("parseGitHubOwner", () => {
 
   it("不正な形式は null を返す", () => {
     expect(parseGitHubOwner("not-a-url")).toBeNull();
+  });
+});
+
+describe("parseGitHubRepo", () => {
+  it("HTTPS URL (.git 付き) からオーナーとリポ名を抽出", () => {
+    expect(parseGitHubRepo("https://github.com/my-org/my-repo.git")).toEqual({
+      owner: "my-org",
+      repo: "my-repo",
+    });
+  });
+
+  it("HTTPS URL (.git なし) からオーナーとリポ名を抽出", () => {
+    expect(parseGitHubRepo("https://github.com/my-org/my-repo")).toEqual({
+      owner: "my-org",
+      repo: "my-repo",
+    });
+  });
+
+  it("SSH URL からオーナーとリポ名を抽出", () => {
+    expect(parseGitHubRepo("git@github.com:my-org/my-repo.git")).toEqual({
+      owner: "my-org",
+      repo: "my-repo",
+    });
+  });
+
+  it("SSH URL (.git なし) からオーナーとリポ名を抽出", () => {
+    expect(parseGitHubRepo("git@github.com:someone/dotfiles")).toEqual({
+      owner: "someone",
+      repo: "dotfiles",
+    });
+  });
+
+  it("GitHub 以外の URL は null を返す", () => {
+    expect(parseGitHubRepo("https://gitlab.com/my-org/my-repo.git")).toBeNull();
+  });
+
+  it("空文字列は null を返す", () => {
+    expect(parseGitHubRepo("")).toBeNull();
+  });
+
+  it("不正な形式は null を返す", () => {
+    expect(parseGitHubRepo("not-a-url")).toBeNull();
+  });
+
+  it(".github リポジトリ名を正しく抽出", () => {
+    expect(parseGitHubRepo("https://github.com/my-org/.github")).toEqual({
+      owner: "my-org",
+      repo: ".github",
+    });
   });
 });
 

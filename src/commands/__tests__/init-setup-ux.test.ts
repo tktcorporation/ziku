@@ -30,6 +30,7 @@ vi.mock("node:fs/promises", async () => {
 // 外部依存をモック
 vi.mock("../../utils/git-remote", () => ({
   detectGitHubOwner: vi.fn(() => "detected-org"),
+  detectGitHubRepo: vi.fn(() => null),
   DEFAULT_TEMPLATE_REPO: ".github",
 }));
 
@@ -67,6 +68,7 @@ vi.mock("../../ui/prompts", () => ({
   selectModules: vi.fn(),
   selectOverwriteStrategy: vi.fn(),
   selectMissingTemplateAction: vi.fn(),
+  selectTemplateModules: vi.fn(() => Promise.resolve([".devcontainer", ".github"])),
   inputTemplateSource: vi.fn(),
   confirmScaffoldDevenvPR: vi.fn(() => Promise.resolve(true)),
 }));
