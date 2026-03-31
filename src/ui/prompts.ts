@@ -157,9 +157,7 @@ export async function confirmScaffoldDevenvPR(owner: string, repo: string): Prom
  * 背景: テンプレート初期化時にハードコードされた全モジュールを含めるのではなく、
  * ユーザーが必要なモジュールだけを選べるようにする。
  */
-export async function selectTemplateModules(
-  presets: TemplateModule[],
-): Promise<string[]> {
+export async function selectTemplateModules(presets: TemplateModule[]): Promise<string[]> {
   const selected = await p.multiselect({
     message: "Select modules to include in your template",
     options: presets.map((m) => ({

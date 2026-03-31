@@ -128,9 +128,8 @@ const { initCommand, isCurrentRepoTemplate, MODULE_PRESETS, generateInitialModul
 const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy, copyFile } =
   await import("../../utils/template");
 const { detectGitHubOwner, detectGitHubRepo } = await import("../../utils/git-remote");
-const { selectModules, selectOverwriteStrategy, selectTemplateModules } = await import(
-  "../../ui/prompts"
-);
+const { selectModules, selectOverwriteStrategy, selectTemplateModules } =
+  await import("../../ui/prompts");
 const { log } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
 const { modulesFileExists } = await import("../../modules/index");
