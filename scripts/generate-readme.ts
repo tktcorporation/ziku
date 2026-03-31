@@ -102,7 +102,7 @@ function generateGettingStartedSection(): string {
   lines.push("npx ziku");
   lines.push("```\n");
   lines.push(
-    "Select the modules you want, and ziku copies the matching files into your project. A `.devenv.json` config and `.devenv/modules.jsonc` are created locally to track what was installed.\n",
+    "Select the modules you want, and ziku copies the matching files into your project. A `.ziku/config.json` and `.ziku/modules.jsonc` are created locally to track what was installed.\n",
   );
 
   lines.push("### 4. Keep it in sync\n");

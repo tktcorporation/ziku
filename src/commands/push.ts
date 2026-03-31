@@ -8,6 +8,7 @@ import { BermError } from "../errors";
 import { addPatternToModulesFileWithCreate, loadModulesFile, modulesFileExists } from "../modules";
 import type { DevEnvConfig, TemplateModule } from "../modules/schemas";
 import { configSchema } from "../modules/schemas";
+import { CONFIG_FILE, migrateConfigIfNeeded } from "../utils/config";
 import {
   confirmAction,
   generatePrBody,
@@ -203,11 +204,11 @@ export const pushCommand = defineCommand({
     intro("push");
 
     const targetDir = resolve(args.dir);
-    const configPath = join(targetDir, ".ziku.json");
+    await migrateConfigIfNeeded(targetDir);
+    const configPath = join(targetDir, CONFIG_FILE);
 
-    // .ziku.json の存在確認
     if (!existsSync(configPath)) {
-      throw new BermError(".ziku.json not found.", "Run 'ziku init' first.");
+      throw new BermError(`${CONFIG_FILE} not found.`, "Run 'ziku init' first.");
     }
 
     // 設定読み込み
@@ -216,7 +217,7 @@ export const pushCommand = defineCommand({
     const parseResult = configSchema.safeParse(configData);
 
     if (!parseResult.success) {
-      throw new BermError("Invalid .ziku.json format", parseResult.error.message);
+      throw new BermError(`Invalid ${CONFIG_FILE} format`, parseResult.error.message);
     }
 
     const config: DevEnvConfig = parseResult.data;

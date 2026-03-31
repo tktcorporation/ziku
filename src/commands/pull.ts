@@ -7,7 +7,7 @@ import { loadModulesFile, modulesFileExists } from "../modules";
 import type { DevEnvConfig, TemplateModule } from "../modules/schemas";
 import { selectDeletedFiles } from "../ui/prompts";
 import { intro, log, outro, pc, withSpinner } from "../ui/renderer";
-import { loadConfig, saveConfig } from "../utils/config";
+import { loadConfig, migrateConfigIfNeeded, saveConfig } from "../utils/config";
 import { resolveLatestCommitSha } from "../utils/github";
 import { hashFiles } from "../utils/hash";
 import {
@@ -57,6 +57,9 @@ export const pullCommand = defineCommand({
     intro("pull");
 
     const targetDir = resolve(args.dir);
+
+    // 旧 .ziku.json → .ziku/config.json へのマイグレーション
+    await migrateConfigIfNeeded(targetDir);
 
     // Step 1: 設定読み込み
     let config;

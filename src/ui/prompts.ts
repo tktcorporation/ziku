@@ -41,7 +41,7 @@ export async function selectModules(moduleList: TemplateModule[]): Promise<strin
 /**
  * 上書き戦略の選択（プロジェクト状態に応じたスマートデフォルト付き）
  *
- * 背景: 新規プロジェクトでは overwrite が自然だが、再実行時（.ziku.json 既存）は
+ * 背景: 新規プロジェクトでは overwrite が自然だが、再実行時（config.json 既存）は
  * カスタマイズ済みファイルを誤って上書きしないよう skip をデフォルトにする。
  * ユーザーが毎回3択を読んで判断する必要をなくす。
  */

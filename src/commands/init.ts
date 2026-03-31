@@ -31,6 +31,7 @@ import {
   resolveLatestCommitSha,
   scaffoldTemplateRepo,
 } from "../utils/github";
+import { CONFIG_FILE, migrateConfigIfNeeded } from "../utils/config";
 import { hashFiles } from "../utils/hash";
 import {
   buildTemplateSource,
@@ -92,6 +93,9 @@ export const initCommand = defineCommand({
     const targetDir = resolve(dir);
 
     log.info(`Target: ${pc.cyan(targetDir)}`);
+
+    // 旧 .ziku.json → .ziku/config.json へのマイグレーション
+    await migrateConfigIfNeeded(targetDir);
 
     // ディレクトリ作成
     if (!existsSync(targetDir)) {
@@ -186,8 +190,8 @@ export const initCommand = defineCommand({
         answers = { modules: selectedModules, overwriteStrategy };
       } else {
         const selectedModules = await selectModules(moduleList);
-        // .ziku.json が既に存在する場合は再実行と判断し、skip をデフォルトに推奨する
-        const configExists = existsSync(resolve(targetDir, ".ziku.json"));
+        // config が既に存在する場合は再実行と判断し、skip をデフォルトに推奨する
+        const configExists = existsSync(resolve(targetDir, CONFIG_FILE));
         const overwriteStrategy = await selectOverwriteStrategy({ isReinit: configExists });
         answers = { modules: selectedModules, overwriteStrategy };
       }
@@ -299,7 +303,7 @@ async function createEnvExample(
 }
 
 /**
- * 設定ファイル (.ziku.json) を生成する。常に上書き。
+ * 設定ファイル (.ziku/config.json) を生成する。常に上書き。
  *
  * 背景: baseHashes を記録することで、pull 時に「ユーザーがローカルで変更したか」を
  * ファイル全体のコピーを保持せずに判定できる。
@@ -329,12 +333,12 @@ async function createDevEnvConfig(
     config.baseHashes = source.baseHashes;
   }
 
-  // .ziku.json は常に上書き（設定管理ファイルなので）
+  // config は常に上書き（設定管理ファイルなので）
   return writeFileWithStrategy({
-    destPath: resolve(targetDir, ".ziku.json"),
+    destPath: resolve(targetDir, CONFIG_FILE),
     content: JSON.stringify(config, null, 2),
     strategy: "overwrite",
-    relativePath: ".ziku.json",
+    relativePath: CONFIG_FILE,
   });
 }
 

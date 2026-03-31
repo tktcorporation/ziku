@@ -152,7 +152,7 @@ describe("initCommand", () => {
     mockFetchTemplates.mockResolvedValue([]);
     mockWriteFileWithStrategy.mockResolvedValue({
       action: "created",
-      path: ".ziku.json",
+      path: ".ziku/config.json",
     });
     mockCopyFile.mockResolvedValue({
       action: "skipped",
@@ -649,7 +649,7 @@ describe("initCommand", () => {
       );
     });
 
-    it(".ziku.json に baseHashes が含まれる", async () => {
+    it("config.json に baseHashes が含まれる", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -673,7 +673,7 @@ describe("initCommand", () => {
 
       // writeFileWithStrategy に baseHashes が含まれた JSON が渡される
       const configCall = mockWriteFileWithStrategy.mock.calls.find(
-        (call) => call[0].relativePath === ".ziku.json",
+        (call) => call[0].relativePath === ".ziku/config.json",
       );
       expect(configCall).toBeDefined();
       const configContent = JSON.parse(configCall![0].content);
@@ -697,7 +697,7 @@ describe("initCommand", () => {
       });
 
       const configCall = mockWriteFileWithStrategy.mock.calls.find(
-        (call) => call[0].relativePath === ".ziku.json",
+        (call) => call[0].relativePath === ".ziku/config.json",
       );
       expect(configCall).toBeDefined();
       const configContent = JSON.parse(configCall![0].content);

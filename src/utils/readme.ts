@@ -76,7 +76,7 @@ function generateFilesSection(modules: TemplateModule[]): string {
   }
 
   lines.push("### 設定ファイル\n");
-  lines.push("- `.ziku.json` - このツールの設定（適用したモジュール情報）\n");
+  lines.push("- `.ziku/config.json` - このツールの設定（適用したモジュール情報）\n");
 
   return lines.join("\n");
 }
