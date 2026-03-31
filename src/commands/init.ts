@@ -22,6 +22,7 @@ import {
   selectMissingTemplateAction,
   selectModules,
   selectOverwriteStrategy,
+  selectTemplateModules,
 } from "../ui/prompts";
 import { DEFAULT_TEMPLATE_REPO, detectGitHubOwner, detectGitHubRepo } from "../utils/git-remote";
 import {
@@ -552,7 +553,8 @@ async function handleMissingDevenv(
     );
   }
 
-  const modulesContent = generateInitialModulesJsonc();
+  const selectedIds = await selectTemplateModules(MODULE_PRESETS);
+  const modulesContent = generateInitialModulesJsonc(selectedIds);
   log.step(`Creating PR to add .ziku/modules.jsonc to ${pc.cyan(`${owner}/${repo}`)}...`);
   const result = await createDevenvScaffoldPR(token, owner, repo, modulesContent);
   log.success(`Created PR: ${pc.cyan(result.url)}`);
@@ -561,46 +563,60 @@ async function handleMissingDevenv(
 }
 
 /**
+ * 初期モジュールのプリセットカタログ。
+ *
+ * テンプレートリポジトリのスキャフォールド時にユーザーが選択可能なモジュール一覧。
+ * PR 作成パスとローカル生成パスの両方で共通して使用される。
+ */
+export const MODULE_PRESETS: TemplateModule[] = [
+  {
+    id: ".devcontainer",
+    name: "DevContainer",
+    description: "VS Code DevContainer setup",
+    patterns: [".devcontainer/**"],
+  },
+  {
+    id: ".github",
+    name: "GitHub",
+    description: "GitHub Actions workflows and configuration",
+    patterns: [".github/**"],
+  },
+  {
+    id: ".vscode",
+    name: "VS Code",
+    description: "VS Code workspace settings and extensions",
+    patterns: [".vscode/**"],
+  },
+  {
+    id: ".claude",
+    name: "Claude",
+    description: "Claude Code project settings",
+    patterns: [".claude/**"],
+  },
+  {
+    id: ".",
+    name: "Root",
+    description: "Root configuration files (e.g., .editorconfig, .prettierrc)",
+    patterns: [".editorconfig", ".prettierrc", ".prettierrc.*"],
+  },
+];
+
+/**
  * 初期の modules.jsonc コンテンツを生成する（スキャフォールド用）
  *
  * テンプレートリポジトリに .ziku/modules.jsonc を追加する際に使用。
- * よくあるモジュール構成をテンプレートとして提供する。
+ * MODULE_PRESETS から選択されたモジュールのみを含む。
+ *
+ * @param selectedIds - 含めるモジュール ID の配列。未指定時は全プリセットを含む。
  */
-export function generateInitialModulesJsonc(): string {
-  const initialModules: TemplateModule[] = [
-    {
-      id: ".",
-      name: "Root",
-      description: "Root configuration files (MCP, mise, etc.)",
-      patterns: [".mcp.json", ".mise.toml"],
-    },
-    {
-      id: ".devcontainer",
-      name: "DevContainer",
-      description: "VS Code DevContainer setup",
-      patterns: [
-        ".devcontainer/devcontainer.json",
-        ".devcontainer/.gitignore",
-        ".devcontainer/setup-*.sh",
-      ],
-    },
-    {
-      id: ".github",
-      name: "GitHub",
-      description: "GitHub Actions workflows",
-      patterns: [".github/workflows/*.yml", ".github/labeler.yml"],
-    },
-    {
-      id: ".claude",
-      name: "Claude",
-      description: "Claude Code project settings",
-      patterns: [".claude/settings.json"],
-    },
-  ];
+export function generateInitialModulesJsonc(selectedIds?: string[]): string {
+  const modules = selectedIds
+    ? MODULE_PRESETS.filter((m) => selectedIds.includes(m.id))
+    : MODULE_PRESETS;
 
   const content = {
     $schema: MODULES_SCHEMA_URL,
-    modules: initialModules.map((m) => ({
+    modules: modules.map((m) => ({
       id: m.id,
       name: m.name,
       description: m.description,
@@ -645,7 +661,12 @@ async function handleTemplateRepoInit(targetDir: string, nonInteractive: boolean
 
   log.step("Generating .ziku/modules.jsonc...");
 
-  const modulesContent = generateInitialModulesJsonc();
+  let selectedIds: string[] | undefined;
+  if (!nonInteractive) {
+    selectedIds = await selectTemplateModules(MODULE_PRESETS);
+  }
+
+  const modulesContent = generateInitialModulesJsonc(selectedIds);
   const modulesDir = join(targetDir, ".ziku");
   if (!existsSync(modulesDir)) {
     mkdirSync(modulesDir, { recursive: true });
