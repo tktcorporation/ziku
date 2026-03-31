@@ -8,6 +8,7 @@ import {
   loadModulesFile,
   modulesFileExists,
 } from "../modules/index";
+import { MODULES_SCHEMA_URL } from "../modules/loader";
 import type {
   Answers,
   FileOperationResult,
@@ -591,7 +592,7 @@ export function generateInitialModulesJsonc(): string {
   ];
 
   const content = {
-    $schema: "https://ziku.dev/schema/modules.json",
+    $schema: MODULES_SCHEMA_URL,
     modules: initialModules.map((m) => ({
       id: m.id,
       name: m.name,
