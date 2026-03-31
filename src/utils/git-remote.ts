@@ -15,16 +15,28 @@ export const DEFAULT_TEMPLATE_REPO = ".github";
  *   - git@github.com:{owner}/{repo}(.git)?
  */
 export function parseGitHubOwner(url: string): string | null {
+  const parsed = parseGitHubRepo(url);
+  return parsed ? parsed.owner : null;
+}
+
+/**
+ * GitHub URL からオーナー名とリポジトリ名を抽出する。
+ *
+ * 対応形式:
+ *   - https://github.com/{owner}/{repo}(.git)?
+ *   - git@github.com:{owner}/{repo}(.git)?
+ */
+export function parseGitHubRepo(url: string): { owner: string; repo: string } | null {
   // HTTPS: https://github.com/{owner}/{repo}
-  const httpsMatch = url.match(/github\.com\/([^/]+)\//);
+  const httpsMatch = url.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/);
   if (httpsMatch) {
-    return httpsMatch[1];
+    return { owner: httpsMatch[1], repo: httpsMatch[2] };
   }
 
   // SSH: git@github.com:{owner}/{repo}
-  const sshMatch = url.match(/github\.com:([^/]+)\//);
+  const sshMatch = url.match(/github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/);
   if (sshMatch) {
-    return sshMatch[1];
+    return { owner: sshMatch[1], repo: sshMatch[2] };
   }
 
   return null;
@@ -37,6 +49,16 @@ export function parseGitHubOwner(url: string): string | null {
  * git リポジトリでない場合や origin が未設定の場合は null を返す。
  */
 export function detectGitHubOwner(cwd?: string): string | null {
+  const repo = detectGitHubRepo(cwd);
+  return repo ? repo.owner : null;
+}
+
+/**
+ * git remote origin の URL から GitHub オーナー名とリポジトリ名を検出する。
+ *
+ * 背景: テンプレートリポジトリ自体で init を実行した場合の検出に使用。
+ */
+export function detectGitHubRepo(cwd?: string): { owner: string; repo: string } | null {
   try {
     const url = execFileSync("git", ["remote", "get-url", "origin"], {
       encoding: "utf-8",
@@ -44,7 +66,7 @@ export function detectGitHubOwner(cwd?: string): string | null {
       stdio: ["pipe", "pipe", "pipe"],
     }).trim();
 
-    return parseGitHubOwner(url);
+    return parseGitHubRepo(url);
   } catch {
     return null;
   }

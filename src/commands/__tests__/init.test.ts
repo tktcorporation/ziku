@@ -16,6 +16,7 @@ vi.mock("node:fs/promises", async () => {
 // 外部依存をモック
 vi.mock("../../utils/git-remote", () => ({
   detectGitHubOwner: vi.fn(() => "test-org"),
+  detectGitHubRepo: vi.fn(() => null),
   DEFAULT_TEMPLATE_REPO: ".github",
 }));
 
@@ -121,23 +122,26 @@ vi.mock("../../modules/index", async (importOriginal) => {
 });
 
 // モック後にインポート
-const { initCommand } = await import("../init");
+const { initCommand, isCurrentRepoTemplate } = await import("../init");
 const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy, copyFile } =
   await import("../../utils/template");
-const { detectGitHubOwner } = await import("../../utils/git-remote");
+const { detectGitHubOwner, detectGitHubRepo } = await import("../../utils/git-remote");
 const { selectModules, selectOverwriteStrategy } = await import("../../ui/prompts");
 const { log } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
+const { modulesFileExists } = await import("../../modules/index");
 
 const mockDownloadTemplateToTemp = vi.mocked(downloadTemplateToTemp);
 const mockFetchTemplates = vi.mocked(fetchTemplates);
 const mockWriteFileWithStrategy = vi.mocked(writeFileWithStrategy);
 const mockCopyFile = vi.mocked(copyFile);
 const mockDetectGitHubOwner = vi.mocked(detectGitHubOwner);
+const mockDetectGitHubRepo = vi.mocked(detectGitHubRepo);
 const mockSelectModules = vi.mocked(selectModules);
 const mockSelectOverwriteStrategy = vi.mocked(selectOverwriteStrategy);
 const mockLog = vi.mocked(log);
 const mockHashFiles = vi.mocked(hashFiles);
+const mockModulesFileExists = vi.mocked(modulesFileExists);
 
 describe("initCommand", () => {
   beforeEach(() => {
@@ -704,5 +708,105 @@ describe("initCommand", () => {
       // 空のハッシュマップの場合は baseHashes キーが省略される
       expect(configContent.baseHashes).toBeUndefined();
     });
+
+    it("テンプレートリポジトリ自体で実行した場合、modules.jsonc を生成する", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      // 現在のリポジトリがテンプレートリポジトリと一致するようモック
+      mockDetectGitHubRepo.mockReturnValueOnce({ owner: "test-org", repo: ".github" });
+      // handleTemplateRepoInit 内で modulesFileExists(targetDir) が false を返す
+      mockModulesFileExists.mockReturnValueOnce(false);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      // テンプレートをダウンロードしない
+      expect(mockDownloadTemplateToTemp).not.toHaveBeenCalled();
+      // modules.jsonc が生成される
+      expect(vol.existsSync("/test/.ziku/modules.jsonc")).toBe(true);
+      const content = vol.readFileSync("/test/.ziku/modules.jsonc", "utf-8") as string;
+      const parsed = JSON.parse(content);
+      expect(parsed.modules).toBeDefined();
+      expect(parsed.modules.length).toBeGreaterThan(0);
+    });
+
+    it("テンプレートリポジトリで modules.jsonc が既にある場合はスキップ", async () => {
+      vol.fromJSON({
+        "/test": null,
+        "/test/.ziku/modules.jsonc": '{"modules":[]}',
+      });
+
+      mockDetectGitHubRepo.mockReturnValueOnce({ owner: "test-org", repo: ".github" });
+      // modulesFileExists が true を返すように（テンプレートリポジトリの場合は targetDir でチェック）
+      // デフォルトモックは templateDir に対して true なので、targetDir 用に呼び出し順を調整
+      mockModulesFileExists.mockReturnValueOnce(true);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(mockDownloadTemplateToTemp).not.toHaveBeenCalled();
+      expect(mockLog.success).toHaveBeenCalledWith(".ziku/modules.jsonc already exists");
+    });
+
+    it("別リポジトリからの実行ではテンプレートリポジトリ検出が働かない", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      // 現在のリポジトリがテンプレートリポジトリと異なる
+      mockDetectGitHubRepo.mockReturnValueOnce({ owner: "test-org", repo: "my-app" });
+
+      mockSelectModules.mockResolvedValueOnce(["."]);
+      mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
+      mockFetchTemplates.mockResolvedValue([]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      // 通常のダウンロードフローが実行される
+      expect(mockDownloadTemplateToTemp).toHaveBeenCalled();
+    });
+  });
+});
+
+describe("isCurrentRepoTemplate", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("現在のリポジトリがテンプレートと一致する場合 true", () => {
+    mockDetectGitHubRepo.mockReturnValueOnce({ owner: "my-org", repo: ".github" });
+    expect(isCurrentRepoTemplate("/test", "my-org", ".github")).toBe(true);
+  });
+
+  it("大文字小文字を無視して比較する", () => {
+    mockDetectGitHubRepo.mockReturnValueOnce({ owner: "My-Org", repo: ".GitHub" });
+    expect(isCurrentRepoTemplate("/test", "my-org", ".github")).toBe(true);
+  });
+
+  it("リポジトリが異なる場合 false", () => {
+    mockDetectGitHubRepo.mockReturnValueOnce({ owner: "my-org", repo: "my-app" });
+    expect(isCurrentRepoTemplate("/test", "my-org", ".github")).toBe(false);
+  });
+
+  it("git remote がない場合 false", () => {
+    mockDetectGitHubRepo.mockReturnValueOnce(null);
+    expect(isCurrentRepoTemplate("/test", "my-org", ".github")).toBe(false);
+  });
+
+  it("オーナーが異なる場合 false", () => {
+    mockDetectGitHubRepo.mockReturnValueOnce({ owner: "other-org", repo: ".github" });
+    expect(isCurrentRepoTemplate("/test", "my-org", ".github")).toBe(false);
   });
 });
