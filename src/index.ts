@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 import * as p from "@clack/prompts";
 import { defineCommand, runMain } from "citty";
+import { Effect } from "effect";
 import { version } from "../package.json";
 import { diffCommand } from "./commands/diff";
 import { initCommand } from "./commands/init";
 import { pullCommand } from "./commands/pull";
 import { pushCommand } from "./commands/push";
 import { trackCommand } from "./commands/track";
-import { BermError } from "./errors";
-import { intro, logBermError, pc } from "./ui/renderer";
+import { ZikuError } from "./errors";
+import { intro, logZikuError, pc } from "./ui/renderer";
 
 const main = defineCommand({
   meta: {
@@ -87,34 +88,38 @@ async function promptCommand(): Promise<void> {
 /**
  * トップレベルエラーハンドラ
  *
- * 背景: 各コマンドで throw された BermError をここでキャッチし、
+ * 背景: 各コマンドで throw された ZikuError をここでキャッチし、
  * @clack/prompts で統一的に表示する。process.exit(1) はこの 1 箇所のみ。
  */
 async function run(): Promise<void> {
-  try {
-    const args = process.argv.slice(2);
-    const hasSubCommand =
-      args.length > 0 &&
-      ["init", "push", "pull", "diff", "track", "--help", "-h", "--version", "-v"].includes(
-        args[0],
-      );
+  await Effect.runPromise(
+    Effect.tryPromise(async () => {
+      const args = process.argv.slice(2);
+      const hasSubCommand =
+        args.length > 0 &&
+        ["init", "push", "pull", "diff", "track", "--help", "-h", "--version", "-v"].includes(
+          args[0],
+        );
 
-    if (!hasSubCommand && args.length > 0 && !args[0].startsWith("-")) {
-      // npx ziku . のような形式は init コマンドとして実行
-      await runMain(initCommand);
-    } else if (!hasSubCommand && args.length === 0) {
-      // 引数なしの場合はコマンド選択プロンプトを表示
-      await promptCommand();
-    } else {
-      await runMain(main);
-    }
-  } catch (error) {
-    if (error instanceof BermError) {
-      logBermError(error);
-      process.exit(1);
-    }
-    throw error;
-  }
+      if (!hasSubCommand && args.length > 0 && !args[0].startsWith("-")) {
+        // npx ziku . のような形式は init コマンドとして実行
+        await runMain(initCommand);
+      } else if (!hasSubCommand && args.length === 0) {
+        // 引数なしの場合はコマンド選択プロンプトを表示
+        await promptCommand();
+      } else {
+        await runMain(main);
+      }
+    }).pipe(
+      Effect.catchAll((error) => {
+        if (error instanceof ZikuError) {
+          logZikuError(error);
+          return Effect.sync(() => process.exit(1));
+        }
+        return Effect.fail(error);
+      }),
+    ),
+  );
 }
 
 void run();

@@ -1,8 +1,10 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { defineCommand } from "citty";
+import { Effect } from "effect";
 import { dirname, join, resolve } from "pathe";
-import { BermError } from "../errors";
+import { withFinally } from "../effect-helpers";
+import { ZikuError } from "../errors";
 import { loadPatternsFile, modulesFileExists } from "../modules";
 import type { DevEnvConfig } from "../modules/schemas";
 import { selectDeletedFiles } from "../ui/prompts";
@@ -51,13 +53,14 @@ export const pullCommand = defineCommand({
 
     const targetDir = resolve(args.dir);
 
-    // Step 1: 設定読み込み
-    let config;
-    try {
-      config = await loadConfig(targetDir);
-    } catch {
-      throw new BermError("Not initialized", "Run `ziku init` first");
+    // Step 1: 設定読み込み（失敗時は ZikuError に変換して throw）
+    const configOrNull = await Effect.runPromise(
+      Effect.tryPromise(() => loadConfig(targetDir)).pipe(Effect.orElseSucceed(() => null)),
+    );
+    if (!configOrNull) {
+      throw new ZikuError("Not initialized", "Run `ziku init` first");
     }
+    const config = configOrNull;
 
     // --continue モード
     if (args.continue) {
@@ -67,7 +70,7 @@ export const pullCommand = defineCommand({
 
     // ローカルの modules.jsonc からフラットパターンを読み込み
     if (!modulesFileExists(targetDir)) {
-      throw new BermError("No .ziku/modules.jsonc found", "Run `ziku init` to set up the project");
+      throw new ZikuError("No .ziku/modules.jsonc found", "Run `ziku init` to set up the project");
     }
 
     const { include, exclude } = await loadPatternsFile(targetDir);
@@ -84,7 +87,7 @@ export const pullCommand = defineCommand({
       downloadTemplateToTemp(targetDir, `gh:${config.source.owner}/${config.source.repo}`),
     );
 
-    try {
+    await withFinally(async () => {
       // Step 3: ハッシュ計算
       log.step("Analyzing changes...");
 
@@ -146,49 +149,60 @@ export const pullCommand = defineCommand({
         let baseTemplateDir: string | undefined;
         let baseCleanup: (() => void) | undefined;
 
+        // ベースバージョンのダウンロード（失敗時は 2-way フォールバック）
         if (config.baseRef) {
-          try {
-            log.info(`Downloading base version (${config.baseRef.slice(0, 7)}...) for merge...`);
-            const baseSource = `gh:${config.source.owner}/${config.source.repo}#${config.baseRef}`;
-            const baseResult = await downloadTemplateToTemp(targetDir, baseSource, "base");
+          const baseResult = await Effect.runPromise(
+            Effect.tryPromise(async () => {
+              log.info(`Downloading base version (${config.baseRef!.slice(0, 7)}...) for merge...`);
+              const baseSource = `gh:${config.source.owner}/${config.source.repo}#${config.baseRef}`;
+              return downloadTemplateToTemp(targetDir, baseSource, "base");
+            }).pipe(
+              Effect.orElseSucceed(() => {
+                log.warn(
+                  "Could not download base version. Falling back to 2-way conflict markers.",
+                );
+                return null;
+              }),
+            ),
+          );
+          if (baseResult) {
             baseTemplateDir = baseResult.templateDir;
             baseCleanup = baseResult.cleanup;
-          } catch {
-            log.warn("Could not download base version. Falling back to 2-way conflict markers.");
           }
         }
 
-        try {
-          for (const file of classification.conflicts) {
-            const localContent = await readFile(join(targetDir, file), "utf-8");
-            const templateContent = await readFile(join(templateDir, file), "utf-8");
+        await withFinally(
+          async () => {
+            for (const file of classification.conflicts) {
+              const localContent = await readFile(join(targetDir, file), "utf-8");
+              const templateContent = await readFile(join(templateDir, file), "utf-8");
 
-            let baseContent = "";
-            if (baseTemplateDir && existsSync(join(baseTemplateDir, file))) {
-              baseContent = await readFile(join(baseTemplateDir, file), "utf-8");
+              let baseContent = "";
+              if (baseTemplateDir && existsSync(join(baseTemplateDir, file))) {
+                baseContent = await readFile(join(baseTemplateDir, file), "utf-8");
+              }
+
+              const result = threeWayMerge({
+                base: asBaseContent(baseContent),
+                local: asLocalContent(localContent),
+                template: asTemplateContent(templateContent),
+                filePath: file,
+              });
+              await writeFile(join(targetDir, file), result.content, "utf-8");
+              if (result.hasConflicts) {
+                unresolvedConflicts.push(file);
+                logMergeConflict(file);
+              } else {
+                log.success(`Auto-merged: ${pc.cyan(file)}`);
+              }
             }
 
-            const result = threeWayMerge({
-              base: asBaseContent(baseContent),
-              local: asLocalContent(localContent),
-              template: asTemplateContent(templateContent),
-              filePath: file,
-            });
-            await writeFile(join(targetDir, file), result.content, "utf-8");
-            if (result.hasConflicts) {
-              unresolvedConflicts.push(file);
-              logMergeConflict(file);
-            } else {
-              log.success(`Auto-merged: ${pc.cyan(file)}`);
+            if (unresolvedConflicts.length > 0) {
+              log.warn("Some files have conflicts. Resolve them, then run `ziku pull --continue`");
             }
-          }
-
-          if (unresolvedConflicts.length > 0) {
-            log.warn("Some files have conflicts. Resolve them, then run `ziku pull --continue`");
-          }
-        } finally {
-          baseCleanup?.();
-        }
+          },
+          () => baseCleanup?.(),
+        );
 
         if (unresolvedConflicts.length > 0) {
           const latestRef = await resolveLatestCommitSha(config.source.owner, config.source.repo);
@@ -217,12 +231,17 @@ export const pullCommand = defineCommand({
         }
 
         for (const file of filesToDelete) {
-          try {
-            await rm(join(targetDir, file), { force: true });
-            log.success(`Deleted: ${file}`);
-          } catch {
-            log.warn(`Could not delete: ${file}`);
-          }
+          // ベストエフォート削除（失敗時は警告のみ）
+          await Effect.runPromise(
+            Effect.tryPromise(async () => {
+              await rm(join(targetDir, file), { force: true });
+              log.success(`Deleted: ${file}`);
+            }).pipe(
+              Effect.orElseSucceed(() => {
+                log.warn(`Could not delete: ${file}`);
+              }),
+            ),
+          );
         }
       }
 
@@ -237,36 +256,35 @@ export const pullCommand = defineCommand({
       await saveConfig(targetDir, updatedConfig);
 
       outro("Pull complete");
-    } finally {
-      cleanup();
-    }
+    }, cleanup);
   },
 });
 
 async function runContinue(targetDir: string, config: DevEnvConfig): Promise<void> {
   if (!config.pendingMerge) {
-    throw new BermError("No pending merge found", "Run `ziku pull` first to start a merge");
+    throw new ZikuError("No pending merge found", "Run `ziku pull` first to start a merge");
   }
 
   const { conflicts, templateHashes, latestRef } = config.pendingMerge;
 
   const stillConflicted: string[] = [];
   for (const file of conflicts) {
-    try {
-      const content = await readFile(join(targetDir, file), "utf-8");
-      if (hasConflictMarkers(content).found) {
-        stillConflicted.push(file);
-      }
-    } catch {
-      // ファイルが存在しない場合は解決済み
-    }
+    // ファイルが存在しない場合は解決済みとみなす
+    await Effect.runPromise(
+      Effect.tryPromise(async () => {
+        const content = await readFile(join(targetDir, file), "utf-8");
+        if (hasConflictMarkers(content).found) {
+          stillConflicted.push(file);
+        }
+      }).pipe(Effect.orElseSucceed(() => {})),
+    );
   }
 
   if (stillConflicted.length > 0) {
     for (const file of stillConflicted) {
       log.warn(`Still has conflict markers: ${pc.cyan(file)}`);
     }
-    throw new BermError(
+    throw new ZikuError(
       "Unresolved conflicts remain",
       "Resolve all conflict markers then run `ziku pull --continue` again",
     );

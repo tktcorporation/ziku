@@ -12,7 +12,7 @@
 
 import { vol } from "memfs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { BermError } from "../../errors";
+import { ZikuError } from "../../errors";
 
 // ── filesystem mock ─────────────────────────────────────────────
 
@@ -99,7 +99,7 @@ vi.mock("../../ui/renderer", () => ({
   withSpinner: vi.fn(async (_text: string, fn: () => Promise<unknown>) => fn()),
   logFileResults: vi.fn(() => ({ added: 1, updated: 0, skipped: 0 })),
   logDiffSummary: vi.fn(),
-  logBermError: vi.fn(),
+  logZikuError: vi.fn(),
 }));
 
 // init 用: フラットテンプレートを返すモック（デフォルト）
@@ -331,7 +331,7 @@ describe("E2E: multi-scenario tests", () => {
       expect(patterns.include).not.toContain(".devcontainer/**");
     });
 
-    it("--modules に存在しないモジュール名 → BermError", async () => {
+    it("--modules に存在しないモジュール名 → ZikuError", async () => {
       vol.fromJSON({ "/test": null });
 
       await expect(
@@ -340,7 +340,7 @@ describe("E2E: multi-scenario tests", () => {
           rawArgs: [],
           cmd: initCommand,
         }),
-      ).rejects.toThrow(BermError);
+      ).rejects.toThrow(ZikuError);
     });
   });
 
@@ -375,7 +375,7 @@ describe("E2E: multi-scenario tests", () => {
       );
     });
 
-    it("--from のリポジトリが存在しない → BermError", async () => {
+    it("--from のリポジトリが存在しない → ZikuError", async () => {
       mockCheckRepoExists.mockResolvedValueOnce(false);
       vol.fromJSON({ "/test": null });
 
@@ -385,7 +385,7 @@ describe("E2E: multi-scenario tests", () => {
           rawArgs: [],
           cmd: initCommand,
         }),
-      ).rejects.toThrow(BermError);
+      ).rejects.toThrow(ZikuError);
     });
   });
 
@@ -423,7 +423,7 @@ describe("E2E: multi-scenario tests", () => {
       );
     });
 
-    it("無効な --overwrite-strategy → BermError", async () => {
+    it("無効な --overwrite-strategy → ZikuError", async () => {
       vol.fromJSON({
         ...vol.toJSON(),
         "/test": null,
@@ -440,7 +440,7 @@ describe("E2E: multi-scenario tests", () => {
           rawArgs: [],
           cmd: initCommand,
         }),
-      ).rejects.toThrow(BermError);
+      ).rejects.toThrow(ZikuError);
     });
   });
 
@@ -449,7 +449,7 @@ describe("E2E: multi-scenario tests", () => {
   // ─────────────────────────────────────────────────────────────
 
   describe("diff: エラーケース", () => {
-    it(".ziku.json が存在しない → BermError", async () => {
+    it(".ziku.json が存在しない → ZikuError", async () => {
       vol.fromJSON({
         "/project/.ziku/modules.jsonc": flatModulesJsonc([".mcp.json"]),
         // .ziku.json なし
@@ -464,7 +464,7 @@ describe("E2E: multi-scenario tests", () => {
       ).rejects.toThrow();
     });
 
-    it("modules.jsonc が存在しない → BermError", async () => {
+    it("modules.jsonc が存在しない → ZikuError", async () => {
       mockModulesFileExists.mockReturnValueOnce(false);
       vol.fromJSON({
         "/project/.ziku.json": JSON.stringify(baseConfig),
@@ -546,7 +546,7 @@ describe("E2E: multi-scenario tests", () => {
       // エラーなく完了すること
     });
 
-    it("modules.jsonc がない場合 → BermError", async () => {
+    it("modules.jsonc がない場合 → ZikuError", async () => {
       mockModulesFileExists.mockReturnValueOnce(false);
       vol.fromJSON({ "/project": null });
 
@@ -556,10 +556,10 @@ describe("E2E: multi-scenario tests", () => {
           rawArgs: [],
           cmd: trackCommand,
         }),
-      ).rejects.toThrow(BermError);
+      ).rejects.toThrow(ZikuError);
     });
 
-    it("パターン引数なし → BermError", async () => {
+    it("パターン引数なし → ZikuError", async () => {
       vol.fromJSON({
         "/project/.ziku/modules.jsonc": flatModulesJsonc([".mcp.json"]),
       });
@@ -573,7 +573,7 @@ describe("E2E: multi-scenario tests", () => {
           rawArgs: [],
           cmd: trackCommand,
         }),
-      ).rejects.toThrow(BermError);
+      ).rejects.toThrow(ZikuError);
 
       process.argv = originalArgv;
     });
@@ -584,7 +584,7 @@ describe("E2E: multi-scenario tests", () => {
   // ─────────────────────────────────────────────────────────────
 
   describe("pull: エラーケース", () => {
-    it(".ziku.json がない → BermError", async () => {
+    it(".ziku.json がない → ZikuError", async () => {
       vol.fromJSON({
         "/project/.ziku/modules.jsonc": flatModulesJsonc([".mcp.json"]),
       });

@@ -82,7 +82,7 @@ const { log, outro, logDiffSummary } = await import("../../ui/renderer");
 const { renderFileDiff } = await import("../../ui/diff-view");
 const { loadPatternsFile } = await import("../../modules");
 
-import { BermError } from "../../errors";
+import { ZikuError } from "../../errors";
 
 const mockDownloadTemplate = vi.mocked(downloadTemplate);
 const mockDetectDiff = vi.mocked(detectDiff);
@@ -141,7 +141,7 @@ describe("diffCommand", () => {
   });
 
   describe("run", () => {
-    it(".ziku.json が存在しない場合は BermError をスロー", async () => {
+    it(".ziku.json が存在しない場合は ZikuError をスロー", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -152,10 +152,10 @@ describe("diffCommand", () => {
           rawArgs: [],
           cmd: diffCommand,
         }),
-      ).rejects.toThrow(BermError);
+      ).rejects.toThrow(ZikuError);
     });
 
-    it("無効な .ziku.json 形式の場合は BermError をスロー", async () => {
+    it("無効な .ziku.json 形式の場合は ZikuError をスロー", async () => {
       vol.fromJSON({
         "/test/.ziku.json": JSON.stringify({ invalid: "format" }),
       });
@@ -166,7 +166,7 @@ describe("diffCommand", () => {
           rawArgs: [],
           cmd: diffCommand,
         }),
-      ).rejects.toThrow(BermError);
+      ).rejects.toThrow(ZikuError);
     });
 
     it("patterns が空の場合は警告", async () => {

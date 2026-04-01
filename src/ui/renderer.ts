@@ -136,8 +136,8 @@ export function logDiffSummary(files: { path: string; type: string }[]): void {
   p.log.message([...lines, "", summaryParts].join("\n"));
 }
 
-/** BermError を整形表示 */
-export function logBermError(error: { message: string; hint?: string }): void {
+/** ZikuError を整形表示する。トップレベルエラーハンドラから呼ばれる。 */
+export function logZikuError(error: { message: string; hint?: string }): void {
   p.log.error(error.message);
   if (error.hint) {
     p.log.message(pc.dim(error.hint));

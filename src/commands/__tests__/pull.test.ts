@@ -1,6 +1,6 @@
 import { vol } from "memfs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { BermError } from "../../errors";
+import { ZikuError } from "../../errors";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -146,7 +146,7 @@ describe("pullCommand", () => {
           rawArgs: [],
           cmd: pullCommand,
         }),
-      ).rejects.toThrow(BermError);
+      ).rejects.toThrow(ZikuError);
     });
 
     it("変更がない場合は 'Already up to date' を表示", async () => {
@@ -490,7 +490,7 @@ describe("pullCommand", () => {
           rawArgs: [],
           cmd: pullCommand,
         }),
-      ).rejects.toThrow(BermError);
+      ).rejects.toThrow(ZikuError);
     });
 
     it("--continue: コンフリクトマーカーが残っている場合はエラー", async () => {
@@ -513,7 +513,7 @@ describe("pullCommand", () => {
           rawArgs: [],
           cmd: pullCommand,
         }),
-      ).rejects.toThrow(BermError);
+      ).rejects.toThrow(ZikuError);
     });
 
     it("--continue: 全解決済みなら baseHashes/baseRef を更新して pendingMerge を削除", async () => {

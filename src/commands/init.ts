@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { defineCommand } from "citty";
+import { Effect } from "effect";
 import { join, resolve } from "pathe";
+import { withFinally } from "../effect-helpers";
 import {
   getModulesFilePath,
   loadPatternsFile,
@@ -10,7 +12,7 @@ import {
 import { MODULES_SCHEMA_URL } from "../modules/loader";
 import type { FileOperationResult, OverwriteStrategy, TemplateModule } from "../modules/schemas";
 import { match } from "ts-pattern";
-import { BermError } from "../errors";
+import { ZikuError } from "../errors";
 import {
   confirmScaffoldDevenvPR,
   inputTemplateSource,
@@ -119,7 +121,7 @@ export const initCommand = defineCommand({
       downloadTemplateToTemp(targetDir, templateSourceStr),
     );
 
-    try {
+    await withFinally(async () => {
       if (!modulesFileExists(templateDir)) {
         // .ziku/modules.jsonc がテンプレートに存在しない場合のハンドリング
         await handleMissingDevenv(sourceOwner, sourceRepo, args.yes as boolean);
@@ -210,9 +212,7 @@ export const initCommand = defineCommand({
           `  ${pc.dim("Check for updates from upstream")}`,
         ].join("\n"),
       );
-    } finally {
-      cleanup();
-    }
+    }, cleanup);
   },
 });
 
@@ -308,14 +308,12 @@ async function resolveTemplatePatterns(
   nonInteractive: boolean,
   modulesArg: string | undefined,
 ): Promise<FlatPatterns> {
-  // まずモジュール形式として読み込みを試行
-  let templateModules: TemplateModule[] | null = null;
-  try {
-    const { modules } = await loadTemplateModulesFile(templateDir);
-    templateModules = modules;
-  } catch {
-    // モジュール形式でない → フラット形式にフォールバック
-  }
+  // まずモジュール形式として読み込みを試行（失敗時はフラット形式にフォールバック）
+  const templateModules = await Effect.runPromise(
+    Effect.tryPromise(() => loadTemplateModulesFile(templateDir).then((r) => r.modules)).pipe(
+      Effect.orElseSucceed(() => null),
+    ),
+  );
 
   if (templateModules) {
     // モジュール形式: モジュール選択
@@ -358,7 +356,7 @@ async function selectModulesFromTemplate(
     const validNames = moduleList.map((m) => m.name);
     const invalidNames = requestedNames.filter((name) => !validNames.includes(name));
     if (invalidNames.length > 0) {
-      throw new BermError(
+      throw new ZikuError(
         `Unknown module(s): ${invalidNames.join(", ")}`,
         `Available modules: ${validNames.join(", ")}`,
       );
@@ -386,7 +384,7 @@ async function resolveEffectiveStrategy(
 
   if (strategyArg) {
     if (strategyArg !== "overwrite" && strategyArg !== "skip" && strategyArg !== "prompt") {
-      throw new BermError(
+      throw new ZikuError(
         `Invalid overwrite strategy: ${strategyArg}`,
         "Must be: overwrite, skip, or prompt",
       );
@@ -414,7 +412,7 @@ async function resolveTemplateSourceWithCheck(
     const resolved = parseFromArg(from);
     const exists = await checkRepoExists(resolved.sourceOwner, resolved.sourceRepo);
     if (!exists) {
-      throw new BermError(
+      throw new ZikuError(
         `Template repository "${resolved.sourceOwner}/${resolved.sourceRepo}" not found`,
         "Check the --from value or create the repository first",
       );
@@ -433,7 +431,7 @@ async function resolveTemplateSourceWithCheck(
 
     // 非インタラクティブモードではリポジトリが見つからなければエラー
     if (nonInteractive) {
-      throw new BermError(
+      throw new ZikuError(
         `Template repository "${candidate.sourceOwner}/${candidate.sourceRepo}" not found`,
         `Create it first, or specify --from owner/repo`,
       );
@@ -445,7 +443,7 @@ async function resolveTemplateSourceWithCheck(
 
   // git remote がない場合
   if (nonInteractive) {
-    throw new BermError(
+    throw new ZikuError(
       "Cannot detect template source: no git remote origin found",
       "Specify --from owner/repo",
     );
@@ -486,7 +484,7 @@ async function handleMissingTemplate(
     .with("create-repo", async () => {
       const token = getGitHubToken();
       if (!token) {
-        throw new BermError(
+        throw new ZikuError(
           "GitHub token required to create a repository",
           "Set GITHUB_TOKEN or GH_TOKEN, or run: gh auth login",
         );
@@ -514,7 +512,7 @@ async function handleMissingDevenv(
   nonInteractive: boolean,
 ): Promise<never> {
   if (nonInteractive) {
-    throw new BermError(
+    throw new ZikuError(
       `Template ${owner}/${repo} has no .ziku/modules.jsonc`,
       "Add .ziku/modules.jsonc to the template repository first, or run interactively to create a PR",
     );
@@ -523,7 +521,7 @@ async function handleMissingDevenv(
   const confirmed = await confirmScaffoldDevenvPR(owner, repo);
 
   if (!confirmed) {
-    throw new BermError(
+    throw new ZikuError(
       ".ziku/modules.jsonc is required",
       "Add it to the template repository manually, then run ziku init again",
     );
@@ -531,7 +529,7 @@ async function handleMissingDevenv(
 
   const token = getGitHubToken();
   if (!token) {
-    throw new BermError(
+    throw new ZikuError(
       "GitHub token required to create a PR",
       "Set GITHUB_TOKEN or GH_TOKEN, or run: gh auth login",
     );
@@ -543,7 +541,7 @@ async function handleMissingDevenv(
   const result = await createDevenvScaffoldPR(token, owner, repo, modulesContent);
   log.success(`Created PR: ${pc.cyan(result.url)}`);
 
-  throw new BermError("Merge the PR first, then run ziku init again", `PR: ${result.url}`);
+  throw new ZikuError("Merge the PR first, then run ziku init again", `PR: ${result.url}`);
 }
 
 /**
@@ -636,7 +634,7 @@ async function handleTemplateRepoInit(targetDir: string, _nonInteractive: boolea
 function parseFromArg(from: string): { sourceOwner: string; sourceRepo: string } {
   const slashIndex = from.indexOf("/");
   if (slashIndex === -1 || slashIndex === 0 || slashIndex === from.length - 1) {
-    throw new BermError(
+    throw new ZikuError(
       `Invalid --from format: "${from}"`,
       "Expected: owner/repo (e.g., my-org/my-templates)",
     );
