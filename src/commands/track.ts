@@ -104,10 +104,7 @@ export const trackCommand = defineCommand({
     await saveModulesFile(targetDir, updatedContent);
 
     log.success("Patterns added!");
-    const details = [
-      "Added:",
-      ...patterns.map((p) => `  ${pc.green("+")} ${p}`),
-    ];
+    const details = ["Added:", ...patterns.map((p) => `  ${pc.green("+")} ${p}`)];
     log.message(details.join("\n"));
     outro("Updated .ziku/modules.jsonc");
   },

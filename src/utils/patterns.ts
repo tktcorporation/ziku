@@ -11,11 +11,7 @@ export interface FlatPatterns {
 /**
  * パターンにマッチするファイル一覧を取得
  */
-export function resolvePatterns(
-  baseDir: string,
-  patterns: string[],
-  ignore?: string[],
-): string[] {
+export function resolvePatterns(baseDir: string, patterns: string[], ignore?: string[]): string[] {
   const files = globSync(patterns, {
     cwd: baseDir,
     dot: true,

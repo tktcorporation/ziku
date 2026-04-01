@@ -1,11 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { defineCommand } from "citty";
 import { join, resolve } from "pathe";
-import {
-  getModulesFilePath,
-  loadTemplateModulesFile,
-  modulesFileExists,
-} from "../modules/index";
+import { getModulesFilePath, loadTemplateModulesFile, modulesFileExists } from "../modules/index";
 import { MODULES_SCHEMA_URL } from "../modules/loader";
 import type {
   Answers,
@@ -227,9 +223,7 @@ export const initCommand = defineCommand({
       const allResults: FileOperationResult[] = [...templateResults];
 
       // devcontainer.env.example を戦略に従って作成
-      const hasDevcontainer = flatPatterns.include.some((p) =>
-        p.startsWith(".devcontainer/"),
-      );
+      const hasDevcontainer = flatPatterns.include.some((p) => p.startsWith(".devcontainer/"));
       if (hasDevcontainer) {
         const envResult = await createEnvExample(targetDir, effectiveStrategy);
         allResults.push(envResult);

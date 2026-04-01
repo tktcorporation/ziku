@@ -24,7 +24,11 @@ export function hashContent(content: string): string {
  * @param patterns - glob パターンの配列（例: [".devcontainer/**"]）
  * @returns パス（dir からの相対パス）-> SHA-256 ハッシュのマップ
  */
-export async function hashFiles(dir: string, patterns: string[], exclude?: string[]): Promise<Record<string, string>> {
+export async function hashFiles(
+  dir: string,
+  patterns: string[],
+  exclude?: string[],
+): Promise<Record<string, string>> {
   const files = await glob(patterns, { cwd: dir, dot: true, ignore: exclude ?? [] });
   const hashes: Record<string, string> = {};
   for (const file of files) {

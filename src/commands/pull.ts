@@ -67,10 +67,7 @@ export const pullCommand = defineCommand({
 
     // ローカルの modules.jsonc からフラットパターンを読み込み
     if (!modulesFileExists(targetDir)) {
-      throw new BermError(
-        "No .ziku/modules.jsonc found",
-        "Run `ziku init` to set up the project",
-      );
+      throw new BermError("No .ziku/modules.jsonc found", "Run `ziku init` to set up the project");
     }
 
     const { include, exclude } = await loadPatternsFile(targetDir);

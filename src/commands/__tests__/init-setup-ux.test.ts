@@ -70,8 +70,16 @@ vi.mock("../../ui/prompts", () => ({
   selectMissingTemplateAction: vi.fn(),
   selectTemplateModules: vi.fn(() =>
     Promise.resolve([
-      { name: "DevContainer", description: "VS Code DevContainer setup", include: [".devcontainer/**"] },
-      { name: "GitHub", description: "GitHub Actions workflows and configuration", include: [".github/**"] },
+      {
+        name: "DevContainer",
+        description: "VS Code DevContainer setup",
+        include: [".devcontainer/**"],
+      },
+      {
+        name: "GitHub",
+        description: "GitHub Actions workflows and configuration",
+        include: [".github/**"],
+      },
     ]),
   ),
   inputTemplateSource: vi.fn(),

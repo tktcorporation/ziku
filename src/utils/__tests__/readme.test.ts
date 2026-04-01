@@ -58,9 +58,7 @@ Old content
 Other content`;
 
     const modulesJson = JSON.stringify({
-      modules: [
-        { name: "DevContainer", description: "Docker 開発環境", include: [] },
-      ],
+      modules: [{ name: "DevContainer", description: "Docker 開発環境", include: [] }],
     });
 
     vol.fromJSON({

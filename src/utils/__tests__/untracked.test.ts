@@ -13,10 +13,7 @@ vi.mock("node:fs/promises", async () => {
 });
 
 // 純粋関数をインポート
-import {
-  getDisplayFolderFromPath,
-  getTotalUntrackedCount,
-} from "../untracked";
+import { getDisplayFolderFromPath, getTotalUntrackedCount } from "../untracked";
 
 describe("getDisplayFolderFromPath", () => {
   it("ルート直下のファイルは 'root' を返す", () => {

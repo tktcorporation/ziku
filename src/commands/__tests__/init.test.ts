@@ -54,8 +54,16 @@ vi.mock("../../ui/prompts", () => ({
   selectMissingTemplateAction: vi.fn(),
   selectTemplateModules: vi.fn(() =>
     Promise.resolve([
-      { name: "DevContainer", description: "VS Code DevContainer setup", include: [".devcontainer/**"] },
-      { name: "GitHub", description: "GitHub Actions workflows and configuration", include: [".github/**"] },
+      {
+        name: "DevContainer",
+        description: "VS Code DevContainer setup",
+        include: [".devcontainer/**"],
+      },
+      {
+        name: "GitHub",
+        description: "GitHub Actions workflows and configuration",
+        include: [".github/**"],
+      },
     ]),
   ),
   inputTemplateSource: vi.fn(),
@@ -690,7 +698,11 @@ describe("initCommand", () => {
       });
 
       // hashFiles がテンプレートディレクトリとモジュールパターンで呼ばれる
-      expect(mockHashFiles).toHaveBeenCalledWith("/tmp/template", expect.any(Array), expect.any(Array));
+      expect(mockHashFiles).toHaveBeenCalledWith(
+        "/tmp/template",
+        expect.any(Array),
+        expect.any(Array),
+      );
 
       // writeFileWithStrategy に baseHashes が含まれた JSON が渡される
       const configCall = mockWriteFileWithStrategy.mock.calls.find(
@@ -737,8 +749,16 @@ describe("initCommand", () => {
       mockModulesFileExists.mockReturnValueOnce(false);
       // ユーザーが DevContainer と GitHub を選択
       mockSelectTemplateModules.mockResolvedValueOnce([
-        { name: "DevContainer", description: "VS Code DevContainer setup", include: [".devcontainer/**"] },
-        { name: "GitHub", description: "GitHub Actions workflows and configuration", include: [".github/**"] },
+        {
+          name: "DevContainer",
+          description: "VS Code DevContainer setup",
+          include: [".devcontainer/**"],
+        },
+        {
+          name: "GitHub",
+          description: "GitHub Actions workflows and configuration",
+          include: [".github/**"],
+        },
       ]);
 
       await (initCommand.run as any)({

@@ -97,10 +97,7 @@ describe("track command - core logic", () => {
         2,
       );
 
-      const result = addIncludePattern(rawContent, [
-        ".cloud/rules/*.md",
-        ".cloud/config.json",
-      ]);
+      const result = addIncludePattern(rawContent, [".cloud/rules/*.md", ".cloud/config.json"]);
 
       const parsed = JSON.parse(result);
       expect(parsed.include).toContain(".mcp.json");
@@ -126,9 +123,7 @@ describe("track command - core logic", () => {
       });
 
       const { rawContent } = await loadPatternsFile("/project");
-      const updated = addIncludePattern(rawContent, [
-        ".cloud/rules/*.md",
-      ]);
+      const updated = addIncludePattern(rawContent, [".cloud/rules/*.md"]);
       await saveModulesFile("/project", updated);
 
       const saved = vol.readFileSync("/project/.ziku/modules.jsonc", "utf8") as string;

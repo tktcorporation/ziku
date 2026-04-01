@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  mergePatterns,
-  matchesPatterns,
-} from "../patterns";
+import { mergePatterns, matchesPatterns } from "../patterns";
 
 describe("mergePatterns", () => {
   it("複数の配列をマージする", () => {

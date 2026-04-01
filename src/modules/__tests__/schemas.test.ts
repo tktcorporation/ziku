@@ -201,7 +201,9 @@ describe("configSchema", () => {
 describe("answersSchema", () => {
   it("有効な回答を受け入れる", () => {
     const answers = {
-      selectedModules: [{ name: "DevContainer", description: "Test", include: [".devcontainer/**"] }],
+      selectedModules: [
+        { name: "DevContainer", description: "Test", include: [".devcontainer/**"] },
+      ],
       overwriteStrategy: "overwrite",
     };
     expect(answersSchema.parse(answers)).toEqual(answers);

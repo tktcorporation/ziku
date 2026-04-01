@@ -4,7 +4,12 @@ import { defineCommand } from "citty";
 import { downloadTemplate } from "giget";
 import { join, resolve } from "pathe";
 import { BermError } from "../errors";
-import { addIncludePattern, loadPatternsFile, modulesFileExists, saveModulesFile } from "../modules";
+import {
+  addIncludePattern,
+  loadPatternsFile,
+  modulesFileExists,
+  saveModulesFile,
+} from "../modules";
 import type { DevEnvConfig } from "../modules/schemas";
 import { configSchema } from "../modules/schemas";
 import {
@@ -57,10 +62,7 @@ const README_PATH = "README.md";
  * ローカルの include パターンとテンプレートのフラット化パターンを比較し、
  * ローカルにのみ存在するパターンを検出する。
  */
-function detectLocalPatternAdditions(
-  localInclude: string[],
-  templateInclude: string[],
-): string[] {
+function detectLocalPatternAdditions(localInclude: string[], templateInclude: string[]): string[] {
   const templateSet = new Set(templateInclude);
   return localInclude.filter((p) => !templateSet.has(p));
 }
@@ -133,10 +135,7 @@ export const pushCommand = defineCommand({
 
     // ローカルの modules.jsonc からフラットパターンを読み込み
     if (!modulesFileExists(targetDir)) {
-      throw new BermError(
-        "No .ziku/modules.jsonc found",
-        "Run `ziku init` to set up the project",
-      );
+      throw new BermError("No .ziku/modules.jsonc found", "Run `ziku init` to set up the project");
     }
 
     const localPatterns = await loadPatternsFile(targetDir);
@@ -168,10 +167,15 @@ export const pushCommand = defineCommand({
 
       if (modulesFileExists(templateDir)) {
         const templatePatterns = await loadPatternsFile(templateDir);
-        const newPatterns = detectLocalPatternAdditions(localPatterns.include, templatePatterns.include);
+        const newPatterns = detectLocalPatternAdditions(
+          localPatterns.include,
+          templatePatterns.include,
+        );
 
         if (newPatterns.length > 0) {
-          log.info(`Detected ${newPatterns.length} new pattern(s) from local: ${newPatterns.join(", ")}`);
+          log.info(
+            `Detected ${newPatterns.length} new pattern(s) from local: ${newPatterns.join(", ")}`,
+          );
           // テンプレートの modules.jsonc に新パターンを追加
           const { loadPatternsFile: loadRaw } = await import("../modules/loader");
           const templateRaw = await loadRaw(templateDir);
