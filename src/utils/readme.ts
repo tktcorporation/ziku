@@ -64,11 +64,10 @@ function generateFilesSection(modules: TemplateModule[]): string {
   lines.push("選択したモジュールに応じて以下のファイルが生成されます：\n");
 
   for (const mod of modules) {
-    const dirName = mod.id === "." ? "ルート" : `\`${mod.id}/\``;
-    lines.push(`### ${dirName}\n`);
+    lines.push(`### ${mod.name}\n`);
     lines.push(`${mod.description}\n`);
 
-    for (const pattern of mod.patterns) {
+    for (const pattern of mod.include) {
       const displayPattern = pattern.includes("*") ? `\`${pattern}\` (パターン)` : `\`${pattern}\``;
       lines.push(`- ${displayPattern}`);
     }

@@ -2,9 +2,8 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { defineCommand } from "citty";
 import { join, resolve } from "pathe";
 import {
-  getModuleById,
+  getAllIncludePatterns,
   getModulesFilePath,
-  getPatternsByModuleIds,
   loadModulesFile,
   modulesFileExists,
 } from "../modules/index";
@@ -35,11 +34,11 @@ import {
 import { hashFiles } from "../utils/hash";
 import {
   buildTemplateSource,
-  copyFile,
   downloadTemplateToTemp,
   fetchTemplates,
   writeFileWithStrategy,
 } from "../utils/template";
+import { getModulePatterns } from "../utils/patterns";
 import { intro, log, logFileResults, outro, pc, withSpinner } from "../ui/renderer";
 
 // ビルド時に置換される定数
@@ -72,7 +71,7 @@ export const initCommand = defineCommand({
     modules: {
       type: "string",
       alias: "m",
-      description: "Comma-separated module IDs to apply (non-interactive)",
+      description: "Comma-separated module names to apply (non-interactive)",
     },
     "overwrite-strategy": {
       type: "string",
@@ -146,20 +145,20 @@ export const initCommand = defineCommand({
 
       if (args.yes || hasModulesArg) {
         // --yes: 全モジュール選択、--modules: 指定モジュール選択
-        let selectedModules: string[];
+        let selectedModules: TemplateModule[];
         if (hasModulesArg) {
-          const requestedIds = (args.modules as string).split(",").map((s) => s.trim());
-          const validIds = moduleList.map((m) => m.id);
-          const invalidIds = requestedIds.filter((id) => !validIds.includes(id));
-          if (invalidIds.length > 0) {
+          const requestedNames = (args.modules as string).split(",").map((s) => s.trim());
+          const validNames = moduleList.map((m) => m.name);
+          const invalidNames = requestedNames.filter((name) => !validNames.includes(name));
+          if (invalidNames.length > 0) {
             throw new BermError(
-              `Unknown module(s): ${invalidIds.join(", ")}`,
-              `Available modules: ${validIds.join(", ")}`,
+              `Unknown module(s): ${invalidNames.join(", ")}`,
+              `Available modules: ${validNames.join(", ")}`,
             );
           }
-          selectedModules = requestedIds;
+          selectedModules = moduleList.filter((m) => requestedNames.includes(m.name));
         } else {
-          selectedModules = moduleList.map((m) => m.id);
+          selectedModules = [...moduleList];
         }
 
         // --overwrite-strategy: 指定戦略、なければ overwrite
@@ -176,7 +175,7 @@ export const initCommand = defineCommand({
         }
 
         answers = {
-          modules: selectedModules,
+          selectedModules,
           overwriteStrategy,
         };
         log.info(`Selected ${pc.cyan(selectedModules.length.toString())} modules`);
@@ -191,16 +190,16 @@ export const initCommand = defineCommand({
         }
         const selectedModules = await selectModules(moduleList);
         const overwriteStrategy = strategy;
-        answers = { modules: selectedModules, overwriteStrategy };
+        answers = { selectedModules, overwriteStrategy };
       } else {
         const selectedModules = await selectModules(moduleList);
         // .ziku.json が既に存在する場合は再実行と判断し、skip をデフォルトに推奨する
         const configExists = existsSync(resolve(targetDir, ".ziku.json"));
         const overwriteStrategy = await selectOverwriteStrategy({ isReinit: configExists });
-        answers = { modules: selectedModules, overwriteStrategy };
+        answers = { selectedModules, overwriteStrategy };
       }
 
-      if (answers.modules.length === 0) {
+      if (answers.selectedModules.length === 0) {
         log.warn("No modules selected");
         return;
       }
@@ -215,33 +214,39 @@ export const initCommand = defineCommand({
       // テンプレート取得・適用（サイレントモード - 後でまとめて表示）
       const templateResults = await fetchTemplates({
         targetDir,
-        modules: answers.modules,
         overwriteStrategy: effectiveStrategy,
-        moduleList,
+        moduleList: answers.selectedModules,
         templateDir,
       });
 
       const allResults: FileOperationResult[] = [...templateResults];
 
       // devcontainer.env.example を戦略に従って作成
-      if (answers.modules.includes("devcontainer")) {
+      const hasDevcontainer = answers.selectedModules.some((m) =>
+        m.include.some((p) => p.startsWith(".devcontainer/")),
+      );
+      if (hasDevcontainer) {
         const envResult = await createEnvExample(targetDir, effectiveStrategy);
         allResults.push(envResult);
       }
 
-      // modules.jsonc をテンプレートからコピー（track コマンドが必要とする）
-      const modulesJsoncResult = await copyModulesJsonc(templateDir, targetDir, effectiveStrategy);
+      // 選択されたモジュールのみで modules.jsonc を生成してローカルに保存
+      const modulesJsoncResult = await writeSelectedModulesJsonc(
+        targetDir,
+        answers.selectedModules,
+        effectiveStrategy,
+      );
       allResults.push(modulesJsoncResult);
 
       // テンプレートファイルのハッシュを計算（pull 時の差分検出用）
-      const patterns = getPatternsByModuleIds(answers.modules, moduleList);
-      const baseHashes = await hashFiles(templateDir, patterns);
+      const { include, exclude } = getModulePatterns(answers.selectedModules);
+      const baseHashes = await hashFiles(templateDir, include, exclude);
 
       // テンプレートリポジトリの最新コミット SHA を取得（3-way マージのベース用）
       const baseRef = await resolveLatestCommitSha(sourceOwner, sourceRepo);
 
       // 設定ファイル生成（常に更新）
-      const configResult = await createDevEnvConfig(targetDir, answers.modules, {
+      const configResult = await createDevEnvConfig(targetDir, {
         owner: sourceOwner,
         repo: sourceRepo,
         baseHashes,
@@ -259,7 +264,7 @@ export const initCommand = defineCommand({
       }
 
       // モジュール別の説明を表示
-      displayModuleDescriptions(answers.modules, allResults, moduleList);
+      displayModuleDescriptions(answers.selectedModules, allResults);
 
       // 成功メッセージと次のステップ
       outro(
@@ -308,13 +313,9 @@ async function createEnvExample(
 
 /**
  * 設定ファイル (.ziku.json) を生成する。常に上書き。
- *
- * 背景: baseHashes を記録することで、pull 時に「ユーザーがローカルで変更したか」を
- * ファイル全体のコピーを保持せずに判定できる。
  */
 async function createDevEnvConfig(
   targetDir: string,
-  selectedModules: string[],
   source: {
     owner: string;
     repo: string;
@@ -325,7 +326,6 @@ async function createDevEnvConfig(
   const config: Record<string, unknown> = {
     version: "0.1.0",
     installedAt: new Date().toISOString(),
-    modules: selectedModules,
     source: { owner: source.owner, repo: source.repo },
   };
 
@@ -347,34 +347,30 @@ async function createDevEnvConfig(
 }
 
 /**
- * テンプレートから modules.jsonc をコピー
+ * 選択されたモジュールのみで modules.jsonc を生成してローカルに書き出す
  */
-async function copyModulesJsonc(
-  templateDir: string,
+async function writeSelectedModulesJsonc(
   targetDir: string,
+  selectedModules: TemplateModule[],
   strategy: OverwriteStrategy,
 ): Promise<FileOperationResult> {
   const modulesRelPath = ".ziku/modules.jsonc";
-  const srcPath = join(templateDir, modulesRelPath);
-  const destPath = getModulesFilePath(targetDir);
+  const content = generateModulesJsoncFromModules(selectedModules);
 
-  if (!existsSync(srcPath)) {
-    return { action: "skipped", path: modulesRelPath };
-  }
-
-  return copyFile(srcPath, destPath, strategy, modulesRelPath);
+  return writeFileWithStrategy({
+    destPath: getModulesFilePath(targetDir),
+    content,
+    strategy,
+    relativePath: modulesRelPath,
+  });
 }
 
 /**
  * モジュール別の説明を表示
- *
- * 背景: 選択されたモジュールが実際に変更を加えた場合のみ、
- * 各モジュールの名前と説明を一覧表示する。ユーザーが何がインストールされたかを確認できる。
  */
 function displayModuleDescriptions(
-  selectedModules: string[],
+  selectedModules: TemplateModule[],
   fileResults: FileOperationResult[],
-  moduleList: TemplateModule[],
 ): void {
   const hasChanges = fileResults.some(
     (r) => r.action === "copied" || r.action === "created" || r.action === "overwritten",
@@ -387,14 +383,11 @@ function displayModuleDescriptions(
   log.info(pc.bold("Installed modules:"));
 
   const lines: string[] = [];
-  for (const moduleId of selectedModules) {
-    const mod = getModuleById(moduleId, moduleList);
-    if (mod) {
-      const description = mod.setupDescription || mod.description;
-      lines.push(`  ${pc.cyan("\u25C6")} ${pc.bold(mod.name)}`);
-      if (description) {
-        lines.push(`    ${pc.dim(description)}`);
-      }
+  for (const mod of selectedModules) {
+    const description = mod.setupDescription || mod.description;
+    lines.push(`  ${pc.cyan("\u25C6")} ${pc.bold(mod.name)}`);
+    if (description) {
+      lines.push(`    ${pc.dim(description)}`);
     }
   }
   if (lines.length > 0) {
@@ -404,13 +397,6 @@ function displayModuleDescriptions(
 
 /**
  * テンプレートソースを解決する（存在チェック付き）。
- *
- * フロー:
- *   1. --from owner/repo → そのまま使用、存在しなければエラー
- *   2. git remote origin → {owner}/.github を候補とし、存在チェック
- *   3. 候補が見つからない / 存在しない → ユーザーに入力・作成を促す
- *
- * デフォルトテンプレートへのフォールバックは行わない。
  */
 async function resolveTemplateSourceWithCheck(
   from: string | undefined,
@@ -520,9 +506,6 @@ async function handleMissingTemplate(
 
 /**
  * テンプレートに .ziku/modules.jsonc がない場合のハンドリング
- *
- * modules.jsonc はテンプレートリポジトリに必須。存在しない場合は
- * PR で追加するか、エラーにする。ローカルフォールバックは行わない。
  */
 async function handleMissingDevenv(
   owner: string,
@@ -553,8 +536,8 @@ async function handleMissingDevenv(
     );
   }
 
-  const selectedIds = await selectTemplateModules(MODULE_PRESETS);
-  const modulesContent = generateInitialModulesJsonc(selectedIds);
+  const selectedModules = await selectTemplateModules(MODULE_PRESETS);
+  const modulesContent = generateModulesJsoncFromModules(selectedModules);
   log.step(`Creating PR to add .ziku/modules.jsonc to ${pc.cyan(`${owner}/${repo}`)}...`);
   const result = await createDevenvScaffoldPR(token, owner, repo, modulesContent);
   log.success(`Created PR: ${pc.cyan(result.url)}`);
@@ -564,75 +547,57 @@ async function handleMissingDevenv(
 
 /**
  * 初期モジュールのプリセットカタログ。
- *
- * テンプレートリポジトリのスキャフォールド時にユーザーが選択可能なモジュール一覧。
- * PR 作成パスとローカル生成パスの両方で共通して使用される。
  */
 export const MODULE_PRESETS: TemplateModule[] = [
   {
-    id: ".devcontainer",
     name: "DevContainer",
     description: "VS Code DevContainer setup",
-    patterns: [".devcontainer/**"],
+    include: [".devcontainer/**"],
   },
   {
-    id: ".github",
     name: "GitHub",
     description: "GitHub Actions workflows and configuration",
-    patterns: [".github/**"],
+    include: [".github/**"],
   },
   {
-    id: ".vscode",
     name: "VS Code",
     description: "VS Code workspace settings and extensions",
-    patterns: [".vscode/**"],
+    include: [".vscode/**"],
   },
   {
-    id: ".claude",
     name: "Claude",
     description: "Claude Code project settings",
-    patterns: [".claude/**"],
+    include: [".claude/**"],
   },
   {
-    id: ".editorconfig",
-    name: "EditorConfig",
-    description: "Editor formatting rules",
-    patterns: [".editorconfig"],
-  },
-  {
-    id: ".mcp.json",
-    name: "MCP",
-    description: "Model Context Protocol configuration",
-    patterns: [".mcp.json"],
-  },
-  {
-    id: ".mise.toml",
-    name: "mise",
-    description: "mise (dev tool version manager) configuration",
-    patterns: [".mise.toml"],
+    name: "Root Config",
+    description: "Root-level configuration files (EditorConfig, MCP, mise)",
+    include: [".editorconfig", ".mcp.json", ".mise.toml"],
   },
 ];
 
 /**
- * 初期の modules.jsonc コンテンツを生成する（スキャフォールド用）
- *
- * テンプレートリポジトリに .ziku/modules.jsonc を追加する際に使用。
- * MODULE_PRESETS から選択されたモジュールのみを含む。
- *
- * @param selectedIds - 含めるモジュール ID の配列。未指定時は全プリセットを含む。
+ * モジュール定義から modules.jsonc コンテンツを生成する
  */
-export function generateInitialModulesJsonc(selectedIds?: string[]): string {
-  const modules = selectedIds
-    ? MODULE_PRESETS.filter((m) => selectedIds.includes(m.id))
+export function generateInitialModulesJsonc(selectedNames?: string[]): string {
+  const modules = selectedNames
+    ? MODULE_PRESETS.filter((m) => selectedNames.includes(m.name))
     : MODULE_PRESETS;
 
+  return generateModulesJsoncFromModules(modules);
+}
+
+/**
+ * モジュール配列から modules.jsonc コンテンツを生成する
+ */
+function generateModulesJsoncFromModules(modules: TemplateModule[]): string {
   const content = {
     $schema: MODULES_SCHEMA_URL,
     modules: modules.map((m) => ({
-      id: m.id,
       name: m.name,
       description: m.description,
-      patterns: m.patterns,
+      include: m.include,
+      ...(m.exclude && m.exclude.length > 0 ? { exclude: m.exclude } : {}),
     })),
   };
   return JSON.stringify(content, null, 2);
@@ -640,9 +605,6 @@ export function generateInitialModulesJsonc(selectedIds?: string[]): string {
 
 /**
  * 現在のリポジトリがテンプレートリポジトリ自体かどうかを判定する。
- *
- * 背景: テンプレートリポジトリ内で `ziku init` を実行した場合、
- * GitHub からダウンロードする代わりにローカルで `.ziku/modules.jsonc` を生成する。
  */
 export function isCurrentRepoTemplate(
   targetDir: string,
@@ -659,8 +621,6 @@ export function isCurrentRepoTemplate(
 
 /**
  * テンプレートリポジトリ自体で init を実行した場合のハンドリング。
- *
- * `.ziku/modules.jsonc` がなければ生成し、既にあれば通知する。
  */
 async function handleTemplateRepoInit(targetDir: string, nonInteractive: boolean): Promise<void> {
   log.info(`Detected: running inside the template repository`);
@@ -673,12 +633,14 @@ async function handleTemplateRepoInit(targetDir: string, nonInteractive: boolean
 
   log.step("Generating .ziku/modules.jsonc...");
 
-  let selectedIds: string[] | undefined;
+  let selectedModules: TemplateModule[];
   if (!nonInteractive) {
-    selectedIds = await selectTemplateModules(MODULE_PRESETS);
+    selectedModules = await selectTemplateModules(MODULE_PRESETS);
+  } else {
+    selectedModules = MODULE_PRESETS;
   }
 
-  const modulesContent = generateInitialModulesJsonc(selectedIds);
+  const modulesContent = generateModulesJsoncFromModules(selectedModules);
   const modulesDir = join(targetDir, ".ziku");
   if (!existsSync(modulesDir)) {
     mkdirSync(modulesDir, { recursive: true });
@@ -719,11 +681,6 @@ function parseFromArg(from: string): { sourceOwner: string; sourceRepo: string }
 
 /**
  * テンプレートソースを解決する（純粋な解決ロジック、存在チェックなし）。
- *
- * 優先順位:
- *   1. --from owner/repo が指定されていればそのまま使用
- *   2. git remote origin から owner を検出 → {owner}/.github
- *   3. 解決不可（null を返す）
  */
 export function resolveTemplateSource(from: string | undefined): {
   sourceOwner: string;

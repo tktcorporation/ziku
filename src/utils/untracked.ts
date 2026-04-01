@@ -3,14 +3,12 @@ import { readFile } from "node:fs/promises";
 import ignore, { type Ignore } from "ignore";
 import { join } from "pathe";
 import { globSync } from "tinyglobby";
-import { getModuleById } from "../modules";
-import type { DevEnvConfig, TemplateModule } from "../modules/schemas";
-import { getEffectivePatterns, resolvePatterns } from "./patterns";
+import type { TemplateModule } from "../modules/schemas";
+import { resolveModuleFiles } from "./patterns";
 
 export interface UntrackedFile {
   path: string;
   folder: string;
-  moduleId: string; // modules.jsonc にパターンを追加する際に必要
 }
 
 export interface UntrackedFilesByFolder {
@@ -19,39 +17,38 @@ export interface UntrackedFilesByFolder {
 }
 
 /**
- * ファイルパスからモジュール ID を取得
- * モジュール ID = ディレクトリパス（ルートは "."）
- *
- * 例:
- *   ".devcontainer/file.json" → ".devcontainer"
- *   ".mcp.json" → "."
- *   ".github/workflows/ci.yml" → ".github"
+ * ファイルパスから表示用フォルダ名を取得
  */
-export function getModuleIdFromPath(filePath: string): string {
+export function getDisplayFolderFromPath(filePath: string): string {
   const parts = filePath.split("/");
   if (parts.length === 1) {
-    return "."; // ルート直下のファイル
+    return "root";
   }
-  return parts[0]; // 最初のディレクトリ
+  return parts[0];
 }
 
 /**
- * 後方互換性のため: フォルダ名を表示用に取得
- * "." は "root" として表示
+ * モジュールの include パターンからベースディレクトリを抽出
  */
-export function getDisplayFolder(moduleId: string): string {
-  return moduleId === "." ? "root" : moduleId;
-}
+function getBaseDirsFromModules(modules: TemplateModule[]): {
+  dirs: string[];
+  hasRootPatterns: boolean;
+} {
+  const dirs = new Set<string>();
+  let hasRootPatterns = false;
 
-/**
- * モジュールのベースディレクトリを取得
- * モジュール ID がそのままディレクトリパスになる
- */
-export function getModuleBaseDir(moduleId: string): string | null {
-  if (moduleId === ".") {
-    return null; // ルートはディレクトリではない
+  for (const mod of modules) {
+    for (const pattern of mod.include) {
+      const firstSegment = pattern.split("/")[0];
+      if (pattern.includes("/") && firstSegment) {
+        dirs.add(firstSegment);
+      } else {
+        hasRootPatterns = true;
+      }
+    }
   }
-  return moduleId;
+
+  return { dirs: [...dirs], hasRootPatterns };
 }
 
 /**
@@ -124,40 +121,15 @@ export async function loadAllGitignores(baseDir: string, dirs: string[]): Promis
  */
 export async function detectUntrackedFiles(options: {
   targetDir: string;
-  moduleIds: string[];
-  config?: DevEnvConfig;
   moduleList: TemplateModule[];
 }): Promise<UntrackedFilesByFolder[]> {
-  const { targetDir, moduleIds, config, moduleList } = options;
+  const { targetDir, moduleList } = options;
 
-  // インストール済みモジュール ID のセット
-  const installedModuleIds = new Set(moduleIds);
+  // 全モジュールのパターンで tracked files を算出
+  const allTrackedFiles = new Set(resolveModuleFiles(targetDir, moduleList));
 
-  // 全モジュールのベースディレクトリを収集（"." 以外）
-  const allBaseDirs: string[] = [];
-  // 全モジュールのホワイトリスト済みファイル
-  const allTrackedFiles = new Set<string>();
-  // ルートモジュール（"."）がインストールされているか
-  let hasRootModule = false;
-
-  for (const moduleId of moduleIds) {
-    const mod = getModuleById(moduleId, moduleList);
-    if (!mod) continue;
-
-    const baseDir = getModuleBaseDir(moduleId);
-    if (baseDir) {
-      allBaseDirs.push(baseDir);
-    } else {
-      hasRootModule = true;
-    }
-
-    // ホワイトリスト済みファイルを収集
-    const effectivePatterns = getEffectivePatterns(moduleId, mod.patterns, config);
-    const trackedFiles = resolvePatterns(targetDir, effectivePatterns);
-    for (const file of trackedFiles) {
-      allTrackedFiles.add(file);
-    }
-  }
+  // ベースディレクトリを抽出
+  const { dirs: allBaseDirs, hasRootPatterns } = getBaseDirsFromModules(moduleList);
 
   // gitignore を読み込み
   const gitignore = await loadAllGitignores(targetDir, allBaseDirs);
@@ -166,8 +138,8 @@ export async function detectUntrackedFiles(options: {
   const allDirFiles = getAllFilesInDirs(targetDir, allBaseDirs);
   const filteredDirFiles = gitignore.filter(allDirFiles);
 
-  // ルート直下のファイルを取得（ルートモジュールがインストールされている場合のみ）
-  const filteredRootFiles = hasRootModule ? gitignore.filter(getRootDotFiles(targetDir)) : [];
+  // ルート直下のファイルを取得（ルートパターンがある場合のみ）
+  const filteredRootFiles = hasRootPatterns ? gitignore.filter(getRootDotFiles(targetDir)) : [];
 
   // 全ファイルをマージ（重複なし）
   const allFiles = new Set([...filteredDirFiles, ...filteredRootFiles]);
@@ -179,17 +151,18 @@ export async function detectUntrackedFiles(options: {
     // ホワイトリストに含まれていればスキップ
     if (allTrackedFiles.has(filePath)) continue;
 
-    // ファイルパスからモジュール ID を導出
-    const moduleId = getModuleIdFromPath(filePath);
+    const displayFolder = getDisplayFolderFromPath(filePath);
 
-    // インストール済みモジュールに属さないファイルはスキップ
-    if (!installedModuleIds.has(moduleId)) continue;
+    // このファイルがモジュールのスコープ内かチェック
+    // (モジュールの include パターンのベースディレクトリ内、またはルートパターンがある場合のルートファイル)
+    const isInScope =
+      allBaseDirs.some((dir) => filePath.startsWith(`${dir}/`)) ||
+      (hasRootPatterns && !filePath.includes("/"));
+    if (!isInScope) continue;
 
-    const displayFolder = getDisplayFolder(moduleId);
     const file: UntrackedFile = {
       path: filePath,
       folder: displayFolder,
-      moduleId,
     };
 
     const existing = filesByFolder.get(displayFolder) || [];

@@ -48,13 +48,13 @@ export async function loadModulesFile(
 }
 
 /**
- * モジュール ID からモジュールを取得
+ * モジュール name からモジュールを取得
  */
-export function getModuleByIdFromList(
+export function getModuleByNameFromList(
   modules: TemplateModule[],
-  id: string,
+  name: string,
 ): TemplateModule | undefined {
-  return modules.find((m) => m.id === id);
+  return modules.find((m) => m.name === name);
 }
 
 /**
@@ -63,19 +63,19 @@ export function getModuleByIdFromList(
  */
 export function addPatternToModulesFile(
   rawContent: string,
-  moduleId: string,
+  moduleName: string,
   patterns: string[],
 ): string {
   // 現在のモジュールリストを取得
   const parsed = parse(rawContent) as ModulesFile;
-  const moduleIndex = parsed.modules.findIndex((m) => m.id === moduleId);
+  const moduleIndex = parsed.modules.findIndex((m) => m.name === moduleName);
 
   if (moduleIndex === -1) {
-    throw new Error(`モジュール ${moduleId} が見つかりません`);
+    throw new Error(`モジュール ${moduleName} が見つかりません`);
   }
 
   // 既存のパターンと新規パターンをマージ
-  const existingPatterns = parsed.modules[moduleIndex].patterns;
+  const existingPatterns = parsed.modules[moduleIndex].include;
   const newPatterns = patterns.filter((p) => !existingPatterns.includes(p));
 
   if (newPatterns.length === 0) {
@@ -85,7 +85,7 @@ export function addPatternToModulesFile(
   const updatedPatterns = [...existingPatterns, ...newPatterns];
 
   // JSONC を編集（コメントを保持）
-  const edits = modify(rawContent, ["modules", moduleIndex, "patterns"], updatedPatterns, {
+  const edits = modify(rawContent, ["modules", moduleIndex, "include"], updatedPatterns, {
     formattingOptions: { tabSize: 2, insertSpaces: true },
   });
 
@@ -98,35 +98,26 @@ export function addPatternToModulesFile(
  */
 export function addPatternToModulesFileWithCreate(
   rawContent: string,
-  moduleId: string,
+  moduleName: string,
   patterns: string[],
-  moduleOptions?: { name?: string; description?: string },
+  moduleOptions?: { description?: string },
 ): string {
   const parsed = parse(rawContent) as ModulesFile;
-  const moduleIndex = parsed.modules.findIndex((m) => m.id === moduleId);
+  const moduleIndex = parsed.modules.findIndex((m) => m.name === moduleName);
 
   if (moduleIndex !== -1) {
     // 既存モジュールにパターンを追加
-    return addPatternToModulesFile(rawContent, moduleId, patterns);
+    return addPatternToModulesFile(rawContent, moduleName, patterns);
   }
 
   // 新しいモジュールを作成
-  const displayName =
-    moduleOptions?.name ||
-    (moduleId === "."
-      ? "Root"
-      : moduleId
-          .replace(/^\./, "")
-          .replace(/[-_]/g, " ")
-          .replace(/\b\w/g, (c) => c.toUpperCase()));
   const description =
-    moduleOptions?.description || `Files in ${moduleId === "." ? "root" : moduleId} directory`;
+    moduleOptions?.description || `Files matching ${patterns.join(", ")}`;
 
   const newModule: TemplateModule = {
-    id: moduleId,
-    name: displayName,
+    name: moduleName,
     description,
-    patterns,
+    include: patterns,
   };
 
   const newModules = [...parsed.modules, newModule];

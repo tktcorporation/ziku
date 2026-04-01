@@ -37,13 +37,13 @@ export const fileOperationResultSchema = z.object({
 });
 export type FileOperationResult = z.infer<typeof fileOperationResultSchema>;
 
-// テンプレートモジュール（新: patterns 形式）
+// テンプレートモジュール（include/exclude パターン形式）
 export const moduleSchema = z.object({
-  id: z.string(),
   name: z.string(),
   description: z.string(),
   setupDescription: z.string().optional(), // セットアップ後の説明
-  patterns: z.array(z.string()), // glob パターン配列（ホワイトリスト形式）
+  include: z.array(z.string()), // 同期対象の glob パターン配列
+  exclude: z.array(z.string()).optional(), // 除外 glob パターン配列
 });
 
 export type TemplateModule = z.infer<typeof moduleSchema>;
@@ -52,13 +52,11 @@ export type TemplateModule = z.infer<typeof moduleSchema>;
 export const configSchema = z.object({
   version: z.string(),
   installedAt: z.string().datetime({ offset: true }),
-  modules: z.array(z.string()),
   source: z.object({
     owner: z.string(),
     repo: z.string(),
     ref: z.string().optional(),
   }),
-  excludePatterns: z.array(z.string()).optional(), // グローバル除外パターン
   /**
    * init/pull 時点のテンプレートリポジトリのコミット SHA。
    * pull 時に baseRef〜最新間の差分を取得し、3-way merge のベースとして使用する。
@@ -93,7 +91,7 @@ export const configSchema = z.object({
 export type DevEnvConfig = z.infer<typeof configSchema>;
 
 export const answersSchema = z.object({
-  modules: z.array(z.string()).min(1, "少なくとも1つのモジュールを選択してください"),
+  selectedModules: z.array(moduleSchema).min(1, "少なくとも1つのモジュールを選択してください"),
   overwriteStrategy: overwriteStrategySchema,
 });
 

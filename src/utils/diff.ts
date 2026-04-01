@@ -3,9 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createPatch } from "diff";
 import { join } from "pathe";
 import pc from "picocolors";
-import { getModuleById } from "../modules";
 import type {
-  DevEnvConfig,
   DiffResult,
   DiffType,
   FileDiff,
@@ -13,13 +11,11 @@ import type {
 } from "../modules/schemas";
 import { log } from "../ui/renderer";
 import { filterByGitignore, loadMergedGitignore } from "./gitignore";
-import { getEffectivePatterns, resolvePatterns } from "./patterns";
+import { getModulePatterns, resolvePatterns } from "./patterns";
 
 export interface DiffOptions {
   targetDir: string;
   templateDir: string;
-  moduleIds: string[];
-  config?: DevEnvConfig;
   moduleList: TemplateModule[];
 }
 
@@ -27,7 +23,7 @@ export interface DiffOptions {
  * ローカルとテンプレート間の差分を検出
  */
 export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
-  const { targetDir, templateDir, moduleIds, config, moduleList } = options;
+  const { targetDir, templateDir, moduleList } = options;
 
   const files: FileDiff[] = [];
   let added = 0;
@@ -39,24 +35,17 @@ export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
   // クレデンシャル等の機密情報の誤流出を防止
   const gitignore = await loadMergedGitignore([targetDir, templateDir]);
 
-  for (const moduleId of moduleIds) {
-    const mod = getModuleById(moduleId, moduleList);
-    if (!mod) {
-      log.warn(`Module "${pc.cyan(moduleId)}" not found`);
-      continue;
-    }
+  // 全モジュールの include/exclude をフラットに取得
+  const { include, exclude } = getModulePatterns(moduleList);
 
-    // 有効なパターンを取得
-    const patterns = getEffectivePatterns(moduleId, mod.patterns, config);
+  // テンプレート側のファイル一覧を取得し、gitignore でフィルタリング
+  const templateFiles = filterByGitignore(resolvePatterns(templateDir, include, exclude), gitignore);
+  // ローカル側のファイル一覧を取得し、gitignore でフィルタリング
+  const localFiles = filterByGitignore(resolvePatterns(targetDir, include, exclude), gitignore);
 
-    // テンプレート側のファイル一覧を取得し、gitignore でフィルタリング
-    const templateFiles = filterByGitignore(resolvePatterns(templateDir, patterns), gitignore);
-    // ローカル側のファイル一覧を取得し、gitignore でフィルタリング
-    const localFiles = filterByGitignore(resolvePatterns(targetDir, patterns), gitignore);
+  const allFiles = new Set([...templateFiles, ...localFiles]);
 
-    const allFiles = new Set([...templateFiles, ...localFiles]);
-
-    for (const filePath of allFiles) {
+  for (const filePath of allFiles) {
       const localPath = join(targetDir, filePath);
       const templatePath = join(templateDir, filePath);
 
@@ -100,7 +89,6 @@ export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
         templateContent,
       });
     }
-  }
 
   return {
     files: files.sort((a, b) => a.path.localeCompare(b.path)),

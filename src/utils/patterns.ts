@@ -1,14 +1,19 @@
 import { globSync } from "tinyglobby";
-import type { DevEnvConfig } from "../modules/schemas";
+import type { TemplateModule } from "../modules/schemas";
 
 /**
  * パターンにマッチするファイル一覧を取得
  */
-export function resolvePatterns(baseDir: string, patterns: string[]): string[] {
+export function resolvePatterns(
+  baseDir: string,
+  patterns: string[],
+  ignore?: string[],
+): string[] {
   const files = globSync(patterns, {
     cwd: baseDir,
     dot: true,
     onlyFiles: true,
+    ignore: ignore ?? [],
   });
   return files.sort();
 }
@@ -56,32 +61,25 @@ export function mergePatterns(...patternArrays: string[][]): string[] {
 }
 
 /**
- * 除外パターンでフィルタリング
+ * モジュールリストから有効パターン（include - exclude）でファイルを解決する
  */
-export function filterByExcludePatterns(files: string[], excludePatterns?: string[]): string[] {
-  if (!excludePatterns || excludePatterns.length === 0) {
-    return files;
-  }
-  return files.filter((file) => !matchesPatterns(file, excludePatterns));
+export function resolveModuleFiles(baseDir: string, modules: TemplateModule[]): string[] {
+  const include = modules.flatMap((m) => m.include);
+  const exclude = modules.flatMap((m) => m.exclude ?? []);
+  return resolvePatterns(baseDir, include, exclude);
 }
 
 /**
- * 設定からモジュールの有効パターンを取得
+ * モジュールリストから include/exclude をフラットに取得
  */
-export function getEffectivePatterns(
-  _moduleId: string,
-  modulePatterns: string[],
-  config?: DevEnvConfig,
-): string[] {
-  let patterns = [...modulePatterns];
-
-  // グローバル除外パターンを適用
-  if (config?.excludePatterns) {
-    const excludePatterns = config.excludePatterns as string[];
-    patterns = patterns.filter((p) => !matchesPatterns(p, excludePatterns));
-  }
-
-  return patterns;
+export function getModulePatterns(modules: TemplateModule[]): {
+  include: string[];
+  exclude: string[];
+} {
+  return {
+    include: modules.flatMap((m) => m.include),
+    exclude: modules.flatMap((m) => m.exclude ?? []),
+  };
 }
 
 /**
@@ -91,13 +89,14 @@ export function compareDirectories(
   localDir: string,
   templateDir: string,
   patterns: string[],
+  ignore?: string[],
 ): {
   localOnly: string[];
   templateOnly: string[];
   both: string[];
 } {
-  const localFiles = new Set(resolvePatterns(localDir, patterns));
-  const templateFiles = new Set(resolvePatterns(templateDir, patterns));
+  const localFiles = new Set(resolvePatterns(localDir, patterns, ignore));
+  const templateFiles = new Set(resolvePatterns(templateDir, patterns, ignore));
 
   const localOnly: string[] = [];
   const templateOnly: string[] = [];

@@ -5,7 +5,7 @@ import { downloadTemplate } from "giget";
 import { join, resolve } from "pathe";
 import { BermError } from "../errors";
 import { loadModulesFile, modulesFileExists } from "../modules";
-import type { DevEnvConfig, TemplateModule } from "../modules/schemas";
+import type { TemplateModule } from "../modules/schemas";
 import { configSchema } from "../modules/schemas";
 import { renderFileDiff } from "../ui/diff-view";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
@@ -51,10 +51,22 @@ export const diffCommand = defineCommand({
       throw new BermError("Invalid .ziku.json format", parseResult.error.message);
     }
 
-    const config: DevEnvConfig = parseResult.data;
+    const config = parseResult.data;
 
-    if (config.modules.length === 0) {
-      log.warn("No modules installed");
+    // modules.jsonc を読み込み（ローカルが source of truth）
+    let moduleList: TemplateModule[];
+    if (modulesFileExists(targetDir)) {
+      const loaded = await loadModulesFile(targetDir);
+      moduleList = loaded.modules;
+    } else {
+      throw new BermError(
+        "No .ziku/modules.jsonc found",
+        "Run `ziku init` to set up the project",
+      );
+    }
+
+    if (moduleList.length === 0) {
+      log.warn("No modules configured");
       return;
     }
 
@@ -73,21 +85,6 @@ export const diffCommand = defineCommand({
         }),
       );
 
-      // modules.jsonc を読み込み
-      let moduleList: TemplateModule[];
-      if (modulesFileExists(templateDir)) {
-        const loaded = await loadModulesFile(templateDir);
-        moduleList = loaded.modules;
-      } else if (modulesFileExists(targetDir)) {
-        const loaded = await loadModulesFile(targetDir);
-        moduleList = loaded.modules;
-      } else {
-        throw new BermError(
-          "No .ziku/modules.jsonc found",
-          "Run `ziku init` to set up the project, or add .ziku/modules.jsonc to the template",
-        );
-      }
-
       // Step 2: 差分を検出
       log.step("Detecting changes...");
 
@@ -95,8 +92,6 @@ export const diffCommand = defineCommand({
         detectDiff({
           targetDir,
           templateDir,
-          moduleIds: config.modules,
-          config,
           moduleList,
         }),
       );
@@ -104,8 +99,6 @@ export const diffCommand = defineCommand({
       // 未トラックファイルを検出
       const untrackedByFolder = await detectUntrackedFiles({
         targetDir,
-        moduleIds: config.modules,
-        config,
         moduleList,
       });
       const untrackedCount = getTotalUntrackedCount(untrackedByFolder);

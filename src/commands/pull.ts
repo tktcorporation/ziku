@@ -18,8 +18,8 @@ import {
   hasConflictMarkers,
   threeWayMerge,
 } from "../utils/merge";
+import { getModulePatterns } from "../utils/patterns";
 import { downloadTemplateToTemp } from "../utils/template";
-import { getEffectivePatterns } from "../utils/patterns";
 
 /**
  * テンプレートの最新更新をローカルに反映するコマンド。
@@ -72,11 +72,6 @@ export const pullCommand = defineCommand({
       return;
     }
 
-    if (config.modules.length === 0) {
-      log.warn("No modules installed");
-      return;
-    }
-
     // Step 2: テンプレートをダウンロード
     log.step("Fetching template...");
 
@@ -85,13 +80,13 @@ export const pullCommand = defineCommand({
     );
 
     try {
-      // modules.jsonc を読み込み
+      // modules.jsonc を読み込み（ローカルが source of truth）
       let moduleList: TemplateModule[];
-      if (modulesFileExists(templateDir)) {
-        const loaded = await loadModulesFile(templateDir);
-        moduleList = loaded.modules;
-      } else if (modulesFileExists(targetDir)) {
+      if (modulesFileExists(targetDir)) {
         const loaded = await loadModulesFile(targetDir);
+        moduleList = loaded.modules;
+      } else if (modulesFileExists(templateDir)) {
+        const loaded = await loadModulesFile(templateDir);
         moduleList = loaded.modules;
       } else {
         throw new BermError(
@@ -100,15 +95,20 @@ export const pullCommand = defineCommand({
         );
       }
 
+      if (moduleList.length === 0) {
+        log.warn("No modules configured");
+        return;
+      }
+
       // Step 3: ハッシュ計算
       log.step("Analyzing changes...");
 
-      // インストール済みモジュールの有効パターンを取得
-      const patterns = getInstalledModulePatterns(config.modules, moduleList, config);
+      // モジュールの include/exclude パターンをフラット化
+      const { include, exclude } = getModulePatterns(moduleList);
 
       const [templateHashes, localHashes] = await Promise.all([
-        hashFiles(templateDir, patterns),
-        hashFiles(targetDir, patterns),
+        hashFiles(templateDir, include, exclude),
+        hashFiles(targetDir, include, exclude),
       ]);
       const baseHashes = config.baseHashes ?? {};
 
@@ -269,12 +269,6 @@ export const pullCommand = defineCommand({
 
 /**
  * `--continue` モードの処理: コンフリクト解決後に baseHashes/baseRef を更新する。
- *
- * 背景: `ziku pull` でコンフリクトが発生した際、ユーザーが手動解決した後に
- * `ziku pull --continue` を実行することで状態更新が完了する。
- * git の `git merge --continue` / `git rebase --continue` パターンを踏襲。
- *
- * 対になる操作: pull.ts の pendingMerge 保存ロジック（コンフリクト発生時）
  */
 async function runContinue(targetDir: string, config: DevEnvConfig): Promise<void> {
   if (!config.pendingMerge) {
@@ -321,40 +315,13 @@ async function runContinue(targetDir: string, config: DevEnvConfig): Promise<voi
 
 /**
  * 1ファイルのマージコンフリクトをユーザーに報告する。
- *
- * 背景: threeWayMerge は hasConflicts: true を返す場合、必ずファイル内に
- * コンフリクトマーカー（<<<<<<< LOCAL / ======= / >>>>>>> TEMPLATE）を挿入する。
- * ユーザーはマーカーを手動で解決し、`ziku pull --continue` で完了する。
  */
 function logMergeConflict(file: string): void {
   log.warn(`Conflict in ${pc.cyan(file)} — manual resolution needed`);
 }
 
 /**
- * インストール済みモジュールの有効パターンを全て取得する。
- *
- * 背景: pull 時にハッシュ計算対象のファイルを特定するため、
- * 各モジュールの patterns に excludePatterns を適用した結果を集約する。
- */
-function getInstalledModulePatterns(
-  moduleIds: string[],
-  moduleList: TemplateModule[],
-  config: DevEnvConfig,
-): string[] {
-  const patterns: string[] = [];
-  for (const moduleId of moduleIds) {
-    const mod = moduleList.find((m) => m.id === moduleId);
-    if (!mod) continue;
-    patterns.push(...getEffectivePatterns(moduleId, mod.patterns, config));
-  }
-  return patterns;
-}
-
-/**
  * pull のサマリーを表示する。
- *
- * 背景: ユーザーが pull の影響範囲を把握できるよう、
- * 分類結果を色分けして一覧表示する。diff.ts の表示スタイルに合わせる。
  */
 function logPullSummary(classification: {
   autoUpdate: string[];

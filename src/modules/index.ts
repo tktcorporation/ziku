@@ -11,28 +11,25 @@ export {
 } from "./loader";
 
 /**
- * モジュールリストから ID でモジュールを取得
+ * モジュールリストから name でモジュールを取得
  */
-export function getModuleById(
-  id: string,
+export function getModuleByName(
+  name: string,
   moduleList: TemplateModule[],
 ): TemplateModule | undefined {
-  return moduleList.find((m) => m.id === id);
+  return moduleList.find((m) => m.name === name);
 }
 
 /**
- * 全モジュールのパターンを取得
+ * 全モジュールの include パターンをフラットに取得
  */
-export function getAllPatterns(moduleList: TemplateModule[]): string[] {
-  return moduleList.flatMap((m) => m.patterns);
+export function getAllIncludePatterns(moduleList: TemplateModule[]): string[] {
+  return moduleList.flatMap((m) => m.include);
 }
 
 /**
- * 指定モジュールIDのパターンを取得
+ * 全モジュールの exclude パターンをフラットに取得
  */
-export function getPatternsByModuleIds(
-  moduleIds: string[],
-  moduleList: TemplateModule[],
-): string[] {
-  return moduleList.filter((m) => moduleIds.includes(m.id)).flatMap((m) => m.patterns);
+export function getAllExcludePatterns(moduleList: TemplateModule[]): string[] {
+  return moduleList.flatMap((m) => m.exclude ?? []);
 }

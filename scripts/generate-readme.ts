@@ -62,7 +62,7 @@ function generateGettingStartedSection(): string {
   // but pick only 2 representative modules to keep the README concise
   const fullJson = JSON.parse(generateInitialModulesJsonc());
   const exampleModules = fullJson.modules.filter(
-    (m: { id: string }) => m.id === "." || m.id === ".github",
+    (m: { name: string }) => m.name === "Root Config" || m.name === "GitHub",
   );
   const exampleJson = JSON.stringify(
     { $schema: fullJson.$schema, modules: exampleModules },

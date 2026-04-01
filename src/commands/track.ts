@@ -7,19 +7,35 @@ import {
   modulesFileExists,
   saveModulesFile,
 } from "../modules";
-import { getModuleIdFromPath } from "../utils/untracked";
 import { intro, log, outro, pc } from "../ui/renderer";
 
 /**
- * パターン文字列からモジュール ID を推定
- * 例: ".cloud/rules/*.md" → ".cloud"
- *     ".mcp.json" → "."
- *     ".github/workflows/ci.yml" → ".github"
+ * パターン文字列から最も近い既存モジュール名を推定する。
+ * include パターンのプレフィックスマッチングで判定する。
+ * 例: ".github/workflows/ci.yml" → "GitHub" (include: [".github/**"])
+ *     ".devcontainer/Dockerfile" → "DevContainer" (include: [".devcontainer/**"])
  */
-function inferModuleId(pattern: string): string {
-  // glob のメタ文字を除いた先頭パスからモジュール ID を推定
+function inferModuleName(
+  pattern: string,
+  modules: { name: string; include: string[] }[],
+): string | undefined {
+  // パターンの先頭ディレクトリを抽出
   const cleanPath = pattern.replace(/\*.*$/, "").replace(/\{.*$/, "");
-  return getModuleIdFromPath(cleanPath || pattern);
+  const firstSegment = cleanPath.split("/")[0] || cleanPath;
+
+  // 各モジュールの include パターンとプレフィックスマッチ
+  for (const mod of modules) {
+    for (const inc of mod.include) {
+      const incBase = inc.split("/")[0] || inc;
+      // glob メタ文字を除去して比較
+      const cleanIncBase = incBase.replace(/[*?[\]{}!]/g, "");
+      if (cleanIncBase && firstSegment.startsWith(cleanIncBase)) {
+        return mod.name;
+      }
+    }
+  }
+
+  return undefined;
 }
 
 export const trackCommand = defineCommand({
@@ -42,7 +58,7 @@ export const trackCommand = defineCommand({
     module: {
       type: "string",
       alias: "m",
-      description: "Module ID to add patterns to (auto-detected from path if omitted)",
+      description: "Module name to add patterns to (auto-detected from path if omitted)",
     },
     name: {
       type: "string",
@@ -78,12 +94,14 @@ export const trackCommand = defineCommand({
       log.info("Tracked modules and patterns:");
       for (const mod of modules) {
         const lines: string[] = [];
-        lines.push(`${pc.cyan(mod.id)} ${pc.dim(`(${mod.name})`)}`);
-        if (mod.description) {
-          lines.push(`  ${pc.dim(mod.description)}`);
-        }
-        for (const pattern of mod.patterns) {
+        lines.push(`${pc.cyan(mod.name)} ${pc.dim(`— ${mod.description}`)}`);
+        for (const pattern of mod.include) {
           lines.push(`  ${pc.dim("→")} ${pattern}`);
+        }
+        if (mod.exclude && mod.exclude.length > 0) {
+          for (const pattern of mod.exclude) {
+            lines.push(`  ${pc.dim("✕")} ${pc.dim(pattern)} ${pc.dim("(exclude)")}`);
+          }
         }
         log.message(lines.join("\n"));
       }
@@ -128,19 +146,19 @@ export const trackCommand = defineCommand({
     if (patterns.length === 0) {
       throw new BermError(
         "No patterns specified.",
-        "Usage: ziku track <patterns...> [--module <id>]\nExample: ziku track '.cloud/rules/*.md' '.cloud/config.json'",
+        "Usage: ziku track <patterns...> [--module <name>]\nExample: ziku track '.cloud/rules/*.md' '.cloud/config.json'",
       );
     }
 
-    // モジュール ID の決定
-    const moduleId = args.module || inferModuleId(patterns[0]);
-
     // modules.jsonc を読み込み
-    const { rawContent } = await loadModulesFile(targetDir);
+    const { modules, rawContent } = await loadModulesFile(targetDir);
+
+    // モジュール名の決定
+    const moduleName =
+      args.module || inferModuleName(patterns[0], modules) || args.name || patterns[0].split("/")[0];
 
     // パターンを追加（モジュールがなければ作成）
-    const updatedContent = addPatternToModulesFileWithCreate(rawContent, moduleId, patterns, {
-      name: args.name,
+    const updatedContent = addPatternToModulesFileWithCreate(rawContent, moduleName, patterns, {
       description: args.description,
     });
 
@@ -155,7 +173,7 @@ export const trackCommand = defineCommand({
     // 結果表示
     log.success("Patterns added!");
     const details = [
-      `Module: ${pc.cyan(moduleId)}`,
+      `Module: ${pc.cyan(moduleName)}`,
       "Added:",
       ...patterns.map((p) => `  ${pc.green("+")} ${p}`),
     ];

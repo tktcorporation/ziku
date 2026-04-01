@@ -14,14 +14,13 @@ import { dirname, join, resolve } from "pathe";
 import pc from "picocolors";
 import { match } from "ts-pattern";
 import type {
-  DevEnvConfig,
   FileOperationResult,
   OverwriteStrategy,
   TemplateModule,
 } from "../modules/schemas";
 import { log } from "../ui/renderer";
 import { loadMergedGitignore, separateByGitignore } from "./gitignore";
-import { getEffectivePatterns, resolvePatterns } from "./patterns";
+import { getModulePatterns, resolvePatterns } from "./patterns";
 
 export const TEMPLATE_SOURCE = "gh:tktcorporation/.github";
 
@@ -103,9 +102,7 @@ export async function downloadTemplateToTemp(
 
 export interface DownloadOptions {
   targetDir: string;
-  modules: string[];
   overwriteStrategy: OverwriteStrategy;
-  config?: DevEnvConfig;
   moduleList: TemplateModule[]; // 外部からロードしたモジュールリスト
   templateDir?: string; // 事前にダウンロードしたテンプレートディレクトリ
 }
@@ -165,9 +162,7 @@ export async function writeFileWithStrategy(
 export async function fetchTemplates(options: DownloadOptions): Promise<FileOperationResult[]> {
   const {
     targetDir,
-    modules,
     overwriteStrategy,
-    config,
     moduleList,
     templateDir: preDownloadedDir,
   } = options;
@@ -194,22 +189,16 @@ export async function fetchTemplates(options: DownloadOptions): Promise<FileOper
     // ローカルとテンプレート両方の .gitignore をマージして読み込み
     const gitignore = await loadMergedGitignore([targetDir, templateDir]);
 
-    // 選択されたモジュールのファイルをパターンベースでコピー
-    for (const moduleId of modules) {
-      const moduleDef = moduleList.find((m) => m.id === moduleId);
-      if (!moduleDef) continue;
+    // 全モジュールの include/exclude をフラットに取得してファイルを解決
+    const { include, exclude } = getModulePatterns(moduleList);
+    const resolvedFiles = resolvePatterns(templateDir, include, exclude);
+    const { tracked, ignored } = separateByGitignore(resolvedFiles, gitignore);
 
-      // 有効なパターンを取得
-      const patterns = getEffectivePatterns(moduleId, moduleDef.patterns, config);
+    if (tracked.length === 0 && ignored.length === 0) {
+      log.warn("No files matched for selected modules");
+    }
 
-      // パターンにマッチするファイル一覧を取得し、gitignore で分離
-      const resolvedFiles = resolvePatterns(templateDir, patterns);
-      const { tracked, ignored } = separateByGitignore(resolvedFiles, gitignore);
-
-      if (tracked.length === 0 && ignored.length === 0) {
-        log.warn(`No files matched for module "${pc.cyan(moduleId)}"`);
-        continue;
-      }
+    {
 
       // tracked ファイルは通常通りコピー
       for (const relativePath of tracked) {

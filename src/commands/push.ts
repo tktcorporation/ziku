@@ -21,16 +21,13 @@ import { calculateDiffStats, formatStats } from "../ui/diff-view";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
 import { detectDiff } from "../utils/diff";
 import { createPullRequest, getGitHubToken } from "../utils/github";
+import { getModulePatterns } from "../utils/patterns";
 import { detectAndUpdateReadme } from "../utils/readme";
 import { buildTemplateSource } from "../utils/template";
 import { detectUntrackedFiles } from "../utils/untracked";
 
 /**
  * FileDiff の差分統計を "+N -M" 形式でフォーマットする。
- *
- * 背景: git push の出力に合わせ、変更行数を可視化する。
- * calculateDiffStats に統一し、unified diff ベースで実際の変更行数を算出する。
- * 以前は行数の差で計算していたため、実際の変更量と大きくズレる問題があった。
  */
 function formatFileStat(file: {
   path: string;
@@ -44,12 +41,6 @@ function formatFileStat(file: {
 
 /**
  * process.exit() でも確実に一時ディレクトリを削除するための同期クリーンアップを登録する。
- *
- * 背景: handleCancel() が process.exit(0) を呼ぶため async finally ブロックが
- * スキップされ、.ziku-temp が残る問題への対策。process.on('exit') は
- * process.exit() でも発火するが同期処理のみ実行可能なため rmSync を使用。
- *
- * 削除条件: handleCancel() が process.exit() を使わなくなった場合。
  */
 function registerSyncCleanup(tempDir: string): () => void {
   const cleanup = () => {
@@ -72,7 +63,7 @@ const README_PATH = "README.md";
 
 interface LocalModuleAdditions {
   mergedModuleList: TemplateModule[];
-  newModuleIds: string[];
+  newModuleNames: string[];
   updatedModulesContent: string | undefined;
 }
 
@@ -89,29 +80,29 @@ async function detectLocalModuleAdditions(
   if (!modulesFileExists(targetDir)) {
     return {
       mergedModuleList: templateModules,
-      newModuleIds: [],
+      newModuleNames: [],
       updatedModulesContent: undefined,
     };
   }
 
   const local = await loadModulesFile(targetDir);
-  const templateModuleIds = new Set(templateModules.map((m) => m.id));
+  const templateModuleNames = new Set(templateModules.map((m) => m.name));
 
   // ローカルにのみ存在するモジュールを検出
-  const newModules = local.modules.filter((m) => !templateModuleIds.has(m.id));
+  const newModules = local.modules.filter((m) => !templateModuleNames.has(m.name));
 
   if (newModules.length === 0) {
     // 新モジュールはないが、既存モジュールにローカルでパターンが追加されていないかチェック
     let updatedContent = templateRawContent;
     let hasPatternAdditions = false;
     for (const localMod of local.modules) {
-      const templateMod = templateModules.find((m) => m.id === localMod.id);
+      const templateMod = templateModules.find((m) => m.name === localMod.name);
       if (!templateMod) continue;
-      const newPatterns = localMod.patterns.filter((p) => !templateMod.patterns.includes(p));
+      const newPatterns = localMod.include.filter((p) => !templateMod.include.includes(p));
       if (newPatterns.length > 0) {
         updatedContent = addPatternToModulesFileWithCreate(
           updatedContent,
-          localMod.id,
+          localMod.name,
           newPatterns,
         );
         hasPatternAdditions = true;
@@ -122,14 +113,14 @@ async function detectLocalModuleAdditions(
       const merged = parse(updatedContent) as { modules: TemplateModule[] };
       return {
         mergedModuleList: merged.modules,
-        newModuleIds: [],
+        newModuleNames: [],
         updatedModulesContent: updatedContent,
       };
     }
 
     return {
       mergedModuleList: templateModules,
-      newModuleIds: [],
+      newModuleNames: [],
       updatedModulesContent: undefined,
     };
   }
@@ -137,26 +128,25 @@ async function detectLocalModuleAdditions(
   // テンプレートの raw content に新モジュールを追加
   let updatedContent = templateRawContent;
   for (const mod of newModules) {
-    updatedContent = addPatternToModulesFileWithCreate(updatedContent, mod.id, mod.patterns, {
-      name: mod.name,
+    updatedContent = addPatternToModulesFileWithCreate(updatedContent, mod.name, mod.include, {
       description: mod.description,
     });
   }
 
   // 既存モジュールへのパターン追加もチェック
   for (const localMod of local.modules) {
-    const templateMod = templateModules.find((m) => m.id === localMod.id);
+    const templateMod = templateModules.find((m) => m.name === localMod.name);
     if (!templateMod) continue; // 新モジュールは上で処理済み
-    const newPatterns = localMod.patterns.filter((p) => !templateMod.patterns.includes(p));
+    const newPatterns = localMod.include.filter((p) => !templateMod.include.includes(p));
     if (newPatterns.length > 0) {
-      updatedContent = addPatternToModulesFileWithCreate(updatedContent, localMod.id, newPatterns);
+      updatedContent = addPatternToModulesFileWithCreate(updatedContent, localMod.name, newPatterns);
     }
   }
 
   const merged = parse(updatedContent) as { modules: TemplateModule[] };
   return {
     mergedModuleList: merged.modules,
-    newModuleIds: newModules.map((m) => m.id),
+    newModuleNames: newModules.map((m) => m.name),
     updatedModulesContent: updatedContent,
   };
 }
@@ -221,11 +211,6 @@ export const pushCommand = defineCommand({
 
     const config: DevEnvConfig = parseResult.data;
 
-    if (config.modules.length === 0) {
-      log.warn("No modules installed");
-      return;
-    }
-
     // pendingMerge がある場合はコンフリクト未解決のためブロック
     if (config.pendingMerge) {
       throw new BermError(
@@ -233,6 +218,22 @@ export const pushCommand = defineCommand({
         "Resolve conflicts in these files, then run `ziku pull --continue`:\n" +
           config.pendingMerge.conflicts.map((f) => `  • ${f}`).join("\n"),
       );
+    }
+
+    // modules.jsonc を読み込み（ローカルが source of truth）
+    if (!modulesFileExists(targetDir)) {
+      throw new BermError(
+        "No .ziku/modules.jsonc found",
+        "Run `ziku init` to set up the project",
+      );
+    }
+
+    const localModulesData = await loadModulesFile(targetDir);
+    let moduleList = localModulesData.modules;
+
+    if (moduleList.length === 0) {
+      log.warn("No modules configured");
+      return;
     }
 
     // Step 1: テンプレートをダウンロード
@@ -251,82 +252,41 @@ export const pushCommand = defineCommand({
         }),
       );
 
-      // modules.jsonc を読み込み
-      let moduleList: TemplateModule[];
-      let modulesRawContent: string | undefined;
-
-      if (modulesFileExists(templateDir)) {
-        const loaded = await loadModulesFile(templateDir);
-        moduleList = loaded.modules;
-        modulesRawContent = loaded.rawContent;
-      } else if (modulesFileExists(targetDir)) {
-        const loaded = await loadModulesFile(targetDir);
-        moduleList = loaded.modules;
-        modulesRawContent = loaded.rawContent;
-      } else {
-        throw new BermError(
-          "No .ziku/modules.jsonc found",
-          "Run `ziku init` to set up the project, or add .ziku/modules.jsonc to the template",
-        );
-      }
-
-      // ローカルのモジュール追加を検出してマージ
-      const effectiveModuleIds = [...config.modules];
+      // テンプレート側の modules.jsonc を読み込んでローカル追加を検出
       let updatedModulesContent: string | undefined;
 
-      if (modulesRawContent) {
+      if (modulesFileExists(templateDir)) {
+        const templateModulesData = await loadModulesFile(templateDir);
         const localAdditions = await detectLocalModuleAdditions(
           targetDir,
-          moduleList,
-          modulesRawContent,
+          templateModulesData.modules,
+          templateModulesData.rawContent,
         );
         moduleList = localAdditions.mergedModuleList;
         updatedModulesContent = localAdditions.updatedModulesContent;
-        for (const id of localAdditions.newModuleIds) {
-          if (!effectiveModuleIds.includes(id)) {
-            effectiveModuleIds.push(id);
-          }
-        }
-        if (localAdditions.newModuleIds.length > 0) {
+        if (localAdditions.newModuleNames.length > 0) {
           log.info(
-            `Detected ${localAdditions.newModuleIds.length} new module(s) from local: ${localAdditions.newModuleIds.join(", ")}`,
+            `Detected ${localAdditions.newModuleNames.length} new module(s) from local: ${localAdditions.newModuleNames.join(", ")}`,
           );
         }
       }
 
       // 3-way マージで解決されたファイルの内容を保持する
-      // PR 作成時に localContent の代わりにマージ済み内容を使う
       const mergedContents = new Map<string, string>();
 
-      // push 対象ファイルパスの集合。
-      // pull と同じく classifyFiles の結果を一次情報として使い、
-      // 「ユーザーが変更したファイル」(localOnly + conflicts) のみを push 対象とする。
-      // これにより autoUpdate（テンプレートのみ変更）や newFiles（テンプレート新規追加）が
-      // 誤って push されてテンプレート変更がリバートされることを構造的に防止する。
+      // push 対象ファイルパスの集合
       let pushableFilePaths: Set<string> = new Set();
 
       // ファイル分類（pull と同じパターン）
-      // baseHashes がない場合は {} をデフォルトとし、全ファイルを base なしで分類する。
-      // base がないファイルは local ≠ template なら conflicts 扱いとなり、
-      // ユーザーに確認を求めることで意図しないリバートを防止する。
       {
         const { hashFiles } = await import("../utils/hash");
         const { classifyFiles } = await import("../utils/merge");
-        const { getModuleById } = await import("../modules");
-        const { getEffectivePatterns } = await import("../utils/patterns");
 
-        // 全モジュールの有効パターンを収集
-        const allPatterns: string[] = [];
-        for (const moduleId of effectiveModuleIds) {
-          const mod = getModuleById(moduleId, moduleList);
-          if (mod) {
-            const patterns = getEffectivePatterns(moduleId, mod.patterns, config);
-            allPatterns.push(...patterns);
-          }
-        }
+        // モジュールの include/exclude パターンをフラット化
+        const { include, exclude } = getModulePatterns(moduleList);
 
-        const templateHashes = await hashFiles(templateDir, allPatterns);
-        const localHashes = await hashFiles(targetDir, allPatterns);
+        const templateHashes = await hashFiles(templateDir, include, exclude);
+        const localHashes = await hashFiles(targetDir, include, exclude);
 
         const classification = classifyFiles({
           baseHashes: config.baseHashes ?? {},
@@ -335,7 +295,6 @@ export const pushCommand = defineCommand({
         });
 
         // push 対象: localOnly（ユーザーのみ変更）+ conflicts（両方変更、マージ後に push）
-        // pull と同じく classification がファイルの処理方法を決定する。
         for (const file of classification.localOnly) {
           pushableFilePaths.add(file);
         }
@@ -343,8 +302,7 @@ export const pushCommand = defineCommand({
           pushableFilePaths.add(file);
         }
 
-        // autoUpdate（テンプレートのみ変更）をユーザーに通知。
-        // push 対象には含めない（classification が除外済み）。
+        // autoUpdate（テンプレートのみ変更）をユーザーに通知
         if (classification.autoUpdate.length > 0) {
           log.info(
             `Skipping ${classification.autoUpdate.length} file(s) only changed in template (use \`ziku pull\` to sync):`,
@@ -358,7 +316,6 @@ export const pushCommand = defineCommand({
           const { threeWayMerge, asBaseContent, asLocalContent, asTemplateContent } =
             await import("../utils/merge");
 
-          // baseRef がある場合はハッシュを強調表示する（git の "non-fast-forward" エラーに相当）
           const baseInfo = config.baseRef
             ? `since ${pc.bold(config.baseRef.slice(0, 7))} (your last sync)`
             : "since your last pull/init";
@@ -366,7 +323,6 @@ export const pushCommand = defineCommand({
             `Template updated ${baseInfo} — ${classification.conflicts.length} conflict(s) detected, attempting auto-merge...`,
           );
 
-          // baseRef が存在すれば、ベースバージョンを再ダウンロードして 3-way マージ
           let baseTemplateDir: string | undefined;
           let baseCleanup: (() => void) | undefined;
 
@@ -393,15 +349,12 @@ export const pushCommand = defineCommand({
               const localContent = await readFile(join(targetDir, file), "utf-8");
               const templateContent = await readFile(join(templateDir, file), "utf-8");
 
-              // baseRef のテンプレートからベース内容を読む
               let baseContent: string | undefined;
               if (baseTemplateDir && existsSync(join(baseTemplateDir, file))) {
                 baseContent = await readFile(join(baseTemplateDir, file), "utf-8");
               }
 
               if (baseContent) {
-                // 3-way マージ: ユーザーのローカル内容をベースに、テンプレート側の変更を適用
-                // コンフリクト時はローカル（ユーザー）側を優先し、コメントやフォーマットも保持する
                 const result = threeWayMerge({
                   base: asBaseContent(baseContent),
                   local: asLocalContent(localContent),
@@ -455,11 +408,9 @@ export const pushCommand = defineCommand({
       }
 
       // ホワイトリスト外ファイルの検出と情報表示
-      if (!args.yes && modulesRawContent) {
+      if (!args.yes) {
         const untrackedByFolder = await detectUntrackedFiles({
           targetDir,
-          moduleIds: effectiveModuleIds,
-          config,
           moduleList,
         });
 
@@ -476,16 +427,11 @@ export const pushCommand = defineCommand({
         detectDiff({
           targetDir,
           templateDir,
-          moduleIds: effectiveModuleIds,
-          config,
           moduleList,
         }),
       );
 
-      // push 対象ファイルを取得。
-      // classification が決定した pushableFilePaths をソースオブトゥルースとして使う。
-      // diff はコンテンツ（localContent/templateContent）の提供元としてのみ使用する。
-      // これにより autoUpdate/newFiles/deletedFiles が push に含まれることを構造的に防止する。
+      // push 対象ファイルを取得
       let pushableFiles = diff.files.filter(
         (f) => (f.type === "added" || f.type === "modified") && pushableFilePaths.has(f.path),
       );
@@ -512,8 +458,6 @@ export const pushCommand = defineCommand({
       }
 
       // Step 3: ファイル選択
-      // --files: ノンインタラクティブにファイルをカンマ区切りで指定（AI エージェント向け）
-      // それ以外: インタラクティブにファイルを選択
       if (args.files) {
         const requestedPaths = args.files
           .split(",")
@@ -546,7 +490,7 @@ export const pushCommand = defineCommand({
         token = await inputGitHubToken();
       }
 
-      // PR タイトル・本文（自動生成がデフォルト、--edit 時のみ編集プロンプト）
+      // PR タイトル・本文
       const suggestedTitle = generatePrTitle(pushableFiles);
       const suggestedBody = generatePrBody(pushableFiles);
 
@@ -590,15 +534,12 @@ export const pushCommand = defineCommand({
       }
 
       // Step 4: git-like なサマリー表示 + 確認
-      // "To owner/repo → branch" 形式でプッシュ先と変更内容を一覧表示する。
-      // 詳細な unified diff は `ziku diff` で確認可能。
       const destination = `${config.source.owner}/${config.source.repo}`;
       const baseBranch = config.source.ref || "main";
       const baseHashStr = config.baseRef
         ? `  ${pc.dim(`since ${config.baseRef.slice(0, 7)}`)}`
         : "";
 
-      // 変更ファイル行の生成（type アイコン + パス + 行数統計）
       const fileLines: string[] = [];
       for (const pf of pushableFiles) {
         if (!files.some((f) => f.path === pf.path)) continue;
@@ -611,7 +552,6 @@ export const pushCommand = defineCommand({
               : pc.red("-");
         fileLines.push(`  ${icon} ${pf.path.padEnd(50)} ${stat}`);
       }
-      // pushableFiles に含まれない追加ファイル（modules.jsonc、README 自動更新等）
       for (const f of files) {
         if (!pushableFiles.some((pf) => pf.path === f.path)) {
           fileLines.push(`  ${pc.green("+")} ${f.path.padEnd(50)} ${pc.dim("(auto-updated)")}`);
@@ -650,7 +590,6 @@ export const pushCommand = defineCommand({
         }),
       );
 
-      // 成功メッセージ — git push の "To repo branch" 形式に準拠
       log.success("Pull request created!");
       log.message(
         [

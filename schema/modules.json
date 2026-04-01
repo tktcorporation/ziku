@@ -10,9 +10,6 @@
       "items": {
         "type": "object",
         "properties": {
-          "id": {
-            "type": "string"
-          },
           "name": {
             "type": "string"
           },
@@ -22,14 +19,20 @@
           "setupDescription": {
             "type": "string"
           },
-          "patterns": {
+          "include": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "exclude": {
             "type": "array",
             "items": {
               "type": "string"
             }
           }
         },
-        "required": ["id", "name", "description", "patterns"],
+        "required": ["name", "description", "include"],
         "additionalProperties": false
       }
     }
