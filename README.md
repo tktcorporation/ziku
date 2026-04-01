@@ -45,32 +45,20 @@ npx ziku
 npx ziku --from my-org/my-templates
 ```
 
-### 2. Add `.devenv/modules.jsonc` to your template
+### 2. Add `.ziku/modules.jsonc` to your template
 
-The template repository needs a `.devenv/modules.jsonc` file that defines which modules and file patterns ziku manages. If this file is missing, ziku will offer to create a PR that adds one with a default configuration.
+The template repository needs a `.ziku/modules.jsonc` file that defines which file patterns ziku manages. If this file is missing, ziku will offer to create a PR that adds one with a default configuration.
 
 Example `modules.jsonc`:
 
 ```jsonc
 {
   "$schema": "https://raw.githubusercontent.com/tktcorporation/ziku/main/schema/modules.json",
-  "modules": [
-    {
-      "name": "GitHub",
-      "description": "GitHub Actions workflows and configuration",
-      "include": [
-        ".github/**"
-      ]
-    },
-    {
-      "name": "Root Config",
-      "description": "Root-level configuration files (EditorConfig, MCP, mise)",
-      "include": [
-        ".editorconfig",
-        ".mcp.json",
-        ".mise.toml"
-      ]
-    }
+  "include": [
+    ".editorconfig",
+    ".mcp.json",
+    ".mise.toml",
+    ".github/**"
   ]
 }
 ```
@@ -81,7 +69,7 @@ Example `modules.jsonc`:
 npx ziku
 ```
 
-Select the modules you want, and ziku copies the matching files into your project. A `.devenv.json` config and `.devenv/modules.jsonc` are created locally to track what was installed.
+ziku copies the matching files into your project. A `.ziku.json` config and `.ziku/modules.jsonc` are created locally to track what was installed.
 
 ### 4. Keep it in sync
 
@@ -151,9 +139,9 @@ ARGUMENTS
 OPTIONS
 
                    `--force`    Overwrite existing files
-                 `-y, --yes`    Select all modules (non-interactive mode)
+                 `-y, --yes`    Non-interactive mode (accept all defaults)
              `-m, --modules`    Comma-separated module names to apply (non-interactive)
-  `-s, --overwrite-strategy`    Overwrite strategy: overwrite, skip, or prompt (non-interactive)
+  `-s, --overwrite-strategy`    Overwrite strategy: overwrite, skip, or prompt
                     `--from`    Template source as owner/repo (e.g., my-org/my-templates)
 ```
 

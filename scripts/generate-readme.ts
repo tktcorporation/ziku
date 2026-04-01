@@ -28,7 +28,7 @@ import { stripVTControlCharacters } from "node:util";
 import { renderUsage } from "citty";
 import { z } from "zod";
 import { diffCommand } from "../src/commands/diff";
-import { generateInitialModulesJsonc, initCommand } from "../src/commands/init";
+import { generateFlatPatternsJsonc, initCommand } from "../src/commands/init";
 import { pullCommand } from "../src/commands/pull";
 import { pushCommand } from "../src/commands/push";
 import { trackCommand } from "../src/commands/track";
@@ -58,17 +58,11 @@ const MARKERS = {
  * Generate Getting Started section from source code constants
  */
 function generateGettingStartedSection(): string {
-  // Generate example modules.jsonc from the same function used at runtime,
-  // but pick only 2 representative modules to keep the README concise
-  const fullJson = JSON.parse(generateInitialModulesJsonc());
-  const exampleModules = fullJson.modules.filter(
-    (m: { name: string }) => m.name === "Root Config" || m.name === "GitHub",
-  );
-  const exampleJson = JSON.stringify(
-    { $schema: fullJson.$schema, modules: exampleModules },
-    null,
-    2,
-  );
+  // Generate example modules.jsonc from the same function used at runtime
+  const exampleJson = generateFlatPatternsJsonc({
+    include: [".editorconfig", ".mcp.json", ".mise.toml", ".github/**"],
+    exclude: [],
+  });
 
   const lines: string[] = [];
   lines.push("## Getting Started\n");
@@ -88,9 +82,9 @@ function generateGettingStartedSection(): string {
   lines.push("npx ziku --from my-org/my-templates");
   lines.push("```\n");
 
-  lines.push("### 2. Add `.devenv/modules.jsonc` to your template\n");
+  lines.push("### 2. Add `.ziku/modules.jsonc` to your template\n");
   lines.push(
-    "The template repository needs a `.devenv/modules.jsonc` file that defines which modules and file patterns ziku manages. If this file is missing, ziku will offer to create a PR that adds one with a default configuration.\n",
+    "The template repository needs a `.ziku/modules.jsonc` file that defines which file patterns ziku manages. If this file is missing, ziku will offer to create a PR that adds one with a default configuration.\n",
   );
   lines.push("Example `modules.jsonc`:\n");
   lines.push("```jsonc");
@@ -102,7 +96,7 @@ function generateGettingStartedSection(): string {
   lines.push("npx ziku");
   lines.push("```\n");
   lines.push(
-    "Select the modules you want, and ziku copies the matching files into your project. A `.devenv.json` config and `.devenv/modules.jsonc` are created locally to track what was installed.\n",
+    "ziku copies the matching files into your project. A `.ziku.json` config and `.ziku/modules.jsonc` are created locally to track what was installed.\n",
   );
 
   lines.push("### 4. Keep it in sync\n");

@@ -90,13 +90,6 @@ export const configSchema = z.object({
 
 export type DevEnvConfig = z.infer<typeof configSchema>;
 
-export const answersSchema = z.object({
-  selectedModules: z.array(moduleSchema).min(1, "少なくとも1つのモジュールを選択してください"),
-  overwriteStrategy: overwriteStrategySchema,
-});
-
-export type Answers = z.infer<typeof answersSchema>;
-
 // 差分タイプ
 export const diffTypeSchema = z.enum([
   "added", // ローカルで新規追加（テンプレートにはない）

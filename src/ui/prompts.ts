@@ -22,7 +22,7 @@ function handleCancel(value: unknown): void {
 
 // ─── init ─────────────────────────────────────────────────────
 
-/** モジュール選択（TemplateModule[] を返す） */
+/** モジュール選択（TemplateModule[] を返す）— init 時にテンプレートがモジュール形式の場合に使用 */
 export async function selectModules(moduleList: TemplateModule[]): Promise<TemplateModule[]> {
   const selected = await p.multiselect({
     message: "Select modules to install",
@@ -138,27 +138,6 @@ export async function confirmScaffoldDevenvPR(owner: string, repo: string): Prom
   });
   handleCancel(confirmed);
   return confirmed as boolean;
-}
-
-// ─── init (template scaffold) ───────────────────────────────
-
-/**
- * テンプレートリポジトリのスキャフォールド時に含めるモジュールの選択
- * （TemplateModule[] を返す）
- */
-export async function selectTemplateModules(presets: TemplateModule[]): Promise<TemplateModule[]> {
-  const selected = await p.multiselect({
-    message: "Select modules to include in your template",
-    options: presets.map((m) => ({
-      value: m.name,
-      label: m.name,
-      hint: m.description,
-    })),
-    required: true,
-  });
-  handleCancel(selected);
-  const selectedNames = new Set(selected as string[]);
-  return presets.filter((m) => selectedNames.has(m.name));
 }
 
 // ─── push ─────────────────────────────────────────────────────

@@ -6,7 +6,6 @@ import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { parse } from "jsonc-parser";
 import { join } from "pathe";
-import type { TemplateModule } from "../modules/schemas";
 
 // マーカー定義
 const MARKERS = {
@@ -25,44 +24,54 @@ const MARKERS = {
 } as const;
 
 /**
- * テンプレートの modules.jsonc を読み込み（グループ形式 or フラット形式対応）
+ * modules.jsonc からパターン一覧を読み込む（フラット形式 or モジュール形式対応）
  */
-async function loadModulesFromFile(modulesPath: string): Promise<TemplateModule[]> {
+async function loadPatternsFromFile(
+  modulesPath: string,
+): Promise<{ include: string[]; exclude: string[] }> {
   if (!existsSync(modulesPath)) {
-    return [];
+    return { include: [], exclude: [] };
   }
   const content = await readFile(modulesPath, "utf-8");
   const parsed = parse(content);
 
-  // グループ形式（テンプレート側）
-  if (parsed && Array.isArray(parsed.modules)) {
-    return parsed.modules as TemplateModule[];
-  }
-
-  // フラット形式 → 単一モジュールとして扱う
+  // フラット形式
   if (parsed && Array.isArray(parsed.include)) {
-    return [
-      {
-        name: "Tracked Files",
-        description: "All tracked file patterns",
-        include: parsed.include,
-        ...(parsed.exclude ? { exclude: parsed.exclude } : {}),
-      },
-    ];
+    return {
+      include: parsed.include,
+      exclude: parsed.exclude ?? [],
+    };
   }
 
-  return [];
+  // モジュール形式（後方互換）→ フラット化
+  if (parsed && Array.isArray(parsed.modules)) {
+    return {
+      include: parsed.modules.flatMap((m: { include?: string[] }) => m.include ?? []),
+      exclude: parsed.modules.flatMap((m: { exclude?: string[] }) => m.exclude ?? []),
+    };
+  }
+
+  return { include: [], exclude: [] };
 }
 
 /**
  * 機能セクションを生成
  */
-function generateFeaturesSection(modules: TemplateModule[]): string {
+function generateFeaturesSection(patterns: string[]): string {
   const lines: string[] = [];
   lines.push("## 機能\n");
 
-  for (const mod of modules) {
-    lines.push(`- **${mod.name}** - ${mod.description}`);
+  // パターンをディレクトリごとにグルーピング
+  const groups = new Map<string, string[]>();
+  for (const pattern of patterns) {
+    const firstSegment = pattern.split("/")[0];
+    const group = firstSegment.startsWith(".") ? firstSegment : "Root";
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group)!.push(pattern);
+  }
+
+  for (const [group, groupPatterns] of groups) {
+    lines.push(`- **${group}** - ${groupPatterns.length} pattern(s)`);
   }
 
   lines.push("");
@@ -72,24 +81,19 @@ function generateFeaturesSection(modules: TemplateModule[]): string {
 /**
  * 生成されるファイルセクションを生成
  */
-function generateFilesSection(modules: TemplateModule[]): string {
+function generateFilesSection(patterns: string[]): string {
   const lines: string[] = [];
   lines.push("## 生成されるファイル\n");
-  lines.push("選択したモジュールに応じて以下のファイルが生成されます：\n");
+  lines.push("以下のパターンに一致するファイルが同期されます：\n");
 
-  for (const mod of modules) {
-    lines.push(`### ${mod.name}\n`);
-    lines.push(`${mod.description}\n`);
-
-    for (const pattern of mod.include) {
-      const displayPattern = pattern.includes("*") ? `\`${pattern}\` (パターン)` : `\`${pattern}\``;
-      lines.push(`- ${displayPattern}`);
-    }
-    lines.push("");
+  for (const pattern of patterns) {
+    const displayPattern = pattern.includes("*") ? `\`${pattern}\` (パターン)` : `\`${pattern}\``;
+    lines.push(`- ${displayPattern}`);
   }
 
+  lines.push("");
   lines.push("### 設定ファイル\n");
-  lines.push("- `.ziku.json` - このツールの設定（適用したモジュール情報）\n");
+  lines.push("- `.ziku.json` - このツールの設定（同期状態）\n");
 
   return lines.join("\n");
 }
@@ -149,14 +153,14 @@ export async function generateReadme(
     return { updated: false, content: "", readmePath };
   }
 
-  const modules = await loadModulesFromFile(modulesPath);
+  const { include } = await loadPatternsFromFile(modulesPath);
 
   let readme = await readFile(readmePath, "utf-8");
   let anyUpdated = false;
 
   // 機能セクション
-  if (modules.length > 0) {
-    const featuresSection = generateFeaturesSection(modules);
+  if (include.length > 0) {
+    const featuresSection = generateFeaturesSection(include);
     const result = updateSection(
       readme,
       MARKERS.features.start,
@@ -181,8 +185,8 @@ export async function generateReadme(
   }
 
   // ファイルセクション
-  if (modules.length > 0) {
-    const filesSection = generateFilesSection(modules);
+  if (include.length > 0) {
+    const filesSection = generateFilesSection(include);
     const result = updateSection(readme, MARKERS.files.start, MARKERS.files.end, filesSection);
     readme = result.content;
     anyUpdated = anyUpdated || result.updated;

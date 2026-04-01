@@ -15,14 +15,12 @@ export const MODULES_SCHEMA_URL =
   "https://raw.githubusercontent.com/tktcorporation/ziku/main/schema/modules.json";
 
 /**
- * テンプレート側の modules.jsonc スキーマ（グループ形式 — init UI 用）
+ * テンプレート側の modules.jsonc スキーマ（モジュール形式 — init 時の選択 UI 用）
  */
 export const templateModulesFileSchema = z.object({
   $schema: z.string().optional(),
   modules: z.array(moduleSchema),
 });
-
-export type TemplateModulesFile = z.infer<typeof templateModulesFileSchema>;
 
 /**
  * ローカル側の modules.jsonc スキーマ（フラット形式 — ランタイム用）
@@ -41,7 +39,8 @@ export type LocalPatternsFile = z.infer<typeof localPatternsFileSchema>;
 export const modulesFileSchema = z.union([localPatternsFileSchema, templateModulesFileSchema]);
 
 /**
- * テンプレートの modules.jsonc を読み込み（グループ形式）
+ * テンプレートの modules.jsonc を読み込み（モジュール形式）。
+ * init 時にモジュール選択 UI を表示するために使用する。
  */
 export async function loadTemplateModulesFile(
   baseDir: string,

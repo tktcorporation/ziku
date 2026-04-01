@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  answersSchema,
   configSchema,
   diffResultSchema,
   diffTypeSchema,
@@ -195,39 +194,6 @@ describe("configSchema", () => {
       source: { owner: "test", repo: "test" },
     };
     expect(configSchema.parse(config)).toEqual(config);
-  });
-});
-
-describe("answersSchema", () => {
-  it("有効な回答を受け入れる", () => {
-    const answers = {
-      selectedModules: [
-        { name: "DevContainer", description: "Test", include: [".devcontainer/**"] },
-      ],
-      overwriteStrategy: "overwrite",
-    };
-    expect(answersSchema.parse(answers)).toEqual(answers);
-  });
-
-  it("空のモジュール配列を拒否する", () => {
-    expect(() =>
-      answersSchema.parse({
-        selectedModules: [],
-        overwriteStrategy: "skip",
-      }),
-    ).toThrow();
-  });
-
-  it("複数のモジュールを受け入れる", () => {
-    const answers = {
-      selectedModules: [
-        { name: "DevContainer", description: "Test", include: [".devcontainer/**"] },
-        { name: "GitHub", description: "Test", include: [".github/**"] },
-        { name: "Claude", description: "Test", include: [".claude/**"] },
-      ],
-      overwriteStrategy: "prompt",
-    };
-    expect(answersSchema.parse(answers)).toEqual(answers);
   });
 });
 

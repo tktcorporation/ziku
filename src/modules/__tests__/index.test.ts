@@ -1,29 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { getModuleByName } from "../index";
+import {
+  addIncludePattern,
+  getModulesFilePath,
+  loadPatternsFile,
+  loadTemplateModulesFile,
+  modulesFileExists,
+  saveModulesFile,
+} from "../index";
 
-const sampleModules = [
-  {
-    name: "A",
-    description: "Module A",
-    include: ["a.txt", "a.json"],
-  },
-  { name: "B", description: "Module B", include: ["b.txt"] },
-  { name: "C", description: "Module C", include: ["c.txt"] },
-];
-
-describe("getModuleByName", () => {
-  it("name でモジュールを取得できる", () => {
-    const result = getModuleByName("A", sampleModules);
-    expect(result?.name).toBe("A");
-  });
-
-  it("存在しない name の場合は undefined を返す", () => {
-    const result = getModuleByName("nonexistent", sampleModules);
-    expect(result).toBeUndefined();
-  });
-
-  it("空のモジュールリストから取得すると undefined を返す", () => {
-    const result = getModuleByName("A", []);
-    expect(result).toBeUndefined();
+// Re-export が正しく動作していることを確認するスモークテスト
+describe("modules/index re-exports", () => {
+  it("全ての公開関数が re-export されている", () => {
+    expect(typeof addIncludePattern).toBe("function");
+    expect(typeof getModulesFilePath).toBe("function");
+    expect(typeof loadPatternsFile).toBe("function");
+    expect(typeof loadTemplateModulesFile).toBe("function");
+    expect(typeof modulesFileExists).toBe("function");
+    expect(typeof saveModulesFile).toBe("function");
   });
 });
