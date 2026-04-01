@@ -24,7 +24,6 @@ describe("loadConfig", () => {
     const config = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
-      modules: [".devcontainer", ".github"],
       source: {
         owner: "tktcorporation",
         repo: ".github",
@@ -41,16 +40,15 @@ describe("loadConfig", () => {
     expect(result).toEqual(config);
   });
 
-  it("excludePatterns を含む設定を読み込める", async () => {
+  it("baseRef を含む設定を読み込める", async () => {
     const config = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
-      modules: [".devcontainer"],
       source: {
         owner: "tktcorporation",
         repo: ".github",
       },
-      excludePatterns: ["*.local", ".env"],
+      baseRef: "abc123def",
     };
 
     vol.fromJSON({
@@ -59,7 +57,7 @@ describe("loadConfig", () => {
 
     const result = await loadConfig("/project");
 
-    expect(result.excludePatterns).toEqual(["*.local", ".env"]);
+    expect(result.baseRef).toBe("abc123def");
   });
 
   it("ファイルが存在しない場合はエラー", async () => {
@@ -81,7 +79,6 @@ describe("loadConfig", () => {
       "/project/.ziku.json": JSON.stringify({
         version: "1.0.0",
         // installedAt が欠けている
-        modules: [],
         source: { owner: "test", repo: "test" },
       }),
     });
@@ -94,7 +91,6 @@ describe("loadConfig", () => {
       "/project/.ziku.json": JSON.stringify({
         version: "1.0.0",
         installedAt: "invalid-date",
-        modules: [],
         source: { owner: "test", repo: "test" },
       }),
     });
@@ -116,7 +112,6 @@ describe("saveConfig", () => {
     const config = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
-      modules: [".devcontainer", ".github"],
       source: {
         owner: "tktcorporation",
         repo: ".github",
@@ -138,7 +133,6 @@ describe("saveConfig", () => {
     const config = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
-      modules: [".devcontainer"],
       source: {
         owner: "tktcorporation",
         repo: ".github",
@@ -164,7 +158,6 @@ describe("saveConfig", () => {
     const newConfig = {
       version: "2.0.0",
       installedAt: "2024-06-01T00:00:00+09:00",
-      modules: [".claude"],
       source: {
         owner: "tktcorporation",
         repo: ".github",

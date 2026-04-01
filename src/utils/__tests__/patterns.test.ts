@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   mergePatterns,
-  filterByExcludePatterns,
-  getEffectivePatterns,
   matchesPatterns,
+  getModulePatterns,
 } from "../patterns";
 
 describe("mergePatterns", () => {
@@ -38,68 +37,44 @@ describe("mergePatterns", () => {
   });
 });
 
-describe("filterByExcludePatterns", () => {
-  it("除外パターンにマッチするファイルを除外する", () => {
-    const files = ["file.txt", "file.local", "config.json"];
+describe("getModulePatterns", () => {
+  it("モジュールリストから include パターンを取得する", () => {
+    const modules = [
+      { name: "A", description: "Module A", include: ["*.json", "*.ts"] },
+      { name: "B", description: "Module B", include: ["*.md"] },
+    ];
 
-    const result = filterByExcludePatterns(files, ["file.local"]);
+    const result = getModulePatterns(modules);
 
-    expect(result).toEqual(["file.txt", "config.json"]);
+    expect(result.include).toEqual(["*.json", "*.ts", "*.md"]);
   });
 
-  it("除外パターンが空の場合は全ファイルを返す", () => {
-    const files = ["file.txt", "config.json"];
+  it("モジュールリストから exclude パターンを取得する", () => {
+    const modules = [
+      { name: "A", description: "Module A", include: ["*.json"], exclude: ["*.local"] },
+      { name: "B", description: "Module B", include: ["*.md"] },
+    ];
 
-    const result = filterByExcludePatterns(files, []);
+    const result = getModulePatterns(modules);
 
-    expect(result).toEqual(files);
+    expect(result.exclude).toEqual(["*.local"]);
   });
 
-  it("除外パターンが undefined の場合は全ファイルを返す", () => {
-    const files = ["file.txt", "config.json"];
+  it("exclude がないモジュールは空配列として扱う", () => {
+    const modules = [
+      { name: "A", description: "Module A", include: ["*.json"] },
+    ];
 
-    const result = filterByExcludePatterns(files, undefined);
+    const result = getModulePatterns(modules);
 
-    expect(result).toEqual(files);
-  });
-});
-
-describe("getEffectivePatterns", () => {
-  it("設定がない場合はモジュールパターンをそのまま返す", () => {
-    const patterns = ["*.json", "*.ts"];
-
-    const result = getEffectivePatterns("test", patterns, undefined);
-
-    expect(result).toEqual(["*.json", "*.ts"]);
+    expect(result.exclude).toEqual([]);
   });
 
-  it("excludePatterns がない設定の場合はそのまま返す", () => {
-    const patterns = ["*.json", "*.ts"];
-    const config = {
-      version: "1.0.0",
-      installedAt: "2024-01-01T00:00:00+09:00",
-      modules: [],
-      source: { owner: "test", repo: "test" },
-    };
+  it("空のモジュールリストの場合は空配列を返す", () => {
+    const result = getModulePatterns([]);
 
-    const result = getEffectivePatterns("test", patterns, config);
-
-    expect(result).toEqual(["*.json", "*.ts"]);
-  });
-
-  it("excludePatterns にマッチするパターンを除外する", () => {
-    const patterns = ["config.json", "settings.local.json", "data.json"];
-    const config = {
-      version: "1.0.0",
-      installedAt: "2024-01-01T00:00:00+09:00",
-      modules: [],
-      source: { owner: "test", repo: "test" },
-      excludePatterns: ["settings.local.json"],
-    };
-
-    const result = getEffectivePatterns("test", patterns, config);
-
-    expect(result).toEqual(["config.json", "data.json"]);
+    expect(result.include).toEqual([]);
+    expect(result.exclude).toEqual([]);
   });
 });
 

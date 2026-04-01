@@ -59,7 +59,7 @@ Other content`;
 
     const modulesJson = JSON.stringify({
       modules: [
-        { id: ".devcontainer", name: "DevContainer", description: "Docker 開発環境", patterns: [] },
+        { name: "DevContainer", description: "Docker 開発環境", include: [] },
       ],
     });
 
@@ -89,10 +89,9 @@ Old files
     const modulesJson = JSON.stringify({
       modules: [
         {
-          id: ".devcontainer",
           name: "DevContainer",
           description: "Docker 開発環境",
-          patterns: [".devcontainer/devcontainer.json"],
+          include: [".devcontainer/devcontainer.json"],
         },
       ],
     });
@@ -171,10 +170,9 @@ Old files
     const modulesJson = JSON.stringify({
       modules: [
         {
-          id: ".",
           name: "ルート設定",
           description: "ルート設定ファイル",
-          patterns: [".mcp.json"],
+          include: [".mcp.json"],
         },
       ],
     });
@@ -203,10 +201,9 @@ Old files
     const modulesJson = JSON.stringify({
       modules: [
         {
-          id: ".devcontainer",
           name: "DevContainer",
           description: "Docker 開発環境",
-          patterns: [".devcontainer/*.sh"],
+          include: [".devcontainer/*.sh"],
         },
       ],
     });
@@ -237,7 +234,7 @@ describe("updateReadmeFile", () => {
 <!-- FEATURES:END -->`;
 
     const modulesJson = JSON.stringify({
-      modules: [{ id: ".", name: "Root", description: "ルート設定", patterns: [] }],
+      modules: [{ name: "Root", description: "ルート設定", include: [] }],
     });
 
     vol.fromJSON({
@@ -301,7 +298,7 @@ describe("detectAndUpdateReadme", () => {
     vol.fromJSON({
       "/project/README.md": "# My Project\n\n<!-- FEATURES:START -->\n<!-- FEATURES:END -->",
       "/template/.ziku/modules.jsonc": JSON.stringify({
-        modules: [{ id: ".", name: "Root", description: "Test", patterns: [] }],
+        modules: [{ name: "Root", description: "Test", include: [] }],
       }),
     });
 
@@ -315,7 +312,7 @@ describe("detectAndUpdateReadme", () => {
     vol.fromJSON({
       "/project/README.md": "# My Project\n\n<!-- FILES:START -->\n<!-- FILES:END -->",
       "/template/.ziku/modules.jsonc": JSON.stringify({
-        modules: [{ id: ".", name: "Root", description: "Test", patterns: [".mcp.json"] }],
+        modules: [{ name: "Root", description: "Test", include: [".mcp.json"] }],
       }),
     });
 
