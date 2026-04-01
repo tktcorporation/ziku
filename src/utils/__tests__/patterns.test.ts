@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   mergePatterns,
   matchesPatterns,
-  getModulePatterns,
 } from "../patterns";
 
 describe("mergePatterns", () => {
@@ -34,47 +33,6 @@ describe("mergePatterns", () => {
     const result = mergePatterns();
 
     expect(result).toEqual([]);
-  });
-});
-
-describe("getModulePatterns", () => {
-  it("モジュールリストから include パターンを取得する", () => {
-    const modules = [
-      { name: "A", description: "Module A", include: ["*.json", "*.ts"] },
-      { name: "B", description: "Module B", include: ["*.md"] },
-    ];
-
-    const result = getModulePatterns(modules);
-
-    expect(result.include).toEqual(["*.json", "*.ts", "*.md"]);
-  });
-
-  it("モジュールリストから exclude パターンを取得する", () => {
-    const modules = [
-      { name: "A", description: "Module A", include: ["*.json"], exclude: ["*.local"] },
-      { name: "B", description: "Module B", include: ["*.md"] },
-    ];
-
-    const result = getModulePatterns(modules);
-
-    expect(result.exclude).toEqual(["*.local"]);
-  });
-
-  it("exclude がないモジュールは空配列として扱う", () => {
-    const modules = [
-      { name: "A", description: "Module A", include: ["*.json"] },
-    ];
-
-    const result = getModulePatterns(modules);
-
-    expect(result.exclude).toEqual([]);
-  });
-
-  it("空のモジュールリストの場合は空配列を返す", () => {
-    const result = getModulePatterns([]);
-
-    expect(result.include).toEqual([]);
-    expect(result.exclude).toEqual([]);
   });
 });
 

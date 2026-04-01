@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getAllIncludePatterns, getModuleByName } from "../index";
+import { getModuleByName } from "../index";
 
 const sampleModules = [
   {
@@ -25,27 +25,5 @@ describe("getModuleByName", () => {
   it("空のモジュールリストから取得すると undefined を返す", () => {
     const result = getModuleByName("A", []);
     expect(result).toBeUndefined();
-  });
-});
-
-describe("getAllIncludePatterns", () => {
-  it("全モジュールの include パターンを取得する", () => {
-    const patterns = getAllIncludePatterns(sampleModules);
-    expect(patterns).toEqual(["a.txt", "a.json", "b.txt", "c.txt"]);
-  });
-
-  it("空のモジュールリストの場合は空配列を返す", () => {
-    const patterns = getAllIncludePatterns([]);
-    expect(patterns).toEqual([]);
-  });
-
-  it("include が空のモジュールを含む場合も動作する", () => {
-    const customModules = [
-      { name: "A", description: "A", include: ["a.txt"] },
-      { name: "B", description: "B", include: [] },
-    ];
-
-    const patterns = getAllIncludePatterns(customModules);
-    expect(patterns).toEqual(["a.txt"]);
   });
 });

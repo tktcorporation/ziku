@@ -45,12 +45,7 @@ vi.mock("../../utils/github", () => ({
   resolveLatestCommitSha: vi.fn(() => Promise.resolve("latest123")),
 }));
 
-vi.mock("../../utils/patterns", () => ({
-  getModulePatterns: vi.fn((modules: any[]) => ({
-    include: modules.flatMap((m: any) => m.include),
-    exclude: modules.flatMap((m: any) => m.exclude ?? []),
-  })),
-}));
+// utils/patterns mock removed (no longer used)
 
 vi.mock("../../ui/prompts", () => ({
   selectDeletedFiles: vi.fn(),
@@ -83,16 +78,11 @@ vi.mock("../../modules/index", async (importOriginal) => {
   return {
     ...original,
     modulesFileExists: vi.fn(() => true),
-    loadModulesFile: vi.fn(() =>
+    loadPatternsFile: vi.fn(() =>
       Promise.resolve({
-        modules: [
-          {
-            name: "Root",
-            description: "Root",
-            include: [".mcp.json", ".mise.toml"],
-          },
-        ],
-        rawContent: '{"modules":[]}',
+        include: [".mcp.json", ".mise.toml"],
+        exclude: [],
+        rawContent: '{"include":[".mcp.json",".mise.toml"],"exclude":[]}',
       }),
     ),
   };

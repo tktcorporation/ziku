@@ -87,7 +87,7 @@ vi.mock("../../modules/index", async (importOriginal) => {
   return {
     ...original,
     modulesFileExists: vi.fn(() => true),
-    loadModulesFile: vi.fn(() =>
+    loadTemplateModulesFile: vi.fn(() =>
       Promise.resolve({
         modules: [
           {
@@ -397,9 +397,9 @@ describe("initCommand", () => {
       // fetchTemplates は指定モジュールで呼ばれる
       expect(mockFetchTemplates).toHaveBeenCalledWith(
         expect.objectContaining({
-          moduleList: [
-            expect.objectContaining({ name: "Root Config" }),
-          ],
+          patterns: expect.objectContaining({
+            include: expect.arrayContaining([".mcp.json", ".mise.toml"]),
+          }),
         }),
       );
     });
@@ -425,10 +425,9 @@ describe("initCommand", () => {
       expect(mockSelectModules).not.toHaveBeenCalled();
       expect(mockFetchTemplates).toHaveBeenCalledWith(
         expect.objectContaining({
-          moduleList: [
-            expect.objectContaining({ name: "Root Config" }),
-            expect.objectContaining({ name: "GitHub" }),
-          ],
+          patterns: expect.objectContaining({
+            include: expect.arrayContaining([".mcp.json", ".mise.toml", ".github/**"]),
+          }),
         }),
       );
     });
@@ -501,9 +500,9 @@ describe("initCommand", () => {
       expect(mockSelectModules).not.toHaveBeenCalled();
       expect(mockFetchTemplates).toHaveBeenCalledWith(
         expect.objectContaining({
-          moduleList: [
-            expect.objectContaining({ name: "Root Config" }),
-          ],
+          patterns: expect.objectContaining({
+            include: expect.arrayContaining([".mcp.json", ".mise.toml"]),
+          }),
           overwriteStrategy: "skip",
         }),
       );
