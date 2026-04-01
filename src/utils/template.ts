@@ -11,6 +11,7 @@ import { homedir, tmpdir } from "node:os";
 import * as p from "@clack/prompts";
 import { downloadTemplate } from "giget";
 import { dirname, join, resolve } from "pathe";
+import { Effect } from "effect";
 import { match } from "ts-pattern";
 import type { FileOperationResult, OverwriteStrategy } from "../modules/schemas";
 import { log } from "../ui/renderer";
@@ -38,16 +39,21 @@ function ensureGigetCacheDir(): void {
     return;
   }
   const defaultCacheDir = resolve(homedir(), ".cache");
-  try {
-    // .cache ディレクトリが存在しなければ作成を試みる
-    if (!existsSync(defaultCacheDir)) {
-      mkdirSync(defaultCacheDir, { recursive: true });
-    }
-    accessSync(defaultCacheDir, constants.W_OK);
-  } catch {
-    // 書き込み不可の場合、OS の一時ディレクトリをフォールバックに設定
-    process.env.XDG_CACHE_HOME = resolve(tmpdir(), "giget-cache");
-  }
+  Effect.runSync(
+    Effect.try(() => {
+      if (!existsSync(defaultCacheDir)) {
+        mkdirSync(defaultCacheDir, { recursive: true });
+      }
+      accessSync(defaultCacheDir, constants.W_OK);
+    }).pipe(
+      // 書き込み不可の場合、OS の一時ディレクトリをフォールバックに設定
+      Effect.orElse(() =>
+        Effect.sync(() => {
+          process.env.XDG_CACHE_HOME = resolve(tmpdir(), "giget-cache");
+        }),
+      ),
+    ),
+  );
 }
 
 // 後方互換性のためのエイリアス
@@ -165,66 +171,60 @@ export async function fetchTemplates(options: DownloadOptions): Promise<FileOper
 
   let templateDir: string;
 
-  try {
-    if (shouldDownload) {
-      ensureGigetCacheDir();
-      const result = await downloadTemplate(TEMPLATE_SOURCE, {
-        dir: tempDir,
-        force: true,
-      });
-      templateDir = result.dir;
+  if (shouldDownload) {
+    ensureGigetCacheDir();
+    const result = await downloadTemplate(TEMPLATE_SOURCE, {
+      dir: tempDir,
+      force: true,
+    });
+    templateDir = result.dir;
+  } else {
+    templateDir = preDownloadedDir;
+  }
+
+  // ローカルとテンプレート両方の .gitignore をマージして読み込み
+  const gitignore = await loadMergedGitignore([targetDir, templateDir]);
+
+  // フラットパターンでファイルを解決
+  const resolvedFiles = resolvePatterns(templateDir, patterns.include, patterns.exclude);
+  const { tracked, ignored } = separateByGitignore(resolvedFiles, gitignore);
+
+  if (tracked.length === 0 && ignored.length === 0) {
+    log.warn("No files matched for selected modules");
+  }
+
+  // tracked ファイルは通常通りコピー
+  for (const relativePath of tracked) {
+    const srcPath = join(templateDir, relativePath);
+    const destPath = join(targetDir, relativePath);
+
+    const result = await copyFile(srcPath, destPath, overwriteStrategy, relativePath);
+    allResults.push(result);
+  }
+
+  // ignored ファイルは特別処理:
+  // - ローカルに存在しない場合 → コピー
+  // - ローカルに存在する場合 → スキップ（上書き防止）
+  for (const relativePath of ignored) {
+    const srcPath = join(templateDir, relativePath);
+    const destPath = join(targetDir, relativePath);
+    const destExists = existsSync(destPath);
+
+    if (destExists) {
+      const result: FileOperationResult = {
+        action: "skipped_ignored",
+        path: relativePath,
+      };
+      allResults.push(result);
     } else {
-      templateDir = preDownloadedDir;
+      const result = await copyFile(srcPath, destPath, overwriteStrategy, relativePath);
+      allResults.push(result);
     }
+  }
 
-    // ローカルとテンプレート両方の .gitignore をマージして読み込み
-    const gitignore = await loadMergedGitignore([targetDir, templateDir]);
-
-    // フラットパターンでファイルを解決
-    const resolvedFiles = resolvePatterns(templateDir, patterns.include, patterns.exclude);
-    const { tracked, ignored } = separateByGitignore(resolvedFiles, gitignore);
-
-    if (tracked.length === 0 && ignored.length === 0) {
-      log.warn("No files matched for selected modules");
-    }
-
-    {
-      // tracked ファイルは通常通りコピー
-      for (const relativePath of tracked) {
-        const srcPath = join(templateDir, relativePath);
-        const destPath = join(targetDir, relativePath);
-
-        const result = await copyFile(srcPath, destPath, overwriteStrategy, relativePath);
-        allResults.push(result);
-      }
-
-      // ignored ファイルは特別処理:
-      // - ローカルに存在しない場合 → コピー
-      // - ローカルに存在する場合 → スキップ（上書き防止）
-      for (const relativePath of ignored) {
-        const srcPath = join(templateDir, relativePath);
-        const destPath = join(targetDir, relativePath);
-        const destExists = existsSync(destPath);
-
-        if (destExists) {
-          // ローカルに既存 → スキップして警告
-          const result: FileOperationResult = {
-            action: "skipped_ignored",
-            path: relativePath,
-          };
-          allResults.push(result);
-        } else {
-          // ローカルにない → 通常通りコピー
-          const result = await copyFile(srcPath, destPath, overwriteStrategy, relativePath);
-          allResults.push(result);
-        }
-      }
-    }
-  } finally {
-    // 新規ダウンロードした場合のみ一時ディレクトリを削除
-    if (shouldDownload && existsSync(tempDir)) {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+  // 新規ダウンロードした場合のみ一時ディレクトリを削除
+  if (shouldDownload && existsSync(tempDir)) {
+    rmSync(tempDir, { recursive: true, force: true });
   }
 
   return allResults;

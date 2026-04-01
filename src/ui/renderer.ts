@@ -8,6 +8,8 @@
  * 削除条件: ziku が別の UI フレームワーク（ink 等）に移行する場合。
  */
 import * as p from "@clack/prompts";
+import { Effect } from "effect";
+import { match } from "ts-pattern";
 import pc from "picocolors";
 
 declare const __VERSION__: string;
@@ -49,14 +51,12 @@ export const log = {
 export async function withSpinner<T>(message: string, task: () => Promise<T>): Promise<T> {
   const s = p.spinner();
   s.start(message);
-  try {
-    const result = await task();
-    s.stop(message);
-    return result;
-  } catch (error) {
-    s.stop(pc.red(`Failed: ${message}`));
-    throw error;
-  }
+  return Effect.runPromise(
+    Effect.tryPromise({ try: () => task(), catch: (e) => e }).pipe(
+      Effect.tap(() => Effect.sync(() => s.stop(message))),
+      Effect.tapError(() => Effect.sync(() => s.stop(pc.red(`Failed: ${message}`)))),
+    ),
+  );
 }
 
 /** ファイル操作結果を表示（init コマンド用） */
@@ -71,21 +71,19 @@ export function logFileResults(results: { action: string; path: string }[]): {
 
   const lines: string[] = [];
   for (const r of results) {
-    switch (r.action) {
-      case "copied":
-      case "created":
+    match(r.action)
+      .with("copied", "created", () => {
         lines.push(`${pc.green("+")} ${r.path}`);
         added++;
-        break;
-      case "overwritten":
+      })
+      .with("overwritten", () => {
         lines.push(`${pc.yellow("~")} ${r.path}`);
         updated++;
-        break;
-      default:
+      })
+      .otherwise(() => {
         lines.push(`${pc.dim("-")} ${pc.dim(r.path)}`);
         skipped++;
-        break;
-    }
+      });
   }
 
   const summary = [
@@ -109,18 +107,13 @@ export function logDiffSummary(files: { path: string; type: string }[]): void {
     return;
   }
 
-  const lines = changed.map((f) => {
-    switch (f.type) {
-      case "added":
-        return `${pc.green("+")} ${pc.green(f.path)}`;
-      case "modified":
-        return `${pc.yellow("~")} ${pc.yellow(f.path)}`;
-      case "deleted":
-        return `${pc.red("-")} ${pc.red(f.path)}`;
-      default:
-        return `  ${pc.dim(f.path)}`;
-    }
-  });
+  const lines = changed.map((f) =>
+    match(f.type)
+      .with("added", () => `${pc.green("+")} ${pc.green(f.path)}`)
+      .with("modified", () => `${pc.yellow("~")} ${pc.yellow(f.path)}`)
+      .with("deleted", () => `${pc.red("-")} ${pc.red(f.path)}`)
+      .otherwise(() => `  ${pc.dim(f.path)}`),
+  );
 
   const summary = files.reduce(
     (acc, f) => {

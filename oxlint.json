@@ -1,6 +1,44 @@
 {
   "$schema": "https://raw.githubusercontent.com/oxc-project/oxc/main/npm/oxlint/configuration_schema.json",
   "plugins": ["typescript", "unicorn", "import"],
-  "rules": {},
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "pedantic": "warn",
+    "nursery": "off"
+  },
+  "rules": {
+    "no-unused-vars": "error",
+    "no-console": "off",
+    "eqeqeq": "error",
+    "no-var": "error",
+    "prefer-const": "error",
+    "no-eval": "error",
+    "no-implied-eval": "error",
+    "no-new-func": "error",
+    "no-empty": "error",
+    "no-debugger": "error",
+    "no-alert": "error",
+    "no-shadow-restricted-names": "error",
+
+    "typescript/no-explicit-any": "error",
+    "typescript/no-non-null-assertion": "warn",
+    "typescript/consistent-type-imports": "error",
+    "typescript/no-unnecessary-type-assertion": "off",
+
+    "unicorn/prefer-node-protocol": "error",
+    "unicorn/no-null": "off",
+    "unicorn/prevent-abbreviations": "off",
+    "unicorn/filename-case": "off",
+    "unicorn/no-process-exit": "off",
+    "unicorn/prefer-top-level-await": "off",
+    "unicorn/no-nested-ternary": "warn",
+    "unicorn/prefer-string-replace-all": "warn",
+    "unicorn/no-array-reduce": "off",
+
+    "import/no-cycle": "error",
+    "import/no-self-import": "error",
+    "import/no-duplicates": "error"
+  },
   "ignorePatterns": ["node_modules", "dist"]
 }

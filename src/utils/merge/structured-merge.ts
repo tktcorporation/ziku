@@ -1,3 +1,4 @@
+import { Effect, Option } from "effect";
 import { applyEdits, modify, parse as jsoncParse } from "jsonc-parser";
 import * as TOML from "smol-toml";
 import * as YAML from "yaml";
@@ -20,17 +21,16 @@ export function mergeJsonContent(
   local: string,
   template: string,
 ): MergeResult | null {
-  let baseObj: unknown;
-  let localObj: unknown;
-  let templateObj: unknown;
+  const parsed = Effect.runSync(
+    Effect.try(() => ({
+      base: jsoncParse(base),
+      local: jsoncParse(local),
+      template: jsoncParse(template),
+    })).pipe(Effect.option),
+  );
 
-  try {
-    baseObj = jsoncParse(base);
-    localObj = jsoncParse(local);
-    templateObj = jsoncParse(template);
-  } catch {
-    return null;
-  }
+  if (Option.isNone(parsed)) return null;
+  const { base: baseObj, local: localObj, template: templateObj } = parsed.value;
 
   // パースできたが値が null/undefined の場合はフォールバック
   if (baseObj == null || localObj == null || templateObj == null) {
@@ -105,17 +105,16 @@ export function mergeTomlContent(
   local: string,
   template: string,
 ): MergeResult | null {
-  let baseObj: Record<string, unknown>;
-  let localObj: Record<string, unknown>;
-  let templateObj: Record<string, unknown>;
+  const parsed = Effect.runSync(
+    Effect.try(() => ({
+      base: TOML.parse(base) as Record<string, unknown>,
+      local: TOML.parse(local) as Record<string, unknown>,
+      template: TOML.parse(template) as Record<string, unknown>,
+    })).pipe(Effect.option),
+  );
 
-  try {
-    baseObj = TOML.parse(base) as Record<string, unknown>;
-    localObj = TOML.parse(local) as Record<string, unknown>;
-    templateObj = TOML.parse(template) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
+  if (Option.isNone(parsed)) return null;
+  const { base: baseObj, local: localObj, template: templateObj } = parsed.value;
 
   return mergeObjects(baseObj, localObj, templateObj, (merged) => TOML.stringify(merged));
 }
@@ -132,17 +131,16 @@ export function mergeYamlContent(
   local: string,
   template: string,
 ): MergeResult | null {
-  let baseObj: unknown;
-  let localObj: unknown;
-  let templateObj: unknown;
+  const parsed = Effect.runSync(
+    Effect.try(() => ({
+      base: YAML.parse(base),
+      local: YAML.parse(local),
+      template: YAML.parse(template),
+    })).pipe(Effect.option),
+  );
 
-  try {
-    baseObj = YAML.parse(base);
-    localObj = YAML.parse(local);
-    templateObj = YAML.parse(template);
-  } catch {
-    return null;
-  }
+  if (Option.isNone(parsed)) return null;
+  const { base: baseObj, local: localObj, template: templateObj } = parsed.value;
 
   if (baseObj == null || localObj == null || templateObj == null) {
     return null;

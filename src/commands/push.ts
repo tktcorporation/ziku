@@ -4,12 +4,7 @@ import { defineCommand } from "citty";
 import { downloadTemplate } from "giget";
 import { join, resolve } from "pathe";
 import { BermError } from "../errors";
-import {
-  addIncludePattern,
-  loadPatternsFile,
-  modulesFileExists,
-  saveModulesFile,
-} from "../modules";
+import { addIncludePattern, loadPatternsFile, modulesFileExists } from "../modules";
 import type { DevEnvConfig } from "../modules/schemas";
 import { configSchema } from "../modules/schemas";
 import {

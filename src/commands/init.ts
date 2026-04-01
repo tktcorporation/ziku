@@ -9,6 +9,7 @@ import {
 } from "../modules/index";
 import { MODULES_SCHEMA_URL } from "../modules/loader";
 import type { FileOperationResult, OverwriteStrategy, TemplateModule } from "../modules/schemas";
+import { match } from "ts-pattern";
 import { BermError } from "../errors";
 import {
   confirmScaffoldDevenvPR,
@@ -481,8 +482,8 @@ async function handleMissingTemplate(
 ): Promise<{ sourceOwner: string; sourceRepo: string }> {
   const action = await selectMissingTemplateAction(owner, repo);
 
-  switch (action) {
-    case "create-repo": {
+  return match(action)
+    .with("create-repo", async () => {
       const token = getGitHubToken();
       if (!token) {
         throw new BermError(
@@ -498,12 +499,9 @@ async function handleMissingTemplate(
       await new Promise((resolve) => setTimeout(resolve, 5000));
 
       return { sourceOwner: owner, sourceRepo: repo };
-    }
-
-    case "specify-source": {
-      return promptTemplateSource();
-    }
-  }
+    })
+    .with("specify-source", () => promptTemplateSource())
+    .exhaustive();
 }
 
 /**

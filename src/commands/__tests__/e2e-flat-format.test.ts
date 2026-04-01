@@ -198,7 +198,7 @@ const mockWriteFileWithStrategy = vi.mocked(writeFileWithStrategy);
 const mockCopyFile = vi.mocked(copyFile);
 const mockHashFiles = vi.mocked(hashFiles);
 const mockLoadConfig = vi.mocked(loadConfig);
-const mockSaveConfig = vi.mocked(saveConfig);
+const _mockSaveConfig = vi.mocked(saveConfig);
 const mockModulesFileExists = vi.mocked(modulesFileExists);
 
 // ── helpers ─────────────────────────────────────────────────────
@@ -576,7 +576,6 @@ describe("E2E: flat modules.jsonc format", () => {
 
       // pull が正しいパターンで hashFiles を呼んだこと
       // pull で呼ばれた hashFiles コール（init の後のコールを取得）
-      const initHashCallCount = mockHashFiles.mock.calls.length;
       // mockHashFiles は init でも呼ばれるので、pull で呼ばれたコールを確認
       // pull は 2回 hashFiles を呼ぶ（template, local）ので最後の2コールを確認
       const pullCalls = mockHashFiles.mock.calls.slice(-2);
