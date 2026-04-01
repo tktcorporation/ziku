@@ -36,6 +36,11 @@ export const localPatternsFileSchema = z.object({
 export type LocalPatternsFile = z.infer<typeof localPatternsFileSchema>;
 
 /**
+ * 両形式をカバーする統合スキーマ（JSON Schema 生成用）
+ */
+export const modulesFileSchema = z.union([localPatternsFileSchema, templateModulesFileSchema]);
+
+/**
  * テンプレートの modules.jsonc を読み込み（グループ形式）
  */
 export async function loadTemplateModulesFile(

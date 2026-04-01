@@ -11,12 +11,8 @@ import { homedir, tmpdir } from "node:os";
 import * as p from "@clack/prompts";
 import { downloadTemplate } from "giget";
 import { dirname, join, resolve } from "pathe";
-import pc from "picocolors";
 import { match } from "ts-pattern";
-import type {
-  FileOperationResult,
-  OverwriteStrategy,
-} from "../modules/schemas";
+import type { FileOperationResult, OverwriteStrategy } from "../modules/schemas";
 import { log } from "../ui/renderer";
 import { loadMergedGitignore, separateByGitignore } from "./gitignore";
 import type { FlatPatterns } from "./patterns";
@@ -160,12 +156,7 @@ export async function writeFileWithStrategy(
  * テンプレートを取得してパターンベースでコピー
  */
 export async function fetchTemplates(options: DownloadOptions): Promise<FileOperationResult[]> {
-  const {
-    targetDir,
-    overwriteStrategy,
-    patterns,
-    templateDir: preDownloadedDir,
-  } = options;
+  const { targetDir, overwriteStrategy, patterns, templateDir: preDownloadedDir } = options;
   const allResults: FileOperationResult[] = [];
 
   // 事前ダウンロード済みか、新規ダウンロードか
@@ -198,7 +189,6 @@ export async function fetchTemplates(options: DownloadOptions): Promise<FileOper
     }
 
     {
-
       // tracked ファイルは通常通りコピー
       for (const relativePath of tracked) {
         const srcPath = join(templateDir, relativePath);

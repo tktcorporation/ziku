@@ -1,64 +1,68 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "type": "object",
-  "properties": {
-    "$schema": {
-      "type": "string"
-    },
-    "include": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      },
-      "description": "Glob patterns for files to sync"
-    },
-    "exclude": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      },
-      "description": "Glob patterns for files to exclude from sync"
-    },
-    "modules": {
-      "type": "array",
-      "description": "Module definitions (template format only)",
-      "items": {
-        "type": "object",
-        "properties": {
-          "name": {
+  "anyOf": [
+    {
+      "type": "object",
+      "properties": {
+        "$schema": {
+          "type": "string"
+        },
+        "include": {
+          "type": "array",
+          "items": {
             "type": "string"
-          },
-          "description": {
-            "type": "string"
-          },
-          "setupDescription": {
-            "type": "string"
-          },
-          "include": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "exclude": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
           }
         },
-        "required": ["name", "description", "include"],
-        "additionalProperties": false
-      }
-    }
-  },
-  "oneOf": [
-    {
-      "required": ["include"]
+        "exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["include"],
+      "additionalProperties": false
     },
     {
-      "required": ["modules"]
+      "type": "object",
+      "properties": {
+        "$schema": {
+          "type": "string"
+        },
+        "modules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "setupDescription": {
+                "type": "string"
+              },
+              "include": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "exclude": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": ["name", "description", "include"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["modules"],
+      "additionalProperties": false
     }
-  ],
-  "additionalProperties": false
+  ]
 }

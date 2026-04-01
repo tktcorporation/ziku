@@ -56,11 +56,19 @@ Example `modules.jsonc`:
   "$schema": "https://raw.githubusercontent.com/tktcorporation/ziku/main/schema/modules.json",
   "modules": [
     {
-      "id": ".github",
       "name": "GitHub",
       "description": "GitHub Actions workflows and configuration",
-      "patterns": [
+      "include": [
         ".github/**"
+      ]
+    },
+    {
+      "name": "Root Config",
+      "description": "Root-level configuration files (EditorConfig, MCP, mise)",
+      "include": [
+        ".editorconfig",
+        ".mcp.json",
+        ".mise.toml"
       ]
     }
   ]
@@ -144,7 +152,7 @@ OPTIONS
 
                    `--force`    Overwrite existing files
                  `-y, --yes`    Select all modules (non-interactive mode)
-             `-m, --modules`    Comma-separated module IDs to apply (non-interactive)
+             `-m, --modules`    Comma-separated module names to apply (non-interactive)
   `-s, --overwrite-strategy`    Overwrite strategy: overwrite, skip, or prompt (non-interactive)
                     `--from`    Template source as owner/repo (e.g., my-org/my-templates)
 ```
@@ -224,10 +232,7 @@ ARGUMENTS
 OPTIONS
 
   `-d, --dir="."`    Project directory (default: current directory)
-   `-m, --module`    Module ID to add patterns to (auto-detected from path if omitted)
-         `--name`    Module name (used when creating a new module)
-  `--description`    Module description (used when creating a new module)
-     `-l, --list`    List all currently tracked modules and patterns
+     `-l, --list`    List all currently tracked patterns
 ```
 
 <!-- COMMANDS:END -->

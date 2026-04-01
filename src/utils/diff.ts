@@ -3,12 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createPatch } from "diff";
 import { join } from "pathe";
 import pc from "picocolors";
-import type {
-  DiffResult,
-  DiffType,
-  FileDiff,
-} from "../modules/schemas";
-import { log } from "../ui/renderer";
+import type { DiffResult, DiffType, FileDiff } from "../modules/schemas";
 import { filterByGitignore, loadMergedGitignore } from "./gitignore";
 import type { FlatPatterns } from "./patterns";
 import { resolvePatterns } from "./patterns";
@@ -35,55 +30,61 @@ export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
   const gitignore = await loadMergedGitignore([targetDir, templateDir]);
 
   // フラットパターンでファイル一覧を取得し、gitignore でフィルタリング
-  const templateFiles = filterByGitignore(resolvePatterns(templateDir, patterns.include, patterns.exclude), gitignore);
-  const localFiles = filterByGitignore(resolvePatterns(targetDir, patterns.include, patterns.exclude), gitignore);
+  const templateFiles = filterByGitignore(
+    resolvePatterns(templateDir, patterns.include, patterns.exclude),
+    gitignore,
+  );
+  const localFiles = filterByGitignore(
+    resolvePatterns(targetDir, patterns.include, patterns.exclude),
+    gitignore,
+  );
 
   const allFiles = new Set([...templateFiles, ...localFiles]);
 
   for (const filePath of allFiles) {
-      const localPath = join(targetDir, filePath);
-      const templatePath = join(templateDir, filePath);
+    const localPath = join(targetDir, filePath);
+    const templatePath = join(templateDir, filePath);
 
-      const localExists = existsSync(localPath);
-      const templateExists = existsSync(templatePath);
+    const localExists = existsSync(localPath);
+    const templateExists = existsSync(templatePath);
 
-      let type: DiffType;
-      let localContent: string | undefined;
-      let templateContent: string | undefined;
+    let type: DiffType;
+    let localContent: string | undefined;
+    let templateContent: string | undefined;
 
-      if (localExists) {
-        localContent = await readFile(localPath, "utf-8");
-      }
-      if (templateExists) {
-        templateContent = await readFile(templatePath, "utf-8");
-      }
-
-      if (localExists && templateExists) {
-        // 両方に存在 → 内容比較
-        if (localContent === templateContent) {
-          type = "unchanged";
-          unchanged++;
-        } else {
-          type = "modified";
-          modified++;
-        }
-      } else if (localExists && !templateExists) {
-        // ローカルのみ → 追加（テンプレートにはない）
-        type = "added";
-        added++;
-      } else {
-        // テンプレートのみ → 削除（ローカルにはない）
-        type = "deleted";
-        deleted++;
-      }
-
-      files.push({
-        path: filePath,
-        type,
-        localContent,
-        templateContent,
-      });
+    if (localExists) {
+      localContent = await readFile(localPath, "utf-8");
     }
+    if (templateExists) {
+      templateContent = await readFile(templatePath, "utf-8");
+    }
+
+    if (localExists && templateExists) {
+      // 両方に存在 → 内容比較
+      if (localContent === templateContent) {
+        type = "unchanged";
+        unchanged++;
+      } else {
+        type = "modified";
+        modified++;
+      }
+    } else if (localExists && !templateExists) {
+      // ローカルのみ → 追加（テンプレートにはない）
+      type = "added";
+      added++;
+    } else {
+      // テンプレートのみ → 削除（ローカルにはない）
+      type = "deleted";
+      deleted++;
+    }
+
+    files.push({
+      path: filePath,
+      type,
+      localContent,
+      templateContent,
+    });
+  }
 
   return {
     files: files.sort((a, b) => a.path.localeCompare(b.path)),
