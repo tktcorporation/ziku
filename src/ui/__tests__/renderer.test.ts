@@ -21,7 +21,7 @@ import * as p from "@clack/prompts";
 import {
   intro,
   log,
-  logBermError,
+  logZikuError,
   logDiffSummary,
   logFileResults,
   outro,
@@ -152,15 +152,15 @@ describe("renderer", () => {
     });
   });
 
-  describe("logBermError", () => {
+  describe("logZikuError", () => {
     it("should display error with hint", () => {
-      logBermError({ message: "not found", hint: "Run init first" });
+      logZikuError({ message: "not found", hint: "Run init first" });
       expect(p.log.error).toHaveBeenCalledWith("not found");
       expect(p.log.message).toHaveBeenCalledTimes(1);
     });
 
     it("should display error without hint", () => {
-      logBermError({ message: "not found" });
+      logZikuError({ message: "not found" });
       expect(p.log.error).toHaveBeenCalledWith("not found");
       expect(p.log.message).not.toHaveBeenCalled();
     });

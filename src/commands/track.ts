@@ -1,6 +1,6 @@
 import { defineCommand } from "citty";
 import { resolve } from "pathe";
-import { BermError } from "../errors";
+import { ZikuError } from "../errors";
 import {
   addIncludePattern,
   loadPatternsFile,
@@ -39,7 +39,7 @@ export const trackCommand = defineCommand({
     const targetDir = resolve(args.dir);
 
     if (!modulesFileExists(targetDir)) {
-      throw new BermError(
+      throw new ZikuError(
         ".ziku/modules.jsonc not found.",
         "Run 'ziku init' first to set up the project.",
       );
@@ -86,7 +86,7 @@ export const trackCommand = defineCommand({
     }
 
     if (patterns.length === 0) {
-      throw new BermError(
+      throw new ZikuError(
         "No patterns specified.",
         "Usage: ziku track <patterns...>\nExample: ziku track '.cloud/rules/*.md' '.cloud/config.json'",
       );

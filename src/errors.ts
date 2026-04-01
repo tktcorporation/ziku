@@ -3,7 +3,7 @@
  *
  * 背景: try/catch ベースのエラーハンドリングを段階的に Effect の型付きエラーチャネルに移行。
  *
- * BermError: ユーザー向けエラー。従来通り throw → catch パターンで使用。
+ * ZikuError: ユーザー向けエラー。従来通り throw → catch パターンで使用。
  *   Effect 化が完了するまでの過渡期に、コマンド層で throw される。
  *
  * Tagged errors: Effect のエラーチャネル用。Effect<A, E> の E として型レベルで追跡される。
@@ -14,20 +14,20 @@ import { Data } from "effect";
 /**
  * ユーザー向けエラー。hint でリカバリ方法を提示する。
  *
- * 背景: 各コマンドは BermError を throw し、cli.ts のトップレベルで catch して
+ * 背景: 各コマンドは ZikuError を throw し、cli.ts のトップレベルで catch して
  * @clack/prompts の log.error() で統一的に表示する。
  * process.exit(1) は cli.ts の 1 箇所のみに制限。
  *
  * 注意: Effect 化が完了した後は TaggedError に移行予定。現時点では
  * throw で使われる箇所が多いため、Error ベースを維持する。
  */
-export class BermError extends Error {
+export class ZikuError extends Error {
   constructor(
     message: string,
     public hint?: string,
   ) {
     super(message);
-    this.name = "BermError";
+    this.name = "ZikuError";
   }
 }
 

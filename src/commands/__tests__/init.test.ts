@@ -1,6 +1,6 @@
 import { vol } from "memfs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { BermError } from "../../errors";
+import { ZikuError } from "../../errors";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -440,7 +440,7 @@ describe("initCommand", () => {
           rawArgs: [],
           cmd: initCommand,
         }),
-      ).rejects.toThrow(BermError);
+      ).rejects.toThrow(ZikuError);
 
       expect(mockFetchTemplates).not.toHaveBeenCalled();
     });
@@ -516,7 +516,7 @@ describe("initCommand", () => {
           rawArgs: [],
           cmd: initCommand,
         }),
-      ).rejects.toThrow(BermError);
+      ).rejects.toThrow(ZikuError);
 
       expect(mockFetchTemplates).not.toHaveBeenCalled();
     });

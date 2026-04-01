@@ -14,7 +14,7 @@
  */
 import { vol } from "memfs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BermError } from "../../errors";
+import { ZikuError } from "../../errors";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -226,7 +226,7 @@ describe("init: セットアップ UX", () => {
       const error = await promise;
 
       // handleMissingDevenv always throws after creating PR
-      expect(error).toBeInstanceOf(BermError);
+      expect(error).toBeInstanceOf(ZikuError);
 
       expect(mockScaffoldTemplateRepo).toHaveBeenCalledWith(
         "ghp_test_token",
@@ -299,7 +299,7 @@ describe("init: セットアップ UX", () => {
       const error = await promise;
 
       // handleMissingDevenv always throws
-      expect(error).toBeInstanceOf(BermError);
+      expect(error).toBeInstanceOf(ZikuError);
 
       // 2回リカバリが呼ばれる
       expect(mockSelectMissingTemplateAction).toHaveBeenCalledTimes(2);
@@ -472,8 +472,8 @@ describe("init: セットアップ UX", () => {
       const error = await promise;
 
       // handleMissingDevenv always throws after PR creation
-      expect(error).toBeInstanceOf(BermError);
-      expect((error as BermError).message).toContain("Merge the PR first");
+      expect(error).toBeInstanceOf(ZikuError);
+      expect((error as ZikuError).message).toContain("Merge the PR first");
 
       // リポジトリ作成
       expect(mockScaffoldTemplateRepo).toHaveBeenCalledWith(
