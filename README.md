@@ -45,24 +45,20 @@ npx ziku
 npx ziku --from my-org/my-templates
 ```
 
-### 2. Add `.devenv/modules.jsonc` to your template
+### 2. Add `.ziku/modules.jsonc` to your template
 
-The template repository needs a `.devenv/modules.jsonc` file that defines which modules and file patterns ziku manages. If this file is missing, ziku will offer to create a PR that adds one with a default configuration.
+The template repository needs a `.ziku/modules.jsonc` file that defines which file patterns ziku manages. If this file is missing, ziku will offer to create a PR that adds one with a default configuration.
 
 Example `modules.jsonc`:
 
 ```jsonc
 {
   "$schema": "https://raw.githubusercontent.com/tktcorporation/ziku/main/schema/modules.json",
-  "modules": [
-    {
-      "id": ".github",
-      "name": "GitHub",
-      "description": "GitHub Actions workflows and configuration",
-      "patterns": [
-        ".github/**"
-      ]
-    }
+  "include": [
+    ".editorconfig",
+    ".mcp.json",
+    ".mise.toml",
+    ".github/**"
   ]
 }
 ```
@@ -73,7 +69,7 @@ Example `modules.jsonc`:
 npx ziku
 ```
 
-Select the modules you want, and ziku copies the matching files into your project. A `.devenv.json` config and `.devenv/modules.jsonc` are created locally to track what was installed.
+ziku copies the matching files into your project. A `.ziku.json` config and `.ziku/modules.jsonc` are created locally to track what was installed.
 
 ### 4. Keep it in sync
 
@@ -143,9 +139,9 @@ ARGUMENTS
 OPTIONS
 
                    `--force`    Overwrite existing files
-                 `-y, --yes`    Select all modules (non-interactive mode)
-             `-m, --modules`    Comma-separated module IDs to apply (non-interactive)
-  `-s, --overwrite-strategy`    Overwrite strategy: overwrite, skip, or prompt (non-interactive)
+                 `-y, --yes`    Non-interactive mode (accept all defaults)
+             `-m, --modules`    Comma-separated module names to apply (non-interactive)
+  `-s, --overwrite-strategy`    Overwrite strategy: overwrite, skip, or prompt
                     `--from`    Template source as owner/repo (e.g., my-org/my-templates)
 ```
 
@@ -224,10 +220,7 @@ ARGUMENTS
 OPTIONS
 
   `-d, --dir="."`    Project directory (default: current directory)
-   `-m, --module`    Module ID to add patterns to (auto-detected from path if omitted)
-         `--name`    Module name (used when creating a new module)
-  `--description`    Module description (used when creating a new module)
-     `-l, --list`    List all currently tracked modules and patterns
+     `-l, --list`    List all currently tracked patterns
 ```
 
 <!-- COMMANDS:END -->

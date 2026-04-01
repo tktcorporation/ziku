@@ -36,7 +36,7 @@ describe("generateReadme", () => {
     const originalReadme = "# My Project\n\nSome content";
     vol.fromJSON({
       "/project/README.md": originalReadme,
-      "/project/.ziku/modules.jsonc": JSON.stringify({ modules: [] }),
+      "/project/.ziku/modules.jsonc": JSON.stringify({ include: [] }),
     });
 
     const result = await generateReadme({
@@ -57,9 +57,41 @@ Old content
 
 Other content`;
 
+    // フラット形式
+    const modulesJson = JSON.stringify({
+      include: [".devcontainer/devcontainer.json"],
+    });
+
+    vol.fromJSON({
+      "/project/README.md": readme,
+      "/project/.ziku/modules.jsonc": modulesJson,
+    });
+
+    const result = await generateReadme({
+      readmePath: "/project/README.md",
+      modulesPath: "/project/.ziku/modules.jsonc",
+    });
+
+    expect(result.updated).toBe(true);
+    expect(result.content).toContain(".devcontainer");
+    expect(result.content).not.toContain("Old content");
+  });
+
+  it("モジュール形式の modules.jsonc も読める（後方互換）", async () => {
+    const readme = `# My Project
+
+<!-- FEATURES:START -->
+Old content
+<!-- FEATURES:END -->`;
+
+    // モジュール形式
     const modulesJson = JSON.stringify({
       modules: [
-        { id: ".devcontainer", name: "DevContainer", description: "Docker 開発環境", patterns: [] },
+        {
+          name: "DevContainer",
+          description: "Docker 開発環境",
+          include: [".devcontainer/devcontainer.json"],
+        },
       ],
     });
 
@@ -74,9 +106,7 @@ Other content`;
     });
 
     expect(result.updated).toBe(true);
-    expect(result.content).toContain("**DevContainer**");
-    expect(result.content).toContain("Docker 開発環境");
-    expect(result.content).not.toContain("Old content");
+    expect(result.content).toContain(".devcontainer");
   });
 
   it("FILES マーカー間のコンテンツを更新する", async () => {
@@ -87,14 +117,7 @@ Old files
 <!-- FILES:END -->`;
 
     const modulesJson = JSON.stringify({
-      modules: [
-        {
-          id: ".devcontainer",
-          name: "DevContainer",
-          description: "Docker 開発環境",
-          patterns: [".devcontainer/devcontainer.json"],
-        },
-      ],
+      include: [".devcontainer/devcontainer.json"],
     });
 
     vol.fromJSON({
@@ -112,7 +135,7 @@ Old files
     expect(result.content).not.toContain("Old files");
   });
 
-  it("modules.jsonc が存在しない場合は空のモジュールリストとして扱う", async () => {
+  it("modules.jsonc が存在しない場合は空のパターンリストとして扱う", async () => {
     const readme = `# My Project
 
 <!-- FEATURES:START -->
@@ -128,7 +151,7 @@ Old content
       modulesPath: "/project/.ziku/modules.jsonc",
     });
 
-    // モジュールがないので更新されない
+    // パターンがないので更新されない
     expect(result.updated).toBe(false);
   });
 
@@ -141,7 +164,7 @@ Old commands
 
     vol.fromJSON({
       "/project/README.md": readme,
-      "/project/.ziku/modules.jsonc": JSON.stringify({ modules: [] }),
+      "/project/.ziku/modules.jsonc": JSON.stringify({ include: [] }),
     });
 
     const result = await generateReadme({
@@ -169,14 +192,7 @@ Old files
 <!-- FILES:END -->`;
 
     const modulesJson = JSON.stringify({
-      modules: [
-        {
-          id: ".",
-          name: "ルート設定",
-          description: "ルート設定ファイル",
-          patterns: [".mcp.json"],
-        },
-      ],
+      include: [".mcp.json"],
     });
 
     vol.fromJSON({
@@ -190,7 +206,6 @@ Old files
     });
 
     expect(result.updated).toBe(true);
-    expect(result.content).toContain("**ルート設定**");
     expect(result.content).toContain(".mcp.json");
   });
 
@@ -201,14 +216,7 @@ Old files
 <!-- FILES:END -->`;
 
     const modulesJson = JSON.stringify({
-      modules: [
-        {
-          id: ".devcontainer",
-          name: "DevContainer",
-          description: "Docker 開発環境",
-          patterns: [".devcontainer/*.sh"],
-        },
-      ],
+      include: [".devcontainer/*.sh"],
     });
 
     vol.fromJSON({
@@ -237,7 +245,7 @@ describe("updateReadmeFile", () => {
 <!-- FEATURES:END -->`;
 
     const modulesJson = JSON.stringify({
-      modules: [{ id: ".", name: "Root", description: "ルート設定", patterns: [] }],
+      include: [".mcp.json"],
     });
 
     vol.fromJSON({
@@ -253,7 +261,7 @@ describe("updateReadmeFile", () => {
     expect(result.updated).toBe(true);
 
     const savedContent = vol.readFileSync("/project/README.md", "utf8");
-    expect(savedContent).toContain("**Root**");
+    expect(savedContent).toContain(".mcp.json");
   });
 
   it("更新がなければファイルに書き込まない", async () => {
@@ -261,7 +269,7 @@ describe("updateReadmeFile", () => {
 
     vol.fromJSON({
       "/project/README.md": readme,
-      "/project/.ziku/modules.jsonc": JSON.stringify({ modules: [] }),
+      "/project/.ziku/modules.jsonc": JSON.stringify({ include: [] }),
     });
 
     await updateReadmeFile({
@@ -301,7 +309,7 @@ describe("detectAndUpdateReadme", () => {
     vol.fromJSON({
       "/project/README.md": "# My Project\n\n<!-- FEATURES:START -->\n<!-- FEATURES:END -->",
       "/template/.ziku/modules.jsonc": JSON.stringify({
-        modules: [{ id: ".", name: "Root", description: "Test", patterns: [] }],
+        include: [".mcp.json"],
       }),
     });
 
@@ -315,7 +323,7 @@ describe("detectAndUpdateReadme", () => {
     vol.fromJSON({
       "/project/README.md": "# My Project\n\n<!-- FILES:START -->\n<!-- FILES:END -->",
       "/template/.ziku/modules.jsonc": JSON.stringify({
-        modules: [{ id: ".", name: "Root", description: "Test", patterns: [".mcp.json"] }],
+        include: [".mcp.json"],
       }),
     });
 

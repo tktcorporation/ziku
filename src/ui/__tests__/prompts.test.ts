@@ -38,16 +38,14 @@ import {
 
 const testModules = [
   {
-    id: "devcontainer",
     name: "Dev Container",
     description: "Dev Container config",
-    patterns: [],
+    include: [".devcontainer/**"],
   },
   {
-    id: "github-actions",
     name: "GitHub Actions",
     description: "CI/CD",
-    patterns: [],
+    include: [".github/**"],
   },
 ];
 
@@ -57,18 +55,18 @@ describe("prompts", () => {
   });
 
   describe("selectModules", () => {
-    it("should return selected module IDs", async () => {
-      vi.mocked(p.multiselect).mockResolvedValue(["devcontainer"]);
+    it("should return selected modules as TemplateModule[]", async () => {
+      vi.mocked(p.multiselect).mockResolvedValue(["Dev Container"]);
       const result = await selectModules(testModules);
-      expect(result).toEqual(["devcontainer"]);
+      expect(result).toEqual([testModules[0]]);
     });
 
-    it("should pass all modules as initial values", async () => {
-      vi.mocked(p.multiselect).mockResolvedValue(["devcontainer", "github-actions"]);
+    it("should pass all module names as initial values", async () => {
+      vi.mocked(p.multiselect).mockResolvedValue(["Dev Container", "GitHub Actions"]);
       await selectModules(testModules);
       expect(p.multiselect).toHaveBeenCalledWith(
         expect.objectContaining({
-          initialValues: ["devcontainer", "github-actions"],
+          initialValues: ["Dev Container", "GitHub Actions"],
         }),
       );
     });

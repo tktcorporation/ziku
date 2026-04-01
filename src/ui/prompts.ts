@@ -22,28 +22,25 @@ function handleCancel(value: unknown): void {
 
 // ─── init ─────────────────────────────────────────────────────
 
-/** モジュール選択 */
-export async function selectModules(moduleList: TemplateModule[]): Promise<string[]> {
+/** モジュール選択（TemplateModule[] を返す）— init 時にテンプレートがモジュール形式の場合に使用 */
+export async function selectModules(moduleList: TemplateModule[]): Promise<TemplateModule[]> {
   const selected = await p.multiselect({
     message: "Select modules to install",
     options: moduleList.map((m) => ({
-      value: m.id,
+      value: m.name,
       label: m.name,
       hint: m.description,
     })),
-    initialValues: moduleList.map((m) => m.id),
+    initialValues: moduleList.map((m) => m.name),
     required: true,
   });
   handleCancel(selected);
-  return selected as string[];
+  const selectedNames = new Set(selected as string[]);
+  return moduleList.filter((m) => selectedNames.has(m.name));
 }
 
 /**
  * 上書き戦略の選択（プロジェクト状態に応じたスマートデフォルト付き）
- *
- * 背景: 新規プロジェクトでは overwrite が自然だが、再実行時（.ziku.json 既存）は
- * カスタマイズ済みファイルを誤って上書きしないよう skip をデフォルトにする。
- * ユーザーが毎回3択を読んで判断する必要をなくす。
  */
 export async function selectOverwriteStrategy(options?: {
   isReinit?: boolean;
@@ -72,8 +69,6 @@ export type MissingTemplateAction = "create-repo" | "specify-source";
 
 /**
  * テンプレートリポジトリが見つからない場合のアクション選択
- *
- * 背景: `{owner}/.github` が存在しない場合、ユーザーにリカバリ方法を提示する。
  */
 export async function selectMissingTemplateAction(
   owner: string,
@@ -125,12 +120,8 @@ export async function inputTemplateSource(defaultValue?: string): Promise<string
   return source as string;
 }
 
-/** .ziku スキャフォールディング時のアクション */
 /**
  * テンプレートリポジトリに .ziku/modules.jsonc が存在しない場合の確認
- *
- * modules.jsonc はテンプレートリポジトリに必須。存在しない場合は
- * PR で追加するかどうかを確認する。
  */
 export async function confirmScaffoldDevenvPR(owner: string, repo: string): Promise<boolean> {
   p.log.warn(
@@ -149,33 +140,10 @@ export async function confirmScaffoldDevenvPR(owner: string, repo: string): Prom
   return confirmed as boolean;
 }
 
-// ─── init (template scaffold) ───────────────────────────────
-
-/**
- * テンプレートリポジトリのスキャフォールド時に含めるモジュールの選択
- *
- * 背景: テンプレート初期化時にハードコードされた全モジュールを含めるのではなく、
- * ユーザーが必要なモジュールだけを選べるようにする。
- */
-export async function selectTemplateModules(presets: TemplateModule[]): Promise<string[]> {
-  const selected = await p.multiselect({
-    message: "Select modules to include in your template",
-    options: presets.map((m) => ({
-      value: m.id,
-      label: m.name,
-      hint: m.description,
-    })),
-    required: true,
-  });
-  handleCancel(selected);
-  return selected as string[];
-}
-
 // ─── push ─────────────────────────────────────────────────────
 
 /**
  * ファイルの行数統計を "+N -M" 形式で返す（hint テキスト用）。
- * git push の出力に合わせ、変更規模をひと目で把握できるようにする。
  */
 function fileStatHint(file: FileDiff): string {
   let additions = 0;
@@ -204,9 +172,6 @@ function fileStatHint(file: FileDiff): string {
 
 /**
  * push 対象ファイルの選択（+N -M 統計付き）
- *
- * 背景: git の `git add -p` に相当するファイル選択 UI。
- * 変更規模（行数増減）をヒントとして表示し、何を同期するか判断しやすくする。
  */
 export async function selectPushFiles(files: FileDiff[]): Promise<FileDiff[]> {
   const typeIcon = (type: string) => {
@@ -242,10 +207,6 @@ export async function selectPushFiles(files: FileDiff[]): Promise<FileDiff[]> {
 
 /**
  * PR タイトル入力（変更内容からスマートなデフォルトを生成）
- *
- * 背景: ユーザーが空欄からタイトルを考える手間を省く。
- * 変更ファイルのパスからモジュール名を推測し、自動生成したタイトルを
- * デフォルト値として表示する。Enter でそのまま採用可能。
  */
 export async function inputPrTitle(defaultTitle?: string): Promise<string> {
   const title = await p.text({
@@ -262,9 +223,6 @@ export async function inputPrTitle(defaultTitle?: string): Promise<string> {
 
 /**
  * 変更ファイル一覧から PR タイトルを自動生成する。
- *
- * 背景: "feat: add .devcontainer config" のような具体的なタイトルを
- * ファイルのパスと変更種別から推測し、ユーザーの入力負担を減らす。
  */
 export function generatePrTitle(files: FileDiff[]): string {
   const added = files.filter((f) => f.type === "added");
@@ -293,10 +251,6 @@ export function generatePrTitle(files: FileDiff[]): string {
 
 /**
  * PR 本文入力（変更一覧から自動生成したデフォルト付き）
- *
- * 背景: 以前は「追加する？」→「入力して」の2ステップだったが、
- * 変更ファイル一覧を自動生成してデフォルト表示することで
- * 1ステップ（Enter で採用 or 編集）に短縮する。
  */
 export async function inputPrBody(defaultBody?: string): Promise<string | undefined> {
   const body = await p.text({
@@ -311,9 +265,6 @@ export async function inputPrBody(defaultBody?: string): Promise<string | undefi
 
 /**
  * 変更ファイル一覧から PR 本文を自動生成する。
- *
- * 背景: ユーザーが本文を一から書く手間を省く。
- * 変更種別ごとにファイルを分類し、箇条書きで表示する。
  */
 export function generatePrBody(files: FileDiff[]): string {
   const added = files.filter((f) => f.type === "added");
@@ -376,10 +327,6 @@ export async function inputGitHubToken(): Promise<string> {
 
 /**
  * 確認プロンプト
- *
- * 背景: デフォルト値をコンテキストに応じて変更可能にする。
- * ファイル選択後の確認では true（ユーザーは既にレビュー済み）、
- * 破壊的操作の確認では false が適切。
  */
 export async function confirmAction(
   message: string,
@@ -397,8 +344,6 @@ export async function confirmAction(
 
 /**
  * コンフリクトマーカーが残っている場合にリトライを確認する。
- * 背景: pull 時の 3-way マージでコンフリクトが自動解決できなかった場合、
- * ユーザーにエディタで再解決するか、スキップするかを選ばせる。
  */
 export async function confirmRetryConflictResolution(): Promise<boolean> {
   const result = await p.confirm({
@@ -414,8 +359,6 @@ export async function confirmRetryConflictResolution(): Promise<boolean> {
 
 /**
  * テンプレートで削除されたファイルの中から、ローカルでも削除するものを選択する。
- * 背景: テンプレートから削除されたファイルを自動削除すると意図しないデータ損失の
- * リスクがあるため、ユーザーに明示的に選ばせる。
  */
 export async function selectDeletedFiles(files: string[]): Promise<string[]> {
   const result = await p.multiselect({
@@ -432,8 +375,6 @@ export async function selectDeletedFiles(files: string[]): Promise<string[]> {
 
 /**
  * コンフリクトのあるファイルを $EDITOR で開く。
- * 背景: 3-way マージでコンフリクトが発生した場合、ユーザーが手動で解決する必要がある。
- * $VISUAL → $EDITOR → vi の優先順でエディタを選択する。
  */
 export function openEditorForConflicts(filePaths: string[]): void {
   const editor = process.env.VISUAL || process.env.EDITOR || "vi";

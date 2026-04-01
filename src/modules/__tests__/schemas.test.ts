@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  answersSchema,
   configSchema,
   diffResultSchema,
   diffTypeSchema,
@@ -92,21 +91,29 @@ describe("fileOperationResultSchema", () => {
 describe("moduleSchema", () => {
   it("有効なモジュールを受け入れる", () => {
     const module = {
-      id: ".devcontainer",
       name: "DevContainer",
       description: "VS Code DevContainer 設定",
-      patterns: [".devcontainer/**"],
+      include: [".devcontainer/**"],
     };
     expect(moduleSchema.parse(module)).toEqual(module);
   });
 
   it("setupDescription を含むモジュールを受け入れる", () => {
     const module = {
-      id: ".devcontainer",
       name: "DevContainer",
       description: "VS Code DevContainer 設定",
       setupDescription: "VS Code で開くとセットアップされます",
-      patterns: [".devcontainer/**"],
+      include: [".devcontainer/**"],
+    };
+    expect(moduleSchema.parse(module)).toEqual(module);
+  });
+
+  it("exclude を含むモジュールを受け入れる", () => {
+    const module = {
+      name: "DevContainer",
+      description: "VS Code DevContainer 設定",
+      include: [".devcontainer/**"],
+      exclude: [".devcontainer/*.local"],
     };
     expect(moduleSchema.parse(module)).toEqual(module);
   });
@@ -114,20 +121,18 @@ describe("moduleSchema", () => {
   it("必須フィールドが欠けている場合は拒否する", () => {
     expect(() =>
       moduleSchema.parse({
-        id: ".devcontainer",
         name: "DevContainer",
         // description が欠けている
-        patterns: [],
+        include: [],
       }),
     ).toThrow();
   });
 
-  it("空のパターン配列を受け入れる", () => {
+  it("空の include 配列を受け入れる", () => {
     const module = {
-      id: "test",
       name: "Test",
       description: "Test module",
-      patterns: [],
+      include: [],
     };
     expect(moduleSchema.parse(module)).toEqual(module);
   });
@@ -138,7 +143,6 @@ describe("configSchema", () => {
     const config = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
-      modules: [".devcontainer", ".github"],
       source: {
         owner: "tktcorporation",
         repo: ".github",
@@ -151,7 +155,6 @@ describe("configSchema", () => {
     const config = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
-      modules: [],
       source: {
         owner: "tktcorporation",
         repo: ".github",
@@ -161,16 +164,15 @@ describe("configSchema", () => {
     expect(configSchema.parse(config)).toEqual(config);
   });
 
-  it("excludePatterns を受け入れる", () => {
+  it("baseRef を受け入れる", () => {
     const config = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
-      modules: [],
       source: {
         owner: "tktcorporation",
         repo: ".github",
       },
-      excludePatterns: ["*.local", ".env"],
+      baseRef: "abc123",
     };
     expect(configSchema.parse(config)).toEqual(config);
   });
@@ -180,7 +182,6 @@ describe("configSchema", () => {
       configSchema.parse({
         version: "1.0.0",
         installedAt: "invalid-date",
-        modules: [],
         source: { owner: "test", repo: "test" },
       }),
     ).toThrow();
@@ -190,37 +191,9 @@ describe("configSchema", () => {
     const config = {
       version: "1.0.0",
       installedAt: "2024-06-15T10:30:00Z",
-      modules: [],
       source: { owner: "test", repo: "test" },
     };
     expect(configSchema.parse(config)).toEqual(config);
-  });
-});
-
-describe("answersSchema", () => {
-  it("有効な回答を受け入れる", () => {
-    const answers = {
-      modules: [".devcontainer"],
-      overwriteStrategy: "overwrite",
-    };
-    expect(answersSchema.parse(answers)).toEqual(answers);
-  });
-
-  it("空のモジュール配列を拒否する", () => {
-    expect(() =>
-      answersSchema.parse({
-        modules: [],
-        overwriteStrategy: "skip",
-      }),
-    ).toThrow();
-  });
-
-  it("複数のモジュールを受け入れる", () => {
-    const answers = {
-      modules: [".devcontainer", ".github", ".claude"],
-      overwriteStrategy: "prompt",
-    };
-    expect(answersSchema.parse(answers)).toEqual(answers);
   });
 });
 

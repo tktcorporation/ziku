@@ -2,19 +2,13 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { defineCommand } from "citty";
 import { join, resolve } from "pathe";
 import {
-  getModuleById,
   getModulesFilePath,
-  getPatternsByModuleIds,
-  loadModulesFile,
+  loadPatternsFile,
+  loadTemplateModulesFile,
   modulesFileExists,
 } from "../modules/index";
 import { MODULES_SCHEMA_URL } from "../modules/loader";
-import type {
-  Answers,
-  FileOperationResult,
-  OverwriteStrategy,
-  TemplateModule,
-} from "../modules/schemas";
+import type { FileOperationResult, OverwriteStrategy, TemplateModule } from "../modules/schemas";
 import { BermError } from "../errors";
 import {
   confirmScaffoldDevenvPR,
@@ -22,7 +16,6 @@ import {
   selectMissingTemplateAction,
   selectModules,
   selectOverwriteStrategy,
-  selectTemplateModules,
 } from "../ui/prompts";
 import { DEFAULT_TEMPLATE_REPO, detectGitHubOwner, detectGitHubRepo } from "../utils/git-remote";
 import {
@@ -35,11 +28,11 @@ import {
 import { hashFiles } from "../utils/hash";
 import {
   buildTemplateSource,
-  copyFile,
   downloadTemplateToTemp,
   fetchTemplates,
   writeFileWithStrategy,
 } from "../utils/template";
+import type { FlatPatterns } from "../utils/patterns";
 import { intro, log, logFileResults, outro, pc, withSpinner } from "../ui/renderer";
 
 // ビルド時に置換される定数
@@ -66,18 +59,18 @@ export const initCommand = defineCommand({
     yes: {
       type: "boolean",
       alias: "y",
-      description: "Select all modules (non-interactive mode)",
+      description: "Non-interactive mode (accept all defaults)",
       default: false,
     },
     modules: {
       type: "string",
       alias: "m",
-      description: "Comma-separated module IDs to apply (non-interactive)",
+      description: "Comma-separated module names to apply (non-interactive)",
     },
     "overwrite-strategy": {
       type: "string",
       alias: "s",
-      description: "Overwrite strategy: overwrite, skip, or prompt (non-interactive)",
+      description: "Overwrite strategy: overwrite, skip, or prompt",
     },
     from: {
       type: "string",
@@ -126,122 +119,68 @@ export const initCommand = defineCommand({
     );
 
     try {
-      // modules.jsonc からモジュールを読み込み
-      let moduleList: TemplateModule[];
-      if (modulesFileExists(templateDir)) {
-        const { modules: loadedModules } = await loadModulesFile(templateDir);
-        moduleList = loadedModules;
-      } else {
+      if (!modulesFileExists(templateDir)) {
         // .ziku/modules.jsonc がテンプレートに存在しない場合のハンドリング
-        moduleList = await handleMissingDevenv(sourceOwner, sourceRepo, args.yes as boolean);
+        await handleMissingDevenv(sourceOwner, sourceRepo, args.yes as boolean);
       }
 
-      // Step 2: モジュール選択
-      log.step("Selecting modules...");
+      // テンプレートの modules.jsonc を読み込み、パターンを解決する。
+      // モジュール形式 → モジュール選択 UI → フラット化
+      // フラット形式 → そのまま使用
+      const flatPatterns = await resolveTemplatePatterns(
+        templateDir,
+        args.yes as boolean,
+        args.modules as string | undefined,
+      );
 
-      let answers: Answers;
-      const hasModulesArg = typeof args.modules === "string" && args.modules.length > 0;
-      const hasStrategyArg =
-        typeof args["overwrite-strategy"] === "string" && args["overwrite-strategy"].length > 0;
-
-      if (args.yes || hasModulesArg) {
-        // --yes: 全モジュール選択、--modules: 指定モジュール選択
-        let selectedModules: string[];
-        if (hasModulesArg) {
-          const requestedIds = (args.modules as string).split(",").map((s) => s.trim());
-          const validIds = moduleList.map((m) => m.id);
-          const invalidIds = requestedIds.filter((id) => !validIds.includes(id));
-          if (invalidIds.length > 0) {
-            throw new BermError(
-              `Unknown module(s): ${invalidIds.join(", ")}`,
-              `Available modules: ${validIds.join(", ")}`,
-            );
-          }
-          selectedModules = requestedIds;
-        } else {
-          selectedModules = moduleList.map((m) => m.id);
-        }
-
-        // --overwrite-strategy: 指定戦略、なければ overwrite
-        let overwriteStrategy: OverwriteStrategy = "overwrite";
-        if (hasStrategyArg) {
-          const strategy = args["overwrite-strategy"] as string;
-          if (strategy !== "overwrite" && strategy !== "skip" && strategy !== "prompt") {
-            throw new BermError(
-              `Invalid overwrite strategy: ${strategy}`,
-              "Must be: overwrite, skip, or prompt",
-            );
-          }
-          overwriteStrategy = strategy;
-        }
-
-        answers = {
-          modules: selectedModules,
-          overwriteStrategy,
-        };
-        log.info(`Selected ${pc.cyan(selectedModules.length.toString())} modules`);
-      } else if (hasStrategyArg) {
-        // --overwrite-strategy のみ指定：モジュール選択はインタラクティブ
-        const strategy = args["overwrite-strategy"] as string;
-        if (strategy !== "overwrite" && strategy !== "skip" && strategy !== "prompt") {
-          throw new BermError(
-            `Invalid overwrite strategy: ${strategy}`,
-            "Must be: overwrite, skip, or prompt",
-          );
-        }
-        const selectedModules = await selectModules(moduleList);
-        const overwriteStrategy = strategy;
-        answers = { modules: selectedModules, overwriteStrategy };
-      } else {
-        const selectedModules = await selectModules(moduleList);
-        // .ziku.json が既に存在する場合は再実行と判断し、skip をデフォルトに推奨する
-        const configExists = existsSync(resolve(targetDir, ".ziku.json"));
-        const overwriteStrategy = await selectOverwriteStrategy({ isReinit: configExists });
-        answers = { modules: selectedModules, overwriteStrategy };
-      }
-
-      if (answers.modules.length === 0) {
-        log.warn("No modules selected");
+      if (flatPatterns.include.length === 0) {
+        log.warn("No patterns to apply");
         return;
       }
 
-      // Step 3: ファイルをコピー
+      // 上書き戦略の解決
+      const effectiveStrategy: OverwriteStrategy = await resolveEffectiveStrategy(
+        args.force as boolean,
+        args["overwrite-strategy"] as string | undefined,
+        args.yes as boolean,
+        existsSync(resolve(targetDir, ".ziku.json")),
+      );
+
+      // Step 2: ファイルをコピー
       log.step("Applying templates...");
 
-      const effectiveStrategy: OverwriteStrategy = args.force
-        ? "overwrite"
-        : answers.overwriteStrategy;
-
-      // テンプレート取得・適用（サイレントモード - 後でまとめて表示）
       const templateResults = await fetchTemplates({
         targetDir,
-        modules: answers.modules,
         overwriteStrategy: effectiveStrategy,
-        moduleList,
+        patterns: flatPatterns,
         templateDir,
       });
 
       const allResults: FileOperationResult[] = [...templateResults];
 
       // devcontainer.env.example を戦略に従って作成
-      if (answers.modules.includes("devcontainer")) {
+      const hasDevcontainer = flatPatterns.include.some((p) => p.startsWith(".devcontainer/"));
+      if (hasDevcontainer) {
         const envResult = await createEnvExample(targetDir, effectiveStrategy);
         allResults.push(envResult);
       }
 
-      // modules.jsonc をテンプレートからコピー（track コマンドが必要とする）
-      const modulesJsoncResult = await copyModulesJsonc(templateDir, targetDir, effectiveStrategy);
+      // modules.jsonc をローカルに保存（テンプレートのパターンをそのまま使用）
+      const modulesJsoncResult = await writeFlatModulesJsonc(
+        targetDir,
+        flatPatterns,
+        effectiveStrategy,
+      );
       allResults.push(modulesJsoncResult);
 
       // テンプレートファイルのハッシュを計算（pull 時の差分検出用）
-      const patterns = getPatternsByModuleIds(answers.modules, moduleList);
-      const baseHashes = await hashFiles(templateDir, patterns);
+      const baseHashes = await hashFiles(templateDir, flatPatterns.include, flatPatterns.exclude);
 
       // テンプレートリポジトリの最新コミット SHA を取得（3-way マージのベース用）
       const baseRef = await resolveLatestCommitSha(sourceOwner, sourceRepo);
 
       // 設定ファイル生成（常に更新）
-      const configResult = await createDevEnvConfig(targetDir, answers.modules, {
+      const configResult = await createDevEnvConfig(targetDir, {
         owner: sourceOwner,
         repo: sourceRepo,
         baseHashes,
@@ -257,9 +196,6 @@ export const initCommand = defineCommand({
         log.info("No changes were made");
         return;
       }
-
-      // モジュール別の説明を表示
-      displayModuleDescriptions(answers.modules, allResults, moduleList);
 
       // 成功メッセージと次のステップ
       outro(
@@ -308,13 +244,9 @@ async function createEnvExample(
 
 /**
  * 設定ファイル (.ziku.json) を生成する。常に上書き。
- *
- * 背景: baseHashes を記録することで、pull 時に「ユーザーがローカルで変更したか」を
- * ファイル全体のコピーを保持せずに判定できる。
  */
 async function createDevEnvConfig(
   targetDir: string,
-  selectedModules: string[],
   source: {
     owner: string;
     repo: string;
@@ -325,7 +257,6 @@ async function createDevEnvConfig(
   const config: Record<string, unknown> = {
     version: "0.1.0",
     installedAt: new Date().toISOString(),
-    modules: selectedModules,
     source: { owner: source.owner, repo: source.repo },
   };
 
@@ -347,70 +278,128 @@ async function createDevEnvConfig(
 }
 
 /**
- * テンプレートから modules.jsonc をコピー
+ * フラットパターンで modules.jsonc をローカルに書き出す
  */
-async function copyModulesJsonc(
-  templateDir: string,
+async function writeFlatModulesJsonc(
   targetDir: string,
+  patterns: FlatPatterns,
   strategy: OverwriteStrategy,
 ): Promise<FileOperationResult> {
   const modulesRelPath = ".ziku/modules.jsonc";
-  const srcPath = join(templateDir, modulesRelPath);
-  const destPath = getModulesFilePath(targetDir);
+  const content = generateFlatPatternsJsonc(patterns);
 
-  if (!existsSync(srcPath)) {
-    return { action: "skipped", path: modulesRelPath };
-  }
-
-  return copyFile(srcPath, destPath, strategy, modulesRelPath);
+  return writeFileWithStrategy({
+    destPath: getModulesFilePath(targetDir),
+    content,
+    strategy,
+    relativePath: modulesRelPath,
+  });
 }
 
 /**
- * モジュール別の説明を表示
+ * テンプレートの modules.jsonc からパターンを解決する。
  *
- * 背景: 選択されたモジュールが実際に変更を加えた場合のみ、
- * 各モジュールの名前と説明を一覧表示する。ユーザーが何がインストールされたかを確認できる。
+ * - モジュール形式: モジュール選択 UI を表示し、選択されたモジュールをフラット化
+ * - フラット形式: そのまま使用（モジュール選択なし）
  */
-function displayModuleDescriptions(
-  selectedModules: string[],
-  fileResults: FileOperationResult[],
+async function resolveTemplatePatterns(
+  templateDir: string,
+  nonInteractive: boolean,
+  modulesArg: string | undefined,
+): Promise<FlatPatterns> {
+  // まずモジュール形式として読み込みを試行
+  let templateModules: TemplateModule[] | null = null;
+  try {
+    const { modules } = await loadTemplateModulesFile(templateDir);
+    templateModules = modules;
+  } catch {
+    // モジュール形式でない → フラット形式にフォールバック
+  }
+
+  if (templateModules) {
+    // モジュール形式: モジュール選択
+    const selectedModules = await selectModulesFromTemplate(
+      templateModules,
+      nonInteractive,
+      modulesArg,
+    );
+    return {
+      include: selectedModules.flatMap((m) => m.include),
+      exclude: selectedModules.flatMap((m) => m.exclude ?? []),
+    };
+  }
+
+  // フラット形式: そのまま使用
+  const loaded = await loadPatternsFile(templateDir);
+  return { include: loaded.include, exclude: loaded.exclude };
+}
+
+/**
+ * テンプレートのモジュール一覧からモジュールを選択する。
+ * --yes: 全モジュール、--modules: 指定モジュール、それ以外: インタラクティブ選択
+ */
+async function selectModulesFromTemplate(
   moduleList: TemplateModule[],
-): void {
-  const hasChanges = fileResults.some(
-    (r) => r.action === "copied" || r.action === "created" || r.action === "overwritten",
-  );
+  nonInteractive: boolean,
+  modulesArg: string | undefined,
+): Promise<TemplateModule[]> {
+  const hasModulesArg = typeof modulesArg === "string" && modulesArg.length > 0;
 
-  if (!hasChanges) {
-    return;
+  if (nonInteractive && !hasModulesArg) {
+    // --yes: 全モジュール選択
+    log.info(`Selected ${pc.cyan(moduleList.length.toString())} modules`);
+    return [...moduleList];
   }
 
-  log.info(pc.bold("Installed modules:"));
-
-  const lines: string[] = [];
-  for (const moduleId of selectedModules) {
-    const mod = getModuleById(moduleId, moduleList);
-    if (mod) {
-      const description = mod.setupDescription || mod.description;
-      lines.push(`  ${pc.cyan("\u25C6")} ${pc.bold(mod.name)}`);
-      if (description) {
-        lines.push(`    ${pc.dim(description)}`);
-      }
+  if (hasModulesArg) {
+    // --modules: 指定モジュール選択
+    const requestedNames = modulesArg.split(",").map((s) => s.trim());
+    const validNames = moduleList.map((m) => m.name);
+    const invalidNames = requestedNames.filter((name) => !validNames.includes(name));
+    if (invalidNames.length > 0) {
+      throw new BermError(
+        `Unknown module(s): ${invalidNames.join(", ")}`,
+        `Available modules: ${validNames.join(", ")}`,
+      );
     }
+    return moduleList.filter((m) => requestedNames.includes(m.name));
   }
-  if (lines.length > 0) {
-    log.message(lines.join("\n"));
+
+  // インタラクティブ: モジュール選択 UI
+  log.step("Selecting modules...");
+  return selectModules(moduleList);
+}
+
+/**
+ * 上書き戦略を CLI 引数・フラグから解決する。
+ *
+ * 優先順位: --force > --overwrite-strategy > --yes > インタラクティブ選択
+ */
+async function resolveEffectiveStrategy(
+  force: boolean,
+  strategyArg: string | undefined,
+  nonInteractive: boolean,
+  configExists: boolean,
+): Promise<OverwriteStrategy> {
+  if (force) return "overwrite";
+
+  if (strategyArg) {
+    if (strategyArg !== "overwrite" && strategyArg !== "skip" && strategyArg !== "prompt") {
+      throw new BermError(
+        `Invalid overwrite strategy: ${strategyArg}`,
+        "Must be: overwrite, skip, or prompt",
+      );
+    }
+    return strategyArg;
   }
+
+  if (nonInteractive) return "overwrite";
+
+  return selectOverwriteStrategy({ isReinit: configExists });
 }
 
 /**
  * テンプレートソースを解決する（存在チェック付き）。
- *
- * フロー:
- *   1. --from owner/repo → そのまま使用、存在しなければエラー
- *   2. git remote origin → {owner}/.github を候補とし、存在チェック
- *   3. 候補が見つからない / 存在しない → ユーザーに入力・作成を促す
- *
- * デフォルトテンプレートへのフォールバックは行わない。
  */
 async function resolveTemplateSourceWithCheck(
   from: string | undefined,
@@ -477,7 +466,6 @@ async function promptTemplateSource(): Promise<{ sourceOwner: string; sourceRepo
 
   const exists = await checkRepoExists(owner, repo);
   if (!exists) {
-    // 存在しないリポジトリ → 作成を提案
     return handleMissingTemplate(owner, repo);
   }
 
@@ -519,10 +507,8 @@ async function handleMissingTemplate(
 }
 
 /**
- * テンプレートに .ziku/modules.jsonc がない場合のハンドリング
- *
- * modules.jsonc はテンプレートリポジトリに必須。存在しない場合は
- * PR で追加するか、エラーにする。ローカルフォールバックは行わない。
+ * テンプレートに .ziku/modules.jsonc がない場合のハンドリング。
+ * テンプレートリポジトリに scaffold PR を作成するフローに誘導する。
  */
 async function handleMissingDevenv(
   owner: string,
@@ -553,8 +539,8 @@ async function handleMissingDevenv(
     );
   }
 
-  const selectedIds = await selectTemplateModules(MODULE_PRESETS);
-  const modulesContent = generateInitialModulesJsonc(selectedIds);
+  // デフォルトのフラットパターンで scaffold PR を作成
+  const modulesContent = generateFlatPatternsJsonc(DEFAULT_SCAFFOLD_PATTERNS);
   log.step(`Creating PR to add .ziku/modules.jsonc to ${pc.cyan(`${owner}/${repo}`)}...`);
   const result = await createDevenvScaffoldPR(token, owner, repo, modulesContent);
   log.success(`Created PR: ${pc.cyan(result.url)}`);
@@ -563,86 +549,38 @@ async function handleMissingDevenv(
 }
 
 /**
- * 初期モジュールのプリセットカタログ。
- *
- * テンプレートリポジトリのスキャフォールド時にユーザーが選択可能なモジュール一覧。
- * PR 作成パスとローカル生成パスの両方で共通して使用される。
+ * テンプレートリポジトリ scaffold 時のデフォルトパターン。
+ * テンプレートに modules.jsonc がない場合に提案する初期パターン。
  */
-export const MODULE_PRESETS: TemplateModule[] = [
-  {
-    id: ".devcontainer",
-    name: "DevContainer",
-    description: "VS Code DevContainer setup",
-    patterns: [".devcontainer/**"],
-  },
-  {
-    id: ".github",
-    name: "GitHub",
-    description: "GitHub Actions workflows and configuration",
-    patterns: [".github/**"],
-  },
-  {
-    id: ".vscode",
-    name: "VS Code",
-    description: "VS Code workspace settings and extensions",
-    patterns: [".vscode/**"],
-  },
-  {
-    id: ".claude",
-    name: "Claude",
-    description: "Claude Code project settings",
-    patterns: [".claude/**"],
-  },
-  {
-    id: ".editorconfig",
-    name: "EditorConfig",
-    description: "Editor formatting rules",
-    patterns: [".editorconfig"],
-  },
-  {
-    id: ".mcp.json",
-    name: "MCP",
-    description: "Model Context Protocol configuration",
-    patterns: [".mcp.json"],
-  },
-  {
-    id: ".mise.toml",
-    name: "mise",
-    description: "mise (dev tool version manager) configuration",
-    patterns: [".mise.toml"],
-  },
-];
+const DEFAULT_SCAFFOLD_PATTERNS: FlatPatterns = {
+  include: [
+    ".devcontainer/**",
+    ".github/**",
+    ".vscode/**",
+    ".claude/**",
+    ".editorconfig",
+    ".mcp.json",
+    ".mise.toml",
+  ],
+  exclude: [],
+};
 
 /**
- * 初期の modules.jsonc コンテンツを生成する（スキャフォールド用）
- *
- * テンプレートリポジトリに .ziku/modules.jsonc を追加する際に使用。
- * MODULE_PRESETS から選択されたモジュールのみを含む。
- *
- * @param selectedIds - 含めるモジュール ID の配列。未指定時は全プリセットを含む。
+ * フラット形式の modules.jsonc コンテンツを生成する。
  */
-export function generateInitialModulesJsonc(selectedIds?: string[]): string {
-  const modules = selectedIds
-    ? MODULE_PRESETS.filter((m) => selectedIds.includes(m.id))
-    : MODULE_PRESETS;
-
-  const content = {
+export function generateFlatPatternsJsonc(patterns: FlatPatterns): string {
+  const content: Record<string, unknown> = {
     $schema: MODULES_SCHEMA_URL,
-    modules: modules.map((m) => ({
-      id: m.id,
-      name: m.name,
-      description: m.description,
-      patterns: m.patterns,
-    })),
+    include: patterns.include,
   };
+  if (patterns.exclude.length > 0) {
+    content.exclude = patterns.exclude;
+  }
   return JSON.stringify(content, null, 2);
 }
 
 /**
  * 現在のリポジトリがテンプレートリポジトリ自体かどうかを判定する。
- *
- * 背景: テンプレートリポジトリ内で `ziku init` を実行した場合、
- * GitHub からダウンロードする代わりにローカルで `.ziku/modules.jsonc` を生成する。
  */
 export function isCurrentRepoTemplate(
   targetDir: string,
@@ -659,10 +597,9 @@ export function isCurrentRepoTemplate(
 
 /**
  * テンプレートリポジトリ自体で init を実行した場合のハンドリング。
- *
- * `.ziku/modules.jsonc` がなければ生成し、既にあれば通知する。
+ * フラット形式の modules.jsonc を生成する。
  */
-async function handleTemplateRepoInit(targetDir: string, nonInteractive: boolean): Promise<void> {
+async function handleTemplateRepoInit(targetDir: string, _nonInteractive: boolean): Promise<void> {
   log.info(`Detected: running inside the template repository`);
 
   if (modulesFileExists(targetDir)) {
@@ -673,12 +610,7 @@ async function handleTemplateRepoInit(targetDir: string, nonInteractive: boolean
 
   log.step("Generating .ziku/modules.jsonc...");
 
-  let selectedIds: string[] | undefined;
-  if (!nonInteractive) {
-    selectedIds = await selectTemplateModules(MODULE_PRESETS);
-  }
-
-  const modulesContent = generateInitialModulesJsonc(selectedIds);
+  const modulesContent = generateFlatPatternsJsonc(DEFAULT_SCAFFOLD_PATTERNS);
   const modulesDir = join(targetDir, ".ziku");
   if (!existsSync(modulesDir)) {
     mkdirSync(modulesDir, { recursive: true });
@@ -719,11 +651,6 @@ function parseFromArg(from: string): { sourceOwner: string; sourceRepo: string }
 
 /**
  * テンプレートソースを解決する（純粋な解決ロジック、存在チェックなし）。
- *
- * 優先順位:
- *   1. --from owner/repo が指定されていればそのまま使用
- *   2. git remote origin から owner を検出 → {owner}/.github
- *   3. 解決不可（null を返す）
  */
 export function resolveTemplateSource(from: string | undefined): {
   sourceOwner: string;

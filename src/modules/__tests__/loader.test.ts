@@ -14,16 +14,16 @@ vi.mock("node:fs/promises", async () => {
 
 // モック後にインポート
 const {
-  loadModulesFile,
-  getModuleByIdFromList,
-  addPatternToModulesFile,
-  addPatternToModulesFileWithCreate,
+  loadTemplateModulesFile,
+  loadLocalPatternsFile,
+  loadPatternsFile,
+  addIncludePattern,
   saveModulesFile,
   getModulesFilePath,
   modulesFileExists,
 } = await import("../loader");
 
-describe("loadModulesFile", () => {
+describe("loadTemplateModulesFile", () => {
   beforeEach(() => {
     vol.reset();
   });
@@ -32,10 +32,9 @@ describe("loadModulesFile", () => {
     const modulesContent = JSON.stringify({
       modules: [
         {
-          id: ".devcontainer",
           name: "DevContainer",
           description: "VS Code DevContainer 設定",
-          patterns: [".devcontainer/**"],
+          include: [".devcontainer/**"],
         },
       ],
     });
@@ -44,10 +43,10 @@ describe("loadModulesFile", () => {
       "/project/.ziku/modules.jsonc": modulesContent,
     });
 
-    const result = await loadModulesFile("/project");
+    const result = await loadTemplateModulesFile("/project");
 
     expect(result.modules).toHaveLength(1);
-    expect(result.modules[0].id).toBe(".devcontainer");
+    expect(result.modules[0].name).toBe("DevContainer");
     expect(result.rawContent).toBe(modulesContent);
   });
 
@@ -56,11 +55,10 @@ describe("loadModulesFile", () => {
       // これはコメント
       "modules": [
         {
-          "id": ".github",
           "name": "GitHub",
           "description": "GitHub 設定",
           /* 複数行コメント */
-          "patterns": [".github/**"]
+          "include": [".github/**"]
         }
       ]
     }`;
@@ -69,10 +67,10 @@ describe("loadModulesFile", () => {
       "/project/.ziku/modules.jsonc": modulesContent,
     });
 
-    const result = await loadModulesFile("/project");
+    const result = await loadTemplateModulesFile("/project");
 
     expect(result.modules).toHaveLength(1);
-    expect(result.modules[0].id).toBe(".github");
+    expect(result.modules[0].name).toBe("GitHub");
   });
 
   it("$schema フィールドを無視して読み込める", async () => {
@@ -80,10 +78,9 @@ describe("loadModulesFile", () => {
       $schema: "https://example.com/schema.json",
       modules: [
         {
-          id: ".",
           name: "Root",
           description: "ルート設定",
-          patterns: [".mcp.json"],
+          include: [".mcp.json"],
         },
       ],
     });
@@ -92,7 +89,7 @@ describe("loadModulesFile", () => {
       "/project/.ziku/modules.jsonc": modulesContent,
     });
 
-    const result = await loadModulesFile("/project");
+    const result = await loadTemplateModulesFile("/project");
 
     expect(result.modules).toHaveLength(1);
   });
@@ -100,7 +97,7 @@ describe("loadModulesFile", () => {
   it("ファイルが存在しない場合はエラー", async () => {
     vol.fromJSON({});
 
-    await expect(loadModulesFile("/project")).rejects.toThrow(
+    await expect(loadTemplateModulesFile("/project")).rejects.toThrow(
       ".ziku/modules.jsonc が見つかりません",
     );
   });
@@ -110,7 +107,7 @@ describe("loadModulesFile", () => {
       "/project/.ziku/modules.jsonc": "{ invalid json }",
     });
 
-    await expect(loadModulesFile("/project")).rejects.toThrow();
+    await expect(loadTemplateModulesFile("/project")).rejects.toThrow();
   });
 
   it("スキーマに合わない場合はエラー", async () => {
@@ -118,27 +115,25 @@ describe("loadModulesFile", () => {
       "/project/.ziku/modules.jsonc": JSON.stringify({
         modules: [
           {
-            id: ".devcontainer",
             // name が欠けている
             description: "Test",
-            patterns: [],
+            include: [],
           },
         ],
       }),
     });
 
-    await expect(loadModulesFile("/project")).rejects.toThrow();
+    await expect(loadTemplateModulesFile("/project")).rejects.toThrow();
   });
 
   it("setupDescription を含むモジュールを読み込める", async () => {
     const modulesContent = JSON.stringify({
       modules: [
         {
-          id: ".devcontainer",
           name: "DevContainer",
           description: "VS Code DevContainer 設定",
           setupDescription: "VS Code で開くとセットアップされます",
-          patterns: [".devcontainer/**"],
+          include: [".devcontainer/**"],
         },
       ],
     });
@@ -147,210 +142,226 @@ describe("loadModulesFile", () => {
       "/project/.ziku/modules.jsonc": modulesContent,
     });
 
-    const result = await loadModulesFile("/project");
+    const result = await loadTemplateModulesFile("/project");
 
     expect(result.modules[0].setupDescription).toBe("VS Code で開くとセットアップされます");
   });
 });
 
-describe("getModuleByIdFromList", () => {
-  const modules = [
-    { id: ".devcontainer", name: "DevContainer", description: "Test", patterns: [] },
-    { id: ".github", name: "GitHub", description: "Test", patterns: [] },
-  ];
-
-  it("ID でモジュールを取得できる", () => {
-    const result = getModuleByIdFromList(modules, ".devcontainer");
-
-    expect(result?.id).toBe(".devcontainer");
-    expect(result?.name).toBe("DevContainer");
+describe("loadLocalPatternsFile", () => {
+  beforeEach(() => {
+    vol.reset();
   });
 
-  it("存在しない ID の場合は undefined を返す", () => {
-    const result = getModuleByIdFromList(modules, ".claude");
+  it("フラット形式の modules.jsonc を読み込める", async () => {
+    const content = JSON.stringify({
+      include: [".devcontainer/**", ".github/**"],
+      exclude: ["*.local"],
+    });
 
-    expect(result).toBeUndefined();
+    vol.fromJSON({
+      "/project/.ziku/modules.jsonc": content,
+    });
+
+    const result = await loadLocalPatternsFile("/project");
+
+    expect(result.include).toEqual([".devcontainer/**", ".github/**"]);
+    expect(result.exclude).toEqual(["*.local"]);
+    expect(result.rawContent).toBe(content);
   });
 
-  it("空のリストの場合は undefined を返す", () => {
-    const result = getModuleByIdFromList([], ".devcontainer");
+  it("exclude が省略された場合は空配列を返す", async () => {
+    const content = JSON.stringify({
+      include: ["src/**"],
+    });
 
-    expect(result).toBeUndefined();
+    vol.fromJSON({
+      "/project/.ziku/modules.jsonc": content,
+    });
+
+    const result = await loadLocalPatternsFile("/project");
+
+    expect(result.include).toEqual(["src/**"]);
+    expect(result.exclude).toEqual([]);
+  });
+
+  it("JSONC コメント付きフラット形式を読み込める", async () => {
+    const content = `{
+      // include patterns
+      "include": ["src/**"],
+      /* exclude patterns */
+      "exclude": ["*.test.ts"]
+    }`;
+
+    vol.fromJSON({
+      "/project/.ziku/modules.jsonc": content,
+    });
+
+    const result = await loadLocalPatternsFile("/project");
+
+    expect(result.include).toEqual(["src/**"]);
+    expect(result.exclude).toEqual(["*.test.ts"]);
+  });
+
+  it("$schema フィールドを無視して読み込める", async () => {
+    const content = JSON.stringify({
+      $schema: "https://example.com/schema.json",
+      include: [".mcp.json"],
+    });
+
+    vol.fromJSON({
+      "/project/.ziku/modules.jsonc": content,
+    });
+
+    const result = await loadLocalPatternsFile("/project");
+
+    expect(result.include).toEqual([".mcp.json"]);
+  });
+
+  it("ファイルが存在しない場合はエラー", async () => {
+    vol.fromJSON({});
+
+    await expect(loadLocalPatternsFile("/project")).rejects.toThrow(
+      ".ziku/modules.jsonc が見つかりません",
+    );
+  });
+
+  it("スキーマに合わない場合はエラー", async () => {
+    vol.fromJSON({
+      "/project/.ziku/modules.jsonc": JSON.stringify({
+        modules: [{ name: "A", description: "A", include: [] }],
+      }),
+    });
+
+    await expect(loadLocalPatternsFile("/project")).rejects.toThrow();
   });
 });
 
-describe("addPatternToModulesFile", () => {
-  it("既存モジュールにパターンを追加できる", () => {
+describe("loadPatternsFile", () => {
+  beforeEach(() => {
+    vol.reset();
+  });
+
+  it("フラット形式を読み込める", async () => {
+    const content = JSON.stringify({
+      include: ["src/**"],
+      exclude: ["*.local"],
+    });
+
+    vol.fromJSON({
+      "/project/.ziku/modules.jsonc": content,
+    });
+
+    const result = await loadPatternsFile("/project");
+
+    expect(result.include).toEqual(["src/**"]);
+    expect(result.exclude).toEqual(["*.local"]);
+  });
+
+  it("テンプレート形式をフラット化して読み込める", async () => {
+    const content = JSON.stringify({
+      modules: [
+        { name: "A", description: "A", include: ["a.txt"], exclude: ["a.local"] },
+        { name: "B", description: "B", include: ["b.txt"] },
+      ],
+    });
+
+    vol.fromJSON({
+      "/project/.ziku/modules.jsonc": content,
+    });
+
+    const result = await loadPatternsFile("/project");
+
+    expect(result.include).toEqual(["a.txt", "b.txt"]);
+    expect(result.exclude).toEqual(["a.local"]);
+  });
+
+  it("ファイルが存在しない場合はエラー", async () => {
+    vol.fromJSON({});
+
+    await expect(loadPatternsFile("/project")).rejects.toThrow(
+      ".ziku/modules.jsonc が見つかりません",
+    );
+  });
+
+  it("どちらの形式にも合わない場合はエラー", async () => {
+    vol.fromJSON({
+      "/project/.ziku/modules.jsonc": JSON.stringify({ invalid: true }),
+    });
+
+    await expect(loadPatternsFile("/project")).rejects.toThrow(
+      ".ziku/modules.jsonc の形式が不正です",
+    );
+  });
+});
+
+describe("addIncludePattern", () => {
+  it("パターンを追加できる", () => {
     const rawContent = JSON.stringify(
       {
-        modules: [
-          {
-            id: ".devcontainer",
-            name: "DevContainer",
-            description: "Test",
-            patterns: [".devcontainer/devcontainer.json"],
-          },
-        ],
+        include: [".devcontainer/devcontainer.json"],
+        exclude: [],
       },
       null,
       2,
     );
 
-    const result = addPatternToModulesFile(rawContent, ".devcontainer", [".devcontainer/new.sh"]);
+    const result = addIncludePattern(rawContent, [".devcontainer/new.sh"]);
 
     const parsed = JSON.parse(result);
-    expect(parsed.modules[0].patterns).toContain(".devcontainer/devcontainer.json");
-    expect(parsed.modules[0].patterns).toContain(".devcontainer/new.sh");
+    expect(parsed.include).toContain(".devcontainer/devcontainer.json");
+    expect(parsed.include).toContain(".devcontainer/new.sh");
   });
 
   it("重複するパターンは追加しない", () => {
     const rawContent = JSON.stringify(
       {
-        modules: [
-          {
-            id: ".devcontainer",
-            name: "DevContainer",
-            description: "Test",
-            patterns: [".devcontainer/devcontainer.json"],
-          },
-        ],
+        include: [".devcontainer/devcontainer.json"],
+        exclude: [],
       },
       null,
       2,
     );
 
-    const result = addPatternToModulesFile(rawContent, ".devcontainer", [
-      ".devcontainer/devcontainer.json",
-    ]);
+    const result = addIncludePattern(rawContent, [".devcontainer/devcontainer.json"]);
 
     // 変更なしの場合は元のコンテンツを返す
     expect(result).toBe(rawContent);
   });
 
-  it("存在しないモジュール ID の場合はエラー", () => {
-    const rawContent = JSON.stringify({
-      modules: [
-        {
-          id: ".devcontainer",
-          name: "DevContainer",
-          description: "Test",
-          patterns: [],
-        },
-      ],
-    });
-
-    expect(() => addPatternToModulesFile(rawContent, ".github", ["pattern"])).toThrow(
-      "モジュール .github が見つかりません",
-    );
-  });
-
   it("複数のパターンを一度に追加できる", () => {
     const rawContent = JSON.stringify(
       {
-        modules: [
-          {
-            id: ".github",
-            name: "GitHub",
-            description: "Test",
-            patterns: [".github/workflows/ci.yml"],
-          },
-        ],
+        include: [".github/workflows/ci.yml"],
+        exclude: [],
       },
       null,
       2,
     );
 
-    const result = addPatternToModulesFile(rawContent, ".github", [
+    const result = addIncludePattern(rawContent, [
       ".github/workflows/test.yml",
       ".github/labeler.yml",
     ]);
 
     const parsed = JSON.parse(result);
-    expect(parsed.modules[0].patterns).toHaveLength(3);
+    expect(parsed.include).toHaveLength(3);
   });
-});
 
-describe("addPatternToModulesFileWithCreate", () => {
-  it("既存モジュールにパターンを追加できる", () => {
+  it("include が空の場合にパターンを追加できる", () => {
     const rawContent = JSON.stringify(
       {
-        modules: [
-          {
-            id: ".devcontainer",
-            name: "DevContainer",
-            description: "Test",
-            patterns: [".devcontainer/devcontainer.json"],
-          },
-        ],
+        include: [],
+        exclude: [],
       },
       null,
       2,
     );
 
-    const result = addPatternToModulesFileWithCreate(rawContent, ".devcontainer", [
-      ".devcontainer/new.sh",
-    ]);
+    const result = addIncludePattern(rawContent, ["new-pattern.txt"]);
 
     const parsed = JSON.parse(result);
-    expect(parsed.modules).toHaveLength(1);
-    expect(parsed.modules[0].patterns).toContain(".devcontainer/new.sh");
-  });
-
-  it("存在しないモジュールの場合は新規作成する", () => {
-    const rawContent = JSON.stringify(
-      {
-        modules: [
-          {
-            id: ".",
-            name: "Root",
-            description: "Root files",
-            patterns: [".mcp.json"],
-          },
-        ],
-      },
-      null,
-      2,
-    );
-
-    const result = addPatternToModulesFileWithCreate(rawContent, ".cloud", [".cloud/rules/*.md"]);
-
-    const parsed = JSON.parse(result);
-    expect(parsed.modules).toHaveLength(2);
-    expect(parsed.modules[1].id).toBe(".cloud");
-    expect(parsed.modules[1].patterns).toContain(".cloud/rules/*.md");
-  });
-
-  it("新規モジュールにカスタム名と説明を設定できる", () => {
-    const rawContent = JSON.stringify({ modules: [] }, null, 2);
-
-    const result = addPatternToModulesFileWithCreate(rawContent, ".cloud", [".cloud/config.json"], {
-      name: "Cloud Rules",
-      description: "Cloud configuration files",
-    });
-
-    const parsed = JSON.parse(result);
-    expect(parsed.modules[0].name).toBe("Cloud Rules");
-    expect(parsed.modules[0].description).toBe("Cloud configuration files");
-  });
-
-  it("新規モジュールのデフォルト名を自動生成する", () => {
-    const rawContent = JSON.stringify({ modules: [] }, null, 2);
-
-    const result = addPatternToModulesFileWithCreate(rawContent, ".cloud", [".cloud/rules/*.md"]);
-
-    const parsed = JSON.parse(result);
-    expect(parsed.modules[0].name).toBe("Cloud");
-    expect(parsed.modules[0].description).toBe("Files in .cloud directory");
-  });
-
-  it("ルートモジュールのデフォルト名は Root になる", () => {
-    const rawContent = JSON.stringify({ modules: [] }, null, 2);
-
-    const result = addPatternToModulesFileWithCreate(rawContent, ".", [".new-config"]);
-
-    const parsed = JSON.parse(result);
-    expect(parsed.modules[0].name).toBe("Root");
-    expect(parsed.modules[0].description).toBe("Files in root directory");
+    expect(parsed.include).toEqual(["new-pattern.txt"]);
   });
 });
 
@@ -364,7 +375,7 @@ describe("saveModulesFile", () => {
       "/project/.ziku": null, // ディレクトリを作成
     });
 
-    const content = JSON.stringify({ modules: [] });
+    const content = JSON.stringify({ include: [], exclude: [] });
     await saveModulesFile("/project", content);
 
     const saved = vol.readFileSync("/project/.ziku/modules.jsonc", "utf8");
@@ -376,7 +387,7 @@ describe("saveModulesFile", () => {
       "/project/.ziku/modules.jsonc": "old content",
     });
 
-    const newContent = JSON.stringify({ modules: [{ id: "new" }] });
+    const newContent = JSON.stringify({ include: ["new-pattern.txt"], exclude: [] });
     await saveModulesFile("/project", newContent);
 
     const saved = vol.readFileSync("/project/.ziku/modules.jsonc", "utf8");

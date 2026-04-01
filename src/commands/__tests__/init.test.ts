@@ -52,7 +52,6 @@ vi.mock("../../ui/prompts", () => ({
   selectModules: vi.fn(),
   selectOverwriteStrategy: vi.fn(),
   selectMissingTemplateAction: vi.fn(),
-  selectTemplateModules: vi.fn(() => Promise.resolve([".devcontainer", ".github"])),
   inputTemplateSource: vi.fn(),
   confirmScaffoldDevenvPR: vi.fn(() => Promise.resolve(true)),
 }));
@@ -82,38 +81,28 @@ vi.mock("../../modules/index", async (importOriginal) => {
   return {
     ...original,
     modulesFileExists: vi.fn(() => true),
-    loadModulesFile: vi.fn(() =>
+    loadTemplateModulesFile: vi.fn(() =>
       Promise.resolve({
         modules: [
           {
-            id: ".",
-            name: "Root",
+            name: "Root Config",
             description: "Root config",
-            patterns: [".mcp.json", ".mise.toml"],
+            include: [".mcp.json", ".mise.toml"],
           },
           {
-            id: ".devcontainer",
             name: "DevContainer",
             description: "DevContainer",
-            patterns: [".devcontainer/**"],
+            include: [".devcontainer/**"],
           },
           {
-            id: ".github",
             name: "GitHub",
             description: "GitHub",
-            patterns: [".github/**"],
+            include: [".github/**"],
           },
           {
-            id: ".claude",
             name: "Claude",
             description: "Claude",
-            patterns: [".claude/**"],
-          },
-          {
-            id: "devcontainer",
-            name: "DevContainer",
-            description: "DevContainer",
-            patterns: [".devcontainer/**"],
+            include: [".claude/**"],
           },
         ],
         rawContent: '{"modules":[]}',
@@ -123,13 +112,11 @@ vi.mock("../../modules/index", async (importOriginal) => {
 });
 
 // モック後にインポート
-const { initCommand, isCurrentRepoTemplate, MODULE_PRESETS, generateInitialModulesJsonc } =
-  await import("../init");
+const { initCommand, isCurrentRepoTemplate, generateFlatPatternsJsonc } = await import("../init");
 const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy, copyFile } =
   await import("../../utils/template");
 const { detectGitHubOwner, detectGitHubRepo } = await import("../../utils/git-remote");
-const { selectModules, selectOverwriteStrategy, selectTemplateModules } =
-  await import("../../ui/prompts");
+const { selectModules, selectOverwriteStrategy } = await import("../../ui/prompts");
 const { log } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
 const { modulesFileExists } = await import("../../modules/index");
@@ -142,7 +129,6 @@ const mockDetectGitHubOwner = vi.mocked(detectGitHubOwner);
 const mockDetectGitHubRepo = vi.mocked(detectGitHubRepo);
 const mockSelectModules = vi.mocked(selectModules);
 const mockSelectOverwriteStrategy = vi.mocked(selectOverwriteStrategy);
-const mockSelectTemplateModules = vi.mocked(selectTemplateModules);
 const mockLog = vi.mocked(log);
 const mockHashFiles = vi.mocked(hashFiles);
 const mockModulesFileExists = vi.mocked(modulesFileExists);
@@ -201,6 +187,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
+      // selectModules が空配列 → include が空 → "No patterns to apply"
       mockSelectModules.mockResolvedValueOnce([]);
 
       await (initCommand.run as any)({
@@ -209,7 +196,7 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
-      expect(mockLog.warn).toHaveBeenCalledWith("No modules selected");
+      expect(mockLog.warn).toHaveBeenCalledWith("No patterns to apply");
     });
 
     it("--yes オプションで全モジュールを自動選択", async () => {
@@ -234,7 +221,9 @@ describe("initCommand", () => {
     it("ターゲットディレクトリが存在しない場合は作成", async () => {
       vol.fromJSON({});
 
-      mockSelectModules.mockResolvedValueOnce(["root"]);
+      mockSelectModules.mockResolvedValueOnce([
+        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
+      ]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
@@ -253,7 +242,9 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectModules.mockResolvedValueOnce(["devcontainer"]);
+      mockSelectModules.mockResolvedValueOnce([
+        { name: "DevContainer", description: "DevContainer", include: [".devcontainer/**"] },
+      ]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -277,7 +268,9 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectModules.mockResolvedValueOnce(["root"]);
+      mockSelectModules.mockResolvedValueOnce([
+        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
+      ]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -307,7 +300,9 @@ describe("initCommand", () => {
         cleanup: mockCleanup,
       });
 
-      mockSelectModules.mockResolvedValueOnce(["root"]);
+      mockSelectModules.mockResolvedValueOnce([
+        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
+      ]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -321,20 +316,17 @@ describe("initCommand", () => {
       expect(mockCleanup).toHaveBeenCalled();
     });
 
-    it("modules.jsonc をテンプレートからコピーする", async () => {
+    it("選択されたモジュールで modules.jsonc を生成する", async () => {
       vol.fromJSON({
         "/test": null,
-        "/tmp/template/.ziku/modules.jsonc": '{"modules":[]}',
       });
 
-      mockSelectModules.mockResolvedValueOnce(["root"]);
+      mockSelectModules.mockResolvedValueOnce([
+        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
+      ]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
-      mockCopyFile.mockResolvedValue({
-        action: "copied",
-        path: ".ziku/modules.jsonc",
-      });
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: false },
@@ -342,12 +334,11 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
-      // copyFile が modules.jsonc に対して呼ばれる
-      expect(mockCopyFile).toHaveBeenCalledWith(
-        "/tmp/template/.ziku/modules.jsonc",
-        expect.stringContaining(".ziku/modules.jsonc"),
-        "prompt",
-        ".ziku/modules.jsonc",
+      // writeFileWithStrategy が modules.jsonc に対して呼ばれる
+      expect(mockWriteFileWithStrategy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          relativePath: ".ziku/modules.jsonc",
+        }),
       );
     });
 
@@ -387,7 +378,7 @@ describe("initCommand", () => {
           dir: "/test",
           force: false,
           yes: false,
-          modules: ".",
+          modules: "Root Config",
         },
         rawArgs: [],
         cmd: initCommand,
@@ -398,7 +389,9 @@ describe("initCommand", () => {
       // fetchTemplates は指定モジュールで呼ばれる
       expect(mockFetchTemplates).toHaveBeenCalledWith(
         expect.objectContaining({
-          modules: ["."],
+          patterns: expect.objectContaining({
+            include: expect.arrayContaining([".mcp.json", ".mise.toml"]),
+          }),
         }),
       );
     });
@@ -415,7 +408,7 @@ describe("initCommand", () => {
           dir: "/test",
           force: false,
           yes: false,
-          modules: ".,.github",
+          modules: "Root Config,GitHub",
         },
         rawArgs: [],
         cmd: initCommand,
@@ -424,12 +417,14 @@ describe("initCommand", () => {
       expect(mockSelectModules).not.toHaveBeenCalled();
       expect(mockFetchTemplates).toHaveBeenCalledWith(
         expect.objectContaining({
-          modules: [".", ".github"],
+          patterns: expect.objectContaining({
+            include: expect.arrayContaining([".mcp.json", ".mise.toml", ".github/**"]),
+          }),
         }),
       );
     });
 
-    it("--modules で無効なモジュール ID を指定するとエラー", async () => {
+    it("--modules で無効なモジュール名を指定するとエラー", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -487,7 +482,7 @@ describe("initCommand", () => {
           dir: "/test",
           force: false,
           yes: false,
-          modules: ".",
+          modules: "Root Config",
           "overwrite-strategy": "skip",
         },
         rawArgs: [],
@@ -497,7 +492,9 @@ describe("initCommand", () => {
       expect(mockSelectModules).not.toHaveBeenCalled();
       expect(mockFetchTemplates).toHaveBeenCalledWith(
         expect.objectContaining({
-          modules: ["."],
+          patterns: expect.objectContaining({
+            include: expect.arrayContaining([".mcp.json", ".mise.toml"]),
+          }),
           overwriteStrategy: "skip",
         }),
       );
@@ -529,7 +526,9 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectModules.mockResolvedValueOnce(["."]);
+      mockSelectModules.mockResolvedValueOnce([
+        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
+      ]);
 
       mockFetchTemplates.mockResolvedValue([]);
 
@@ -576,7 +575,9 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectModules.mockResolvedValueOnce(["."]);
+      mockSelectModules.mockResolvedValueOnce([
+        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
+      ]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -606,7 +607,9 @@ describe("initCommand", () => {
 
       mockDetectGitHubOwner.mockReturnValueOnce("detected-org");
 
-      mockSelectModules.mockResolvedValueOnce(["."]);
+      mockSelectModules.mockResolvedValueOnce([
+        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
+      ]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -639,7 +642,9 @@ describe("initCommand", () => {
       // ユーザーが custom-org/templates を入力
       mockInputTemplateSource.mockResolvedValueOnce("custom-org/templates");
       mockCheckRepoExists.mockResolvedValueOnce(true);
-      mockSelectModules.mockResolvedValueOnce(["."]);
+      mockSelectModules.mockResolvedValueOnce([
+        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
+      ]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -677,7 +682,11 @@ describe("initCommand", () => {
       });
 
       // hashFiles がテンプレートディレクトリとモジュールパターンで呼ばれる
-      expect(mockHashFiles).toHaveBeenCalledWith("/tmp/template", expect.any(Array));
+      expect(mockHashFiles).toHaveBeenCalledWith(
+        "/tmp/template",
+        expect.any(Array),
+        expect.any(Array),
+      );
 
       // writeFileWithStrategy に baseHashes が含まれた JSON が渡される
       const configCall = mockWriteFileWithStrategy.mock.calls.find(
@@ -713,7 +722,7 @@ describe("initCommand", () => {
       expect(configContent.baseHashes).toBeUndefined();
     });
 
-    it("テンプレートリポジトリ自体で実行した場合、選択されたモジュールで modules.jsonc を生成する", async () => {
+    it("テンプレートリポジトリ自体で実行した場合、フラット形式の modules.jsonc を生成する", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -722,8 +731,6 @@ describe("initCommand", () => {
       mockDetectGitHubRepo.mockReturnValueOnce({ owner: "test-org", repo: ".github" });
       // handleTemplateRepoInit 内で modulesFileExists(targetDir) が false を返す
       mockModulesFileExists.mockReturnValueOnce(false);
-      // ユーザーが DevContainer と GitHub を選択
-      mockSelectTemplateModules.mockResolvedValueOnce([".devcontainer", ".github"]);
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: false },
@@ -733,37 +740,15 @@ describe("initCommand", () => {
 
       // テンプレートをダウンロードしない
       expect(mockDownloadTemplateToTemp).not.toHaveBeenCalled();
-      // selectTemplateModules が呼ばれる
-      expect(mockSelectTemplateModules).toHaveBeenCalledWith(MODULE_PRESETS);
-      // modules.jsonc が生成される
+      // modules.jsonc がフラット形式で生成される
       expect(vol.existsSync("/test/.ziku/modules.jsonc")).toBe(true);
       const content = vol.readFileSync("/test/.ziku/modules.jsonc", "utf-8") as string;
       const parsed = JSON.parse(content);
-      expect(parsed.modules).toHaveLength(2);
-      expect(parsed.modules.map((m: any) => m.id)).toEqual([".devcontainer", ".github"]);
-    });
-
-    it("テンプレートリポジトリで --yes の場合、全プリセットで modules.jsonc を生成する", async () => {
-      vol.fromJSON({
-        "/test": null,
-      });
-
-      mockDetectGitHubRepo.mockReturnValueOnce({ owner: "test-org", repo: ".github" });
-      mockModulesFileExists.mockReturnValueOnce(false);
-
-      await (initCommand.run as any)({
-        args: { dir: "/test", force: false, yes: true },
-        rawArgs: [],
-        cmd: initCommand,
-      });
-
-      // --yes ではインタラクティブ選択をスキップ
-      expect(mockSelectTemplateModules).not.toHaveBeenCalled();
-      // 全プリセットが含まれる
-      expect(vol.existsSync("/test/.ziku/modules.jsonc")).toBe(true);
-      const content = vol.readFileSync("/test/.ziku/modules.jsonc", "utf-8") as string;
-      const parsed = JSON.parse(content);
-      expect(parsed.modules).toHaveLength(MODULE_PRESETS.length);
+      expect(parsed.include).toBeDefined();
+      expect(Array.isArray(parsed.include)).toBe(true);
+      expect(parsed.include.length).toBeGreaterThan(0);
+      // モジュール形式ではない
+      expect(parsed.modules).toBeUndefined();
     });
 
     it("テンプレートリポジトリで modules.jsonc が既にある場合はスキップ", async () => {
@@ -795,7 +780,9 @@ describe("initCommand", () => {
       // 現在のリポジトリがテンプレートリポジトリと異なる
       mockDetectGitHubRepo.mockReturnValueOnce({ owner: "test-org", repo: "my-app" });
 
-      mockSelectModules.mockResolvedValueOnce(["."]);
+      mockSelectModules.mockResolvedValueOnce([
+        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
+      ]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
       mockFetchTemplates.mockResolvedValue([]);
 
@@ -842,44 +829,33 @@ describe("isCurrentRepoTemplate", () => {
   });
 });
 
-describe("MODULE_PRESETS", () => {
-  it("プリセットが定義されている", () => {
-    expect(MODULE_PRESETS.length).toBeGreaterThan(0);
-  });
-
-  it("各プリセットに必須フィールドがある", () => {
-    for (const preset of MODULE_PRESETS) {
-      expect(preset.id).toBeTruthy();
-      expect(preset.name).toBeTruthy();
-      expect(preset.description).toBeTruthy();
-      expect(preset.patterns.length).toBeGreaterThan(0);
-    }
-  });
-
-  it("ID が一意", () => {
-    const ids = MODULE_PRESETS.map((p) => p.id);
-    expect(new Set(ids).size).toBe(ids.length);
-  });
-});
-
-describe("generateInitialModulesJsonc", () => {
-  it("引数なしで全プリセットを含む", () => {
-    const content = generateInitialModulesJsonc();
+describe("generateFlatPatternsJsonc", () => {
+  it("include と $schema を含むフラット JSON を生成する", () => {
+    const content = generateFlatPatternsJsonc({
+      include: [".github/**", ".devcontainer/**"],
+      exclude: [],
+    });
     const parsed = JSON.parse(content);
-    expect(parsed.modules).toHaveLength(MODULE_PRESETS.length);
     expect(parsed.$schema).toBeDefined();
+    expect(parsed.include).toEqual([".github/**", ".devcontainer/**"]);
+    expect(parsed.exclude).toBeUndefined();
   });
 
-  it("選択した ID のみ含む", () => {
-    const content = generateInitialModulesJsonc([".github"]);
+  it("exclude がある場合は含める", () => {
+    const content = generateFlatPatternsJsonc({
+      include: [".github/**"],
+      exclude: [".github/CODEOWNERS"],
+    });
     const parsed = JSON.parse(content);
-    expect(parsed.modules).toHaveLength(1);
-    expect(parsed.modules[0].id).toBe(".github");
+    expect(parsed.exclude).toEqual([".github/CODEOWNERS"]);
   });
 
-  it("空配列で空のモジュールリスト", () => {
-    const content = generateInitialModulesJsonc([]);
+  it("空の include で空配列を含む JSON を生成する", () => {
+    const content = generateFlatPatternsJsonc({
+      include: [],
+      exclude: [],
+    });
     const parsed = JSON.parse(content);
-    expect(parsed.modules).toHaveLength(0);
+    expect(parsed.include).toEqual([]);
   });
 });

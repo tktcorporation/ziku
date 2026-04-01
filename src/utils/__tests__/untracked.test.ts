@@ -13,60 +13,31 @@ vi.mock("node:fs/promises", async () => {
 });
 
 // 純粋関数をインポート
-import {
-  getModuleIdFromPath,
-  getDisplayFolder,
-  getModuleBaseDir,
-  getTotalUntrackedCount,
-} from "../untracked";
+import { getDisplayFolderFromPath, getTotalUntrackedCount } from "../untracked";
 
-describe("getModuleIdFromPath", () => {
-  it("ルート直下のファイルは '.' を返す", () => {
-    expect(getModuleIdFromPath(".mcp.json")).toBe(".");
-    expect(getModuleIdFromPath(".mise.toml")).toBe(".");
-    expect(getModuleIdFromPath("readme.md")).toBe(".");
+describe("getDisplayFolderFromPath", () => {
+  it("ルート直下のファイルは 'root' を返す", () => {
+    expect(getDisplayFolderFromPath(".mcp.json")).toBe("root");
+    expect(getDisplayFolderFromPath(".mise.toml")).toBe("root");
+    expect(getDisplayFolderFromPath("readme.md")).toBe("root");
   });
 
   it(".devcontainer 配下のファイルは '.devcontainer' を返す", () => {
-    expect(getModuleIdFromPath(".devcontainer/devcontainer.json")).toBe(".devcontainer");
-    expect(getModuleIdFromPath(".devcontainer/setup.sh")).toBe(".devcontainer");
+    expect(getDisplayFolderFromPath(".devcontainer/devcontainer.json")).toBe(".devcontainer");
+    expect(getDisplayFolderFromPath(".devcontainer/setup.sh")).toBe(".devcontainer");
   });
 
   it(".github 配下のファイルは '.github' を返す", () => {
-    expect(getModuleIdFromPath(".github/workflows/ci.yml")).toBe(".github");
-    expect(getModuleIdFromPath(".github/labeler.yml")).toBe(".github");
+    expect(getDisplayFolderFromPath(".github/workflows/ci.yml")).toBe(".github");
+    expect(getDisplayFolderFromPath(".github/labeler.yml")).toBe(".github");
   });
 
   it(".claude 配下のファイルは '.claude' を返す", () => {
-    expect(getModuleIdFromPath(".claude/settings.json")).toBe(".claude");
+    expect(getDisplayFolderFromPath(".claude/settings.json")).toBe(".claude");
   });
 
   it("深いネストのファイルは最初のディレクトリを返す", () => {
-    expect(getModuleIdFromPath(".github/workflows/deep/nested/file.yml")).toBe(".github");
-  });
-});
-
-describe("getDisplayFolder", () => {
-  it("'.' を 'root' として表示する", () => {
-    expect(getDisplayFolder(".")).toBe("root");
-  });
-
-  it("その他のモジュール ID はそのまま返す", () => {
-    expect(getDisplayFolder(".devcontainer")).toBe(".devcontainer");
-    expect(getDisplayFolder(".github")).toBe(".github");
-    expect(getDisplayFolder(".claude")).toBe(".claude");
-  });
-});
-
-describe("getModuleBaseDir", () => {
-  it("'.' の場合は null を返す", () => {
-    expect(getModuleBaseDir(".")).toBeNull();
-  });
-
-  it("その他のモジュール ID はそのまま返す", () => {
-    expect(getModuleBaseDir(".devcontainer")).toBe(".devcontainer");
-    expect(getModuleBaseDir(".github")).toBe(".github");
-    expect(getModuleBaseDir(".claude")).toBe(".claude");
+    expect(getDisplayFolderFromPath(".github/workflows/deep/nested/file.yml")).toBe(".github");
   });
 });
 
@@ -76,13 +47,13 @@ describe("getTotalUntrackedCount", () => {
       {
         folder: ".devcontainer",
         files: [
-          { path: ".devcontainer/new.sh", folder: ".devcontainer", moduleId: ".devcontainer" },
-          { path: ".devcontainer/test.sh", folder: ".devcontainer", moduleId: ".devcontainer" },
+          { path: ".devcontainer/new.sh", folder: ".devcontainer" },
+          { path: ".devcontainer/test.sh", folder: ".devcontainer" },
         ],
       },
       {
         folder: ".github",
-        files: [{ path: ".github/new.yml", folder: ".github", moduleId: ".github" }],
+        files: [{ path: ".github/new.yml", folder: ".github" }],
       },
     ];
 
@@ -98,7 +69,7 @@ describe("getTotalUntrackedCount", () => {
       { folder: ".devcontainer", files: [] },
       {
         folder: ".github",
-        files: [{ path: ".github/new.yml", folder: ".github", moduleId: ".github" }],
+        files: [{ path: ".github/new.yml", folder: ".github" }],
       },
     ];
 

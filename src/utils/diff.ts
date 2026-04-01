@@ -3,31 +3,22 @@ import { readFile } from "node:fs/promises";
 import { createPatch } from "diff";
 import { join } from "pathe";
 import pc from "picocolors";
-import { getModuleById } from "../modules";
-import type {
-  DevEnvConfig,
-  DiffResult,
-  DiffType,
-  FileDiff,
-  TemplateModule,
-} from "../modules/schemas";
-import { log } from "../ui/renderer";
+import type { DiffResult, DiffType, FileDiff } from "../modules/schemas";
 import { filterByGitignore, loadMergedGitignore } from "./gitignore";
-import { getEffectivePatterns, resolvePatterns } from "./patterns";
+import type { FlatPatterns } from "./patterns";
+import { resolvePatterns } from "./patterns";
 
 export interface DiffOptions {
   targetDir: string;
   templateDir: string;
-  moduleIds: string[];
-  config?: DevEnvConfig;
-  moduleList: TemplateModule[];
+  patterns: FlatPatterns;
 }
 
 /**
  * ローカルとテンプレート間の差分を検出
  */
 export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
-  const { targetDir, templateDir, moduleIds, config, moduleList } = options;
+  const { targetDir, templateDir, patterns } = options;
 
   const files: FileDiff[] = [];
   let added = 0;
@@ -36,70 +27,63 @@ export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
   let unchanged = 0;
 
   // ローカルとテンプレート両方の .gitignore をマージして読み込み
-  // クレデンシャル等の機密情報の誤流出を防止
   const gitignore = await loadMergedGitignore([targetDir, templateDir]);
 
-  for (const moduleId of moduleIds) {
-    const mod = getModuleById(moduleId, moduleList);
-    if (!mod) {
-      log.warn(`Module "${pc.cyan(moduleId)}" not found`);
-      continue;
+  // フラットパターンでファイル一覧を取得し、gitignore でフィルタリング
+  const templateFiles = filterByGitignore(
+    resolvePatterns(templateDir, patterns.include, patterns.exclude),
+    gitignore,
+  );
+  const localFiles = filterByGitignore(
+    resolvePatterns(targetDir, patterns.include, patterns.exclude),
+    gitignore,
+  );
+
+  const allFiles = new Set([...templateFiles, ...localFiles]);
+
+  for (const filePath of allFiles) {
+    const localPath = join(targetDir, filePath);
+    const templatePath = join(templateDir, filePath);
+
+    const localExists = existsSync(localPath);
+    const templateExists = existsSync(templatePath);
+
+    let type: DiffType;
+    let localContent: string | undefined;
+    let templateContent: string | undefined;
+
+    if (localExists) {
+      localContent = await readFile(localPath, "utf-8");
+    }
+    if (templateExists) {
+      templateContent = await readFile(templatePath, "utf-8");
     }
 
-    // 有効なパターンを取得
-    const patterns = getEffectivePatterns(moduleId, mod.patterns, config);
-
-    // テンプレート側のファイル一覧を取得し、gitignore でフィルタリング
-    const templateFiles = filterByGitignore(resolvePatterns(templateDir, patterns), gitignore);
-    // ローカル側のファイル一覧を取得し、gitignore でフィルタリング
-    const localFiles = filterByGitignore(resolvePatterns(targetDir, patterns), gitignore);
-
-    const allFiles = new Set([...templateFiles, ...localFiles]);
-
-    for (const filePath of allFiles) {
-      const localPath = join(targetDir, filePath);
-      const templatePath = join(templateDir, filePath);
-
-      const localExists = existsSync(localPath);
-      const templateExists = existsSync(templatePath);
-
-      let type: DiffType;
-      let localContent: string | undefined;
-      let templateContent: string | undefined;
-
-      if (localExists) {
-        localContent = await readFile(localPath, "utf-8");
-      }
-      if (templateExists) {
-        templateContent = await readFile(templatePath, "utf-8");
-      }
-
-      if (localExists && templateExists) {
-        // 両方に存在 → 内容比較
-        if (localContent === templateContent) {
-          type = "unchanged";
-          unchanged++;
-        } else {
-          type = "modified";
-          modified++;
-        }
-      } else if (localExists && !templateExists) {
-        // ローカルのみ → 追加（テンプレートにはない）
-        type = "added";
-        added++;
+    if (localExists && templateExists) {
+      // 両方に存在 → 内容比較
+      if (localContent === templateContent) {
+        type = "unchanged";
+        unchanged++;
       } else {
-        // テンプレートのみ → 削除（ローカルにはない）
-        type = "deleted";
-        deleted++;
+        type = "modified";
+        modified++;
       }
-
-      files.push({
-        path: filePath,
-        type,
-        localContent,
-        templateContent,
-      });
+    } else if (localExists && !templateExists) {
+      // ローカルのみ → 追加（テンプレートにはない）
+      type = "added";
+      added++;
+    } else {
+      // テンプレートのみ → 削除（ローカルにはない）
+      type = "deleted";
+      deleted++;
     }
+
+    files.push({
+      path: filePath,
+      type,
+      localContent,
+      templateContent,
+    });
   }
 
   return {

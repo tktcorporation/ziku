@@ -45,9 +45,7 @@ vi.mock("../../utils/github", () => ({
   resolveLatestCommitSha: vi.fn(() => Promise.resolve("latest123")),
 }));
 
-vi.mock("../../utils/patterns", () => ({
-  getEffectivePatterns: vi.fn((_id: string, patterns: string[]) => patterns),
-}));
+// utils/patterns mock removed (no longer used)
 
 vi.mock("../../ui/prompts", () => ({
   selectDeletedFiles: vi.fn(),
@@ -80,17 +78,11 @@ vi.mock("../../modules/index", async (importOriginal) => {
   return {
     ...original,
     modulesFileExists: vi.fn(() => true),
-    loadModulesFile: vi.fn(() =>
+    loadPatternsFile: vi.fn(() =>
       Promise.resolve({
-        modules: [
-          {
-            id: ".",
-            name: "Root",
-            description: "Root",
-            patterns: [".mcp.json", ".mise.toml"],
-          },
-        ],
-        rawContent: '{"modules":[]}',
+        include: [".mcp.json", ".mise.toml"],
+        exclude: [],
+        rawContent: '{"include":[".mcp.json",".mise.toml"],"exclude":[]}',
       }),
     ),
   };
@@ -117,7 +109,6 @@ const mockLog = vi.mocked(log);
 const baseConfig = {
   version: "0.1.0",
   installedAt: "2024-01-01T00:00:00.000Z",
-  modules: ["."],
   source: { owner: "tktcorporation", repo: ".github" },
   baseHashes: { ".mcp.json": "abc123" },
 };

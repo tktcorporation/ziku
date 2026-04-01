@@ -39,23 +39,11 @@ vi.mock("../../utils/untracked", () => ({
 
 // modules をモック
 vi.mock("../../modules", () => ({
-  loadModulesFile: vi.fn(() =>
+  loadPatternsFile: vi.fn(() =>
     Promise.resolve({
-      modules: [
-        {
-          id: "root",
-          name: "Root",
-          description: "Root",
-          patterns: [".root/**"],
-        },
-        {
-          id: "github",
-          name: "GitHub",
-          description: "GitHub",
-          patterns: [".github/**"],
-        },
-      ],
-      rawContent: '{"modules":[]}',
+      include: [".root/**", ".github/**"],
+      exclude: [],
+      rawContent: '{"include":[".root/**",".github/**"],"exclude":[]}',
     }),
   ),
   modulesFileExists: vi.fn().mockReturnValue(true),
@@ -92,6 +80,7 @@ const { downloadTemplate } = await import("giget");
 const { detectDiff, hasDiff } = await import("../../utils/diff");
 const { log, outro, logDiffSummary } = await import("../../ui/renderer");
 const { renderFileDiff } = await import("../../ui/diff-view");
+const { loadPatternsFile } = await import("../../modules");
 
 import { BermError } from "../../errors";
 
@@ -102,11 +91,11 @@ const mockLog = vi.mocked(log);
 const mockOutro = vi.mocked(outro);
 const mockLogDiffSummary = vi.mocked(logDiffSummary);
 const mockRenderFileDiff = vi.mocked(renderFileDiff);
+const mockLoadPatternsFile = vi.mocked(loadPatternsFile);
 
 const validConfig = {
   version: "0.1.0",
   installedAt: "2024-01-01T00:00:00.000Z",
-  modules: ["root", "github"],
   source: {
     owner: "tktcorporation",
     repo: ".github",
@@ -180,12 +169,15 @@ describe("diffCommand", () => {
       ).rejects.toThrow(BermError);
     });
 
-    it("modules が空の場合は警告", async () => {
+    it("patterns が空の場合は警告", async () => {
       vol.fromJSON({
-        "/test/.ziku.json": JSON.stringify({
-          ...validConfig,
-          modules: [],
-        }),
+        "/test/.ziku.json": JSON.stringify(validConfig),
+      });
+
+      mockLoadPatternsFile.mockResolvedValueOnce({
+        include: [],
+        exclude: [],
+        rawContent: '{"include":[],"exclude":[]}',
       });
 
       await (diffCommand.run as any)({
@@ -194,7 +186,7 @@ describe("diffCommand", () => {
         cmd: diffCommand,
       });
 
-      expect(mockLog.warn).toHaveBeenCalledWith("No modules installed");
+      expect(mockLog.warn).toHaveBeenCalledWith("No patterns configured");
     });
 
     it("差分がない場合は outro で完了メッセージ", async () => {

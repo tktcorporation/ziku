@@ -77,10 +77,7 @@ vi.mock("../../utils/merge", () => ({
   asTemplateContent: vi.fn((s: string) => s),
 }));
 
-// utils/patterns をモック
-vi.mock("../../utils/patterns", () => ({
-  getEffectivePatterns: vi.fn((_moduleId: string, patterns: string[]) => patterns),
-}));
+// utils/patterns mock removed (no longer used)
 
 // ui/prompts をモック
 vi.mock("../../ui/prompts", () => ({
@@ -96,32 +93,15 @@ vi.mock("../../ui/prompts", () => ({
 // modules をモック
 vi.mock("../../modules", () => ({
   modulesFileExists: vi.fn(() => true),
-  loadModulesFile: vi.fn(() =>
+  loadPatternsFile: vi.fn(() =>
     Promise.resolve({
-      modules: [
-        {
-          id: "root",
-          name: "Root",
-          description: "Root",
-          patterns: [".root/**"],
-        },
-        {
-          id: "github",
-          name: "GitHub",
-          description: "GitHub",
-          patterns: [".github/**"],
-        },
-      ],
-      rawContent: '{"modules":[]}',
+      include: [".root/**", ".github/**"],
+      exclude: [],
+      rawContent: '{"include":[".root/**",".github/**"],"exclude":[]}',
     }),
   ),
-  addPatternToModulesFile: vi.fn(),
-  getModuleById: vi.fn((id: string) => ({
-    id,
-    name: id,
-    description: `${id} module`,
-    patterns: [`.${id}/**`],
-  })),
+  addIncludePattern: vi.fn(),
+  saveModulesFile: vi.fn(),
 }));
 
 // ui/renderer をモック
@@ -158,7 +138,9 @@ const { confirmAction, inputGitHubToken, inputPrTitle, inputPrBody, selectPushFi
 const { log } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
 const { classifyFiles, threeWayMerge } = await import("../../utils/merge");
+const { loadPatternsFile } = await import("../../modules");
 const mockDownloadTemplate = vi.mocked(downloadTemplate);
+const mockLoadPatternsFile = vi.mocked(loadPatternsFile);
 const mockDetectDiff = vi.mocked(detectDiff);
 const mockGetPushableFiles = vi.mocked(getPushableFiles);
 const mockGetGitHubToken = vi.mocked(getGitHubToken);
@@ -176,7 +158,6 @@ const mockThreeWayMerge = vi.mocked(threeWayMerge);
 const validConfig = {
   version: "0.1.0",
   installedAt: "2024-01-01T00:00:00.000Z",
-  modules: ["root", "github"],
   source: {
     owner: "tktcorporation",
     repo: ".github",
@@ -302,12 +283,15 @@ describe("pushCommand", () => {
       ).rejects.toThrow("Invalid .ziku.json format");
     });
 
-    it("modules が空の場合は警告", async () => {
+    it("patterns が空の場合は警告", async () => {
       vol.fromJSON({
-        "/test/.ziku.json": JSON.stringify({
-          ...validConfig,
-          modules: [],
-        }),
+        "/test/.ziku.json": JSON.stringify(validConfig),
+      });
+
+      mockLoadPatternsFile.mockResolvedValueOnce({
+        include: [],
+        exclude: [],
+        rawContent: '{"include":[],"exclude":[]}',
       });
 
       await (pushCommand.run as any)({
@@ -316,7 +300,7 @@ describe("pushCommand", () => {
         cmd: pushCommand,
       });
 
-      expect(mockLog.warn).toHaveBeenCalledWith("No modules installed");
+      expect(mockLog.warn).toHaveBeenCalledWith("No patterns configured");
     });
 
     it("push 対象ファイルがない場合は情報メッセージ", async () => {

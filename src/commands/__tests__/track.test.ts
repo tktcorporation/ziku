@@ -61,64 +61,49 @@ vi.spyOn(process, "exit").mockImplementation(() => {
 });
 
 // モック後にインポート
-const { loadModulesFile, saveModulesFile, modulesFileExists } = await import("../../modules");
-const { addPatternToModulesFileWithCreate } = await import("../../modules/loader");
+const { loadPatternsFile, saveModulesFile, modulesFileExists } = await import("../../modules");
+const { addIncludePattern } = await import("../../modules/loader");
 
 describe("track command - core logic", () => {
   beforeEach(() => {
     vol.reset();
   });
 
-  describe("addPatternToModulesFileWithCreate", () => {
-    it("既存モジュールにパターンを追加できる", () => {
+  describe("addIncludePattern", () => {
+    it("既存の include 配列にパターンを追加できる", () => {
       const rawContent = JSON.stringify(
         {
-          modules: [
-            {
-              id: ".cloud",
-              name: "Cloud",
-              description: "Cloud files",
-              patterns: [".cloud/config.json"],
-            },
-          ],
+          include: [".cloud/config.json"],
+          exclude: [],
         },
         null,
         2,
       );
 
-      const result = addPatternToModulesFileWithCreate(rawContent, ".cloud", [".cloud/rules/*.md"]);
+      const result = addIncludePattern(rawContent, [".cloud/rules/*.md"]);
 
       const parsed = JSON.parse(result);
-      expect(parsed.modules[0].patterns).toContain(".cloud/config.json");
-      expect(parsed.modules[0].patterns).toContain(".cloud/rules/*.md");
+      expect(parsed.include).toContain(".cloud/config.json");
+      expect(parsed.include).toContain(".cloud/rules/*.md");
     });
 
-    it("新しいモジュールを作成してパターンを追加できる", () => {
+    it("新しいパターンを include 配列に追加できる", () => {
       const rawContent = JSON.stringify(
         {
-          modules: [
-            {
-              id: ".",
-              name: "Root",
-              description: "Root files",
-              patterns: [".mcp.json"],
-            },
-          ],
+          include: [".mcp.json"],
+          exclude: [],
         },
         null,
         2,
       );
 
-      const result = addPatternToModulesFileWithCreate(rawContent, ".cloud", [
-        ".cloud/rules/*.md",
-        ".cloud/config.json",
-      ]);
+      const result = addIncludePattern(rawContent, [".cloud/rules/*.md", ".cloud/config.json"]);
 
       const parsed = JSON.parse(result);
-      expect(parsed.modules).toHaveLength(2);
-      expect(parsed.modules[1].id).toBe(".cloud");
-      expect(parsed.modules[1].name).toBe("Cloud");
-      expect(parsed.modules[1].patterns).toEqual([".cloud/rules/*.md", ".cloud/config.json"]);
+      expect(parsed.include).toContain(".mcp.json");
+      expect(parsed.include).toContain(".cloud/rules/*.md");
+      expect(parsed.include).toContain(".cloud/config.json");
+      expect(parsed.include).toHaveLength(3);
     });
   });
 
@@ -126,14 +111,8 @@ describe("track command - core logic", () => {
     it("パターン追加後にファイルを正しく保存できる", async () => {
       const initialContent = JSON.stringify(
         {
-          modules: [
-            {
-              id: ".",
-              name: "Root",
-              description: "Root files",
-              patterns: [".mcp.json"],
-            },
-          ],
+          include: [".mcp.json"],
+          exclude: [],
         },
         null,
         2,
@@ -143,16 +122,15 @@ describe("track command - core logic", () => {
         "/project/.ziku/modules.jsonc": initialContent,
       });
 
-      const { rawContent } = await loadModulesFile("/project");
-      const updated = addPatternToModulesFileWithCreate(rawContent, ".cloud", [
-        ".cloud/rules/*.md",
-      ]);
+      const { rawContent } = await loadPatternsFile("/project");
+      const updated = addIncludePattern(rawContent, [".cloud/rules/*.md"]);
       await saveModulesFile("/project", updated);
 
       const saved = vol.readFileSync("/project/.ziku/modules.jsonc", "utf8") as string;
       const parsed = JSON.parse(saved);
-      expect(parsed.modules).toHaveLength(2);
-      expect(parsed.modules[1].id).toBe(".cloud");
+      expect(parsed.include).toContain(".mcp.json");
+      expect(parsed.include).toContain(".cloud/rules/*.md");
+      expect(parsed.include).toHaveLength(2);
     });
 
     it("modules.jsonc が存在しない場合を検知できる", () => {
@@ -175,7 +153,8 @@ describe("trackCommand", () => {
   it("--list のみで patterns なしでも動作する（required: false）", async () => {
     vol.fromJSON({
       "/project/.ziku/modules.jsonc": JSON.stringify({
-        modules: [{ id: ".", name: "Root", description: "Root", patterns: [".mcp.json"] }],
+        include: [".mcp.json"],
+        exclude: [],
       }),
     });
 
@@ -185,9 +164,6 @@ describe("trackCommand", () => {
         args: {
           dir: "/project",
           list: true,
-          module: undefined,
-          name: undefined,
-          description: undefined,
         },
         rawArgs: ["--list"],
         cmd: trackCommand,
