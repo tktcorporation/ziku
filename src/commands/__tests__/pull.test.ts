@@ -46,7 +46,10 @@ vi.mock("../../utils/github", () => ({
 }));
 
 vi.mock("../../utils/patterns", () => ({
-  getEffectivePatterns: vi.fn((_id: string, patterns: string[]) => patterns),
+  getModulePatterns: vi.fn((modules: any[]) => ({
+    include: modules.flatMap((m: any) => m.include),
+    exclude: modules.flatMap((m: any) => m.exclude ?? []),
+  })),
 }));
 
 vi.mock("../../ui/prompts", () => ({
@@ -84,10 +87,9 @@ vi.mock("../../modules/index", async (importOriginal) => {
       Promise.resolve({
         modules: [
           {
-            id: ".",
             name: "Root",
             description: "Root",
-            patterns: [".mcp.json", ".mise.toml"],
+            include: [".mcp.json", ".mise.toml"],
           },
         ],
         rawContent: '{"modules":[]}',
@@ -117,7 +119,6 @@ const mockLog = vi.mocked(log);
 const baseConfig = {
   version: "0.1.0",
   installedAt: "2024-01-01T00:00:00.000Z",
-  modules: ["."],
   source: { owner: "tktcorporation", repo: ".github" },
   baseHashes: { ".mcp.json": "abc123" },
 };

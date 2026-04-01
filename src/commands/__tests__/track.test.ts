@@ -75,10 +75,9 @@ describe("track command - core logic", () => {
         {
           modules: [
             {
-              id: ".cloud",
               name: "Cloud",
               description: "Cloud files",
-              patterns: [".cloud/config.json"],
+              include: [".cloud/config.json"],
             },
           ],
         },
@@ -86,11 +85,11 @@ describe("track command - core logic", () => {
         2,
       );
 
-      const result = addPatternToModulesFileWithCreate(rawContent, ".cloud", [".cloud/rules/*.md"]);
+      const result = addPatternToModulesFileWithCreate(rawContent, "Cloud", [".cloud/rules/*.md"]);
 
       const parsed = JSON.parse(result);
-      expect(parsed.modules[0].patterns).toContain(".cloud/config.json");
-      expect(parsed.modules[0].patterns).toContain(".cloud/rules/*.md");
+      expect(parsed.modules[0].include).toContain(".cloud/config.json");
+      expect(parsed.modules[0].include).toContain(".cloud/rules/*.md");
     });
 
     it("新しいモジュールを作成してパターンを追加できる", () => {
@@ -98,10 +97,9 @@ describe("track command - core logic", () => {
         {
           modules: [
             {
-              id: ".",
               name: "Root",
               description: "Root files",
-              patterns: [".mcp.json"],
+              include: [".mcp.json"],
             },
           ],
         },
@@ -109,16 +107,15 @@ describe("track command - core logic", () => {
         2,
       );
 
-      const result = addPatternToModulesFileWithCreate(rawContent, ".cloud", [
+      const result = addPatternToModulesFileWithCreate(rawContent, "Cloud", [
         ".cloud/rules/*.md",
         ".cloud/config.json",
       ]);
 
       const parsed = JSON.parse(result);
       expect(parsed.modules).toHaveLength(2);
-      expect(parsed.modules[1].id).toBe(".cloud");
       expect(parsed.modules[1].name).toBe("Cloud");
-      expect(parsed.modules[1].patterns).toEqual([".cloud/rules/*.md", ".cloud/config.json"]);
+      expect(parsed.modules[1].include).toEqual([".cloud/rules/*.md", ".cloud/config.json"]);
     });
   });
 
@@ -128,10 +125,9 @@ describe("track command - core logic", () => {
         {
           modules: [
             {
-              id: ".",
               name: "Root",
               description: "Root files",
-              patterns: [".mcp.json"],
+              include: [".mcp.json"],
             },
           ],
         },
@@ -144,7 +140,7 @@ describe("track command - core logic", () => {
       });
 
       const { rawContent } = await loadModulesFile("/project");
-      const updated = addPatternToModulesFileWithCreate(rawContent, ".cloud", [
+      const updated = addPatternToModulesFileWithCreate(rawContent, "Cloud", [
         ".cloud/rules/*.md",
       ]);
       await saveModulesFile("/project", updated);
@@ -152,7 +148,7 @@ describe("track command - core logic", () => {
       const saved = vol.readFileSync("/project/.ziku/modules.jsonc", "utf8") as string;
       const parsed = JSON.parse(saved);
       expect(parsed.modules).toHaveLength(2);
-      expect(parsed.modules[1].id).toBe(".cloud");
+      expect(parsed.modules[1].name).toBe("Cloud");
     });
 
     it("modules.jsonc が存在しない場合を検知できる", () => {
@@ -175,7 +171,7 @@ describe("trackCommand", () => {
   it("--list のみで patterns なしでも動作する（required: false）", async () => {
     vol.fromJSON({
       "/project/.ziku/modules.jsonc": JSON.stringify({
-        modules: [{ id: ".", name: "Root", description: "Root", patterns: [".mcp.json"] }],
+        modules: [{ name: "Root", description: "Root", include: [".mcp.json"] }],
       }),
     });
 

@@ -43,16 +43,14 @@ vi.mock("../../modules", () => ({
     Promise.resolve({
       modules: [
         {
-          id: "root",
           name: "Root",
           description: "Root",
-          patterns: [".root/**"],
+          include: [".root/**"],
         },
         {
-          id: "github",
           name: "GitHub",
           description: "GitHub",
-          patterns: [".github/**"],
+          include: [".github/**"],
         },
       ],
       rawContent: '{"modules":[]}',
@@ -92,6 +90,7 @@ const { downloadTemplate } = await import("giget");
 const { detectDiff, hasDiff } = await import("../../utils/diff");
 const { log, outro, logDiffSummary } = await import("../../ui/renderer");
 const { renderFileDiff } = await import("../../ui/diff-view");
+const { loadModulesFile } = await import("../../modules");
 
 import { BermError } from "../../errors";
 
@@ -102,11 +101,11 @@ const mockLog = vi.mocked(log);
 const mockOutro = vi.mocked(outro);
 const mockLogDiffSummary = vi.mocked(logDiffSummary);
 const mockRenderFileDiff = vi.mocked(renderFileDiff);
+const mockLoadModulesFile = vi.mocked(loadModulesFile);
 
 const validConfig = {
   version: "0.1.0",
   installedAt: "2024-01-01T00:00:00.000Z",
-  modules: ["root", "github"],
   source: {
     owner: "tktcorporation",
     repo: ".github",
@@ -182,10 +181,12 @@ describe("diffCommand", () => {
 
     it("modules が空の場合は警告", async () => {
       vol.fromJSON({
-        "/test/.ziku.json": JSON.stringify({
-          ...validConfig,
-          modules: [],
-        }),
+        "/test/.ziku.json": JSON.stringify(validConfig),
+      });
+
+      mockLoadModulesFile.mockResolvedValueOnce({
+        modules: [],
+        rawContent: '{"modules":[]}',
       });
 
       await (diffCommand.run as any)({
@@ -194,7 +195,7 @@ describe("diffCommand", () => {
         cmd: diffCommand,
       });
 
-      expect(mockLog.warn).toHaveBeenCalledWith("No modules installed");
+      expect(mockLog.warn).toHaveBeenCalledWith("No modules configured");
     });
 
     it("差分がない場合は outro で完了メッセージ", async () => {

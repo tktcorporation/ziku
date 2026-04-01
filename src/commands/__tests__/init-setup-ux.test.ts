@@ -68,7 +68,12 @@ vi.mock("../../ui/prompts", () => ({
   selectModules: vi.fn(),
   selectOverwriteStrategy: vi.fn(),
   selectMissingTemplateAction: vi.fn(),
-  selectTemplateModules: vi.fn(() => Promise.resolve([".devcontainer", ".github"])),
+  selectTemplateModules: vi.fn(() =>
+    Promise.resolve([
+      { name: "DevContainer", description: "VS Code DevContainer setup", include: [".devcontainer/**"] },
+      { name: "GitHub", description: "GitHub Actions workflows and configuration", include: [".github/**"] },
+    ]),
+  ),
   inputTemplateSource: vi.fn(),
   confirmScaffoldDevenvPR: vi.fn(() => Promise.resolve(true)),
 }));
@@ -197,7 +202,9 @@ describe("init: セットアップ UX", () => {
       mockScaffoldTemplateRepo.mockResolvedValueOnce({
         url: "https://github.com/detected-org/.github",
       });
-      mockSelectModules.mockResolvedValueOnce(["."]);
+      mockSelectModules.mockResolvedValueOnce([
+        { name: "Root", description: "Root", include: [".mcp.json"] },
+      ]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
       // After creating repo, handleMissingDevenv will throw because modules.jsonc doesn't exist
@@ -242,15 +249,16 @@ describe("init: セットアップ UX", () => {
       vi.mocked(loadModulesFile).mockResolvedValue({
         modules: [
           {
-            id: ".",
             name: "Root",
             description: "Root",
-            patterns: [".mcp.json"],
+            include: [".mcp.json"],
           },
         ],
         rawContent: '{"modules":[]}',
       });
-      mockSelectModules.mockResolvedValueOnce(["."]);
+      mockSelectModules.mockResolvedValueOnce([
+        { name: "Root", description: "Root", include: [".mcp.json"] },
+      ]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
       await runInit({});
@@ -320,15 +328,16 @@ describe("init: セットアップ UX", () => {
       vi.mocked(loadModulesFile).mockResolvedValue({
         modules: [
           {
-            id: ".",
             name: "Root",
             description: "Root",
-            patterns: [".mcp.json"],
+            include: [".mcp.json"],
           },
         ],
         rawContent: '{"modules":[]}',
       });
-      mockSelectModules.mockResolvedValueOnce(["."]);
+      mockSelectModules.mockResolvedValueOnce([
+        { name: "Root", description: "Root", include: [".mcp.json"] },
+      ]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
       await runInit({});
@@ -352,15 +361,16 @@ describe("init: セットアップ UX", () => {
       vi.mocked(loadModulesFile).mockResolvedValue({
         modules: [
           {
-            id: ".",
             name: "Root",
             description: "Root",
-            patterns: [".mcp.json"],
+            include: [".mcp.json"],
           },
         ],
         rawContent: '{"modules":[]}',
       });
-      mockSelectModules.mockResolvedValueOnce(["."]);
+      mockSelectModules.mockResolvedValueOnce([
+        { name: "Root", description: "Root", include: [".mcp.json"] },
+      ]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
       await runInit({});

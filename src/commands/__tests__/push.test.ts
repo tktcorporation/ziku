@@ -79,7 +79,10 @@ vi.mock("../../utils/merge", () => ({
 
 // utils/patterns をモック
 vi.mock("../../utils/patterns", () => ({
-  getEffectivePatterns: vi.fn((_moduleId: string, patterns: string[]) => patterns),
+  getModulePatterns: vi.fn((modules: any[]) => ({
+    include: modules.flatMap((m: any) => m.include),
+    exclude: modules.flatMap((m: any) => m.exclude ?? []),
+  })),
 }));
 
 // ui/prompts をモック
@@ -100,28 +103,23 @@ vi.mock("../../modules", () => ({
     Promise.resolve({
       modules: [
         {
-          id: "root",
           name: "Root",
           description: "Root",
-          patterns: [".root/**"],
+          include: [".root/**"],
         },
         {
-          id: "github",
           name: "GitHub",
           description: "GitHub",
-          patterns: [".github/**"],
+          include: [".github/**"],
         },
       ],
       rawContent: '{"modules":[]}',
     }),
   ),
   addPatternToModulesFile: vi.fn(),
-  getModuleById: vi.fn((id: string) => ({
-    id,
-    name: id,
-    description: `${id} module`,
-    patterns: [`.${id}/**`],
-  })),
+  getModuleByName: vi.fn((name: string, moduleList: any[]) =>
+    moduleList.find((m: any) => m.name === name),
+  ),
 }));
 
 // ui/renderer をモック
@@ -158,7 +156,9 @@ const { confirmAction, inputGitHubToken, inputPrTitle, inputPrBody, selectPushFi
 const { log } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
 const { classifyFiles, threeWayMerge } = await import("../../utils/merge");
+const { loadModulesFile } = await import("../../modules");
 const mockDownloadTemplate = vi.mocked(downloadTemplate);
+const mockLoadModulesFile = vi.mocked(loadModulesFile);
 const mockDetectDiff = vi.mocked(detectDiff);
 const mockGetPushableFiles = vi.mocked(getPushableFiles);
 const mockGetGitHubToken = vi.mocked(getGitHubToken);
@@ -176,7 +176,6 @@ const mockThreeWayMerge = vi.mocked(threeWayMerge);
 const validConfig = {
   version: "0.1.0",
   installedAt: "2024-01-01T00:00:00.000Z",
-  modules: ["root", "github"],
   source: {
     owner: "tktcorporation",
     repo: ".github",
@@ -304,10 +303,12 @@ describe("pushCommand", () => {
 
     it("modules が空の場合は警告", async () => {
       vol.fromJSON({
-        "/test/.ziku.json": JSON.stringify({
-          ...validConfig,
-          modules: [],
-        }),
+        "/test/.ziku.json": JSON.stringify(validConfig),
+      });
+
+      mockLoadModulesFile.mockResolvedValueOnce({
+        modules: [],
+        rawContent: '{"modules":[]}',
       });
 
       await (pushCommand.run as any)({
@@ -316,7 +317,7 @@ describe("pushCommand", () => {
         cmd: pushCommand,
       });
 
-      expect(mockLog.warn).toHaveBeenCalledWith("No modules installed");
+      expect(mockLog.warn).toHaveBeenCalledWith("No modules configured");
     });
 
     it("push 対象ファイルがない場合は情報メッセージ", async () => {
