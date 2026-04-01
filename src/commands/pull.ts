@@ -3,8 +3,8 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { defineCommand } from "citty";
 import { dirname, join, resolve } from "pathe";
 import { BermError } from "../errors";
-import { loadModulesFile, modulesFileExists } from "../modules";
-import type { DevEnvConfig, TemplateModule } from "../modules/schemas";
+import { loadPatternsFile, modulesFileExists } from "../modules";
+import type { DevEnvConfig } from "../modules/schemas";
 import { selectDeletedFiles } from "../ui/prompts";
 import { intro, log, outro, pc, withSpinner } from "../ui/renderer";
 import { loadConfig, saveConfig } from "../utils/config";
@@ -18,17 +18,10 @@ import {
   hasConflictMarkers,
   threeWayMerge,
 } from "../utils/merge";
-import { getModulePatterns } from "../utils/patterns";
 import { downloadTemplateToTemp } from "../utils/template";
 
 /**
  * テンプレートの最新更新をローカルに反映するコマンド。
- *
- * 背景: init 後にテンプレートが更新された場合、ローカルの変更を保持しつつ
- * テンプレートの変更を取り込むために使用する。base/local/template の
- * 3-way マージにより、コンフリクトを最小限に抑える。
- *
- * 呼び出し元: CLI から `ziku pull` で実行
  */
 export const pullCommand = defineCommand({
   meta: {
@@ -66,9 +59,24 @@ export const pullCommand = defineCommand({
       throw new BermError("Not initialized", "Run `ziku init` first");
     }
 
-    // --continue モード: コンフリクト解決後の状態更新
+    // --continue モード
     if (args.continue) {
       await runContinue(targetDir, config);
+      return;
+    }
+
+    // ローカルの modules.jsonc からフラットパターンを読み込み
+    if (!modulesFileExists(targetDir)) {
+      throw new BermError(
+        "No .ziku/modules.jsonc found",
+        "Run `ziku init` to set up the project",
+      );
+    }
+
+    const { include, exclude } = await loadPatternsFile(targetDir);
+
+    if (include.length === 0) {
+      log.warn("No patterns configured");
       return;
     }
 
@@ -80,31 +88,8 @@ export const pullCommand = defineCommand({
     );
 
     try {
-      // modules.jsonc を読み込み（ローカルが source of truth）
-      let moduleList: TemplateModule[];
-      if (modulesFileExists(targetDir)) {
-        const loaded = await loadModulesFile(targetDir);
-        moduleList = loaded.modules;
-      } else if (modulesFileExists(templateDir)) {
-        const loaded = await loadModulesFile(templateDir);
-        moduleList = loaded.modules;
-      } else {
-        throw new BermError(
-          "No .ziku/modules.jsonc found",
-          "Run `ziku init` to set up the project, or add .ziku/modules.jsonc to the template",
-        );
-      }
-
-      if (moduleList.length === 0) {
-        log.warn("No modules configured");
-        return;
-      }
-
       // Step 3: ハッシュ計算
       log.step("Analyzing changes...");
-
-      // モジュールの include/exclude パターンをフラット化
-      const { include, exclude } = getModulePatterns(moduleList);
 
       const [templateHashes, localHashes] = await Promise.all([
         hashFiles(templateDir, include, exclude),
@@ -161,7 +146,6 @@ export const pullCommand = defineCommand({
       // Step 8: コンフリクト解決
       const unresolvedConflicts: string[] = [];
       if (classification.conflicts.length > 0) {
-        // baseRef が存在する場合、ベースバージョンを再ダウンロードして 3-way マージ
         let baseTemplateDir: string | undefined;
         let baseCleanup: (() => void) | undefined;
 
@@ -182,7 +166,6 @@ export const pullCommand = defineCommand({
             const localContent = await readFile(join(targetDir, file), "utf-8");
             const templateContent = await readFile(join(templateDir, file), "utf-8");
 
-            // base がない場合は "" をデフォルトとして使う（共通祖先が空 = 新規追加のマージ相当）
             let baseContent = "";
             if (baseTemplateDir && existsSync(join(baseTemplateDir, file))) {
               baseContent = await readFile(join(baseTemplateDir, file), "utf-8");
@@ -211,8 +194,6 @@ export const pullCommand = defineCommand({
         }
 
         if (unresolvedConflicts.length > 0) {
-          // pendingMerge を保存して中断。baseHashes/baseRef は --continue 後に更新する。
-          // 自動マージ成功したファイルは含めず、未解決ファイルのみ記録する。
           const latestRef = await resolveLatestCommitSha(config.source.owner, config.source.repo);
           await saveConfig(targetDir, {
             ...config,
@@ -232,11 +213,9 @@ export const pullCommand = defineCommand({
         let filesToDelete: string[];
 
         if (args.force) {
-          // --force: 確認なしで全削除
           filesToDelete = classification.deletedFiles;
           log.info(`Deleting ${filesToDelete.length} file(s) removed from template...`);
         } else {
-          // 通常: ユーザーに選択させる
           filesToDelete = await selectDeletedFiles(classification.deletedFiles);
         }
 
@@ -250,7 +229,7 @@ export const pullCommand = defineCommand({
         }
       }
 
-      // Step 10: 設定を更新（baseRef + baseHashes）
+      // Step 10: 設定を更新
       const latestRef = await resolveLatestCommitSha(config.source.owner, config.source.repo);
 
       const updatedConfig = {
@@ -267,9 +246,6 @@ export const pullCommand = defineCommand({
   },
 });
 
-/**
- * `--continue` モードの処理: コンフリクト解決後に baseHashes/baseRef を更新する。
- */
 async function runContinue(targetDir: string, config: DevEnvConfig): Promise<void> {
   if (!config.pendingMerge) {
     throw new BermError("No pending merge found", "Run `ziku pull` first to start a merge");
@@ -277,7 +253,6 @@ async function runContinue(targetDir: string, config: DevEnvConfig): Promise<voi
 
   const { conflicts, templateHashes, latestRef } = config.pendingMerge;
 
-  // コンフリクトマーカーが残っていないか確認
   const stillConflicted: string[] = [];
   for (const file of conflicts) {
     try {
@@ -286,7 +261,7 @@ async function runContinue(targetDir: string, config: DevEnvConfig): Promise<voi
         stillConflicted.push(file);
       }
     } catch {
-      // ファイルが存在しない場合は解決済みとみなす（削除により解決）
+      // ファイルが存在しない場合は解決済み
     }
   }
 
@@ -300,7 +275,6 @@ async function runContinue(targetDir: string, config: DevEnvConfig): Promise<voi
     );
   }
 
-  // 全て解決済み: baseHashes/baseRef を更新して pendingMerge を削除
   const updatedConfig = {
     ...config,
     baseHashes: templateHashes,
@@ -313,16 +287,10 @@ async function runContinue(targetDir: string, config: DevEnvConfig): Promise<voi
   outro("Pull complete");
 }
 
-/**
- * 1ファイルのマージコンフリクトをユーザーに報告する。
- */
 function logMergeConflict(file: string): void {
   log.warn(`Conflict in ${pc.cyan(file)} — manual resolution needed`);
 }
 
-/**
- * pull のサマリーを表示する。
- */
 function logPullSummary(classification: {
   autoUpdate: string[];
   newFiles: string[];

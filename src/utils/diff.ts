@@ -7,23 +7,23 @@ import type {
   DiffResult,
   DiffType,
   FileDiff,
-  TemplateModule,
 } from "../modules/schemas";
 import { log } from "../ui/renderer";
 import { filterByGitignore, loadMergedGitignore } from "./gitignore";
-import { getModulePatterns, resolvePatterns } from "./patterns";
+import type { FlatPatterns } from "./patterns";
+import { resolvePatterns } from "./patterns";
 
 export interface DiffOptions {
   targetDir: string;
   templateDir: string;
-  moduleList: TemplateModule[];
+  patterns: FlatPatterns;
 }
 
 /**
  * ローカルとテンプレート間の差分を検出
  */
 export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
-  const { targetDir, templateDir, moduleList } = options;
+  const { targetDir, templateDir, patterns } = options;
 
   const files: FileDiff[] = [];
   let added = 0;
@@ -32,16 +32,11 @@ export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
   let unchanged = 0;
 
   // ローカルとテンプレート両方の .gitignore をマージして読み込み
-  // クレデンシャル等の機密情報の誤流出を防止
   const gitignore = await loadMergedGitignore([targetDir, templateDir]);
 
-  // 全モジュールの include/exclude をフラットに取得
-  const { include, exclude } = getModulePatterns(moduleList);
-
-  // テンプレート側のファイル一覧を取得し、gitignore でフィルタリング
-  const templateFiles = filterByGitignore(resolvePatterns(templateDir, include, exclude), gitignore);
-  // ローカル側のファイル一覧を取得し、gitignore でフィルタリング
-  const localFiles = filterByGitignore(resolvePatterns(targetDir, include, exclude), gitignore);
+  // フラットパターンでファイル一覧を取得し、gitignore でフィルタリング
+  const templateFiles = filterByGitignore(resolvePatterns(templateDir, patterns.include, patterns.exclude), gitignore);
+  const localFiles = filterByGitignore(resolvePatterns(targetDir, patterns.include, patterns.exclude), gitignore);
 
   const allFiles = new Set([...templateFiles, ...localFiles]);
 

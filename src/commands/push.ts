@@ -2,11 +2,10 @@ import { existsSync, rmSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { defineCommand } from "citty";
 import { downloadTemplate } from "giget";
-import { parse } from "jsonc-parser";
 import { join, resolve } from "pathe";
 import { BermError } from "../errors";
-import { addPatternToModulesFileWithCreate, loadModulesFile, modulesFileExists } from "../modules";
-import type { DevEnvConfig, TemplateModule } from "../modules/schemas";
+import { addIncludePattern, loadPatternsFile, modulesFileExists, saveModulesFile } from "../modules";
+import type { DevEnvConfig } from "../modules/schemas";
 import { configSchema } from "../modules/schemas";
 import {
   confirmAction,
@@ -21,14 +20,10 @@ import { calculateDiffStats, formatStats } from "../ui/diff-view";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
 import { detectDiff } from "../utils/diff";
 import { createPullRequest, getGitHubToken } from "../utils/github";
-import { getModulePatterns } from "../utils/patterns";
 import { detectAndUpdateReadme } from "../utils/readme";
 import { buildTemplateSource } from "../utils/template";
 import { detectUntrackedFiles } from "../utils/untracked";
 
-/**
- * FileDiff の差分統計を "+N -M" 形式でフォーマットする。
- */
 function formatFileStat(file: {
   path: string;
   type: string;
@@ -39,9 +34,6 @@ function formatFileStat(file: {
   return formatStats(stats);
 }
 
-/**
- * process.exit() でも確実に一時ディレクトリを削除するための同期クリーンアップを登録する。
- */
 function registerSyncCleanup(tempDir: string): () => void {
   const cleanup = () => {
     try {
@@ -49,7 +41,7 @@ function registerSyncCleanup(tempDir: string): () => void {
         rmSync(tempDir, { recursive: true, force: true });
       }
     } catch {
-      // プロセス終了中のエラーは無視（ベストエフォート）
+      // ベストエフォート
     }
   };
   process.on("exit", cleanup);
@@ -61,94 +53,16 @@ function registerSyncCleanup(tempDir: string): () => void {
 const MODULES_FILE_PATH = ".ziku/modules.jsonc";
 const README_PATH = "README.md";
 
-interface LocalModuleAdditions {
-  mergedModuleList: TemplateModule[];
-  newModuleNames: string[];
-  updatedModulesContent: string | undefined;
-}
-
 /**
- * ローカルの modules.jsonc とテンプレートの modules.jsonc を比較し、
- * ローカルにのみ存在するモジュール（track コマンドで追加されたもの等）を検出してマージする。
- * テンプレートの raw content をベースに新モジュールを追加した内容を返す。
+ * ローカルの include パターンとテンプレートのフラット化パターンを比較し、
+ * ローカルにのみ存在するパターンを検出する。
  */
-async function detectLocalModuleAdditions(
-  targetDir: string,
-  templateModules: TemplateModule[],
-  templateRawContent: string,
-): Promise<LocalModuleAdditions> {
-  if (!modulesFileExists(targetDir)) {
-    return {
-      mergedModuleList: templateModules,
-      newModuleNames: [],
-      updatedModulesContent: undefined,
-    };
-  }
-
-  const local = await loadModulesFile(targetDir);
-  const templateModuleNames = new Set(templateModules.map((m) => m.name));
-
-  // ローカルにのみ存在するモジュールを検出
-  const newModules = local.modules.filter((m) => !templateModuleNames.has(m.name));
-
-  if (newModules.length === 0) {
-    // 新モジュールはないが、既存モジュールにローカルでパターンが追加されていないかチェック
-    let updatedContent = templateRawContent;
-    let hasPatternAdditions = false;
-    for (const localMod of local.modules) {
-      const templateMod = templateModules.find((m) => m.name === localMod.name);
-      if (!templateMod) continue;
-      const newPatterns = localMod.include.filter((p) => !templateMod.include.includes(p));
-      if (newPatterns.length > 0) {
-        updatedContent = addPatternToModulesFileWithCreate(
-          updatedContent,
-          localMod.name,
-          newPatterns,
-        );
-        hasPatternAdditions = true;
-      }
-    }
-
-    if (hasPatternAdditions) {
-      const merged = parse(updatedContent) as { modules: TemplateModule[] };
-      return {
-        mergedModuleList: merged.modules,
-        newModuleNames: [],
-        updatedModulesContent: updatedContent,
-      };
-    }
-
-    return {
-      mergedModuleList: templateModules,
-      newModuleNames: [],
-      updatedModulesContent: undefined,
-    };
-  }
-
-  // テンプレートの raw content に新モジュールを追加
-  let updatedContent = templateRawContent;
-  for (const mod of newModules) {
-    updatedContent = addPatternToModulesFileWithCreate(updatedContent, mod.name, mod.include, {
-      description: mod.description,
-    });
-  }
-
-  // 既存モジュールへのパターン追加もチェック
-  for (const localMod of local.modules) {
-    const templateMod = templateModules.find((m) => m.name === localMod.name);
-    if (!templateMod) continue; // 新モジュールは上で処理済み
-    const newPatterns = localMod.include.filter((p) => !templateMod.include.includes(p));
-    if (newPatterns.length > 0) {
-      updatedContent = addPatternToModulesFileWithCreate(updatedContent, localMod.name, newPatterns);
-    }
-  }
-
-  const merged = parse(updatedContent) as { modules: TemplateModule[] };
-  return {
-    mergedModuleList: merged.modules,
-    newModuleNames: newModules.map((m) => m.name),
-    updatedModulesContent: updatedContent,
-  };
+function detectLocalPatternAdditions(
+  localInclude: string[],
+  templateInclude: string[],
+): string[] {
+  const templateSet = new Set(templateInclude);
+  return localInclude.filter((p) => !templateSet.has(p));
 }
 
 export const pushCommand = defineCommand({
@@ -175,7 +89,7 @@ export const pushCommand = defineCommand({
     },
     yes: {
       type: "boolean",
-      alias: ["y", "f"], // -f は後方互換のため残す
+      alias: ["y", "f"],
       description: "Skip confirmation prompts",
       default: false,
     },
@@ -195,12 +109,10 @@ export const pushCommand = defineCommand({
     const targetDir = resolve(args.dir);
     const configPath = join(targetDir, ".ziku.json");
 
-    // .ziku.json の存在確認
     if (!existsSync(configPath)) {
       throw new BermError(".ziku.json not found.", "Run 'ziku init' first.");
     }
 
-    // 設定読み込み
     const configContent = await readFile(configPath, "utf-8");
     const configData = JSON.parse(configContent);
     const parseResult = configSchema.safeParse(configData);
@@ -211,7 +123,6 @@ export const pushCommand = defineCommand({
 
     const config: DevEnvConfig = parseResult.data;
 
-    // pendingMerge がある場合はコンフリクト未解決のためブロック
     if (config.pendingMerge) {
       throw new BermError(
         "Unresolved merge conflicts from `ziku pull`",
@@ -220,7 +131,7 @@ export const pushCommand = defineCommand({
       );
     }
 
-    // modules.jsonc を読み込み（ローカルが source of truth）
+    // ローカルの modules.jsonc からフラットパターンを読み込み
     if (!modulesFileExists(targetDir)) {
       throw new BermError(
         "No .ziku/modules.jsonc found",
@@ -228,18 +139,16 @@ export const pushCommand = defineCommand({
       );
     }
 
-    const localModulesData = await loadModulesFile(targetDir);
-    let moduleList = localModulesData.modules;
+    const localPatterns = await loadPatternsFile(targetDir);
 
-    if (moduleList.length === 0) {
-      log.warn("No modules configured");
+    if (localPatterns.include.length === 0) {
+      log.warn("No patterns configured");
       return;
     }
 
     // Step 1: テンプレートをダウンロード
     log.step("Fetching template...");
 
-    // テンプレートを一時ディレクトリにダウンロード
     const templateSource = buildTemplateSource(config.source);
     const tempDir = join(targetDir, ".ziku-temp");
     const unregisterCleanup = registerSyncCleanup(tempDir);
@@ -252,41 +161,42 @@ export const pushCommand = defineCommand({
         }),
       );
 
-      // テンプレート側の modules.jsonc を読み込んでローカル追加を検出
+      // テンプレート側のパターンを読み込み、ローカル追加を検出
       let updatedModulesContent: string | undefined;
+      let effectiveInclude = localPatterns.include;
+      let effectiveExclude = localPatterns.exclude;
 
       if (modulesFileExists(templateDir)) {
-        const templateModulesData = await loadModulesFile(templateDir);
-        const localAdditions = await detectLocalModuleAdditions(
-          targetDir,
-          templateModulesData.modules,
-          templateModulesData.rawContent,
-        );
-        moduleList = localAdditions.mergedModuleList;
-        updatedModulesContent = localAdditions.updatedModulesContent;
-        if (localAdditions.newModuleNames.length > 0) {
-          log.info(
-            `Detected ${localAdditions.newModuleNames.length} new module(s) from local: ${localAdditions.newModuleNames.join(", ")}`,
-          );
+        const templatePatterns = await loadPatternsFile(templateDir);
+        const newPatterns = detectLocalPatternAdditions(localPatterns.include, templatePatterns.include);
+
+        if (newPatterns.length > 0) {
+          log.info(`Detected ${newPatterns.length} new pattern(s) from local: ${newPatterns.join(", ")}`);
+          // テンプレートの modules.jsonc に新パターンを追加
+          const { loadPatternsFile: loadRaw } = await import("../modules/loader");
+          const templateRaw = await loadRaw(templateDir);
+          updatedModulesContent = addIncludePattern(templateRaw.rawContent, newPatterns);
         }
+
+        // マージされたパターンを使用
+        const allInclude = new Set([...templatePatterns.include, ...localPatterns.include]);
+        effectiveInclude = [...allInclude];
+        effectiveExclude = [...new Set([...templatePatterns.exclude, ...localPatterns.exclude])];
       }
 
-      // 3-way マージで解決されたファイルの内容を保持する
-      const mergedContents = new Map<string, string>();
+      const patterns = { include: effectiveInclude, exclude: effectiveExclude };
 
-      // push 対象ファイルパスの集合
+      // 3-way マージ結果を保持
+      const mergedContents = new Map<string, string>();
       let pushableFilePaths: Set<string> = new Set();
 
-      // ファイル分類（pull と同じパターン）
+      // ファイル分類
       {
         const { hashFiles } = await import("../utils/hash");
         const { classifyFiles } = await import("../utils/merge");
 
-        // モジュールの include/exclude パターンをフラット化
-        const { include, exclude } = getModulePatterns(moduleList);
-
-        const templateHashes = await hashFiles(templateDir, include, exclude);
-        const localHashes = await hashFiles(targetDir, include, exclude);
+        const templateHashes = await hashFiles(templateDir, patterns.include, patterns.exclude);
+        const localHashes = await hashFiles(targetDir, patterns.include, patterns.exclude);
 
         const classification = classifyFiles({
           baseHashes: config.baseHashes ?? {},
@@ -294,7 +204,6 @@ export const pushCommand = defineCommand({
           templateHashes,
         });
 
-        // push 対象: localOnly（ユーザーのみ変更）+ conflicts（両方変更、マージ後に push）
         for (const file of classification.localOnly) {
           pushableFilePaths.add(file);
         }
@@ -302,7 +211,6 @@ export const pushCommand = defineCommand({
           pushableFilePaths.add(file);
         }
 
-        // autoUpdate（テンプレートのみ変更）をユーザーに通知
         if (classification.autoUpdate.length > 0) {
           log.info(
             `Skipping ${classification.autoUpdate.length} file(s) only changed in template (use \`ziku pull\` to sync):`,
@@ -407,11 +315,11 @@ export const pushCommand = defineCommand({
         }
       }
 
-      // ホワイトリスト外ファイルの検出と情報表示
+      // ホワイトリスト外ファイルの検出
       if (!args.yes) {
         const untrackedByFolder = await detectUntrackedFiles({
           targetDir,
-          moduleList,
+          patterns,
         });
 
         if (untrackedByFolder.length > 0) {
@@ -427,11 +335,10 @@ export const pushCommand = defineCommand({
         detectDiff({
           targetDir,
           templateDir,
-          moduleList,
+          patterns,
         }),
       );
 
-      // push 対象ファイルを取得
       let pushableFiles = diff.files.filter(
         (f) => (f.type === "added" || f.type === "modified") && pushableFilePaths.has(f.path),
       );
@@ -443,7 +350,7 @@ export const pushCommand = defineCommand({
         return;
       }
 
-      // ドライランモード
+      // ドライラン
       if (args.dryRun) {
         log.info("Dry run mode");
         log.step("Files that would be included in PR:");
@@ -490,7 +397,6 @@ export const pushCommand = defineCommand({
         token = await inputGitHubToken();
       }
 
-      // PR タイトル・本文
       const suggestedTitle = generatePrTitle(pushableFiles);
       const suggestedBody = generatePrBody(pushableFiles);
 
@@ -508,16 +414,13 @@ export const pushCommand = defineCommand({
         body = suggestedBody;
       }
 
-      // README を更新（対象の場合のみ）
       const readmeResult = await detectAndUpdateReadme(targetDir, templateDir);
 
-      // ファイル内容を準備（3-way マージ済みの内容があればそちらを優先）
       const files = pushableFiles.map((f) => ({
         path: f.path,
         content: mergedContents.get(f.path) ?? f.localContent ?? "",
       }));
 
-      // modules.jsonc の変更があれば追加
       if (updatedModulesContent) {
         files.push({
           path: MODULES_FILE_PATH,
@@ -525,7 +428,6 @@ export const pushCommand = defineCommand({
         });
       }
 
-      // README の変更があれば追加
       if (readmeResult?.updated) {
         files.push({
           path: README_PATH,
@@ -533,7 +435,7 @@ export const pushCommand = defineCommand({
         });
       }
 
-      // Step 4: git-like なサマリー表示 + 確認
+      // Step 4: サマリー表示 + 確認
       const destination = `${config.source.owner}/${config.source.repo}`;
       const baseBranch = config.source.ref || "main";
       const baseHashStr = config.baseRef
@@ -602,7 +504,6 @@ export const pushCommand = defineCommand({
       outro(`Review and merge at ${pc.cyan(result.url)}`);
     } finally {
       unregisterCleanup();
-      // 一時ディレクトリを削除
       if (existsSync(tempDir)) {
         await rm(tempDir, { recursive: true, force: true });
       }

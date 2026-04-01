@@ -1,5 +1,12 @@
 import { globSync } from "tinyglobby";
-import type { TemplateModule } from "../modules/schemas";
+
+/**
+ * フラットな include/exclude パターン
+ */
+export interface FlatPatterns {
+  include: string[];
+  exclude: string[];
+}
 
 /**
  * パターンにマッチするファイル一覧を取得
@@ -58,28 +65,6 @@ export function mergePatterns(...patternArrays: string[][]): string[] {
     merged.push(...patterns);
   }
   return [...new Set(merged)]; // 重複排除
-}
-
-/**
- * モジュールリストから有効パターン（include - exclude）でファイルを解決する
- */
-export function resolveModuleFiles(baseDir: string, modules: TemplateModule[]): string[] {
-  const include = modules.flatMap((m) => m.include);
-  const exclude = modules.flatMap((m) => m.exclude ?? []);
-  return resolvePatterns(baseDir, include, exclude);
-}
-
-/**
- * モジュールリストから include/exclude をフラットに取得
- */
-export function getModulePatterns(modules: TemplateModule[]): {
-  include: string[];
-  exclude: string[];
-} {
-  return {
-    include: modules.flatMap((m) => m.include),
-    exclude: modules.flatMap((m) => m.exclude ?? []),
-  };
 }
 
 /**

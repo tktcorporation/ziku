@@ -16,11 +16,11 @@ import { match } from "ts-pattern";
 import type {
   FileOperationResult,
   OverwriteStrategy,
-  TemplateModule,
 } from "../modules/schemas";
 import { log } from "../ui/renderer";
 import { loadMergedGitignore, separateByGitignore } from "./gitignore";
-import { getModulePatterns, resolvePatterns } from "./patterns";
+import type { FlatPatterns } from "./patterns";
+import { resolvePatterns } from "./patterns";
 
 export const TEMPLATE_SOURCE = "gh:tktcorporation/.github";
 
@@ -103,7 +103,7 @@ export async function downloadTemplateToTemp(
 export interface DownloadOptions {
   targetDir: string;
   overwriteStrategy: OverwriteStrategy;
-  moduleList: TemplateModule[]; // 外部からロードしたモジュールリスト
+  patterns: FlatPatterns; // フラットな include/exclude パターン
   templateDir?: string; // 事前にダウンロードしたテンプレートディレクトリ
 }
 
@@ -163,7 +163,7 @@ export async function fetchTemplates(options: DownloadOptions): Promise<FileOper
   const {
     targetDir,
     overwriteStrategy,
-    moduleList,
+    patterns,
     templateDir: preDownloadedDir,
   } = options;
   const allResults: FileOperationResult[] = [];
@@ -189,9 +189,8 @@ export async function fetchTemplates(options: DownloadOptions): Promise<FileOper
     // ローカルとテンプレート両方の .gitignore をマージして読み込み
     const gitignore = await loadMergedGitignore([targetDir, templateDir]);
 
-    // 全モジュールの include/exclude をフラットに取得してファイルを解決
-    const { include, exclude } = getModulePatterns(moduleList);
-    const resolvedFiles = resolvePatterns(templateDir, include, exclude);
+    // フラットパターンでファイルを解決
+    const resolvedFiles = resolvePatterns(templateDir, patterns.include, patterns.exclude);
     const { tracked, ignored } = separateByGitignore(resolvedFiles, gitignore);
 
     if (tracked.length === 0 && ignored.length === 0) {

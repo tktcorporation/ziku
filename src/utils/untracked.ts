@@ -3,8 +3,8 @@ import { readFile } from "node:fs/promises";
 import ignore, { type Ignore } from "ignore";
 import { join } from "pathe";
 import { globSync } from "tinyglobby";
-import type { TemplateModule } from "../modules/schemas";
-import { resolveModuleFiles } from "./patterns";
+import type { FlatPatterns } from "./patterns";
+import { resolvePatterns } from "./patterns";
 
 export interface UntrackedFile {
   path: string;
@@ -28,23 +28,21 @@ export function getDisplayFolderFromPath(filePath: string): string {
 }
 
 /**
- * モジュールの include パターンからベースディレクトリを抽出
+ * include パターンからベースディレクトリを抽出
  */
-function getBaseDirsFromModules(modules: TemplateModule[]): {
+function getBaseDirsFromPatterns(include: string[]): {
   dirs: string[];
   hasRootPatterns: boolean;
 } {
   const dirs = new Set<string>();
   let hasRootPatterns = false;
 
-  for (const mod of modules) {
-    for (const pattern of mod.include) {
-      const firstSegment = pattern.split("/")[0];
-      if (pattern.includes("/") && firstSegment) {
-        dirs.add(firstSegment);
-      } else {
-        hasRootPatterns = true;
-      }
+  for (const pattern of include) {
+    const firstSegment = pattern.split("/")[0];
+    if (pattern.includes("/") && firstSegment) {
+      dirs.add(firstSegment);
+    } else {
+      hasRootPatterns = true;
     }
   }
 
@@ -78,31 +76,25 @@ export function getRootDotFiles(baseDir: string): string[] {
 
 /**
  * 複数ディレクトリの .gitignore をマージして読み込み
- * サブディレクトリの .gitignore も含める
  */
 export async function loadAllGitignores(baseDir: string, dirs: string[]): Promise<Ignore> {
   const ig = ignore();
 
-  // ルートの .gitignore
   const rootGitignore = join(baseDir, ".gitignore");
   if (existsSync(rootGitignore)) {
     const content = await readFile(rootGitignore, "utf-8");
     ig.add(content);
   }
 
-  // 各ディレクトリの .gitignore
   for (const dir of dirs) {
     const gitignorePath = join(baseDir, dir, ".gitignore");
     if (existsSync(gitignorePath)) {
       const content = await readFile(gitignorePath, "utf-8");
-      // ディレクトリ相対のパスを絶対パスに変換するため、各パターンにプレフィックスを追加
       const prefixedContent = content
         .split("\n")
         .map((line) => {
           const trimmed = line.trim();
-          // コメント行や空行はそのまま
           if (!trimmed || trimmed.startsWith("#")) return line;
-          // 否定パターンの場合
           if (trimmed.startsWith("!")) {
             return `!${dir}/${trimmed.slice(1)}`;
           }
@@ -121,15 +113,15 @@ export async function loadAllGitignores(baseDir: string, dirs: string[]): Promis
  */
 export async function detectUntrackedFiles(options: {
   targetDir: string;
-  moduleList: TemplateModule[];
+  patterns: FlatPatterns;
 }): Promise<UntrackedFilesByFolder[]> {
-  const { targetDir, moduleList } = options;
+  const { targetDir, patterns } = options;
 
-  // 全モジュールのパターンで tracked files を算出
-  const allTrackedFiles = new Set(resolveModuleFiles(targetDir, moduleList));
+  // フラットパターンで tracked files を算出
+  const allTrackedFiles = new Set(resolvePatterns(targetDir, patterns.include, patterns.exclude));
 
   // ベースディレクトリを抽出
-  const { dirs: allBaseDirs, hasRootPatterns } = getBaseDirsFromModules(moduleList);
+  const { dirs: allBaseDirs, hasRootPatterns } = getBaseDirsFromPatterns(patterns.include);
 
   // gitignore を読み込み
   const gitignore = await loadAllGitignores(targetDir, allBaseDirs);
@@ -148,13 +140,10 @@ export async function detectUntrackedFiles(options: {
   const filesByFolder = new Map<string, UntrackedFile[]>();
 
   for (const filePath of allFiles) {
-    // ホワイトリストに含まれていればスキップ
     if (allTrackedFiles.has(filePath)) continue;
 
     const displayFolder = getDisplayFolderFromPath(filePath);
 
-    // このファイルがモジュールのスコープ内かチェック
-    // (モジュールの include パターンのベースディレクトリ内、またはルートパターンがある場合のルートファイル)
     const isInScope =
       allBaseDirs.some((dir) => filePath.startsWith(`${dir}/`)) ||
       (hasRootPatterns && !filePath.includes("/"));
@@ -170,10 +159,8 @@ export async function detectUntrackedFiles(options: {
     filesByFolder.set(displayFolder, existing);
   }
 
-  // 結果を配列に変換（フォルダ名でソート）
   const result: UntrackedFilesByFolder[] = [];
   const sortedFolders = Array.from(filesByFolder.keys()).sort((a, b) => {
-    // root は最後に
     if (a === "root") return 1;
     if (b === "root") return -1;
     return a.localeCompare(b);

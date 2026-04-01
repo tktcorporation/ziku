@@ -2,9 +2,8 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { defineCommand } from "citty";
 import { join, resolve } from "pathe";
 import {
-  getAllIncludePatterns,
   getModulesFilePath,
-  loadModulesFile,
+  loadTemplateModulesFile,
   modulesFileExists,
 } from "../modules/index";
 import { MODULES_SCHEMA_URL } from "../modules/loader";
@@ -38,7 +37,7 @@ import {
   fetchTemplates,
   writeFileWithStrategy,
 } from "../utils/template";
-import { getModulePatterns } from "../utils/patterns";
+import type { FlatPatterns } from "../utils/patterns";
 import { intro, log, logFileResults, outro, pc, withSpinner } from "../ui/renderer";
 
 // ビルド時に置換される定数
@@ -128,7 +127,7 @@ export const initCommand = defineCommand({
       // modules.jsonc からモジュールを読み込み
       let moduleList: TemplateModule[];
       if (modulesFileExists(templateDir)) {
-        const { modules: loadedModules } = await loadModulesFile(templateDir);
+        const { modules: loadedModules } = await loadTemplateModulesFile(templateDir);
         moduleList = loadedModules;
       } else {
         // .ziku/modules.jsonc がテンプレートに存在しない場合のハンドリング
@@ -211,19 +210,25 @@ export const initCommand = defineCommand({
         ? "overwrite"
         : answers.overwriteStrategy;
 
+      // 選択されたモジュールからフラットパターンを構築
+      const flatPatterns: FlatPatterns = {
+        include: answers.selectedModules.flatMap((m) => m.include),
+        exclude: answers.selectedModules.flatMap((m) => m.exclude ?? []),
+      };
+
       // テンプレート取得・適用（サイレントモード - 後でまとめて表示）
       const templateResults = await fetchTemplates({
         targetDir,
         overwriteStrategy: effectiveStrategy,
-        moduleList: answers.selectedModules,
+        patterns: flatPatterns,
         templateDir,
       });
 
       const allResults: FileOperationResult[] = [...templateResults];
 
       // devcontainer.env.example を戦略に従って作成
-      const hasDevcontainer = answers.selectedModules.some((m) =>
-        m.include.some((p) => p.startsWith(".devcontainer/")),
+      const hasDevcontainer = flatPatterns.include.some((p) =>
+        p.startsWith(".devcontainer/"),
       );
       if (hasDevcontainer) {
         const envResult = await createEnvExample(targetDir, effectiveStrategy);
@@ -239,8 +244,7 @@ export const initCommand = defineCommand({
       allResults.push(modulesJsoncResult);
 
       // テンプレートファイルのハッシュを計算（pull 時の差分検出用）
-      const { include, exclude } = getModulePatterns(answers.selectedModules);
-      const baseHashes = await hashFiles(templateDir, include, exclude);
+      const baseHashes = await hashFiles(templateDir, flatPatterns.include, flatPatterns.exclude);
 
       // テンプレートリポジトリの最新コミット SHA を取得（3-way マージのベース用）
       const baseRef = await resolveLatestCommitSha(sourceOwner, sourceRepo);
@@ -347,7 +351,7 @@ async function createDevEnvConfig(
 }
 
 /**
- * 選択されたモジュールのみで modules.jsonc を生成してローカルに書き出す
+ * 選択されたモジュールをフラット化して modules.jsonc をローカルに書き出す
  */
 async function writeSelectedModulesJsonc(
   targetDir: string,
@@ -355,7 +359,7 @@ async function writeSelectedModulesJsonc(
   strategy: OverwriteStrategy,
 ): Promise<FileOperationResult> {
   const modulesRelPath = ".ziku/modules.jsonc";
-  const content = generateModulesJsoncFromModules(selectedModules);
+  const content = generateFlatPatternsJsonc(selectedModules);
 
   return writeFileWithStrategy({
     destPath: getModulesFilePath(targetDir),
@@ -537,7 +541,7 @@ async function handleMissingDevenv(
   }
 
   const selectedModules = await selectTemplateModules(MODULE_PRESETS);
-  const modulesContent = generateModulesJsoncFromModules(selectedModules);
+  const modulesContent = generateTemplateModulesJsonc(selectedModules);
   log.step(`Creating PR to add .ziku/modules.jsonc to ${pc.cyan(`${owner}/${repo}`)}...`);
   const result = await createDevenvScaffoldPR(token, owner, repo, modulesContent);
   log.success(`Created PR: ${pc.cyan(result.url)}`);
@@ -577,20 +581,20 @@ export const MODULE_PRESETS: TemplateModule[] = [
 ];
 
 /**
- * モジュール定義から modules.jsonc コンテンツを生成する
+ * テンプレート用 modules.jsonc を生成（グループ形式 — テンプレートリポジトリ用）
  */
 export function generateInitialModulesJsonc(selectedNames?: string[]): string {
   const modules = selectedNames
     ? MODULE_PRESETS.filter((m) => selectedNames.includes(m.name))
     : MODULE_PRESETS;
 
-  return generateModulesJsoncFromModules(modules);
+  return generateTemplateModulesJsonc(modules);
 }
 
 /**
- * モジュール配列から modules.jsonc コンテンツを生成する
+ * テンプレート用 modules.jsonc コンテンツを生成（グループ形式）
  */
-function generateModulesJsoncFromModules(modules: TemplateModule[]): string {
+function generateTemplateModulesJsonc(modules: TemplateModule[]): string {
   const content = {
     $schema: MODULES_SCHEMA_URL,
     modules: modules.map((m) => ({
@@ -600,6 +604,23 @@ function generateModulesJsoncFromModules(modules: TemplateModule[]): string {
       ...(m.exclude && m.exclude.length > 0 ? { exclude: m.exclude } : {}),
     })),
   };
+  return JSON.stringify(content, null, 2);
+}
+
+/**
+ * ローカル用 modules.jsonc コンテンツを生成（フラット形式）
+ * 選択されたモジュールの include/exclude をフラット化する
+ */
+function generateFlatPatternsJsonc(modules: TemplateModule[]): string {
+  const include = modules.flatMap((m) => m.include);
+  const exclude = modules.flatMap((m) => m.exclude ?? []);
+  const content: Record<string, unknown> = {
+    $schema: MODULES_SCHEMA_URL,
+    include,
+  };
+  if (exclude.length > 0) {
+    content.exclude = exclude;
+  }
   return JSON.stringify(content, null, 2);
 }
 
@@ -640,7 +661,7 @@ async function handleTemplateRepoInit(targetDir: string, nonInteractive: boolean
     selectedModules = MODULE_PRESETS;
   }
 
-  const modulesContent = generateModulesJsoncFromModules(selectedModules);
+  const modulesContent = generateTemplateModulesJsonc(selectedModules);
   const modulesDir = join(targetDir, ".ziku");
   if (!existsSync(modulesDir)) {
     mkdirSync(modulesDir, { recursive: true });

@@ -24,20 +24,34 @@ const MARKERS = {
   },
 } as const;
 
-interface ModulesFile {
-  modules: TemplateModule[];
-}
-
 /**
- * modules.jsonc を読み込み
+ * テンプレートの modules.jsonc を読み込み（グループ形式 or フラット形式対応）
  */
 async function loadModulesFromFile(modulesPath: string): Promise<TemplateModule[]> {
   if (!existsSync(modulesPath)) {
     return [];
   }
   const content = await readFile(modulesPath, "utf-8");
-  const parsed = parse(content) as ModulesFile;
-  return parsed.modules;
+  const parsed = parse(content);
+
+  // グループ形式（テンプレート側）
+  if (parsed && Array.isArray(parsed.modules)) {
+    return parsed.modules as TemplateModule[];
+  }
+
+  // フラット形式 → 単一モジュールとして扱う
+  if (parsed && Array.isArray(parsed.include)) {
+    return [
+      {
+        name: "Tracked Files",
+        description: "All tracked file patterns",
+        include: parsed.include,
+        ...(parsed.exclude ? { exclude: parsed.exclude } : {}),
+      },
+    ];
+  }
+
+  return [];
 }
 
 /**

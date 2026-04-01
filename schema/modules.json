@@ -5,8 +5,23 @@
     "$schema": {
       "type": "string"
     },
+    "include": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Glob patterns for files to sync"
+    },
+    "exclude": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Glob patterns for files to exclude from sync"
+    },
     "modules": {
       "type": "array",
+      "description": "Module definitions (template format only)",
       "items": {
         "type": "object",
         "properties": {
@@ -37,6 +52,13 @@
       }
     }
   },
-  "required": ["modules"],
+  "oneOf": [
+    {
+      "required": ["include"]
+    },
+    {
+      "required": ["modules"]
+    }
+  ],
   "additionalProperties": false
 }

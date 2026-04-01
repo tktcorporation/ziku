@@ -10,25 +10,35 @@ const MODULES_FILE = ".ziku/modules.jsonc";
 
 /**
  * modules.jsonc の $schema URL。
- * raw.githubusercontent.com 経由でリポジトリ内の schema/modules.json を参照する。
  */
 export const MODULES_SCHEMA_URL =
   "https://raw.githubusercontent.com/tktcorporation/ziku/main/schema/modules.json";
 
 /**
- * modules.jsonc のスキーマ
+ * テンプレート側の modules.jsonc スキーマ（グループ形式 — init UI 用）
  */
-export const modulesFileSchema = z.object({
+export const templateModulesFileSchema = z.object({
   $schema: z.string().optional(),
   modules: z.array(moduleSchema),
 });
 
-export type ModulesFile = z.infer<typeof modulesFileSchema>;
+export type TemplateModulesFile = z.infer<typeof templateModulesFileSchema>;
 
 /**
- * modules.jsonc ファイルを読み込み
+ * ローカル側の modules.jsonc スキーマ（フラット形式 — ランタイム用）
  */
-export async function loadModulesFile(
+export const localPatternsFileSchema = z.object({
+  $schema: z.string().optional(),
+  include: z.array(z.string()),
+  exclude: z.array(z.string()).optional(),
+});
+
+export type LocalPatternsFile = z.infer<typeof localPatternsFileSchema>;
+
+/**
+ * テンプレートの modules.jsonc を読み込み（グループ形式）
+ */
+export async function loadTemplateModulesFile(
   baseDir: string,
 ): Promise<{ modules: TemplateModule[]; rawContent: string }> {
   const filePath = join(baseDir, MODULES_FILE);
@@ -39,7 +49,7 @@ export async function loadModulesFile(
 
   const content = await readFile(filePath, "utf-8");
   const parsed = parse(content);
-  const validated = modulesFileSchema.parse(parsed);
+  const validated = templateModulesFileSchema.parse(parsed);
 
   return {
     modules: validated.modules,
@@ -48,81 +58,82 @@ export async function loadModulesFile(
 }
 
 /**
- * モジュール name からモジュールを取得
+ * ローカルの modules.jsonc を読み込み（フラット形式）
  */
-export function getModuleByNameFromList(
-  modules: TemplateModule[],
-  name: string,
-): TemplateModule | undefined {
-  return modules.find((m) => m.name === name);
+export async function loadLocalPatternsFile(
+  baseDir: string,
+): Promise<{ include: string[]; exclude: string[]; rawContent: string }> {
+  const filePath = join(baseDir, MODULES_FILE);
+
+  if (!existsSync(filePath)) {
+    throw new Error(`${MODULES_FILE} が見つかりません: ${filePath}`);
+  }
+
+  const content = await readFile(filePath, "utf-8");
+  const parsed = parse(content);
+  const validated = localPatternsFileSchema.parse(parsed);
+
+  return {
+    include: validated.include,
+    exclude: validated.exclude ?? [],
+    rawContent: content,
+  };
 }
 
 /**
- * modules.jsonc にパターンを追加（コメントを保持）
- * @returns 更新後の JSONC 文字列
+ * modules.jsonc がどちらの形式かを判定して読み込み
+ * テンプレート形式（modules配列）の場合はフラット化して返す
  */
-export function addPatternToModulesFile(
-  rawContent: string,
-  moduleName: string,
-  patterns: string[],
-): string {
-  // 現在のモジュールリストを取得
-  const parsed = parse(rawContent) as ModulesFile;
-  const moduleIndex = parsed.modules.findIndex((m) => m.name === moduleName);
+export async function loadPatternsFile(
+  baseDir: string,
+): Promise<{ include: string[]; exclude: string[]; rawContent: string }> {
+  const filePath = join(baseDir, MODULES_FILE);
 
-  if (moduleIndex === -1) {
-    throw new Error(`モジュール ${moduleName} が見つかりません`);
+  if (!existsSync(filePath)) {
+    throw new Error(`${MODULES_FILE} が見つかりません: ${filePath}`);
   }
 
-  // 既存のパターンと新規パターンをマージ
-  const existingPatterns = parsed.modules[moduleIndex].include;
-  const newPatterns = patterns.filter((p) => !existingPatterns.includes(p));
+  const content = await readFile(filePath, "utf-8");
+  const parsed = parse(content);
+
+  // フラット形式を先に試行
+  const localResult = localPatternsFileSchema.safeParse(parsed);
+  if (localResult.success) {
+    return {
+      include: localResult.data.include,
+      exclude: localResult.data.exclude ?? [],
+      rawContent: content,
+    };
+  }
+
+  // テンプレート形式にフォールバック（フラット化して返す）
+  const templateResult = templateModulesFileSchema.safeParse(parsed);
+  if (templateResult.success) {
+    return {
+      include: templateResult.data.modules.flatMap((m) => m.include),
+      exclude: templateResult.data.modules.flatMap((m) => m.exclude ?? []),
+      rawContent: content,
+    };
+  }
+
+  throw new Error(`${MODULES_FILE} の形式が不正です`);
+}
+
+/**
+ * ローカルの modules.jsonc にパターンを追加
+ * @returns 更新後の JSONC 文字列
+ */
+export function addIncludePattern(rawContent: string, patterns: string[]): string {
+  const parsed = parse(rawContent) as LocalPatternsFile;
+  const existing = parsed.include ?? [];
+  const newPatterns = patterns.filter((p) => !existing.includes(p));
 
   if (newPatterns.length === 0) {
     return rawContent;
   }
 
-  const updatedPatterns = [...existingPatterns, ...newPatterns];
-
-  // JSONC を編集（コメントを保持）
-  const edits = modify(rawContent, ["modules", moduleIndex, "include"], updatedPatterns, {
-    formattingOptions: { tabSize: 2, insertSpaces: true },
-  });
-
-  return applyEdits(rawContent, edits);
-}
-
-/**
- * modules.jsonc にパターンを追加（モジュールが存在しない場合は作成）
- * @returns 更新後の JSONC 文字列
- */
-export function addPatternToModulesFileWithCreate(
-  rawContent: string,
-  moduleName: string,
-  patterns: string[],
-  moduleOptions?: { description?: string },
-): string {
-  const parsed = parse(rawContent) as ModulesFile;
-  const moduleIndex = parsed.modules.findIndex((m) => m.name === moduleName);
-
-  if (moduleIndex !== -1) {
-    // 既存モジュールにパターンを追加
-    return addPatternToModulesFile(rawContent, moduleName, patterns);
-  }
-
-  // 新しいモジュールを作成
-  const description =
-    moduleOptions?.description || `Files matching ${patterns.join(", ")}`;
-
-  const newModule: TemplateModule = {
-    name: moduleName,
-    description,
-    include: patterns,
-  };
-
-  const newModules = [...parsed.modules, newModule];
-
-  const edits = modify(rawContent, ["modules"], newModules, {
+  const updatedInclude = [...existing, ...newPatterns];
+  const edits = modify(rawContent, ["include"], updatedInclude, {
     formattingOptions: { tabSize: 2, insertSpaces: true },
   });
 
