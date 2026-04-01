@@ -15,10 +15,10 @@ vi.mock("@clack/prompts", () => ({
 }));
 
 vi.mock("node:child_process", () => ({
-  execSync: vi.fn(),
+  execFileSync: vi.fn(),
 }));
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import * as p from "@clack/prompts";
 import type { FileDiff } from "../../modules/schemas";
 import {
@@ -328,8 +328,8 @@ describe("prompts", () => {
 
       openEditorForConflicts(["file1.ts", "file2.ts"]);
 
-      expect(execSync).toHaveBeenCalledWith("nano file1.ts", { stdio: "inherit" });
-      expect(execSync).toHaveBeenCalledWith("nano file2.ts", { stdio: "inherit" });
+      expect(execFileSync).toHaveBeenCalledWith("nano", ["file1.ts"], { stdio: "inherit" });
+      expect(execFileSync).toHaveBeenCalledWith("nano", ["file2.ts"], { stdio: "inherit" });
 
       process.env.EDITOR = originalEditor;
       if (originalVisual !== undefined) {
@@ -345,7 +345,7 @@ describe("prompts", () => {
 
       openEditorForConflicts(["file1.ts"]);
 
-      expect(execSync).toHaveBeenCalledWith("code file1.ts", { stdio: "inherit" });
+      expect(execFileSync).toHaveBeenCalledWith("code", ["file1.ts"], { stdio: "inherit" });
 
       process.env.EDITOR = originalEditor;
       if (originalVisual !== undefined) {
@@ -360,7 +360,7 @@ describe("prompts", () => {
       const originalVisual = process.env.VISUAL;
       delete process.env.VISUAL;
       process.env.EDITOR = "nonexistent";
-      vi.mocked(execSync).mockImplementation(() => {
+      vi.mocked(execFileSync).mockImplementation(() => {
         throw new Error("not found");
       });
 

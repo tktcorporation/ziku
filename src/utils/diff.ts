@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createPatch } from "diff";
 import { join } from "pathe";
 import pc from "picocolors";
+import { match } from "ts-pattern";
 import type { DiffResult, DiffType, FileDiff } from "../modules/schemas";
 import { filterByGitignore, loadMergedGitignore } from "./gitignore";
 import type { FlatPatterns } from "./patterns";
@@ -142,16 +143,12 @@ interface StatusStyle {
 }
 
 function getStatusStyle(type: DiffType): StatusStyle {
-  switch (type) {
-    case "added":
-      return { icon: pc.green("+"), color: pc.green };
-    case "modified":
-      return { icon: pc.yellow("~"), color: pc.yellow };
-    case "deleted":
-      return { icon: pc.red("-"), color: pc.red };
-    case "unchanged":
-      return { icon: pc.dim(" "), color: pc.dim };
-  }
+  return match(type)
+    .with("added", () => ({ icon: pc.green("+"), color: pc.green }))
+    .with("modified", () => ({ icon: pc.yellow("~"), color: pc.yellow }))
+    .with("deleted", () => ({ icon: pc.red("-"), color: pc.red }))
+    .with("unchanged", () => ({ icon: pc.dim(" "), color: pc.dim }))
+    .exhaustive();
 }
 
 /**
@@ -175,14 +172,12 @@ export function hasDiff(diff: DiffResult): boolean {
 export function generateUnifiedDiff(fileDiff: FileDiff): string {
   const { path, type, localContent, templateContent } = fileDiff;
 
-  switch (type) {
-    case "added":
-      return createPatch(path, "", localContent || "", "template", "local");
-    case "modified":
-      return createPatch(path, templateContent || "", localContent || "", "template", "local");
-    default:
-      return "";
-  }
+  return match(type)
+    .with("added", () => createPatch(path, "", localContent || "", "template", "local"))
+    .with("modified", () =>
+      createPatch(path, templateContent || "", localContent || "", "template", "local"),
+    )
+    .otherwise(() => "");
 }
 
 /**

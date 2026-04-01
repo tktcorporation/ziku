@@ -12,6 +12,7 @@
 import * as p from "@clack/prompts";
 import { diffWords } from "diff";
 import pc from "picocolors";
+import { match } from "ts-pattern";
 import type { FileDiff } from "../modules/schemas";
 import { generateUnifiedDiff } from "../utils/diff";
 
@@ -37,20 +38,17 @@ function countLines(content: string): number {
 
 /** ファイルの差分統計を計算 */
 export function calculateDiffStats(fileDiff: FileDiff): DiffStats {
-  switch (fileDiff.type) {
-    case "unchanged":
-      return { additions: 0, deletions: 0 };
-    case "deleted":
-      return {
-        additions: 0,
-        deletions: countLines(fileDiff.templateContent ?? ""),
-      };
-    case "added":
-      return {
-        additions: countLines(fileDiff.localContent ?? ""),
-        deletions: 0,
-      };
-    case "modified": {
+  return match(fileDiff.type)
+    .with("unchanged", () => ({ additions: 0, deletions: 0 }))
+    .with("deleted", () => ({
+      additions: 0,
+      deletions: countLines(fileDiff.templateContent ?? ""),
+    }))
+    .with("added", () => ({
+      additions: countLines(fileDiff.localContent ?? ""),
+      deletions: 0,
+    }))
+    .with("modified", () => {
       const diff = generateUnifiedDiff(fileDiff);
       let additions = 0;
       let deletions = 0;
@@ -59,8 +57,8 @@ export function calculateDiffStats(fileDiff: FileDiff): DiffStats {
         else if (line.startsWith("-") && !line.startsWith("---")) deletions++;
       }
       return { additions, deletions };
-    }
-  }
+    })
+    .exhaustive();
 }
 
 /** 統計フォーマット (+10 -5) */

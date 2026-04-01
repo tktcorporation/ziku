@@ -7,9 +7,11 @@
  *
  * 全プロンプトは Ctrl+C でキャンセル可能。handleCancel() で統一処理。
  */
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { Effect } from "effect";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
+import { match } from "ts-pattern";
 import type { FileDiff, OverwriteStrategy, TemplateModule } from "../modules/schemas";
 
 /** ユーザーが Ctrl+C でキャンセルした場合の統一処理 */
@@ -174,18 +176,12 @@ function fileStatHint(file: FileDiff): string {
  * push 対象ファイルの選択（+N -M 統計付き）
  */
 export async function selectPushFiles(files: FileDiff[]): Promise<FileDiff[]> {
-  const typeIcon = (type: string) => {
-    switch (type) {
-      case "added":
-        return pc.green("+");
-      case "modified":
-        return pc.yellow("~");
-      case "deleted":
-        return pc.red("-");
-      default:
-        return " ";
-    }
-  };
+  const typeIcon = (type: string) =>
+    match(type)
+      .with("added", () => pc.green("+"))
+      .with("modified", () => pc.yellow("~"))
+      .with("deleted", () => pc.red("-"))
+      .otherwise(() => " ");
 
   const selected = await p.multiselect({
     message: "Select files to include in PR",
@@ -379,10 +375,11 @@ export async function selectDeletedFiles(files: string[]): Promise<string[]> {
 export function openEditorForConflicts(filePaths: string[]): void {
   const editor = process.env.VISUAL || process.env.EDITOR || "vi";
   for (const filePath of filePaths) {
-    try {
-      execSync(`${editor} ${filePath}`, { stdio: "inherit" });
-    } catch {
-      // エディタが見つからない場合はスキップ
-    }
+    // エディタが見つからない場合はスキップ
+    Effect.runSync(
+      Effect.try(() => execFileSync(editor, [filePath], { stdio: "inherit" })).pipe(
+        Effect.orElseSucceed(() => undefined),
+      ),
+    );
   }
 }

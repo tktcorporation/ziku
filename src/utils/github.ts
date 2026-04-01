@@ -1,4 +1,5 @@
 import { Octokit } from "@octokit/rest";
+import { Effect } from "effect";
 import type { PrResult } from "../modules/schemas";
 
 export interface PushOptions {
@@ -22,23 +23,17 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
   const forkOwner = user.login;
 
   // 2. fork を確認・作成
-  let forkRepo: string;
-  try {
-    const { data: fork } = await octokit.repos.get({
-      owner: forkOwner,
-      repo,
-    });
-    forkRepo = fork.name;
-  } catch {
-    const { data: fork } = await octokit.repos.createFork({
-      owner,
-      repo,
-    });
-    forkRepo = fork.name;
-
-    // fork の同期を待つ
-    await sleep(3000);
-  }
+  const forkRepo = await Effect.runPromise(
+    Effect.tryPromise(() => octokit.repos.get({ owner: forkOwner, repo })).pipe(
+      Effect.map(({ data }) => data.name),
+      Effect.orElse(() =>
+        Effect.tryPromise(() => octokit.repos.createFork({ owner, repo })).pipe(
+          Effect.tap(() => Effect.promise(() => sleep(3000))),
+          Effect.map(({ data }) => data.name),
+        ),
+      ),
+    ),
+  );
 
   // 3. ベースブランチの最新コミット SHA を取得
   const { data: baseBranchRef } = await octokit.repos.getBranch({
@@ -61,21 +56,22 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
 
   // 6. ファイルを更新
   for (const file of files) {
-    // 既存ファイルの SHA を取得（存在する場合）
-    let existingSha: string | undefined;
-    try {
-      const { data: existingFile } = await octokit.repos.getContent({
-        owner: forkOwner,
-        repo: forkRepo,
-        path: file.path,
-        ref: branchName,
-      });
-      if (!Array.isArray(existingFile) && existingFile.type === "file") {
-        existingSha = existingFile.sha;
-      }
-    } catch {
-      // ファイルが存在しない場合は新規作成
-    }
+    // 既存ファイルの SHA を取得（存在する場合、なければ新規作成）
+    const existingSha = await Effect.runPromise(
+      Effect.tryPromise(() =>
+        octokit.repos.getContent({
+          owner: forkOwner,
+          repo: forkRepo,
+          path: file.path,
+          ref: branchName,
+        }),
+      ).pipe(
+        Effect.map(({ data }) =>
+          !Array.isArray(data) && data.type === "file" ? data.sha : undefined,
+        ),
+        Effect.orElseSucceed(() => undefined),
+      ),
+    );
 
     // ファイルを作成または更新
     await octokit.repos.createOrUpdateFileContents({
@@ -148,23 +144,26 @@ export function getGitHubToken(): string | undefined {
  * gh CLI が未インストール or 未ログインの場合は undefined を返す。
  */
 export function getGhCliToken(): string | undefined {
-  try {
-    const { execSync } = require("node:child_process");
-    const token = execSync("gh auth token", {
-      encoding: "utf-8",
-      timeout: 5000,
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-    if (
-      token &&
-      (token.startsWith("ghp_") || token.startsWith("gho_") || token.startsWith("github_pat_"))
-    ) {
-      return token;
-    }
-  } catch {
-    // gh CLI が未インストール or 未ログイン — 無視
-  }
-  return undefined;
+  return Effect.runSync(
+    Effect.try(() => {
+      const { execFileSync } = require("node:child_process");
+      return (
+        execFileSync("gh", ["auth", "token"], {
+          encoding: "utf-8",
+          timeout: 5000,
+          stdio: ["pipe", "pipe", "pipe"],
+        }) as string
+      ).trim();
+    }).pipe(
+      Effect.flatMap((token) =>
+        token &&
+        (token.startsWith("ghp_") || token.startsWith("gho_") || token.startsWith("github_pat_"))
+          ? Effect.succeed(token)
+          : Effect.succeed(undefined),
+      ),
+      Effect.orElseSucceed(() => undefined),
+    ),
+  );
 }
 
 /**
@@ -176,14 +175,15 @@ export function getGhCliToken(): string | undefined {
  * 認証不要（公開リポジトリの場合）。HEAD リクエストで軽量に確認。
  */
 export async function checkRepoExists(owner: string, repo: string): Promise<boolean> {
-  try {
-    const url = `https://api.github.com/repos/${owner}/${repo}`;
-    const res = await fetch(url, { method: "HEAD" });
-    return res.ok;
-  } catch {
-    // ネットワークエラー等の場合は存在チェックをスキップ（楽観的に続行）
-    return true;
-  }
+  return Effect.runPromise(
+    Effect.tryPromise(() =>
+      fetch(`https://api.github.com/repos/${owner}/${repo}`, { method: "HEAD" }),
+    ).pipe(
+      Effect.map((res) => res.ok),
+      // ネットワークエラー等の場合は存在チェックをスキップ（楽観的に続行）
+      Effect.orElseSucceed(() => true),
+    ),
+  );
 }
 
 /**
@@ -201,13 +201,12 @@ export async function scaffoldTemplateRepo(
   const octokit = new Octokit({ auth: token });
 
   // org か personal かを判定
-  let isOrg = false;
-  try {
-    await octokit.orgs.get({ org: targetOwner });
-    isOrg = true;
-  } catch {
-    // personal account
-  }
+  const isOrg = await Effect.runPromise(
+    Effect.tryPromise(() => octokit.orgs.get({ org: targetOwner })).pipe(
+      Effect.map(() => true),
+      Effect.orElseSucceed(() => false),
+    ),
+  );
 
   // リポジトリを作成
   const createParams = {
@@ -270,16 +269,16 @@ export async function resolveLatestCommitSha(
   repo: string,
   ref = "main",
 ): Promise<string | undefined> {
-  try {
-    const url = `https://api.github.com/repos/${owner}/${repo}/commits/${ref}`;
-    const res = await fetch(url, {
-      headers: { Accept: "application/vnd.github.sha" },
-    });
-    if (!res.ok) return undefined;
-    return (await res.text()).trim();
-  } catch {
-    return undefined;
-  }
+  return Effect.runPromise(
+    Effect.tryPromise(async () => {
+      const url = `https://api.github.com/repos/${owner}/${repo}/commits/${ref}`;
+      const res = await fetch(url, {
+        headers: { Accept: "application/vnd.github.sha" },
+      });
+      if (!res.ok) return undefined;
+      return (await res.text()).trim();
+    }).pipe(Effect.orElseSucceed(() => undefined)),
+  );
 }
 
 /**

@@ -1,3 +1,4 @@
+import { Effect } from "effect";
 import { parse as jsoncParse } from "jsonc-parser";
 import * as TOML from "smol-toml";
 import * as YAML from "yaml";
@@ -27,28 +28,28 @@ export function isYamlFile(filePath: string): boolean {
  */
 export function validateStructuredContent(content: string, filePath: string): boolean {
   if (isJsonFile(filePath)) {
-    try {
-      const result = jsoncParse(content);
-      return result != null;
-    } catch {
-      return false;
-    }
+    return Effect.runSync(
+      Effect.try(() => jsoncParse(content)).pipe(
+        Effect.map((result) => result != null),
+        Effect.orElseSucceed(() => false),
+      ),
+    );
   }
   if (isTomlFile(filePath)) {
-    try {
-      TOML.parse(content);
-      return true;
-    } catch {
-      return false;
-    }
+    return Effect.runSync(
+      Effect.try(() => TOML.parse(content)).pipe(
+        Effect.map(() => true),
+        Effect.orElseSucceed(() => false),
+      ),
+    );
   }
   if (isYamlFile(filePath)) {
-    try {
-      YAML.parse(content);
-      return true;
-    } catch {
-      return false;
-    }
+    return Effect.runSync(
+      Effect.try(() => YAML.parse(content)).pipe(
+        Effect.map(() => true),
+        Effect.orElseSucceed(() => false),
+      ),
+    );
   }
   return true;
 }
