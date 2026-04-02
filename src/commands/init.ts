@@ -22,7 +22,12 @@ import {
   selectTemplateCandidate,
 } from "../ui/prompts";
 import type { TemplateCandidate } from "../ui/prompts";
-import { DEFAULT_TEMPLATE_REPO, detectGitHubOwner, detectGitHubRepo } from "../utils/git-remote";
+import {
+  DEFAULT_TEMPLATE_REPO,
+  DEFAULT_TEMPLATE_REPOS,
+  detectGitHubOwner,
+  detectGitHubRepo,
+} from "../utils/git-remote";
 import {
   checkRepoExists,
   createDevenvScaffoldPR,
@@ -405,7 +410,7 @@ async function resolveEffectiveStrategy(
  *
  * 候補の優先順位:
  *   1. --from で明示指定 → そのまま使用
- *   2. 自動検出（認証ユーザーの .github + git remote オーナーの .github）
+ *   2. 自動検出（認証ユーザー・git remote オーナー × .ziku / .github）
  *      → 存在する候補をインタラクティブに選択
  *   3. 候補なし → 手動入力
  */
@@ -419,14 +424,29 @@ async function resolveTemplateSourceWithCheck(
   // --from で明示指定
   if (from) {
     const resolved = parseFromArg(from);
-    const exists = await checkRepoExists(resolved.sourceOwner, resolved.sourceRepo);
-    if (!exists) {
-      throw new ZikuError(
-        `Template repository "${resolved.sourceOwner}/${resolved.sourceRepo}" not found`,
-        "Check the --from value or create the repository first",
-      );
+    // owner/repo 形式（明示的なリポジトリ指定）の場合はそのまま存在チェック
+    if (from.includes("/")) {
+      const exists = await checkRepoExists(resolved.sourceOwner, resolved.sourceRepo);
+      if (!exists) {
+        throw new ZikuError(
+          `Template repository "${resolved.sourceOwner}/${resolved.sourceRepo}" not found`,
+          "Check the --from value or create the repository first",
+        );
+      }
+      return resolved;
     }
-    return resolved;
+    // owner のみ指定 → デフォルトリポジトリ候補を順に探索
+    const existsResults = await Promise.all(
+      DEFAULT_TEMPLATE_REPOS.map((repo) => checkRepoExists(resolved.sourceOwner, repo)),
+    );
+    const foundIndex = existsResults.indexOf(true);
+    if (foundIndex !== -1) {
+      return { sourceOwner: resolved.sourceOwner, sourceRepo: DEFAULT_TEMPLATE_REPOS[foundIndex] };
+    }
+    throw new ZikuError(
+      `No template repository found for "${resolved.sourceOwner}" (checked: ${DEFAULT_TEMPLATE_REPOS.join(", ")})`,
+      "Check the --from value or create the repository first",
+    );
   }
 
   // 候補を収集: 認証ユーザー + git remote オーナー
@@ -436,29 +456,22 @@ async function resolveTemplateSourceWithCheck(
   const candidateEntries: TemplateCandidate[] = [];
   const seen = new Set<string>();
 
-  // 候補1: 認証ユーザーの .github
-  if (authenticatedUser) {
-    const key = `${authenticatedUser}/${DEFAULT_TEMPLATE_REPO}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      candidateEntries.push({
-        owner: authenticatedUser,
-        repo: DEFAULT_TEMPLATE_REPO,
-        label: "Your account",
-      });
-    }
-  }
+  // 候補: 認証ユーザー・git remote オーナー × デフォルトリポジトリ名
+  const owners: Array<{ name: string; label: string }> = [];
+  if (authenticatedUser) owners.push({ name: authenticatedUser, label: "Your account" });
+  if (detectedOwner) owners.push({ name: detectedOwner, label: "Git remote owner" });
 
-  // 候補2: git remote オーナーの .github
-  if (detectedOwner) {
-    const key = `${detectedOwner}/${DEFAULT_TEMPLATE_REPO}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      candidateEntries.push({
-        owner: detectedOwner,
-        repo: DEFAULT_TEMPLATE_REPO,
-        label: "Git remote owner",
-      });
+  for (const owner of owners) {
+    for (const repo of DEFAULT_TEMPLATE_REPOS) {
+      const key = `${owner.name}/${repo}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        candidateEntries.push({
+          owner: owner.name,
+          repo,
+          label: owner.label,
+        });
+      }
     }
   }
 
@@ -468,14 +481,22 @@ async function resolveTemplateSourceWithCheck(
   );
   const existingCandidates = candidateEntries.filter((_, i) => existsResults[i]);
 
+  // 同一オーナーで複数リポジトリが見つかった場合、優先順（.ziku > .github）で絞り込む
+  const deduplicatedCandidates = deduplicateByOwner(existingCandidates);
+
   if (nonInteractive) {
     // 候補が1つだけ → そのまま使用
-    if (existingCandidates.length === 1) {
-      return { sourceOwner: existingCandidates[0].owner, sourceRepo: existingCandidates[0].repo };
+    if (deduplicatedCandidates.length === 1) {
+      return {
+        sourceOwner: deduplicatedCandidates[0].owner,
+        sourceRepo: deduplicatedCandidates[0].repo,
+      };
     }
-    // 候補が2つ以上 → 曖昧なのでエラー（候補を表示）
-    if (existingCandidates.length > 1) {
-      const candidateList = existingCandidates.map((c) => `${c.owner}/${c.repo}`).join(", ");
+    // 候補が2つ以上（異なるオーナー）→ 曖昧なのでエラー
+    if (deduplicatedCandidates.length > 1) {
+      const candidateList = deduplicatedCandidates
+        .map((c) => `${c.owner}/${c.repo}`)
+        .join(", ");
       throw new ZikuError(
         `Multiple template candidates found: ${candidateList}`,
         "Specify --from <owner> or --from <owner/repo> to disambiguate",
@@ -724,7 +745,22 @@ function parseFromArg(from: string): { sourceOwner: string; sourceRepo: string }
 }
 
 /**
+ * 同一オーナーの候補を重複排除する。
+ * candidateEntries は優先順（.ziku → .github）で並んでいるため、先に見つかったものを優先する。
+ */
+function deduplicateByOwner(candidates: TemplateCandidate[]): TemplateCandidate[] {
+  const seen = new Set<string>();
+  return candidates.filter((c) => {
+    const key = c.owner.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
  * テンプレートソースを解決する（純粋な解決ロジック、存在チェックなし）。
+ * 存在チェックなしのため、デフォルトリポジトリ候補の先頭（.ziku）を使用する。
  */
 export function resolveTemplateSource(from: string | undefined): {
   sourceOwner: string;

@@ -17,7 +17,8 @@ vi.mock("node:fs/promises", async () => {
 vi.mock("../../utils/git-remote", () => ({
   detectGitHubOwner: vi.fn(() => "test-org"),
   detectGitHubRepo: vi.fn(() => null),
-  DEFAULT_TEMPLATE_REPO: ".github",
+  DEFAULT_TEMPLATE_REPOS: [".ziku", ".github"],
+  DEFAULT_TEMPLATE_REPO: ".ziku",
 }));
 
 vi.mock("../../utils/template", () => ({
@@ -603,7 +604,7 @@ describe("initCommand", () => {
       );
     });
 
-    it("--from でオーナー名のみ指定すると .github を補完", async () => {
+    it("--from でオーナー名のみ指定すると .ziku / .github を探索し最初に見つかったものを使う", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -626,9 +627,10 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
+      // checkRepoExists がデフォルトで true を返すため、先頭の .ziku が使われる
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),
-        "gh:my-org/.github",
+        "gh:my-org/.ziku",
       );
     });
 

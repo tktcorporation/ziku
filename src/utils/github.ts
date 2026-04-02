@@ -169,7 +169,7 @@ export function getGhCliToken(): string | undefined {
 /**
  * 認証済み GitHub ユーザーのログイン名を取得する。
  *
- * 背景: テンプレートソースの自動検出で、自分のアカウントの `.github` リポジトリを
+ * 背景: テンプレートソースの自動検出で、自分のアカウントの `.ziku` / `.github` リポジトリを
  * 候補に含めるために使用する。トークンがない場合や API エラー時は undefined を返す。
  */
 export async function getAuthenticatedUserLogin(): Promise<string | undefined> {

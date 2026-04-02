@@ -31,7 +31,8 @@ vi.mock("node:fs/promises", async () => {
 vi.mock("../../utils/git-remote", () => ({
   detectGitHubOwner: vi.fn(() => "detected-org"),
   detectGitHubRepo: vi.fn(() => null),
-  DEFAULT_TEMPLATE_REPO: ".github",
+  DEFAULT_TEMPLATE_REPOS: [".ziku", ".github"],
+  DEFAULT_TEMPLATE_REPO: ".ziku",
 }));
 
 vi.mock("../../utils/template", () => ({
@@ -216,11 +217,12 @@ describe("init: セットアップ UX", () => {
     });
 
     it("リポジトリ作成を選択するとリポジトリを作成して続行する", async () => {
-      mockCheckRepoExists.mockResolvedValueOnce(false);
+      // 2候補（.ziku, .github）とも存在しない
+      mockCheckRepoExists.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
       mockSelectMissingTemplateAction.mockResolvedValueOnce("create-repo");
       mockGetGitHubToken.mockReturnValue("ghp_test_token");
       mockScaffoldTemplateRepo.mockResolvedValueOnce({
-        url: "https://github.com/detected-org/.github",
+        url: "https://github.com/detected-org/.ziku",
       });
       mockSelectModules.mockResolvedValueOnce([
         { name: "Root", description: "Root", include: [".mcp.json"] },
@@ -243,15 +245,15 @@ describe("init: セットアップ UX", () => {
       expect(mockScaffoldTemplateRepo).toHaveBeenCalledWith(
         "ghp_test_token",
         "detected-org",
-        ".github",
+        ".ziku",
       );
       expect(mockLog.success).toHaveBeenCalledWith(
-        expect.stringContaining("https://github.com/detected-org/.github"),
+        expect.stringContaining("https://github.com/detected-org/.ziku"),
       );
     });
 
     it("リポジトリ作成時に GitHub トークンがなければエラー", async () => {
-      mockCheckRepoExists.mockResolvedValueOnce(false);
+      mockCheckRepoExists.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
       mockSelectMissingTemplateAction.mockResolvedValueOnce("create-repo");
       mockGetGitHubToken.mockReturnValue(undefined);
 
@@ -259,7 +261,7 @@ describe("init: セットアップ UX", () => {
     });
 
     it("カスタムソースを指定すると存在チェック後に続行する", async () => {
-      mockCheckRepoExists.mockResolvedValueOnce(false);
+      mockCheckRepoExists.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
       mockSelectMissingTemplateAction.mockResolvedValueOnce("specify-source");
       mockInputTemplateSource.mockResolvedValueOnce("custom-org/templates");
       mockCheckRepoExists.mockResolvedValueOnce(true);
@@ -290,8 +292,8 @@ describe("init: セットアップ UX", () => {
     });
 
     it("カスタムソースも存在しない場合はさらにリカバリを提示する", async () => {
-      // detected-org/.github が存在しない
-      mockCheckRepoExists.mockResolvedValueOnce(false);
+      // detected-org/.ziku, detected-org/.github が存在しない
+      mockCheckRepoExists.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
       mockSelectMissingTemplateAction.mockResolvedValueOnce("specify-source");
       // ユーザーが入力したリポジトリも存在しない
       mockInputTemplateSource.mockResolvedValueOnce("nonexistent-org/repo");
@@ -461,20 +463,20 @@ describe("init: セットアップ UX", () => {
 
   describe("E2E: テンプレートなし → 作成 → .ziku スキャフォールド PR → マージ待ち", () => {
     it("全フローが正常に完了する（PR 作成後にマージ待ちエラー）", async () => {
-      // 1. テンプレートリポが存在しない
-      mockCheckRepoExists.mockResolvedValueOnce(false);
+      // 1. テンプレートリポが存在しない（.ziku, .github 両方）
+      mockCheckRepoExists.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
       // 2. ユーザーがリポジトリ作成を選択
       mockSelectMissingTemplateAction.mockResolvedValueOnce("create-repo");
       mockGetGitHubToken.mockReturnValue("ghp_test_token");
       mockScaffoldTemplateRepo.mockResolvedValueOnce({
-        url: "https://github.com/detected-org/.github",
+        url: "https://github.com/detected-org/.ziku",
       });
-      // 3. テンプレートに .ziku がない
+      // 3. テンプレートに .ziku/modules.jsonc がない
       mockModulesFileExists.mockReturnValue(false);
       // 4. ユーザーが PR 作成を承認
       mockConfirmScaffoldDevenvPR.mockResolvedValueOnce(true);
       mockCreateDevenvScaffoldPR.mockResolvedValueOnce({
-        url: "https://github.com/detected-org/.github/pull/1",
+        url: "https://github.com/detected-org/.ziku/pull/1",
         number: 1,
         branch: "ziku-scaffold",
       });
@@ -487,17 +489,17 @@ describe("init: セットアップ UX", () => {
       expect(error).toBeInstanceOf(ZikuError);
       expect((error as ZikuError).message).toContain("Merge the PR first");
 
-      // リポジトリ作成
+      // リポジトリ作成（優先候補の .ziku）
       expect(mockScaffoldTemplateRepo).toHaveBeenCalledWith(
         "ghp_test_token",
         "detected-org",
-        ".github",
+        ".ziku",
       );
       // .ziku スキャフォールド PR
       expect(mockCreateDevenvScaffoldPR).toHaveBeenCalledWith(
         "ghp_test_token",
         "detected-org",
-        ".github",
+        ".ziku",
         expect.stringContaining("modules"),
       );
     });
@@ -507,7 +509,8 @@ describe("init: セットアップ UX", () => {
 
   describe("E2E: カスタムソース → .ziku なし → PR → マージ待ちエラー", () => {
     it("全フローが正常に完了する", async () => {
-      mockCheckRepoExists.mockResolvedValueOnce(false);
+      // 2候補とも存在しない
+      mockCheckRepoExists.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
       mockSelectMissingTemplateAction.mockResolvedValueOnce("specify-source");
       mockInputTemplateSource.mockResolvedValueOnce("my-org/my-templates");
       mockCheckRepoExists.mockResolvedValueOnce(true);

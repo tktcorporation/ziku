@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_TEMPLATE_REPO, parseGitHubOwner, parseGitHubRepo } from "../git-remote";
+import {
+  DEFAULT_TEMPLATE_REPO,
+  DEFAULT_TEMPLATE_REPOS,
+  parseGitHubOwner,
+  parseGitHubRepo,
+} from "../git-remote";
 
 describe("parseGitHubOwner", () => {
   it("HTTPS URL (.git 付き) からオーナーを抽出", () => {
@@ -81,7 +86,8 @@ describe("parseGitHubRepo", () => {
 });
 
 describe("default constants", () => {
-  it("デフォルトリポジトリが定義されている", () => {
-    expect(DEFAULT_TEMPLATE_REPO).toBe(".github");
+  it("デフォルトリポジトリ候補が .ziku と .github を含む", () => {
+    expect(DEFAULT_TEMPLATE_REPOS).toEqual([".ziku", ".github"]);
+    expect(DEFAULT_TEMPLATE_REPO).toBe(".ziku");
   });
 });

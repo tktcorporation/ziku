@@ -31,7 +31,8 @@ vi.mock("node:fs/promises", async () => {
 vi.mock("../../utils/git-remote", () => ({
   detectGitHubOwner: vi.fn(() => "test-org"),
   detectGitHubRepo: vi.fn(() => null),
-  DEFAULT_TEMPLATE_REPO: ".github",
+  DEFAULT_TEMPLATE_REPOS: [".ziku", ".github"],
+  DEFAULT_TEMPLATE_REPO: ".ziku",
 }));
 
 vi.mock("../../utils/template", () => ({
