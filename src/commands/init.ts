@@ -19,11 +19,14 @@ import {
   selectMissingTemplateAction,
   selectModules,
   selectOverwriteStrategy,
+  selectTemplateCandidate,
 } from "../ui/prompts";
+import type { TemplateCandidate } from "../ui/prompts";
 import { DEFAULT_TEMPLATE_REPO, detectGitHubOwner, detectGitHubRepo } from "../utils/git-remote";
 import {
   checkRepoExists,
   createDevenvScaffoldPR,
+  getAuthenticatedUserLogin,
   getGitHubToken,
   resolveLatestCommitSha,
   scaffoldTemplateRepo,
@@ -399,6 +402,12 @@ async function resolveEffectiveStrategy(
 
 /**
  * テンプレートソースを解決する（存在チェック付き）。
+ *
+ * 候補の優先順位:
+ *   1. --from で明示指定 → そのまま使用
+ *   2. 自動検出（認証ユーザーの .github + git remote オーナーの .github）
+ *      → 存在する候補をインタラクティブに選択
+ *   3. 候補なし → 手動入力
  */
 async function resolveTemplateSourceWithCheck(
   from: string | undefined,
@@ -420,28 +429,73 @@ async function resolveTemplateSourceWithCheck(
     return resolved;
   }
 
-  // git remote から候補を検出
+  // 候補を収集: 認証ユーザー + git remote オーナー
   const detectedOwner = detectGitHubOwner();
+  const authenticatedUser = await getAuthenticatedUserLogin();
+
+  const candidateEntries: TemplateCandidate[] = [];
+  const seen = new Set<string>();
+
+  // 候補1: 認証ユーザーの .github
+  if (authenticatedUser) {
+    const key = `${authenticatedUser}/${DEFAULT_TEMPLATE_REPO}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      candidateEntries.push({
+        owner: authenticatedUser,
+        repo: DEFAULT_TEMPLATE_REPO,
+        label: "Your account",
+      });
+    }
+  }
+
+  // 候補2: git remote オーナーの .github
   if (detectedOwner) {
-    const candidate = { sourceOwner: detectedOwner, sourceRepo: DEFAULT_TEMPLATE_REPO };
-    const exists = await checkRepoExists(candidate.sourceOwner, candidate.sourceRepo);
-    if (exists) {
-      return candidate;
+    const key = `${detectedOwner}/${DEFAULT_TEMPLATE_REPO}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      candidateEntries.push({
+        owner: detectedOwner,
+        repo: DEFAULT_TEMPLATE_REPO,
+        label: "Git remote owner",
+      });
+    }
+  }
+
+  // 存在チェックを並列で実行
+  const existsResults = await Promise.all(
+    candidateEntries.map((c) => checkRepoExists(c.owner, c.repo)),
+  );
+  const existingCandidates = candidateEntries.filter((_, i) => existsResults[i]);
+
+  // 候補が見つかった場合
+  if (existingCandidates.length > 0) {
+    if (nonInteractive) {
+      // 非インタラクティブ: 最初の候補を使用
+      return { sourceOwner: existingCandidates[0].owner, sourceRepo: existingCandidates[0].repo };
     }
 
-    // 非インタラクティブモードではリポジトリが見つからなければエラー
+    // インタラクティブ: ユーザーに選択させる
+    const selected = await selectTemplateCandidate(existingCandidates);
+    if (selected === "specify-other") {
+      return promptTemplateSource();
+    }
+    return { sourceOwner: selected.owner, sourceRepo: selected.repo };
+  }
+
+  // 候補はあったが全て存在しない場合
+  if (candidateEntries.length > 0) {
+    const firstCandidate = candidateEntries[0];
     if (nonInteractive) {
       throw new ZikuError(
-        `Template repository "${candidate.sourceOwner}/${candidate.sourceRepo}" not found`,
+        `Template repository "${firstCandidate.owner}/${firstCandidate.repo}" not found`,
         `Create it first, or specify --from owner/repo`,
       );
     }
-
-    // インタラクティブ: リポジトリが見つからない → アクション選択
-    return handleMissingTemplate(candidate.sourceOwner, candidate.sourceRepo);
+    return handleMissingTemplate(firstCandidate.owner, firstCandidate.repo);
   }
 
-  // git remote がない場合
+  // 候補が一つもない場合（git remote なし + 認証なし）
   if (nonInteractive) {
     throw new ZikuError(
       "Cannot detect template source: no git remote origin found",
@@ -449,7 +503,6 @@ async function resolveTemplateSourceWithCheck(
     );
   }
 
-  // インタラクティブ: ユーザーに入力を促す
   log.warn("Could not detect template source from git remote.");
   return promptTemplateSource();
 }

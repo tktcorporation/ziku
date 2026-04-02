@@ -66,6 +66,55 @@ export async function selectOverwriteStrategy(options?: {
 
 // ─── init (template resolution) ──────────────────────────────
 
+/**
+ * テンプレートソース候補
+ */
+export interface TemplateCandidate {
+  owner: string;
+  repo: string;
+  label: string;
+}
+
+/**
+ * 検出されたテンプレート候補からユーザーに選択させる。
+ *
+ * 候補が1つの場合は確認、複数の場合は選択肢を表示する。
+ * いずれの場合も「別のリポジトリを指定する」オプションを含む。
+ */
+export async function selectTemplateCandidate(
+  candidates: TemplateCandidate[],
+): Promise<{ owner: string; repo: string } | "specify-other"> {
+  const options = [
+    ...candidates.map((c) => ({
+      value: `${c.owner}/${c.repo}` as string,
+      label: `${c.owner}/${c.repo}`,
+      hint: c.label,
+    })),
+    {
+      value: "__other__" as string,
+      label: "Specify a different repository",
+      hint: "Enter owner/repo manually",
+    },
+  ];
+
+  const selected = await p.select({
+    message: "Which template repository to use?",
+    options,
+    initialValue: options[0].value,
+  });
+  handleCancel(selected);
+
+  if (selected === "__other__") {
+    return "specify-other";
+  }
+
+  const slashIndex = (selected as string).indexOf("/");
+  return {
+    owner: (selected as string).slice(0, slashIndex),
+    repo: (selected as string).slice(slashIndex + 1),
+  };
+}
+
 /** テンプレートリポジトリが見つからない場合のアクション */
 export type MissingTemplateAction = "create-repo" | "specify-source";
 

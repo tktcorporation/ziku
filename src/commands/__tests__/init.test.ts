@@ -38,6 +38,7 @@ vi.mock("../../utils/github", () => ({
   resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
   checkRepoExists: vi.fn(() => Promise.resolve(true)),
   getGitHubToken: vi.fn(() => undefined),
+  getAuthenticatedUserLogin: vi.fn(() => Promise.resolve(undefined)),
   scaffoldTemplateRepo: vi.fn(() => Promise.resolve({ url: "https://github.com/test/repo" })),
   createDevenvScaffoldPR: vi.fn(() =>
     Promise.resolve({
@@ -52,6 +53,9 @@ vi.mock("../../ui/prompts", () => ({
   selectModules: vi.fn(),
   selectOverwriteStrategy: vi.fn(),
   selectMissingTemplateAction: vi.fn(),
+  selectTemplateCandidate: vi.fn(() =>
+    Promise.resolve({ owner: "test-org", repo: ".github" }),
+  ),
   inputTemplateSource: vi.fn(),
   confirmScaffoldDevenvPR: vi.fn(() => Promise.resolve(true)),
 }));
@@ -116,7 +120,8 @@ const { initCommand, isCurrentRepoTemplate, generateFlatPatternsJsonc } = await 
 const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy, copyFile } =
   await import("../../utils/template");
 const { detectGitHubOwner, detectGitHubRepo } = await import("../../utils/git-remote");
-const { selectModules, selectOverwriteStrategy } = await import("../../ui/prompts");
+const { selectModules, selectOverwriteStrategy, selectTemplateCandidate } =
+  await import("../../ui/prompts");
 const { log } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
 const { modulesFileExists } = await import("../../modules/index");
@@ -606,6 +611,10 @@ describe("initCommand", () => {
       });
 
       mockDetectGitHubOwner.mockReturnValueOnce("detected-org");
+      vi.mocked(selectTemplateCandidate).mockResolvedValueOnce({
+        owner: "detected-org",
+        repo: ".github",
+      });
 
       mockSelectModules.mockResolvedValueOnce([
         { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },

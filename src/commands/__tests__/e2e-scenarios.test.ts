@@ -52,6 +52,7 @@ vi.mock("../../utils/github", () => ({
   resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123")),
   checkRepoExists: vi.fn(() => Promise.resolve(true)),
   getGitHubToken: vi.fn(() => "ghp_test"),
+  getAuthenticatedUserLogin: vi.fn(() => Promise.resolve(undefined)),
   scaffoldTemplateRepo: vi.fn(() => Promise.resolve({ url: "https://github.com/test/repo" })),
   createDevenvScaffoldPR: vi.fn(() =>
     Promise.resolve({ url: "https://github.com/test/repo/pull/1", number: 1, branch: "ziku" }),
@@ -65,6 +66,9 @@ vi.mock("../../ui/prompts", () => ({
   selectModules: vi.fn(),
   selectOverwriteStrategy: vi.fn(() => Promise.resolve("overwrite")),
   selectMissingTemplateAction: vi.fn(),
+  selectTemplateCandidate: vi.fn(() =>
+    Promise.resolve({ owner: "test-org", repo: ".github" }),
+  ),
   inputTemplateSource: vi.fn(),
   confirmScaffoldDevenvPR: vi.fn(() => Promise.resolve(true)),
   selectDeletedFiles: vi.fn(() => Promise.resolve([])),
