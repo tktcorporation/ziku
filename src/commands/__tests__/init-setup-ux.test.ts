@@ -52,6 +52,7 @@ vi.mock("../../utils/github", () => ({
   resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
   checkRepoExists: vi.fn(() => Promise.resolve(true)),
   getGitHubToken: vi.fn(() => undefined),
+  getAuthenticatedUserLogin: vi.fn(() => Promise.resolve(undefined)),
   scaffoldTemplateRepo: vi.fn(() =>
     Promise.resolve({ url: "https://github.com/detected-org/.github" }),
   ),
@@ -68,6 +69,7 @@ vi.mock("../../ui/prompts", () => ({
   selectModules: vi.fn(),
   selectOverwriteStrategy: vi.fn(),
   selectMissingTemplateAction: vi.fn(),
+  selectTemplateCandidate: vi.fn(),
   selectTemplateModules: vi.fn(() =>
     Promise.resolve([
       {
@@ -124,13 +126,19 @@ const {
   selectModules,
   selectOverwriteStrategy,
   selectMissingTemplateAction,
+  selectTemplateCandidate,
   inputTemplateSource,
   confirmScaffoldDevenvPR,
 } = await import("../../ui/prompts");
 const { log } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
-const { checkRepoExists, getGitHubToken, scaffoldTemplateRepo, createDevenvScaffoldPR } =
-  await import("../../utils/github");
+const {
+  checkRepoExists,
+  getAuthenticatedUserLogin,
+  getGitHubToken,
+  scaffoldTemplateRepo,
+  createDevenvScaffoldPR,
+} = await import("../../utils/github");
 const { modulesFileExists } = await import("../../modules/index");
 
 const mockDownloadTemplateToTemp = vi.mocked(downloadTemplateToTemp);
@@ -141,11 +149,13 @@ const mockDetectGitHubOwner = vi.mocked(detectGitHubOwner);
 const mockSelectModules = vi.mocked(selectModules);
 const mockSelectOverwriteStrategy = vi.mocked(selectOverwriteStrategy);
 const mockSelectMissingTemplateAction = vi.mocked(selectMissingTemplateAction);
+const mockSelectTemplateCandidate = vi.mocked(selectTemplateCandidate);
 const mockInputTemplateSource = vi.mocked(inputTemplateSource);
 const mockConfirmScaffoldDevenvPR = vi.mocked(confirmScaffoldDevenvPR);
 const mockLog = vi.mocked(log);
 const mockHashFiles = vi.mocked(hashFiles);
 const mockCheckRepoExists = vi.mocked(checkRepoExists);
+const mockGetAuthenticatedUserLogin = vi.mocked(getAuthenticatedUserLogin);
 const mockGetGitHubToken = vi.mocked(getGitHubToken);
 const mockScaffoldTemplateRepo = vi.mocked(scaffoldTemplateRepo);
 const mockCreateDevenvScaffoldPR = vi.mocked(createDevenvScaffoldPR);
@@ -184,8 +194,10 @@ describe("init: セットアップ UX", () => {
     });
     mockHashFiles.mockResolvedValue({});
     mockDetectGitHubOwner.mockReturnValue("detected-org");
+    mockGetAuthenticatedUserLogin.mockResolvedValue(undefined);
     mockCheckRepoExists.mockResolvedValue(true);
     mockGetGitHubToken.mockReturnValue(undefined);
+    mockSelectTemplateCandidate.mockResolvedValue({ owner: "detected-org", repo: ".github" });
     mockModulesFileExists.mockReturnValue(false);
     mockConfirmScaffoldDevenvPR.mockResolvedValue(true);
   });
@@ -197,8 +209,8 @@ describe("init: セットアップ UX", () => {
   // ─── テンプレートリポジトリが見つからない場合 ───
 
   describe("テンプレートリポジトリが見つからない場合", () => {
-    it("非インタラクティブモード（--yes）ではエラーを投げる", async () => {
-      mockCheckRepoExists.mockResolvedValueOnce(false);
+    it("非インタラクティブモード（--yes）で候補が存在しない場合はエラー", async () => {
+      mockCheckRepoExists.mockResolvedValue(false);
 
       await expect(runInit({ yes: true })).rejects.toThrow("not found");
     });

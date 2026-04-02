@@ -167,6 +167,28 @@ export function getGhCliToken(): string | undefined {
 }
 
 /**
+ * 認証済み GitHub ユーザーのログイン名を取得する。
+ *
+ * 背景: テンプレートソースの自動検出で、自分のアカウントの `.github` リポジトリを
+ * 候補に含めるために使用する。トークンがない場合や API エラー時は undefined を返す。
+ */
+export async function getAuthenticatedUserLogin(): Promise<string | undefined> {
+  const token = getGitHubToken();
+  if (!token) return undefined;
+
+  return Effect.runPromise(
+    Effect.tryPromise(async () => {
+      const res = await fetch("https://api.github.com/user", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return undefined;
+      const data = (await res.json()) as { login?: string };
+      return data.login;
+    }).pipe(Effect.orElseSucceed(() => undefined)),
+  );
+}
+
+/**
  * GitHub リポジトリの存在を確認する。
  *
  * 背景: ziku init でテンプレートリポジトリが存在しない場合に、
