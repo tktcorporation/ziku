@@ -66,9 +66,7 @@ vi.mock("../../ui/prompts", () => ({
   selectModules: vi.fn(),
   selectOverwriteStrategy: vi.fn(() => Promise.resolve("overwrite")),
   selectMissingTemplateAction: vi.fn(),
-  selectTemplateCandidate: vi.fn(() =>
-    Promise.resolve({ owner: "test-org", repo: ".github" }),
-  ),
+  selectTemplateCandidate: vi.fn(() => Promise.resolve({ owner: "test-org", repo: ".github" })),
   inputTemplateSource: vi.fn(),
   confirmScaffoldDevenvPR: vi.fn(() => Promise.resolve(true)),
   selectDeletedFiles: vi.fn(() => Promise.resolve([])),

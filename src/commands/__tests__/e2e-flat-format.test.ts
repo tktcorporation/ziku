@@ -64,9 +64,7 @@ vi.mock("../../ui/prompts", () => ({
   selectModules: vi.fn(),
   selectOverwriteStrategy: vi.fn(),
   selectMissingTemplateAction: vi.fn(),
-  selectTemplateCandidate: vi.fn(() =>
-    Promise.resolve({ owner: "test-org", repo: ".github" }),
-  ),
+  selectTemplateCandidate: vi.fn(() => Promise.resolve({ owner: "test-org", repo: ".github" })),
   selectTemplateModules: vi.fn(() =>
     Promise.resolve([
       {
