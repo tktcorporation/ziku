@@ -257,7 +257,7 @@ describe("E2E: flat modules.jsonc format", () => {
       vol.fromJSON({ "/test": null });
 
       await (initCommand.run as any)({
-        args: { dir: "/test", force: false, yes: true },
+        args: { dir: "/test", force: false, yes: true, from: "test-org/.github" },
         rawArgs: [],
         cmd: initCommand,
       });
@@ -287,7 +287,7 @@ describe("E2E: flat modules.jsonc format", () => {
       vol.fromJSON({ "/test": null });
 
       await (initCommand.run as any)({
-        args: { dir: "/test", force: false, yes: true },
+        args: { dir: "/test", force: false, yes: true, from: "test-org/.github" },
         rawArgs: [],
         cmd: initCommand,
       });
@@ -307,7 +307,7 @@ describe("E2E: flat modules.jsonc format", () => {
       vol.fromJSON({ "/test": null });
 
       await (initCommand.run as any)({
-        args: { dir: "/test", force: false, yes: true },
+        args: { dir: "/test", force: false, yes: true, from: "test-org/.github" },
         rawArgs: [],
         cmd: initCommand,
       });
@@ -326,7 +326,7 @@ describe("E2E: flat modules.jsonc format", () => {
       vol.fromJSON({ "/test": null });
 
       await (initCommand.run as any)({
-        args: { dir: "/test", force: false, yes: true },
+        args: { dir: "/test", force: false, yes: true, from: "test-org/.github" },
         rawArgs: [],
         cmd: initCommand,
       });
@@ -349,7 +349,7 @@ describe("E2E: flat modules.jsonc format", () => {
       vol.fromJSON({ "/test": null });
 
       await (initCommand.run as any)({
-        args: { dir: "/test", force: false, yes: true },
+        args: { dir: "/test", force: false, yes: true, from: "test-org/.github" },
         rawArgs: [],
         cmd: initCommand,
       });
@@ -536,7 +536,7 @@ describe("E2E: flat modules.jsonc format", () => {
       vol.fromJSON({ "/test": null });
 
       await (initCommand.run as any)({
-        args: { dir: "/test", force: false, yes: true },
+        args: { dir: "/test", force: false, yes: true, from: "test-org/.github" },
         rawArgs: [],
         cmd: initCommand,
       });

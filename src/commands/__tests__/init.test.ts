@@ -212,7 +212,7 @@ describe("initCommand", () => {
       mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
 
       await (initCommand.run as any)({
-        args: { dir: "/test", force: false, yes: true },
+        args: { dir: "/test", force: false, yes: true, from: "test-org/.github" },
         rawArgs: [],
         cmd: initCommand,
       });
@@ -462,6 +462,7 @@ describe("initCommand", () => {
           dir: "/test",
           force: false,
           yes: true,
+          from: "test-org/.github",
           "overwrite-strategy": "skip",
         },
         rawArgs: [],
@@ -516,6 +517,7 @@ describe("initCommand", () => {
             dir: "/test",
             force: false,
             yes: true,
+            from: "test-org/.github",
             "overwrite-strategy": "invalid",
           },
           rawArgs: [],
@@ -685,7 +687,7 @@ describe("initCommand", () => {
       mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
 
       await (initCommand.run as any)({
-        args: { dir: "/test", force: false, yes: true },
+        args: { dir: "/test", force: false, yes: true, from: "test-org/.github" },
         rawArgs: [],
         cmd: initCommand,
       });
@@ -717,7 +719,7 @@ describe("initCommand", () => {
       mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
 
       await (initCommand.run as any)({
-        args: { dir: "/test", force: false, yes: true },
+        args: { dir: "/test", force: false, yes: true, from: "test-org/.github" },
         rawArgs: [],
         cmd: initCommand,
       });

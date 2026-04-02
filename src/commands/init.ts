@@ -468,13 +468,16 @@ async function resolveTemplateSourceWithCheck(
   );
   const existingCandidates = candidateEntries.filter((_, i) => existsResults[i]);
 
+  // 非インタラクティブモードでは --from 必須
+  if (nonInteractive) {
+    throw new ZikuError(
+      "Cannot detect template source in non-interactive mode",
+      "Specify --from owner/repo",
+    );
+  }
+
   // 候補が見つかった場合
   if (existingCandidates.length > 0) {
-    if (nonInteractive) {
-      // 非インタラクティブ: 最初の候補を使用
-      return { sourceOwner: existingCandidates[0].owner, sourceRepo: existingCandidates[0].repo };
-    }
-
     // インタラクティブ: ユーザーに選択させる
     const selected = await selectTemplateCandidate(existingCandidates);
     if (selected === "specify-other") {
@@ -486,21 +489,7 @@ async function resolveTemplateSourceWithCheck(
   // 候補はあったが全て存在しない場合
   if (candidateEntries.length > 0) {
     const firstCandidate = candidateEntries[0];
-    if (nonInteractive) {
-      throw new ZikuError(
-        `Template repository "${firstCandidate.owner}/${firstCandidate.repo}" not found`,
-        `Create it first, or specify --from owner/repo`,
-      );
-    }
     return handleMissingTemplate(firstCandidate.owner, firstCandidate.repo);
-  }
-
-  // 候補が一つもない場合（git remote なし + 認証なし）
-  if (nonInteractive) {
-    throw new ZikuError(
-      "Cannot detect template source: no git remote origin found",
-      "Specify --from owner/repo",
-    );
   }
 
   log.warn("Could not detect template source from git remote.");
