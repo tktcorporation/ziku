@@ -1,5 +1,15 @@
 # @tktco/ziku
 
+## 0.25.0
+
+### Minor Changes
+
+- [#8](https://github.com/tktcorporation/ziku/pull/8) [`1e10b40`](https://github.com/tktcorporation/ziku/commit/1e10b4044d3df652a4a63fd4269312f0dbbaff22) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Support running `ziku init` inside a template repository to generate `.ziku/modules.jsonc` locally with interactive module preset selection
+
+- [#11](https://github.com/tktcorporation/ziku/pull/11) [`5e831ea`](https://github.com/tktcorporation/ziku/commit/5e831ea73e960f9b13b45582244d2400496788a5) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Effect TS / ts-pattern / 厳格 oxlint ルールの導入。ユーティリティ層の try/catch を Effect パターンに置換し、全 switch 文を ts-pattern の exhaustive match に変更。
+
+- [#10](https://github.com/tktcorporation/ziku/pull/10) [`d611f4a`](https://github.com/tktcorporation/ziku/commit/d611f4afd1511e03b378aba5c533608d6bc9a923) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Refactor modules.jsonc to flat include/exclude format for local repos, keeping grouped format for template repos
+
 ## 0.24.0
 
 ### Minor Changes
