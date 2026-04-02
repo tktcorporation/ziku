@@ -468,17 +468,39 @@ async function resolveTemplateSourceWithCheck(
   );
   const existingCandidates = candidateEntries.filter((_, i) => existsResults[i]);
 
-  // 非インタラクティブモードでは --from 必須
   if (nonInteractive) {
+    // 候補が1つだけ → そのまま使用
+    if (existingCandidates.length === 1) {
+      return { sourceOwner: existingCandidates[0].owner, sourceRepo: existingCandidates[0].repo };
+    }
+    // 候補が2つ以上 → 曖昧なのでエラー（候補を表示）
+    if (existingCandidates.length > 1) {
+      const candidateList = existingCandidates
+        .map((c) => `${c.owner}/${c.repo}`)
+        .join(", ");
+      throw new ZikuError(
+        `Multiple template candidates found: ${candidateList}`,
+        "Specify --from <owner> or --from <owner/repo> to disambiguate",
+      );
+    }
+    // 候補なし
+    if (candidateEntries.length > 0) {
+      const firstCandidate = candidateEntries[0];
+      throw new ZikuError(
+        `Template repository "${firstCandidate.owner}/${firstCandidate.repo}" not found`,
+        "Create it first, or specify --from <owner> or --from <owner/repo>",
+      );
+    }
     throw new ZikuError(
-      "Cannot detect template source in non-interactive mode",
-      "Specify --from owner/repo",
+      "Cannot detect template source: no git remote origin found",
+      "Specify --from <owner> or --from <owner/repo>",
     );
   }
 
+  // ─── インタラクティブモード ───
+
   // 候補が見つかった場合
   if (existingCandidates.length > 0) {
-    // インタラクティブ: ユーザーに選択させる
     const selected = await selectTemplateCandidate(existingCandidates);
     if (selected === "specify-other") {
       return promptTemplateSource();
@@ -671,14 +693,30 @@ async function handleTemplateRepoInit(targetDir: string, _nonInteractive: boolea
 }
 
 /**
- * --from 引数をパースする
+ * --from 引数をパースする。
+ *
+ * - "owner/repo" → { sourceOwner: "owner", sourceRepo: "repo" }
+ * - "owner" (/ なし) → { sourceOwner: "owner", sourceRepo: ".github" }
  */
 function parseFromArg(from: string): { sourceOwner: string; sourceRepo: string } {
   const slashIndex = from.indexOf("/");
-  if (slashIndex === -1 || slashIndex === 0 || slashIndex === from.length - 1) {
+  if (slashIndex === -1) {
+    // オーナー名のみ → デフォルトの .github リポジトリを補完
+    if (!from.trim()) {
+      throw new ZikuError(
+        `Invalid --from format: "${from}"`,
+        "Expected: owner or owner/repo (e.g., my-org or my-org/my-templates)",
+      );
+    }
+    return {
+      sourceOwner: from,
+      sourceRepo: DEFAULT_TEMPLATE_REPO,
+    };
+  }
+  if (slashIndex === 0 || slashIndex === from.length - 1) {
     throw new ZikuError(
       `Invalid --from format: "${from}"`,
-      "Expected: owner/repo (e.g., my-org/my-templates)",
+      "Expected: owner or owner/repo (e.g., my-org or my-org/my-templates)",
     );
   }
   return {

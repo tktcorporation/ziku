@@ -257,7 +257,7 @@ describe("E2E: multi-scenario tests", () => {
       });
 
       await (initCommand.run as any)({
-        args: { dir: "/test", force: false, yes: true, from: "test-org/.github" },
+        args: { dir: "/test", force: false, yes: true },
         rawArgs: [],
         cmd: initCommand,
       });
@@ -416,7 +416,6 @@ describe("E2E: multi-scenario tests", () => {
           dir: "/test",
           force: false,
           yes: true,
-          from: "test-org/.github",
           "overwrite-strategy": "skip",
         },
         rawArgs: [],
@@ -440,7 +439,6 @@ describe("E2E: multi-scenario tests", () => {
             dir: "/test",
             force: false,
             yes: true,
-            from: "test-org/.github",
             "overwrite-strategy": "invalid",
           },
           rawArgs: [],
@@ -621,7 +619,7 @@ describe("E2E: multi-scenario tests", () => {
       mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
 
       await (initCommand.run as any)({
-        args: { dir: "/project", force: false, yes: true, from: "test-org/.github" },
+        args: { dir: "/project", force: false, yes: true },
         rawArgs: [],
         cmd: initCommand,
       });
@@ -693,7 +691,7 @@ describe("E2E: multi-scenario tests", () => {
       vi.mocked(logFileResults).mockReturnValue({ added: 0, updated: 0, skipped: 3 });
 
       await (initCommand.run as any)({
-        args: { dir: "/test", force: false, yes: true, from: "test-org/.github" },
+        args: { dir: "/test", force: false, yes: true },
         rawArgs: [],
         cmd: initCommand,
       });
@@ -715,7 +713,7 @@ describe("E2E: multi-scenario tests", () => {
       });
 
       await (initCommand.run as any)({
-        args: { dir: "/test", force: false, yes: true, from: "test-org/.github" },
+        args: { dir: "/test", force: false, yes: true },
         rawArgs: [],
         cmd: initCommand,
       });

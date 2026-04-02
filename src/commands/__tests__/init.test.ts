@@ -212,7 +212,7 @@ describe("initCommand", () => {
       mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
 
       await (initCommand.run as any)({
-        args: { dir: "/test", force: false, yes: true, from: "test-org/.github" },
+        args: { dir: "/test", force: false, yes: true },
         rawArgs: [],
         cmd: initCommand,
       });
@@ -462,7 +462,6 @@ describe("initCommand", () => {
           dir: "/test",
           force: false,
           yes: true,
-          from: "test-org/.github",
           "overwrite-strategy": "skip",
         },
         rawArgs: [],
@@ -517,7 +516,6 @@ describe("initCommand", () => {
             dir: "/test",
             force: false,
             yes: true,
-            from: "test-org/.github",
             "overwrite-strategy": "invalid",
           },
           rawArgs: [],
@@ -607,6 +605,35 @@ describe("initCommand", () => {
       );
     });
 
+    it("--from でオーナー名のみ指定すると .github を補完", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      mockSelectModules.mockResolvedValueOnce([
+        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
+      ]);
+      mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
+
+      mockFetchTemplates.mockResolvedValue([]);
+
+      await (initCommand.run as any)({
+        args: {
+          dir: "/test",
+          force: false,
+          yes: false,
+          from: "my-org",
+        },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
+        expect.any(String),
+        "gh:my-org/.github",
+      );
+    });
+
     it("--from 未指定時は git remote から owner を検出", async () => {
       vol.fromJSON({
         "/test": null,
@@ -687,7 +714,7 @@ describe("initCommand", () => {
       mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
 
       await (initCommand.run as any)({
-        args: { dir: "/test", force: false, yes: true, from: "test-org/.github" },
+        args: { dir: "/test", force: false, yes: true },
         rawArgs: [],
         cmd: initCommand,
       });
@@ -719,7 +746,7 @@ describe("initCommand", () => {
       mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
 
       await (initCommand.run as any)({
-        args: { dir: "/test", force: false, yes: true, from: "test-org/.github" },
+        args: { dir: "/test", force: false, yes: true },
         rawArgs: [],
         cmd: initCommand,
       });

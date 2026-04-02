@@ -209,10 +209,10 @@ describe("init: セットアップ UX", () => {
   // ─── テンプレートリポジトリが見つからない場合 ───
 
   describe("テンプレートリポジトリが見つからない場合", () => {
-    it("非インタラクティブモード（--yes）ではエラーを投げる", async () => {
-      await expect(runInit({ yes: true })).rejects.toThrow(
-        "Cannot detect template source in non-interactive mode",
-      );
+    it("非インタラクティブモード（--yes）で候補が存在しない場合はエラー", async () => {
+      mockCheckRepoExists.mockResolvedValue(false);
+
+      await expect(runInit({ yes: true })).rejects.toThrow("not found");
     });
 
     it("リポジトリ作成を選択するとリポジトリを作成して続行する", async () => {
@@ -335,9 +335,7 @@ describe("init: セットアップ UX", () => {
     it("非インタラクティブモードではエラーを投げる", async () => {
       mockDetectGitHubOwner.mockReturnValueOnce(null);
 
-      await expect(runInit({ yes: true })).rejects.toThrow(
-        "Cannot detect template source in non-interactive mode",
-      );
+      await expect(runInit({ yes: true })).rejects.toThrow("Cannot detect template source");
     });
 
     it("インタラクティブモードではユーザーにソース入力を促す", async () => {
@@ -412,9 +410,7 @@ describe("init: セットアップ UX", () => {
       mockCheckRepoExists.mockResolvedValueOnce(true);
       mockModulesFileExists.mockReturnValue(false);
 
-      await expect(runInit({ yes: true, from: "detected-org/.github" })).rejects.toThrow(
-        "has no .ziku/modules.jsonc",
-      );
+      await expect(runInit({ yes: true })).rejects.toThrow("has no .ziku/modules.jsonc");
     });
 
     it("PR 作成を承認すると PR を作成してエラーを投げる（マージ後に再実行）", async () => {
