@@ -33,7 +33,7 @@ Your template stays alive, fed by every project that uses it.
 
 ### 1. Set up your template repository
 
-ziku uses a GitHub repository as the template source. By default, it looks for `{your-org}/.github` based on your git remote.
+ziku uses a GitHub repository as the template source. By default, it looks for `{your-org}/.ziku` based on your git remote.
 
 If the repository doesn't exist yet, `npx ziku` will offer to create it for you interactively. You can also create it manually or specify a different source:
 

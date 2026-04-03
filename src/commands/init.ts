@@ -512,9 +512,7 @@ async function resolveTemplateSourceWithCheck(
     }
     // 候補が2つ以上（異なるオーナー）→ 曖昧なのでエラー
     if (deduplicatedCandidates.length > 1) {
-      const candidateList = deduplicatedCandidates
-        .map((c) => `${c.owner}/${c.repo}`)
-        .join(", ");
+      const candidateList = deduplicatedCandidates.map((c) => `${c.owner}/${c.repo}`).join(", ");
       throw new ZikuError(
         `Multiple template candidates found: ${candidateList}`,
         "Specify --from <owner> or --from <owner/repo> to disambiguate",
