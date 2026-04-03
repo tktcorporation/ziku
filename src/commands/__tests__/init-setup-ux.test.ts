@@ -177,7 +177,7 @@ async function runInit(args: Record<string, unknown>) {
 describe("init: セットアップ UX", () => {
   beforeEach(() => {
     vol.reset();
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     vi.useFakeTimers({ shouldAdvanceTime: true });
 
     vol.fromJSON({ "/test": null });
@@ -200,6 +200,7 @@ describe("init: セットアップ UX", () => {
     mockDetectGitHubOwner.mockReturnValue("detected-org");
     mockGetAuthenticatedUserLogin.mockResolvedValue(undefined);
     mockCheckRepoExists.mockResolvedValue(true);
+    mockCheckRepoSetup.mockResolvedValue(true);
     mockGetGitHubToken.mockReturnValue(undefined);
     mockSelectTemplateCandidate.mockResolvedValue({ owner: "detected-org", repo: ".github" });
     mockModulesFileExists.mockReturnValue(false);
@@ -371,6 +372,120 @@ describe("init: セットアップ UX", () => {
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),
         "gh:my-org/templates",
+      );
+    });
+  });
+
+  // ─── セットアップ状態チェック ───
+
+  describe("セットアップ状態（.ziku/modules.jsonc 存在）チェック", () => {
+    it("非インタラクティブで .github のみセットアップ済みなら .github を選択", async () => {
+      // .ziku と .github 両方存在
+      mockCheckRepoExists.mockResolvedValue(true);
+      // .ziku はセットアップ未完了、.github はセットアップ済み
+      mockCheckRepoSetup
+        .mockResolvedValueOnce(false) // detected-org/.ziku
+        .mockResolvedValueOnce(true); // detected-org/.github
+
+      mockModulesFileExists.mockReturnValue(true);
+      const { loadTemplateModulesFile } = await import("../../modules/index");
+      vi.mocked(loadTemplateModulesFile).mockResolvedValue({
+        modules: [{ name: "Root", description: "Root", include: [".mcp.json"] }],
+        rawContent: '{"modules":[]}',
+      });
+
+      await runInit({ yes: true });
+
+      // セットアップ済みの .github が優先される
+      expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
+        expect.any(String),
+        "gh:detected-org/.github",
+      );
+    });
+
+    it("非インタラクティブで .ziku のみセットアップ済みなら .ziku を選択", async () => {
+      mockCheckRepoExists.mockResolvedValue(true);
+      // .ziku はセットアップ済み、.github はセットアップ未完了
+      mockCheckRepoSetup
+        .mockResolvedValueOnce(true) // detected-org/.ziku
+        .mockResolvedValueOnce(false); // detected-org/.github
+
+      mockModulesFileExists.mockReturnValue(true);
+      const { loadTemplateModulesFile } = await import("../../modules/index");
+      vi.mocked(loadTemplateModulesFile).mockResolvedValue({
+        modules: [{ name: "Root", description: "Root", include: [".mcp.json"] }],
+        rawContent: '{"modules":[]}',
+      });
+
+      await runInit({ yes: true });
+
+      expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
+        expect.any(String),
+        "gh:detected-org/.ziku",
+      );
+    });
+
+    it("両方セットアップ済みならリスト順（.ziku）を優先", async () => {
+      mockCheckRepoExists.mockResolvedValue(true);
+      // 両方セットアップ済み
+      mockCheckRepoSetup.mockResolvedValue(true);
+
+      mockModulesFileExists.mockReturnValue(true);
+      const { loadTemplateModulesFile } = await import("../../modules/index");
+      vi.mocked(loadTemplateModulesFile).mockResolvedValue({
+        modules: [{ name: "Root", description: "Root", include: [".mcp.json"] }],
+        rawContent: '{"modules":[]}',
+      });
+
+      await runInit({ yes: true });
+
+      // デフォルト順で .ziku が先
+      expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
+        expect.any(String),
+        "gh:detected-org/.ziku",
+      );
+    });
+
+    it("どちらもセットアップ未完了ならリスト順（.ziku）を選択", async () => {
+      mockCheckRepoExists.mockResolvedValue(true);
+      mockCheckRepoSetup.mockResolvedValue(false);
+
+      mockModulesFileExists.mockReturnValue(false);
+      mockConfirmScaffoldDevenvPR.mockResolvedValueOnce(true);
+      mockGetGitHubToken.mockReturnValue("ghp_test_token");
+
+      await expect(runInit({ yes: true })).rejects.toThrow("has no .ziku/modules.jsonc");
+    });
+
+    it("インタラクティブモードで候補に ready 状態が表示される", async () => {
+      mockCheckRepoExists.mockResolvedValue(true);
+      mockCheckRepoSetup
+        .mockResolvedValueOnce(true) // detected-org/.ziku: ready
+        .mockResolvedValueOnce(false); // detected-org/.github: not ready
+
+      mockSelectTemplateCandidate.mockResolvedValueOnce({
+        owner: "detected-org",
+        repo: ".ziku",
+      });
+      mockModulesFileExists.mockReturnValue(true);
+      const { loadTemplateModulesFile } = await import("../../modules/index");
+      vi.mocked(loadTemplateModulesFile).mockResolvedValue({
+        modules: [{ name: "Root", description: "Root", include: [".mcp.json"] }],
+        rawContent: '{"modules":[]}',
+      });
+      mockSelectModules.mockResolvedValueOnce([
+        { name: "Root", description: "Root", include: [".mcp.json"] },
+      ]);
+      mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
+
+      await runInit({});
+
+      // selectTemplateCandidate に ready 付きの候補が渡される
+      expect(mockSelectTemplateCandidate).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({ owner: "detected-org", repo: ".ziku", ready: true }),
+          expect.objectContaining({ owner: "detected-org", repo: ".github", ready: false }),
+        ]),
       );
     });
   });

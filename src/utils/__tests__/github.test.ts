@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { checkRepoExists, getGhCliToken, getGitHubToken } from "../github";
+import { checkRepoExists, checkRepoSetup, getGhCliToken, getGitHubToken } from "../github";
 
 // Octokit をモック
 const mockGetAuthenticated = vi.fn();
@@ -324,6 +324,68 @@ describe("checkRepoExists", () => {
 
     const result = await checkRepoExists("owner", "repo");
     expect(result).toBe(true);
+  });
+});
+
+describe("checkRepoSetup", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it(".ziku/modules.jsonc が存在する場合は true を返す", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true });
+
+    const result = await checkRepoSetup("owner", "repo");
+    expect(result).toBe(true);
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "https://api.github.com/repos/owner/repo/contents/.ziku/modules.jsonc",
+      expect.objectContaining({ method: "HEAD" }),
+    );
+  });
+
+  it(".ziku/modules.jsonc が存在しない場合は false を返す", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 404 });
+
+    const result = await checkRepoSetup("owner", "repo");
+    expect(result).toBe(false);
+  });
+
+  it("ネットワークエラーの場合は false を返す", async () => {
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("Network error"));
+
+    const result = await checkRepoSetup("owner", "repo");
+    expect(result).toBe(false);
+  });
+
+  it("GitHub トークンがある場合は Authorization ヘッダーを送信する", async () => {
+    process.env.GITHUB_TOKEN = "ghp_test_token";
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true });
+
+    await checkRepoSetup("owner", "repo");
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        headers: { Authorization: "Bearer ghp_test_token" },
+      }),
+    );
+
+    delete process.env.GITHUB_TOKEN;
+  });
+
+  it("GitHub トークンがない場合は Authorization ヘッダーなし", async () => {
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true });
+
+    await checkRepoSetup("owner", "repo");
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        headers: {},
+      }),
+    );
   });
 });
 
