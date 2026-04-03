@@ -38,6 +38,7 @@ vi.mock("../../utils/hash", () => ({
 vi.mock("../../utils/github", () => ({
   resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
   checkRepoExists: vi.fn(() => Promise.resolve(true)),
+  checkRepoSetup: vi.fn(() => Promise.resolve(true)),
   getGitHubToken: vi.fn(() => undefined),
   getAuthenticatedUserLogin: vi.fn(() => Promise.resolve(undefined)),
   scaffoldTemplateRepo: vi.fn(() => Promise.resolve({ url: "https://github.com/test/repo" })),

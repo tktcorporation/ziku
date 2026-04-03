@@ -209,6 +209,33 @@ export async function checkRepoExists(owner: string, repo: string): Promise<bool
 }
 
 /**
+ * テンプレートリポジトリがセットアップ済み（.ziku/modules.jsonc が存在する）か確認する。
+ *
+ * 背景: リポジトリが存在しても .ziku/modules.jsonc がなければテンプレートとして
+ * 機能しないため、候補の優先順位付けやユーザーへのヒント表示に利用する。
+ * GitHub Contents API で軽量に確認。
+ */
+export async function checkRepoSetup(owner: string, repo: string): Promise<boolean> {
+  const token = getGitHubToken();
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return Effect.runPromise(
+    Effect.tryPromise(() =>
+      fetch(`https://api.github.com/repos/${owner}/${repo}/contents/.ziku/modules.jsonc`, {
+        method: "HEAD",
+        headers,
+      }),
+    ).pipe(
+      Effect.map((res) => res.ok),
+      // ネットワークエラー等の場合は不明として false を返す
+      Effect.orElseSucceed(() => false),
+    ),
+  );
+}
+
+/**
  * テンプレートリポジトリを新規作成する。
  *
  * 背景: org に `.github` テンプレートリポジトリが存在しない場合、

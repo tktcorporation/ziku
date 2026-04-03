@@ -52,6 +52,7 @@ vi.mock("../../utils/hash", () => ({
 vi.mock("../../utils/github", () => ({
   resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
   checkRepoExists: vi.fn(() => Promise.resolve(true)),
+  checkRepoSetup: vi.fn(() => Promise.resolve(true)),
   getGitHubToken: vi.fn(() => undefined),
   getAuthenticatedUserLogin: vi.fn(() => Promise.resolve(undefined)),
   scaffoldTemplateRepo: vi.fn(() =>
@@ -135,6 +136,7 @@ const { log } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
 const {
   checkRepoExists,
+  checkRepoSetup,
   getAuthenticatedUserLogin,
   getGitHubToken,
   scaffoldTemplateRepo,
@@ -156,6 +158,7 @@ const mockConfirmScaffoldDevenvPR = vi.mocked(confirmScaffoldDevenvPR);
 const mockLog = vi.mocked(log);
 const mockHashFiles = vi.mocked(hashFiles);
 const mockCheckRepoExists = vi.mocked(checkRepoExists);
+const mockCheckRepoSetup = vi.mocked(checkRepoSetup);
 const mockGetAuthenticatedUserLogin = vi.mocked(getAuthenticatedUserLogin);
 const mockGetGitHubToken = vi.mocked(getGitHubToken);
 const mockScaffoldTemplateRepo = vi.mocked(scaffoldTemplateRepo);

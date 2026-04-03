@@ -30,6 +30,7 @@ import {
 } from "../utils/git-remote";
 import {
   checkRepoExists,
+  checkRepoSetup,
   createDevenvScaffoldPR,
   getAuthenticatedUserLogin,
   getGitHubToken,
@@ -435,18 +436,26 @@ async function resolveTemplateSourceWithCheck(
       }
       return resolved;
     }
-    // owner のみ指定 → デフォルトリポジトリ候補を順に探索
+    // owner のみ指定 → デフォルトリポジトリ候補を順に探索（セットアップ済みを優先）
     const existsResults = await Promise.all(
       DEFAULT_TEMPLATE_REPOS.map((repo) => checkRepoExists(resolved.sourceOwner, repo)),
     );
-    const foundIndex = existsResults.indexOf(true);
-    if (foundIndex !== -1) {
-      return { sourceOwner: resolved.sourceOwner, sourceRepo: DEFAULT_TEMPLATE_REPOS[foundIndex] };
+    const existingRepos = DEFAULT_TEMPLATE_REPOS.filter((_, i) => existsResults[i]);
+    if (existingRepos.length === 0) {
+      throw new ZikuError(
+        `No template repository found for "${resolved.sourceOwner}" (checked: ${DEFAULT_TEMPLATE_REPOS.join(", ")})`,
+        "Check the --from value or create the repository first",
+      );
     }
-    throw new ZikuError(
-      `No template repository found for "${resolved.sourceOwner}" (checked: ${DEFAULT_TEMPLATE_REPOS.join(", ")})`,
-      "Check the --from value or create the repository first",
+    // 存在するリポジトリの中でセットアップ済みのものを優先
+    const setupResults = await Promise.all(
+      existingRepos.map((repo) => checkRepoSetup(resolved.sourceOwner, repo)),
     );
+    const readyRepo = existingRepos.find((_, i) => setupResults[i]);
+    return {
+      sourceOwner: resolved.sourceOwner,
+      sourceRepo: readyRepo ?? existingRepos[0],
+    };
   }
 
   // 候補を収集: 認証ユーザー + git remote オーナー
@@ -481,7 +490,16 @@ async function resolveTemplateSourceWithCheck(
   );
   const existingCandidates = candidateEntries.filter((_, i) => existsResults[i]);
 
-  // 同一オーナーで複数リポジトリが見つかった場合、優先順（.ziku > .github）で絞り込む
+  // セットアップ状態を並列でチェック
+  const setupResults = await Promise.all(
+    existingCandidates.map((c) => checkRepoSetup(c.owner, c.repo)),
+  );
+  for (let i = 0; i < existingCandidates.length; i++) {
+    existingCandidates[i].ready = setupResults[i];
+  }
+
+  // 同一オーナーで複数リポジトリが見つかった場合、セットアップ済みを優先し、
+  // それでも同順ならリスト順（.ziku > .github）で絞り込む
   const deduplicatedCandidates = deduplicateByOwner(existingCandidates);
 
   if (nonInteractive) {
@@ -746,16 +764,21 @@ function parseFromArg(from: string): { sourceOwner: string; sourceRepo: string }
 
 /**
  * 同一オーナーの候補を重複排除する。
- * candidateEntries は優先順（.ziku → .github）で並んでいるため、先に見つかったものを優先する。
+ * セットアップ済み（ready=true）の候補を優先し、同順ならリスト順（.ziku → .github）で選択する。
  */
 function deduplicateByOwner(candidates: TemplateCandidate[]): TemplateCandidate[] {
-  const seen = new Set<string>();
-  return candidates.filter((c) => {
+  const byOwner = new Map<string, TemplateCandidate>();
+  for (const c of candidates) {
     const key = c.owner.toLowerCase();
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+    const existing = byOwner.get(key);
+    if (!existing) {
+      byOwner.set(key, c);
+    } else if (c.ready && !existing.ready) {
+      // セットアップ済みの候補を優先
+      byOwner.set(key, c);
+    }
+  }
+  return [...byOwner.values()];
 }
 
 /**
