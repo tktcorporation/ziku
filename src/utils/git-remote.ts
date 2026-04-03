@@ -1,14 +1,17 @@
 import { execFileSync } from "node:child_process";
 import { Effect } from "effect";
 
-/** テンプレートリポジトリのデフォルト名 */
-export const DEFAULT_TEMPLATE_REPO = ".github";
+/** テンプレートリポジトリのデフォルト名（優先順） */
+export const DEFAULT_TEMPLATE_REPOS: readonly string[] = [".ziku", ".github"];
+
+/** テンプレートリポジトリのデフォルト名（後方互換用） */
+export const DEFAULT_TEMPLATE_REPO = DEFAULT_TEMPLATE_REPOS[0];
 
 /**
  * GitHub URL からオーナー名を抽出する。
  *
  * 背景: `ziku init` で --from が未指定の場合、git remote URL から
- * オーナーを推定し `{owner}/.github` をテンプレートソースとする。
+ * オーナーを推定し `{owner}/.ziku` または `{owner}/.github` をテンプレートソースとする。
  * テスト容易性のため detectGitHubOwner から分離した純粋関数。
  *
  * 対応形式:

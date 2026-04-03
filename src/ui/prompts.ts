@@ -73,6 +73,8 @@ export interface TemplateCandidate {
   owner: string;
   repo: string;
   label: string;
+  /** .ziku/modules.jsonc が存在するか（セットアップ済みか） */
+  ready?: boolean;
 }
 
 /**
@@ -85,11 +87,14 @@ export async function selectTemplateCandidate(
   candidates: TemplateCandidate[],
 ): Promise<{ owner: string; repo: string } | "specify-other"> {
   const options = [
-    ...candidates.map((c) => ({
-      value: `${c.owner}/${c.repo}` as string,
-      label: `${c.owner}/${c.repo}`,
-      hint: c.label,
-    })),
+    ...candidates.map((c) => {
+      const readyHint = c.ready === true ? " (ready)" : c.ready === false ? " (not set up)" : "";
+      return {
+        value: `${c.owner}/${c.repo}` as string,
+        label: `${c.owner}/${c.repo}`,
+        hint: `${c.label}${readyHint}`,
+      };
+    }),
     {
       value: "__other__" as string,
       label: "Specify a different repository",

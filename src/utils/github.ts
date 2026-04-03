@@ -169,7 +169,7 @@ export function getGhCliToken(): string | undefined {
 /**
  * 認証済み GitHub ユーザーのログイン名を取得する。
  *
- * 背景: テンプレートソースの自動検出で、自分のアカウントの `.github` リポジトリを
+ * 背景: テンプレートソースの自動検出で、自分のアカウントの `.ziku` / `.github` リポジトリを
  * 候補に含めるために使用する。トークンがない場合や API エラー時は undefined を返す。
  */
 export async function getAuthenticatedUserLogin(): Promise<string | undefined> {
@@ -204,6 +204,33 @@ export async function checkRepoExists(owner: string, repo: string): Promise<bool
       Effect.map((res) => res.ok),
       // ネットワークエラー等の場合は存在チェックをスキップ（楽観的に続行）
       Effect.orElseSucceed(() => true),
+    ),
+  );
+}
+
+/**
+ * テンプレートリポジトリがセットアップ済み（.ziku/modules.jsonc が存在する）か確認する。
+ *
+ * 背景: リポジトリが存在しても .ziku/modules.jsonc がなければテンプレートとして
+ * 機能しないため、候補の優先順位付けやユーザーへのヒント表示に利用する。
+ * GitHub Contents API で軽量に確認。
+ */
+export async function checkRepoSetup(owner: string, repo: string): Promise<boolean> {
+  const token = getGitHubToken();
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return Effect.runPromise(
+    Effect.tryPromise(() =>
+      fetch(`https://api.github.com/repos/${owner}/${repo}/contents/.ziku/modules.jsonc`, {
+        method: "HEAD",
+        headers,
+      }),
+    ).pipe(
+      Effect.map((res) => res.ok),
+      // ネットワークエラー等の場合は不明として false を返す
+      Effect.orElseSucceed(() => false),
     ),
   );
 }

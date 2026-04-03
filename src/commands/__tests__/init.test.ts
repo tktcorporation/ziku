@@ -17,7 +17,8 @@ vi.mock("node:fs/promises", async () => {
 vi.mock("../../utils/git-remote", () => ({
   detectGitHubOwner: vi.fn(() => "test-org"),
   detectGitHubRepo: vi.fn(() => null),
-  DEFAULT_TEMPLATE_REPO: ".github",
+  DEFAULT_TEMPLATE_REPOS: [".ziku", ".github"],
+  DEFAULT_TEMPLATE_REPO: ".ziku",
 }));
 
 vi.mock("../../utils/template", () => ({
@@ -37,6 +38,7 @@ vi.mock("../../utils/hash", () => ({
 vi.mock("../../utils/github", () => ({
   resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
   checkRepoExists: vi.fn(() => Promise.resolve(true)),
+  checkRepoSetup: vi.fn(() => Promise.resolve(true)),
   getGitHubToken: vi.fn(() => undefined),
   getAuthenticatedUserLogin: vi.fn(() => Promise.resolve(undefined)),
   scaffoldTemplateRepo: vi.fn(() => Promise.resolve({ url: "https://github.com/test/repo" })),
@@ -123,6 +125,7 @@ const { selectModules, selectOverwriteStrategy, selectTemplateCandidate } =
 const { log } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
 const { modulesFileExists } = await import("../../modules/index");
+const { checkRepoExists, checkRepoSetup } = await import("../../utils/github");
 
 const mockDownloadTemplateToTemp = vi.mocked(downloadTemplateToTemp);
 const mockFetchTemplates = vi.mocked(fetchTemplates);
@@ -135,6 +138,8 @@ const mockSelectOverwriteStrategy = vi.mocked(selectOverwriteStrategy);
 const mockLog = vi.mocked(log);
 const mockHashFiles = vi.mocked(hashFiles);
 const mockModulesFileExists = vi.mocked(modulesFileExists);
+const mockCheckRepoExists = vi.mocked(checkRepoExists);
+const mockCheckRepoSetup = vi.mocked(checkRepoSetup);
 
 describe("initCommand", () => {
   beforeEach(() => {
@@ -603,7 +608,7 @@ describe("initCommand", () => {
       );
     });
 
-    it("--from でオーナー名のみ指定すると .github を補完", async () => {
+    it("--from でオーナー名のみ指定すると .ziku / .github を探索し最初に見つかったものを使う", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -626,9 +631,69 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
+      // checkRepoExists がデフォルトで true を返すため、先頭の .ziku が使われる
+      expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
+        expect.any(String),
+        "gh:my-org/.ziku",
+      );
+    });
+
+    it("--from オーナーのみで .github だけセットアップ済みなら .github を選択", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      // 両方存在するが .ziku はセットアップ未完了
+      mockCheckRepoExists.mockResolvedValue(true);
+      mockCheckRepoSetup
+        .mockResolvedValueOnce(false) // .ziku
+        .mockResolvedValueOnce(true); // .github
+
+      mockSelectModules.mockResolvedValueOnce([
+        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
+      ]);
+      mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
+      mockFetchTemplates.mockResolvedValue([]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false, from: "my-org" },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      // セットアップ済みの .github が選ばれる
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),
         "gh:my-org/.github",
+      );
+    });
+
+    it("--from オーナーのみで .ziku のみ存在する場合は .ziku を選択", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      // .ziku のみ存在
+      mockCheckRepoExists
+        .mockResolvedValueOnce(true) // .ziku
+        .mockResolvedValueOnce(false); // .github
+      mockCheckRepoSetup.mockResolvedValueOnce(false); // .ziku はセットアップ未完了
+
+      mockSelectModules.mockResolvedValueOnce([
+        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
+      ]);
+      mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
+      mockFetchTemplates.mockResolvedValue([]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false, from: "my-org" },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
+        expect.any(String),
+        "gh:my-org/.ziku",
       );
     });
 
