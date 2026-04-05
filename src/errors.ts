@@ -68,3 +68,11 @@ export class TemplateError extends Data.TaggedError("TemplateError")<{
   readonly message: string;
   readonly cause?: unknown;
 }> {}
+
+/**
+ * テンプレートに .ziku/ziku.jsonc が存在しない。
+ * init 時にテンプレートが未構成の場合に発生する。
+ */
+export class TemplateNotConfiguredError extends Data.TaggedError("TemplateNotConfiguredError")<{
+  readonly templateDir: string;
+}> {}

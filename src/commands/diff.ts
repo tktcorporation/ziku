@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { withFinally } from "../effect-helpers";
 import { defineCommand } from "citty";
+import { Effect } from "effect";
 import { downloadTemplate } from "giget";
 import { join, resolve } from "pathe";
 import { isLocalSource } from "../modules/schemas";
@@ -12,6 +13,7 @@ import { detectDiff, hasDiff } from "../utils/diff";
 import { buildTemplateSource } from "../utils/template";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked";
 import { ZIKU_CONFIG_FILE, loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
+import { LOCK_FILE, loadLock } from "../utils/lock";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 
@@ -24,6 +26,7 @@ export const diffLifecycle: CommandLifecycle = {
   description: "ローカルとテンプレートの差分を表示",
   ops: [
     { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "patterns を取得" },
+    { file: LOCK_FILE, location: "local", op: "read", note: "source を取得" },
     {
       file: SYNCED_FILES,
       location: "local",
@@ -68,6 +71,16 @@ export const diffCommand = defineCommand({
 
     const { config: zikuConfig } = await loadZikuConfig(targetDir);
 
+    // source は lock.json から取得
+    const lock = await Effect.runPromise(
+      Effect.tryPromise(() => loadLock(targetDir)).pipe(
+        Effect.mapError(
+          () => new ZikuError(".ziku/lock.json not found.", "Run 'ziku init' first."),
+        ),
+      ),
+    );
+    const source = lock.source;
+
     const patterns = {
       include: zikuConfig.include,
       exclude: zikuConfig.exclude ?? [],
@@ -82,12 +95,12 @@ export const diffCommand = defineCommand({
     let templateDir: string;
     let tempDir: string | undefined;
 
-    if (isLocalSource(zikuConfig.source)) {
-      templateDir = resolve(zikuConfig.source.path);
+    if (isLocalSource(source)) {
+      templateDir = resolve(source.path);
       log.info(`Template: ${pc.cyan(templateDir)} (local)`);
     } else {
       log.step("Fetching template...");
-      const templateSource = buildTemplateSource(zikuConfig.source);
+      const templateSource = buildTemplateSource(source);
       const td = join(targetDir, ".ziku-temp");
       tempDir = td;
       const { dir } = await withSpinner("Downloading template from GitHub...", () =>

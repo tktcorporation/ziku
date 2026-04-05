@@ -4,7 +4,7 @@
  * ziku の完全なライフサイクルを 1 本のシナリオで検証する。
  * モックは最小限（GitHub API とUIのみ）にし、内部ロジックは実際のコードを通す。
  *
- *   1. setup: テンプレートリポに modules.jsonc を作成
+ *   1. setup: テンプレートリポに .ziku/ziku.jsonc を作成
  *   2. init (プロジェクトA): テンプレートからファイルをコピー
  *   3. init (プロジェクトB): テンプレートからファイルをコピー
  *   4. プロジェクトA でファイル追加 → push → テンプレートに PR
@@ -14,6 +14,7 @@
  */
 
 import { vol } from "memfs";
+import { Effect } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // ── filesystem mock（これだけは必須）─────────────────────────────
@@ -44,7 +45,6 @@ vi.mock("../../utils/github", () => ({
   getGitHubToken: vi.fn(() => "ghp_test"),
   getAuthenticatedUserLogin: vi.fn(() => Promise.resolve()),
   scaffoldTemplateRepo: vi.fn(),
-  createDevenvScaffoldPR: vi.fn(),
   createPullRequest: vi.fn(() =>
     Promise.resolve({
       url: "https://github.com/test-org/.github/pull/1",
@@ -76,12 +76,11 @@ vi.mock("giget", () => ({
 // ── UI 系のみモック（対話型プロンプトはテスト不可）───
 
 vi.mock("../../ui/prompts", () => ({
-  selectModules: vi.fn(),
+  selectDirectories: vi.fn(),
   selectOverwriteStrategy: vi.fn(() => Promise.resolve("overwrite")),
   selectMissingTemplateAction: vi.fn(),
   selectTemplateCandidate: vi.fn(),
   inputTemplateSource: vi.fn(),
-  confirmScaffoldDevenvPR: vi.fn(),
   selectDeletedFiles: vi.fn(() => Promise.resolve([])),
   selectPushFiles: vi.fn(),
   confirmAction: vi.fn(() => Promise.resolve(true)),
@@ -155,6 +154,52 @@ vi.mock("../../utils/merge", () => ({
 vi.mock("../../utils/untracked", () => ({
   detectUntrackedFiles: vi.fn(() => Promise.resolve([])),
   getTotalUntrackedCount: vi.fn(() => 0),
+}));
+
+// loadTemplateConfig: テンプレートの .ziku/ziku.jsonc を Effect で読み込むモック
+// 実際のファイルシステム（memfs）から読む代わりにモックで返す
+vi.mock("../../utils/template-config", () => ({
+  loadTemplateConfig: vi.fn(() =>
+    Effect.succeed({
+      include: [
+        ".claude/settings.json",
+        ".claude/rules/*.md",
+        ".claude/skills/**",
+        ".claude/hooks/**",
+        ".mcp.json",
+        ".devcontainer/**",
+        ".github/**",
+      ],
+      exclude: [],
+    }),
+  ),
+  templateConfigExists: vi.fn(() => true),
+  extractDirectoryEntries: vi.fn((patterns: string[]) => {
+    const dirMap = new Map<string, string[]>();
+    const rootFiles: string[] = [];
+    for (const p of patterns) {
+      const slashIndex = p.indexOf("/");
+      if (slashIndex === -1) {
+        rootFiles.push(p);
+      } else {
+        const dir = p.slice(0, slashIndex);
+        const existing = dirMap.get(dir);
+        if (existing) {
+          existing.push(p);
+        } else {
+          dirMap.set(dir, [p]);
+        }
+      }
+    }
+    const entries: Array<{ label: string; patterns: string[] }> = [];
+    for (const [dir, pats] of [...dirMap.entries()].toSorted()) {
+      entries.push({ label: dir, patterns: pats });
+    }
+    if (rootFiles.length > 0) {
+      entries.push({ label: "Root files", patterns: rootFiles });
+    }
+    return entries;
+  }),
 }));
 
 vi.spyOn(console, "log").mockImplementation(() => {});
@@ -260,16 +305,16 @@ describe("E2E ライフサイクル: setup → init → push → pull → init",
   });
 
   it("完全なライフサイクルが正しく動作する", async () => {
-    // ─── Step 1: setup — テンプレートリポに modules.jsonc を作成 ───
+    // ─── Step 1: setup — テンプレートリポに .ziku/ziku.jsonc を作成 ───
 
     await runSetup("/template");
 
-    expect(vol.existsSync("/template/.ziku/modules.jsonc")).toBe(true);
-    const modulesContent = JSON.parse(
-      vol.readFileSync("/template/.ziku/modules.jsonc", "utf8") as string,
+    expect(vol.existsSync("/template/.ziku/ziku.jsonc")).toBe(true);
+    const zikuJsoncContent = JSON.parse(
+      vol.readFileSync("/template/.ziku/ziku.jsonc", "utf8") as string,
     );
-    expect(modulesContent.modules).toBeDefined();
-    expect(modulesContent.modules.length).toBeGreaterThan(0);
+    expect(zikuJsoncContent.include).toBeDefined();
+    expect(zikuJsoncContent.include.length).toBeGreaterThan(0);
 
     // ─── Step 2: テンプレートリポにファイルを配置（実際のテンプレート状態）───
 
@@ -286,6 +331,11 @@ describe("E2E ライフサイクル: setup → init → push → pull → init",
     // ziku.jsonc と lock.json が作成された
     expect(vol.existsSync("/projectA/.ziku/ziku.jsonc")).toBe(true);
     expect(vol.existsSync("/projectA/.ziku/lock.json")).toBe(true);
+
+    // lock.json に source フィールドが含まれる
+    const lockA = JSON.parse(vol.readFileSync("/projectA/.ziku/lock.json", "utf8") as string);
+    expect(lockA.source).toBeDefined();
+    expect(lockA.source.owner).toBe("test-org");
 
     // テンプレートのファイルがコピーされた
     expect(vol.existsSync("/projectA/.claude/rules/style.md")).toBe(true);

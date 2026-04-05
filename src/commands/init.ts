@@ -1,22 +1,23 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { defineCommand } from "citty";
+import { Effect } from "effect";
 import { join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
-import { MODULES_FILE, loadModulesFile, modulesFileExists } from "../modules/index";
+import { loadTemplateConfig, extractDirectoryEntries } from "../utils/template-config";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 import type {
   FileOperationResult,
   LockState,
   OverwriteStrategy,
-  TemplateModule,
+  TemplateSource,
 } from "../modules/schemas";
 import { P, match } from "ts-pattern";
 import { ZikuError } from "../errors";
 import {
   inputTemplateSource,
   selectMissingTemplateAction,
-  selectModules,
+  selectDirectories,
   selectOverwriteStrategy,
   selectTemplateCandidate,
 } from "../ui/prompts";
@@ -38,7 +39,6 @@ import { hashFiles } from "../utils/hash";
 import { LOCK_FILE, saveLock } from "../utils/lock";
 import { ZIKU_CONFIG_FILE, generateZikuJsonc, zikuConfigExists } from "../utils/ziku-config";
 import {
-  buildTemplateSource,
   downloadTemplateToTemp,
   fetchTemplates,
   writeFileWithStrategy,
@@ -58,18 +58,23 @@ export const initUserLifecycle: CommandLifecycle = {
   name: "init (user project)",
   description: "ユーザープロジェクトの初期化",
   ops: [
-    { file: MODULES_FILE, location: "template", op: "read", note: "モジュール選択 UI に使用" },
+    {
+      file: ZIKU_CONFIG_FILE,
+      location: "template",
+      op: "read",
+      note: "テンプレートの include パターンを取得",
+    },
     {
       file: ZIKU_CONFIG_FILE,
       location: "local",
       op: "create",
-      note: "選択パターンをフラット化して保存",
+      note: "選択パターンを保存",
     },
     {
       file: LOCK_FILE,
       location: "local",
       op: "create",
-      note: "ベースコミット SHA + ハッシュを記録",
+      note: "ソース情報 + ベースコミット SHA + ハッシュを記録",
     },
     {
       file: SYNCED_FILES,
@@ -103,10 +108,10 @@ export const initCommand = defineCommand({
       description: "Non-interactive mode (accept all defaults)",
       default: false,
     },
-    modules: {
+    dirs: {
       type: "string",
-      alias: "m",
-      description: "Comma-separated module names to apply (non-interactive)",
+      alias: "d",
+      description: "Comma-separated directory names to apply (non-interactive)",
     },
     "overwrite-strategy": {
       type: "string",
@@ -139,13 +144,11 @@ export const initCommand = defineCommand({
     }
 
     // ─── 入り口: テンプレートソースの解決 ───
-    // --from-dir（ローカル）と --from（GitHub）で分岐し、templateDir と cleanup を取得。
-    // 以降の処理は共通。
     const fromDir = args["from-dir"] as string | undefined;
 
     let templateDir: string;
     let cleanup: () => void;
-    let source: { owner: string; repo: string } | { dir: string };
+    let source: TemplateSource;
 
     if (fromDir) {
       // ローカルディレクトリをテンプレートとして使用（ダウンロード不要）
@@ -161,12 +164,14 @@ export const initCommand = defineCommand({
       );
       source = { owner: resolved.sourceOwner, repo: resolved.sourceRepo };
 
-      const templateSourceStr = buildTemplateSource(source as { owner: string; repo: string });
       log.info(`Template: ${pc.cyan(`${resolved.sourceOwner}/${resolved.sourceRepo}`)}`);
 
       log.step("Fetching template...");
       const downloaded = await withSpinner("Downloading template from GitHub...", () =>
-        downloadTemplateToTemp(targetDir, templateSourceStr),
+        downloadTemplateToTemp(
+          targetDir,
+          `gh:${resolved.sourceOwner}/${resolved.sourceRepo}`,
+        ),
       );
       templateDir = downloaded.templateDir;
       cleanup = downloaded.cleanup;
@@ -174,22 +179,32 @@ export const initCommand = defineCommand({
 
     // ─── 共通処理: テンプレート適用 ───
     await withFinally(async () => {
-      if (!modulesFileExists(templateDir)) {
-        // ローカルソースの場合はテンプレートパスを表示、GitHub の場合は setup 誘導
-        const hint = match(source)
-          .with({ path: P.string }, (s) => `Add .ziku/modules.jsonc to ${s.path}`)
-          .with(
-            { owner: P.string, repo: P.string },
-            (s) => `Run ziku setup --remote --from ${s.owner}/${s.repo}`,
-          )
-          .exhaustive();
-        throw new ZikuError(`Template has no .ziku/modules.jsonc`, hint);
-      }
+      // テンプレートの ziku.jsonc を Effect で読み込む
+      const templateConfig = await Effect.runPromise(
+        loadTemplateConfig(templateDir).pipe(
+          Effect.catchTag("TemplateNotConfiguredError", (_err) => {
+            const hint = match(source)
+              .with({ path: P.string }, (s) => `Add .ziku/ziku.jsonc to ${s.path}`)
+              .with(
+                { owner: P.string, repo: P.string },
+                (s) => `Add .ziku/ziku.jsonc to ${s.owner}/${s.repo}`,
+              )
+              .exhaustive();
+            return Effect.fail(new ZikuError(`Template has no .ziku/ziku.jsonc`, hint));
+          }),
+          Effect.catchTag("ParseError", (err) =>
+            Effect.fail(new ZikuError(
+              `Failed to parse template .ziku/ziku.jsonc`,
+              String(err.cause),
+            )),
+          ),
+        ),
+      );
 
       const flatPatterns = await resolveTemplatePatterns(
-        templateDir,
+        templateConfig,
         args.yes as boolean,
-        args.modules as string | undefined,
+        args.dirs as string | undefined,
       );
 
       if (flatPatterns.include.length === 0) {
@@ -233,16 +248,15 @@ export const initCommand = defineCommand({
         .with({ path: P.string }, () => Promise.resolve(undefined))
         .exhaustive();
 
-      // .ziku/ziku.jsonc を書き出し（ユーザー設定: source + patterns）
+      // .ziku/ziku.jsonc を書き出し（パターン定義のみ、source なし）
       const zikuJsoncResult = await writeZikuJsonc(targetDir, {
-        source,
         patterns: flatPatterns,
         strategy: effectiveStrategy,
       });
       allResults.push(zikuJsoncResult);
 
-      // .ziku/lock.json を書き出し（同期状態: 常に上書き）
-      const lockResult = await writeLockFile(targetDir, { baseHashes, baseRef });
+      // .ziku/lock.json を書き出し（source + 同期状態）
+      const lockResult = await writeLockFile(targetDir, { source, baseHashes, baseRef });
       allResults.push(lockResult);
 
       // ファイル操作結果を表示（サマリー含む）
@@ -298,18 +312,16 @@ function createEnvExample(
 }
 
 /**
- * .ziku/ziku.jsonc を書き出す（ユーザー設定: source + patterns）
+ * .ziku/ziku.jsonc を書き出す（パターン定義のみ、source は lock.json に分離）
  */
 function writeZikuJsonc(
   targetDir: string,
   opts: {
-    source: { owner: string; repo: string } | { path: string };
     patterns: FlatPatterns;
     strategy: OverwriteStrategy;
   },
 ): Promise<FileOperationResult> {
   const content = generateZikuJsonc({
-    source: opts.source,
     include: opts.patterns.include,
     exclude: opts.patterns.exclude,
   });
@@ -323,11 +335,12 @@ function writeZikuJsonc(
 }
 
 /**
- * .ziku/lock.json を書き出す（同期状態: 常に上書き）
+ * .ziku/lock.json を書き出す（source + 同期状態: 常に上書き）
  */
 async function writeLockFile(
   targetDir: string,
   opts: {
+    source: TemplateSource;
     baseHashes?: Record<string, string>;
     baseRef?: string;
   },
@@ -335,6 +348,7 @@ async function writeLockFile(
   const lock: LockState = {
     version: "0.1.0",
     installedAt: new Date().toISOString(),
+    source: opts.source,
     ...(opts.baseRef ? { baseRef: opts.baseRef } : {}),
     ...(opts.baseHashes && Object.keys(opts.baseHashes).length > 0
       ? { baseHashes: opts.baseHashes }
@@ -351,58 +365,67 @@ async function writeLockFile(
 }
 
 /**
- * テンプレートの modules.jsonc からパターンを解決する。
+ * テンプレートの ziku.jsonc からパターンを解決する。
  *
- * modules.jsonc は常にモジュール形式。モジュール選択 UI を表示し、
- * 選択されたモジュールの include/exclude をフラット化して返す。
+ * include パターンをトップレベルディレクトリでグループ化し、
+ * ユーザーにディレクトリ単位で選択させる。
  */
 async function resolveTemplatePatterns(
-  templateDir: string,
+  templateConfig: { include: string[]; exclude?: string[] },
   nonInteractive: boolean,
-  modulesArg: string | undefined,
+  dirsArg: string | undefined,
 ): Promise<FlatPatterns> {
-  const { modules } = await loadModulesFile(templateDir);
-  const selectedModules = await selectModulesFromTemplate(modules, nonInteractive, modulesArg);
+  const allInclude = templateConfig.include;
+  const allExclude = templateConfig.exclude ?? [];
+
+  const entries = extractDirectoryEntries(allInclude);
+  const selectedPatterns = await selectDirsFromTemplate(entries, nonInteractive, dirsArg);
+
+  // 選択されたパターンに対応する exclude を絞り込む
+  // （exclude は全て適用しても安全なので、そのまま返す）
   return {
-    include: selectedModules.flatMap((m) => m.include),
-    exclude: selectedModules.flatMap((m) => m.exclude ?? []),
+    include: selectedPatterns,
+    exclude: allExclude,
   };
 }
 
 /**
- * テンプレートのモジュール一覧からモジュールを選択する。
- * --yes: 全モジュール、--modules: 指定モジュール、それ以外: インタラクティブ選択
+ * テンプレートのディレクトリエントリからディレクトリを選択する。
+ * --yes: 全ディレクトリ、--dirs: 指定ディレクトリ、それ以外: インタラクティブ選択
  */
-async function selectModulesFromTemplate(
-  moduleList: TemplateModule[],
+async function selectDirsFromTemplate(
+  entries: Array<{ label: string; patterns: string[] }>,
   nonInteractive: boolean,
-  modulesArg: string | undefined,
-): Promise<TemplateModule[]> {
-  const hasModulesArg = typeof modulesArg === "string" && modulesArg.length > 0;
+  dirsArg: string | undefined,
+): Promise<string[]> {
+  const hasDirsArg = typeof dirsArg === "string" && dirsArg.length > 0;
 
-  if (nonInteractive && !hasModulesArg) {
-    // --yes: 全モジュール選択
-    log.info(`Selected ${pc.cyan(moduleList.length.toString())} modules`);
-    return [...moduleList];
+  if (nonInteractive && !hasDirsArg) {
+    // --yes: 全ディレクトリ選択
+    const allPatterns = entries.flatMap((e) => e.patterns);
+    log.info(`Selected ${pc.cyan(entries.length.toString())} directories`);
+    return allPatterns;
   }
 
-  if (hasModulesArg) {
-    // --modules: 指定モジュール選択
-    const requestedNames = modulesArg.split(",").map((s) => s.trim());
-    const validNames = moduleList.map((m) => m.name);
-    const invalidNames = requestedNames.filter((name) => !validNames.includes(name));
-    if (invalidNames.length > 0) {
+  if (hasDirsArg) {
+    // --dirs: 指定ディレクトリ選択
+    const requestedLabels = dirsArg.split(",").map((s) => s.trim());
+    const validLabels = entries.map((e) => e.label);
+    const invalidLabels = requestedLabels.filter((l) => !validLabels.includes(l));
+    if (invalidLabels.length > 0) {
       throw new ZikuError(
-        `Unknown module(s): ${invalidNames.join(", ")}`,
-        `Available modules: ${validNames.join(", ")}`,
+        `Unknown directory(ies): ${invalidLabels.join(", ")}`,
+        `Available directories: ${validLabels.join(", ")}`,
       );
     }
-    return moduleList.filter((m) => requestedNames.includes(m.name));
+    return entries
+      .filter((e) => requestedLabels.includes(e.label))
+      .flatMap((e) => e.patterns);
   }
 
-  // インタラクティブ: モジュール選択 UI
-  log.step("Selecting modules...");
-  return await selectModules(moduleList);
+  // インタラクティブ: ディレクトリ選択 UI
+  log.step("Selecting directories...");
+  return await selectDirectories(entries);
 }
 
 /**

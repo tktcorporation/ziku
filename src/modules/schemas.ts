@@ -37,59 +37,63 @@ export const fileOperationResultSchema = z.object({
 });
 export type FileOperationResult = z.infer<typeof fileOperationResultSchema>;
 
-// テンプレートモジュール（include/exclude パターン形式）
-export const moduleSchema = z.object({
-  name: z.string(),
-  description: z.string(),
-  setupDescription: z.string().optional(), // セットアップ後の説明
-  include: z.array(z.string()), // 同期対象の glob パターン配列
-  exclude: z.array(z.string()).optional(), // 除外 glob パターン配列
-});
-
-export type TemplateModule = z.infer<typeof moduleSchema>;
-
 // ────────────────────────────────────────────────────────────────
-// ZikuConfig (.ziku/ziku.jsonc) — ユーザー設定: どこから何を同期するか
+// ZikuConfig (.ziku/ziku.jsonc) — パターン定義のみ
+// テンプレート側・ユーザー側で同一フォーマット。
+// source（どこから同期するか）は lock.json に分離。
 // ────────────────────────────────────────────────────────────────
 
 export const zikuConfigSchema = z.object({
   $schema: z.string().optional(),
-  source: z.union([
-    z.object({
-      owner: z.string(),
-      repo: z.string(),
-      ref: z.string().optional(),
-    }),
-    z.object({
-      /** ローカルテンプレートディレクトリの絶対パス */
-      path: z.string(),
-    }),
-  ]),
   include: z.array(z.string()),
   exclude: z.array(z.string()).optional(),
 });
 
 export type ZikuConfig = z.infer<typeof zikuConfigSchema>;
 
+// ────────────────────────────────────────────────────────────────
+// TemplateSource — テンプレートの取得元
+// lock.json の source フィールドで使用。
+// ────────────────────────────────────────────────────────────────
+
+export const templateSourceSchema = z.union([
+  z.object({
+    owner: z.string(),
+    repo: z.string(),
+    ref: z.string().optional(),
+  }),
+  z.object({
+    /** ローカルテンプレートディレクトリの絶対パス */
+    path: z.string(),
+  }),
+]);
+
+export type TemplateSource = z.infer<typeof templateSourceSchema>;
+
 /** source がローカルパスかどうか判定する */
-export function isLocalSource(source: ZikuConfig["source"]): source is { path: string } {
+export function isLocalSource(source: TemplateSource): source is { path: string } {
   return "path" in source;
 }
 
 /** source が GitHub リポジトリかどうか判定する */
 export function isGitHubSource(
-  source: ZikuConfig["source"],
+  source: TemplateSource,
 ): source is { owner: string; repo: string; ref?: string } {
   return "owner" in source;
 }
 
 // ────────────────────────────────────────────────────────────────
-// LockState (.ziku/lock.json) — 機械管理: 同期状態
+// LockState (.ziku/lock.json) — 機械管理: 同期状態 + ソース情報
 // ────────────────────────────────────────────────────────────────
 
 export const lockSchema = z.object({
   version: z.string(),
   installedAt: z.string().datetime({ offset: true }),
+  /**
+   * テンプレートの取得元。
+   * init 時に設定され、pull/push/diff で参照される。
+   */
+  source: templateSourceSchema,
   /**
    * init/pull 時点のテンプレートリポジトリのコミット SHA。
    * pull 時に baseRef〜最新間の差分を取得し、3-way merge のベースとして使用する。
@@ -122,30 +126,6 @@ export const lockSchema = z.object({
 });
 
 export type LockState = z.infer<typeof lockSchema>;
-
-/**
- * @deprecated 後方互換用。新コードでは ZikuConfig + LockState を使用する。
- */
-export const configSchema = z.object({
-  version: z.string(),
-  installedAt: z.string().datetime({ offset: true }),
-  source: z.object({
-    owner: z.string(),
-    repo: z.string(),
-    ref: z.string().optional(),
-  }),
-  baseRef: z.string().optional(),
-  baseHashes: z.record(z.string(), z.string()).optional(),
-  pendingMerge: z
-    .object({
-      conflicts: z.array(z.string()),
-      templateHashes: z.record(z.string(), z.string()),
-      latestRef: z.string().optional(),
-    })
-    .optional(),
-});
-
-export type DevEnvConfig = z.infer<typeof configSchema>;
 
 // 差分タイプ
 export const diffTypeSchema = z.enum([

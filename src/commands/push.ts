@@ -6,16 +6,7 @@ import { downloadTemplate } from "giget";
 import { join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
-import {
-  MODULES_FILE,
-  addModulesToJsonc,
-  flattenModules,
-  isFileMatchedByModules,
-  loadModulesFile,
-  modulesFileExists,
-  suggestModuleAdditions,
-} from "../modules";
-import type { FileDiff, TemplateModule } from "../modules/schemas";
+import type { FileDiff } from "../modules/schemas";
 import { isLocalSource } from "../modules/schemas";
 import { LOCK_FILE, loadLock } from "../utils/lock";
 import { ZIKU_CONFIG_FILE, loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
@@ -46,15 +37,9 @@ export const pushLifecycle: CommandLifecycle = {
   name: "push",
   description: "ローカルの変更をテンプレートリポジトリに PR として送信",
   ops: [
-    { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "source と patterns を取得" },
-    { file: LOCK_FILE, location: "local", op: "read", note: "baseRef, baseHashes を取得" },
+    { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "patterns を取得" },
+    { file: LOCK_FILE, location: "local", op: "read", note: "source, baseRef, baseHashes を取得" },
     { file: SYNCED_FILES, location: "local", op: "read", note: "ローカルの変更を検出" },
-    {
-      file: MODULES_FILE,
-      location: "template",
-      op: "read",
-      note: "テンプレートのパターンと比較し、ローカル追加分を検出",
-    },
     {
       file: SYNCED_FILES,
       location: "template",
@@ -66,12 +51,6 @@ export const pushLifecycle: CommandLifecycle = {
       location: "template",
       op: "update",
       note: "変更ファイルを含む PR を作成",
-    },
-    {
-      file: MODULES_FILE,
-      location: "template",
-      op: "update",
-      note: "カバーされないファイルがあれば新モジュールを追加して PR に含める",
     },
   ],
 };
@@ -152,10 +131,9 @@ export const pushCommand = defineCommand({
       throw new ZikuError(".ziku/ziku.jsonc not found.", "Run 'ziku init' first.");
     }
 
-    const { config: zikuConfig, rawContent: zikuConfigRaw } = await loadZikuConfig(targetDir);
+    const { config: zikuConfig } = await loadZikuConfig(targetDir);
 
-    // lock.json を読み込み（loadLock に集約）
-    // ENOENT → lock未作成、それ以外 → フォーマット不正として ZikuError に変換
+    // lock.json を読み込み（source + 同期状態）
     const lock = await Effect.runPromise(
       Effect.tryPromise({
         try: () => loadLock(targetDir),
@@ -177,61 +155,39 @@ export const pushCommand = defineCommand({
       );
     }
 
-    const localPatterns = {
+    // source は lock.json から取得
+    if (isLocalSource(lock.source)) {
+      throw new ZikuError(
+        "Push is not supported for local template sources",
+        "Push is only available for GitHub-hosted templates",
+      );
+    }
+
+    const patterns = {
       include: zikuConfig.include,
       exclude: zikuConfig.exclude ?? [],
-      rawContent: zikuConfigRaw,
     };
 
-    if (localPatterns.include.length === 0) {
+    if (patterns.include.length === 0) {
       log.warn("No patterns configured");
       return;
     }
 
     // Step 1: テンプレートを取得
-    // ローカルソースの場合はダウンロード不要、パスを直接使用
-    let templateDir: string;
-    let tempDir: string | undefined;
-    let unregisterCleanup: (() => void) | undefined;
-
-    if (isLocalSource(zikuConfig.source)) {
-      templateDir = resolve(zikuConfig.source.path);
-      log.info(`Template: ${pc.cyan(templateDir)} (local)`);
-    } else {
-      log.step("Fetching template...");
-      const templateSource = buildTemplateSource(zikuConfig.source);
-      const td = join(targetDir, ".ziku-temp");
-      tempDir = td;
-      unregisterCleanup = registerSyncCleanup(td);
-      const { dir } = await withSpinner("Downloading template from GitHub...", () =>
-        downloadTemplate(templateSource, {
-          dir: td,
-          force: true,
-        }),
-      );
-      templateDir = dir;
-    }
+    log.step("Fetching template...");
+    const templateSource = buildTemplateSource(lock.source);
+    const tempDir = join(targetDir, ".ziku-temp");
+    const unregisterCleanup = registerSyncCleanup(tempDir);
+    const { dir } = await withSpinner("Downloading template from GitHub...", () =>
+      downloadTemplate(templateSource, {
+        dir: tempDir,
+        force: true,
+      }),
+    );
+    const templateDir = dir;
 
     await withFinally(
       async () => {
-        // テンプレート側のパターンを読み込み、パターン結合
-        let effectiveInclude = localPatterns.include;
-        let effectiveExclude = localPatterns.exclude;
-        let templateModulesInfo: { modules: TemplateModule[]; rawContent: string } | undefined;
-
-        if (modulesFileExists(templateDir)) {
-          const loaded = await loadModulesFile(templateDir);
-          templateModulesInfo = loaded;
-          const templatePatterns = flattenModules(loaded.modules);
-
-          // マージされたパターンを使用
-          const allInclude = new Set([...templatePatterns.include, ...localPatterns.include]);
-          effectiveInclude = [...allInclude];
-          effectiveExclude = [...new Set([...templatePatterns.exclude, ...localPatterns.exclude])];
-        }
-
-        const patterns = { include: effectiveInclude, exclude: effectiveExclude };
-
         // 3-way マージ結果を保持
         const mergedContents = new Map<string, string>();
         const pushableFilePaths: Set<string> = new Set();
@@ -289,7 +245,7 @@ export const pushCommand = defineCommand({
                   );
                   const { downloadTemplateToTemp: downloadBase } =
                     await import("../utils/template");
-                  const baseSource = `gh:${zikuConfig.source.owner}/${zikuConfig.source.repo}#${lock.baseRef}`;
+                  const baseSource = `gh:${lock.source.owner}/${lock.source.repo}#${lock.baseRef}`;
                   return downloadBase(targetDir, baseSource);
                 }).pipe(
                   Effect.orElseSucceed(() => {
@@ -473,27 +429,6 @@ export const pushCommand = defineCommand({
           content: mergedContents.get(f.path) ?? f.localContent ?? "",
         }));
 
-        // push 対象ファイルが modules.jsonc のパターンでカバーされているかチェック。
-        // カバーされていないファイルがあれば modules.jsonc を自動更新して PR に含める。
-        // これにより他プロジェクトが init した際にも新ファイルが取得される。
-        if (templateModulesInfo) {
-          const { modules: tplModules, rawContent: tplRawContent } = templateModulesInfo;
-          const uncoveredFiles = files
-            .map((f) => f.path)
-            .filter((path) => path !== MODULES_FILE && !isFileMatchedByModules(path, tplModules));
-
-          if (uncoveredFiles.length > 0) {
-            const newModules = suggestModuleAdditions(uncoveredFiles, tplModules);
-            const updatedContent = addModulesToJsonc(tplRawContent, newModules);
-            files.push({ path: MODULES_FILE, content: updatedContent });
-
-            log.info(`Auto-adding ${uncoveredFiles.length} uncovered file(s) to ${MODULES_FILE}:`);
-            for (const mod of newModules) {
-              log.message(`  ${pc.green("+")} module "${mod.name}": ${mod.include.join(", ")}`);
-            }
-          }
-        }
-
         if (readmeResult?.updated) {
           files.push({
             path: README_PATH,
@@ -502,8 +437,8 @@ export const pushCommand = defineCommand({
         }
 
         // Step 4: サマリー表示 + 確認
-        const destination = `${zikuConfig.source.owner}/${zikuConfig.source.repo}`;
-        const baseBranch = zikuConfig.source.ref || "main";
+        const destination = `${lock.source.owner}/${lock.source.repo}`;
+        const baseBranch = lock.source.ref || "main";
         const baseHashStr = lock.baseRef ? `  ${pc.dim(`since ${lock.baseRef.slice(0, 7)}`)}` : "";
 
         const fileLines: string[] = [];
@@ -547,19 +482,19 @@ export const pushCommand = defineCommand({
 
         const result = await withSpinner("Creating PR on GitHub...", () =>
           createPullRequest(token, {
-            owner: zikuConfig.source.owner,
-            repo: zikuConfig.source.repo,
+            owner: lock.source.owner,
+            repo: lock.source.repo,
             files,
             title,
             body,
-            baseBranch: zikuConfig.source.ref || "main",
+            baseBranch: lock.source.ref || "main",
           }),
         );
 
         log.success("Pull request created!");
         log.message(
           [
-            `${pc.dim("To")} ${pc.bold(`${zikuConfig.source.owner}/${zikuConfig.source.repo}`)}`,
+            `${pc.dim("To")} ${pc.bold(`${lock.source.owner}/${lock.source.repo}`)}`,
             `  ${lock.baseRef ? `${pc.dim(lock.baseRef.slice(0, 7))}..` : ""}${pc.green(result.branch)}  ${pc.dim(`(${files.length} file${files.length === 1 ? "" : "s"} changed)`)}`,
             "",
             `  ${pc.bold(`PR #${result.number}`)}  ${pc.cyan(result.url)}`,

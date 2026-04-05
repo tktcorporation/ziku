@@ -80,21 +80,6 @@ vi.mock("../../ui/renderer", () => ({
   withSpinner: vi.fn(async (_text: string, fn: () => Promise<unknown>) => fn()),
 }));
 
-vi.mock("../../modules/index", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../../modules/index")>();
-  return {
-    ...original,
-    modulesFileExists: vi.fn(() => true),
-    loadPatternsFile: vi.fn(() =>
-      Promise.resolve({
-        include: [".mcp.json", ".mise.toml"],
-        exclude: [],
-        rawContent: '{"include":[".mcp.json",".mise.toml"],"exclude":[]}',
-      }),
-    ),
-  };
-});
-
 // モック後にインポート
 const { pullCommand } = await import("../pull");
 const { selectDeletedFiles } = await import("../../ui/prompts");
@@ -117,7 +102,6 @@ const mockThreeWayMerge = vi.mocked(threeWayMerge);
 const mockLog = vi.mocked(log);
 
 const baseZikuConfig = {
-  source: { owner: "tktcorporation", repo: ".github" },
   include: [".mcp.json", ".mise.toml"],
   exclude: [],
 };
@@ -125,6 +109,7 @@ const baseZikuConfig = {
 const baseLock = {
   version: "0.1.0",
   installedAt: "2024-01-01T00:00:00.000Z",
+  source: { owner: "tktcorporation", repo: ".github" },
   baseHashes: { ".mcp.json": "abc123" },
 };
 

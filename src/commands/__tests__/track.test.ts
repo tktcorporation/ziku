@@ -61,8 +61,7 @@ vi.spyOn(process, "exit").mockImplementation(() => {
 });
 
 // モック後にインポート
-const { modulesFileExists } = await import("../../modules");
-const { addIncludePattern, saveZikuConfig } = await import("../../utils/ziku-config");
+const { addIncludePattern, saveZikuConfig, zikuConfigExists } = await import("../../utils/ziku-config");
 
 describe("track command - core logic", () => {
   beforeEach(() => {
@@ -111,7 +110,7 @@ describe("track command - core logic", () => {
     it("パターン追加後にファイルを正しく保存できる", async () => {
       const initialContent = JSON.stringify(
         {
-          source: { owner: "test", repo: ".ziku" },
+  
           include: [".mcp.json"],
           exclude: [],
         },
@@ -133,9 +132,9 @@ describe("track command - core logic", () => {
       expect(parsed.include).toHaveLength(2);
     });
 
-    it("modules.jsonc が存在しない場合を検知できる", () => {
+    it("ziku.jsonc が存在しない場合を検知できる", () => {
       vol.fromJSON({});
-      expect(modulesFileExists("/project")).toBe(false);
+      expect(zikuConfigExists("/project")).toBe(false);
     });
   });
 });
@@ -153,7 +152,7 @@ describe("trackCommand", () => {
   it("--list のみで patterns なしでも動作する（required: false）", async () => {
     vol.fromJSON({
       "/project/.ziku/ziku.jsonc": JSON.stringify({
-        source: { owner: "test", repo: ".ziku" },
+
         include: [".mcp.json"],
         exclude: [],
       }),

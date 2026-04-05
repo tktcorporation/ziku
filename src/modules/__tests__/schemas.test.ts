@@ -1,16 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
-  configSchema,
   diffResultSchema,
   diffTypeSchema,
   fileActionSchema,
   fileDiffSchema,
   fileOperationResultSchema,
   filePathSchema,
-  moduleSchema,
+  lockSchema,
   nonNegativeIntSchema,
   overwriteStrategySchema,
   prResultSchema,
+  zikuConfigSchema,
 } from "../schemas";
 
 describe("nonNegativeIntSchema", () => {
@@ -88,72 +88,56 @@ describe("fileOperationResultSchema", () => {
   });
 });
 
-describe("moduleSchema", () => {
-  it("有効なモジュールを受け入れる", () => {
-    const module = {
-      name: "DevContainer",
-      description: "VS Code DevContainer 設定",
-      include: [".devcontainer/**"],
+describe("zikuConfigSchema", () => {
+  it("有効な設定を受け入れる（include のみ）", () => {
+    const config = {
+      include: [".mcp.json", ".devcontainer/**"],
     };
-    expect(moduleSchema.parse(module)).toEqual(module);
+    expect(zikuConfigSchema.parse(config)).toEqual(config);
   });
 
-  it("setupDescription を含むモジュールを受け入れる", () => {
-    const module = {
-      name: "DevContainer",
-      description: "VS Code DevContainer 設定",
-      setupDescription: "VS Code で開くとセットアップされます",
-      include: [".devcontainer/**"],
+  it("$schema フィールドを受け入れる", () => {
+    const config = {
+      $schema: "https://example.com/schema.json",
+      include: [".mcp.json"],
     };
-    expect(moduleSchema.parse(module)).toEqual(module);
+    expect(zikuConfigSchema.parse(config)).toEqual(config);
   });
 
-  it("exclude を含むモジュールを受け入れる", () => {
-    const module = {
-      name: "DevContainer",
-      description: "VS Code DevContainer 設定",
-      include: [".devcontainer/**"],
-      exclude: [".devcontainer/*.local"],
+  it("exclude フィールドを受け入れる", () => {
+    const config = {
+      include: [".mcp.json"],
+      exclude: ["*.local"],
     };
-    expect(moduleSchema.parse(module)).toEqual(module);
+    expect(zikuConfigSchema.parse(config)).toEqual(config);
   });
 
-  it("必須フィールドが欠けている場合は拒否する", () => {
-    expect(() =>
-      moduleSchema.parse({
-        name: "DevContainer",
-        // description が欠けている
-        include: [],
-      }),
-    ).toThrow();
+  it("include が欠けている場合は拒否する", () => {
+    expect(() => zikuConfigSchema.parse({ exclude: [] })).toThrow();
   });
 
   it("空の include 配列を受け入れる", () => {
-    const module = {
-      name: "Test",
-      description: "Test module",
-      include: [],
-    };
-    expect(moduleSchema.parse(module)).toEqual(module);
+    const config = { include: [] };
+    expect(zikuConfigSchema.parse(config)).toEqual(config);
   });
 });
 
-describe("configSchema", () => {
-  it("有効な設定を受け入れる", () => {
-    const config = {
-      version: "1.0.0",
+describe("lockSchema", () => {
+  it("有効な lock を受け入れる（source 付き）", () => {
+    const lock = {
+      version: "0.1.0",
       installedAt: "2024-01-01T00:00:00+09:00",
       source: {
         owner: "tktcorporation",
         repo: ".github",
       },
     };
-    expect(configSchema.parse(config)).toEqual(config);
+    expect(lockSchema.parse(lock)).toEqual(lock);
   });
 
   it("ref を含む source を受け入れる", () => {
-    const config = {
-      version: "1.0.0",
+    const lock = {
+      version: "0.1.0",
       installedAt: "2024-01-01T00:00:00+09:00",
       source: {
         owner: "tktcorporation",
@@ -161,12 +145,23 @@ describe("configSchema", () => {
         ref: "main",
       },
     };
-    expect(configSchema.parse(config)).toEqual(config);
+    expect(lockSchema.parse(lock)).toEqual(lock);
+  });
+
+  it("ローカルパス source を受け入れる", () => {
+    const lock = {
+      version: "0.1.0",
+      installedAt: "2024-01-01T00:00:00+09:00",
+      source: {
+        path: "/path/to/template",
+      },
+    };
+    expect(lockSchema.parse(lock)).toEqual(lock);
   });
 
   it("baseRef を受け入れる", () => {
-    const config = {
-      version: "1.0.0",
+    const lock = {
+      version: "0.1.0",
       installedAt: "2024-01-01T00:00:00+09:00",
       source: {
         owner: "tktcorporation",
@@ -174,13 +169,52 @@ describe("configSchema", () => {
       },
       baseRef: "abc123",
     };
-    expect(configSchema.parse(config)).toEqual(config);
+    expect(lockSchema.parse(lock)).toEqual(lock);
+  });
+
+  it("baseHashes を受け入れる", () => {
+    const lock = {
+      version: "0.1.0",
+      installedAt: "2024-01-01T00:00:00+09:00",
+      source: {
+        owner: "tktcorporation",
+        repo: ".github",
+      },
+      baseHashes: { ".mcp.json": "abc123" },
+    };
+    expect(lockSchema.parse(lock)).toEqual(lock);
+  });
+
+  it("pendingMerge を受け入れる", () => {
+    const lock = {
+      version: "0.1.0",
+      installedAt: "2024-01-01T00:00:00+09:00",
+      source: {
+        owner: "tktcorporation",
+        repo: ".github",
+      },
+      pendingMerge: {
+        conflicts: [".mcp.json"],
+        templateHashes: { ".mcp.json": "abc123" },
+        latestRef: "def456",
+      },
+    };
+    expect(lockSchema.parse(lock)).toEqual(lock);
+  });
+
+  it("source が欠けている場合は拒否する", () => {
+    expect(() =>
+      lockSchema.parse({
+        version: "0.1.0",
+        installedAt: "2024-01-01T00:00:00+09:00",
+      }),
+    ).toThrow();
   });
 
   it("不正な datetime 形式を拒否する", () => {
     expect(() =>
-      configSchema.parse({
-        version: "1.0.0",
+      lockSchema.parse({
+        version: "0.1.0",
         installedAt: "invalid-date",
         source: { owner: "test", repo: "test" },
       }),
@@ -188,12 +222,12 @@ describe("configSchema", () => {
   });
 
   it("ISO 8601 形式の datetime を受け入れる", () => {
-    const config = {
-      version: "1.0.0",
+    const lock = {
+      version: "0.1.0",
       installedAt: "2024-06-15T10:30:00Z",
       source: { owner: "test", repo: "test" },
     };
-    expect(configSchema.parse(config)).toEqual(config);
+    expect(lockSchema.parse(lock)).toEqual(lock);
   });
 });
 

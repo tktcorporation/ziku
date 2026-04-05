@@ -7,10 +7,11 @@ import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
 import type { LockState } from "../modules/schemas";
 import { isLocalSource, isGitHubSource } from "../modules/schemas";
+import { loadTemplateConfig } from "../utils/template-config";
 import { selectDeletedFiles } from "../ui/prompts";
 import { intro, log, outro, pc, withSpinner } from "../ui/renderer";
 import { LOCK_FILE, loadLock, saveLock } from "../utils/lock";
-import { ZIKU_CONFIG_FILE, loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
+import { ZIKU_CONFIG_FILE, loadZikuConfig, saveZikuConfig, generateZikuJsonc, zikuConfigExists } from "../utils/ziku-config";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 import { resolveLatestCommitSha } from "../utils/github";
@@ -33,8 +34,8 @@ export const pullLifecycle: CommandLifecycle = {
   name: "pull",
   description: "テンプレートの最新更新をローカルに反映",
   ops: [
-    { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "source と patterns を取得" },
-    { file: LOCK_FILE, location: "local", op: "read", note: "前回の baseHashes, baseRef を取得" },
+    { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "patterns を取得" },
+    { file: LOCK_FILE, location: "local", op: "read", note: "source, baseHashes, baseRef を取得" },
     {
       file: SYNCED_FILES,
       location: "template",
@@ -46,6 +47,12 @@ export const pullLifecycle: CommandLifecycle = {
       location: "local",
       op: "update",
       note: "自動更新・新規追加・3-way マージ・削除",
+    },
+    {
+      file: ZIKU_CONFIG_FILE,
+      location: "local",
+      op: "update",
+      note: "テンプレートの新パターンをマージ",
     },
     {
       file: LOCK_FILE,
@@ -116,12 +123,15 @@ export const pullCommand = defineCommand({
       return;
     }
 
+    // source は lock.json から取得
+    const source = lock.source;
+
     // Step 2: テンプレートを取得
     let templateDir: string;
     let cleanup: () => void;
 
-    if (isLocalSource(zikuConfig.source)) {
-      templateDir = resolve(zikuConfig.source.path);
+    if (isLocalSource(source)) {
+      templateDir = resolve(source.path);
       cleanup = () => {};
       log.info(`Template: ${pc.cyan(templateDir)} (local)`);
     } else {
@@ -129,7 +139,7 @@ export const pullCommand = defineCommand({
       const downloaded = await withSpinner("Downloading template from GitHub...", () =>
         downloadTemplateToTemp(
           targetDir,
-          `gh:${zikuConfig.source.owner}/${zikuConfig.source.repo}`,
+          `gh:${source.owner}/${source.repo}`,
         ),
       );
       templateDir = downloaded.templateDir;
@@ -137,12 +147,42 @@ export const pullCommand = defineCommand({
     }
 
     await withFinally(async () => {
-      // Step 3: ハッシュ計算
+      // Step 2.5: テンプレートの ziku.jsonc を読み、ユーザーのパターンとマージ
+      // テンプレートで追加された新パターンがユーザーにも反映される
+      const templateConfig = await Effect.runPromise(
+        loadTemplateConfig(templateDir).pipe(
+          Effect.orElseSucceed(() => null),
+        ),
+      );
+
+      let mergedInclude = include;
+      let mergedExclude = exclude;
+      let patternsUpdated = false;
+
+      if (templateConfig) {
+        const newInclude = templateConfig.include.filter((p) => !include.includes(p));
+        const newExclude = (templateConfig.exclude ?? []).filter((p) => !exclude.includes(p));
+
+        if (newInclude.length > 0 || newExclude.length > 0) {
+          mergedInclude = [...include, ...newInclude];
+          mergedExclude = [...exclude, ...newExclude];
+          patternsUpdated = true;
+
+          if (newInclude.length > 0) {
+            log.info(`Template added ${newInclude.length} new pattern(s):`);
+            for (const p of newInclude) {
+              log.message(`  ${pc.green("+")} ${p}`);
+            }
+          }
+        }
+      }
+
+      // Step 3: ハッシュ計算（マージ後のパターンで実行）
       log.step("Analyzing changes...");
 
       const [templateHashes, localHashes] = await Promise.all([
-        hashFiles(templateDir, include, exclude),
-        hashFiles(targetDir, include, exclude),
+        hashFiles(templateDir, mergedInclude, mergedExclude),
+        hashFiles(targetDir, mergedInclude, mergedExclude),
       ]);
       const baseHashes = lock.baseHashes ?? {};
 
@@ -199,11 +239,11 @@ export const pullCommand = defineCommand({
         let baseCleanup: (() => void) | undefined;
 
         // ベースバージョンのダウンロード（失敗時は 2-way フォールバック）
-        if (lock.baseRef && isGitHubSource(zikuConfig.source)) {
+        if (lock.baseRef && isGitHubSource(source)) {
           const baseResult = await Effect.runPromise(
             Effect.tryPromise(() => {
               log.info(`Downloading base version (${lock.baseRef?.slice(0, 7)}...) for merge...`);
-              const baseSource = `gh:${zikuConfig.source.owner}/${zikuConfig.source.repo}#${lock.baseRef}`;
+              const baseSource = `gh:${source.owner}/${source.repo}#${lock.baseRef}`;
               return downloadTemplateToTemp(targetDir, baseSource, "base");
             }).pipe(
               Effect.orElseSucceed(() => {
@@ -254,8 +294,8 @@ export const pullCommand = defineCommand({
         );
 
         if (unresolvedConflicts.length > 0) {
-          const latestRef = isGitHubSource(zikuConfig.source)
-            ? await resolveLatestCommitSha(zikuConfig.source.owner, zikuConfig.source.repo)
+          const latestRef = isGitHubSource(source)
+            ? await resolveLatestCommitSha(source.owner, source.repo)
             : undefined;
           await saveLock(targetDir, {
             ...lock,
@@ -297,9 +337,19 @@ export const pullCommand = defineCommand({
       }
 
       // Step 10: 設定を更新
-      const latestRef = isGitHubSource(zikuConfig.source)
-        ? await resolveLatestCommitSha(zikuConfig.source.owner, zikuConfig.source.repo)
+      const latestRef = isGitHubSource(source)
+        ? await resolveLatestCommitSha(source.owner, source.repo)
         : undefined;
+
+      // パターンが更新された場合、ユーザーの ziku.jsonc を上書き
+      if (patternsUpdated) {
+        const updatedContent = generateZikuJsonc({
+          include: mergedInclude,
+          exclude: mergedExclude,
+        });
+        await saveZikuConfig(targetDir, updatedContent);
+        log.success(`Updated ${ZIKU_CONFIG_FILE} with new patterns from template`);
+      }
 
       const updatedLock = {
         ...lock,

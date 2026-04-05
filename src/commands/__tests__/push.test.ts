@@ -102,28 +102,6 @@ vi.mock("../../utils/lock", async (importOriginal) => {
   return { ...actual };
 });
 
-// modules をモック
-vi.mock("../../modules", () => ({
-  MODULES_FILE: ".ziku/modules.jsonc",
-  modulesFileExists: vi.fn(() => true),
-  loadModulesFile: vi.fn(() =>
-    Promise.resolve({
-      modules: [
-        { name: "Root", description: "Root", include: [".root/**"] },
-        { name: "GitHub", description: "GitHub", include: [".github/**"] },
-      ],
-      rawContent: '{"modules":[]}',
-    }),
-  ),
-  flattenModules: vi.fn(() => ({
-    include: [".root/**", ".github/**"],
-    exclude: [],
-  })),
-  isFileMatchedByModules: vi.fn(() => true),
-  suggestModuleAdditions: vi.fn(() => []),
-  addModulesToJsonc: vi.fn((raw: string) => raw),
-}));
-
 // ui/renderer をモック
 vi.mock("../../ui/renderer", () => ({
   intro: vi.fn(),
@@ -174,10 +152,6 @@ const mockClassifyFiles = vi.mocked(classifyFiles);
 const mockThreeWayMerge = vi.mocked(threeWayMerge);
 
 const validZikuConfig = {
-  source: {
-    owner: "tktcorporation",
-    repo: ".github",
-  },
   include: [".github/**"],
   exclude: [],
 };
@@ -185,6 +159,10 @@ const validZikuConfig = {
 const validLock = {
   version: "0.1.0",
   installedAt: "2024-01-01T00:00:00.000Z",
+  source: {
+    owner: "tktcorporation",
+    repo: ".github",
+  },
 };
 
 const emptyDiff = {

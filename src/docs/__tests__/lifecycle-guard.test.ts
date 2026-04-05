@@ -14,7 +14,6 @@
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { MODULES_FILE } from "../../modules/loader";
 import { LOCK_FILE } from "../../utils/lock";
 import { ZIKU_CONFIG_FILE } from "../../utils/ziku-config";
 import type { FileOp } from "../lifecycle-types";
@@ -42,8 +41,6 @@ const IMPORT_OP_MAP: Record<string, { file: string; ops: string[] }[]> = {
   loadLock: [{ file: LOCK_FILE, ops: ["read"] }],
   saveLock: [{ file: LOCK_FILE, ops: ["update", "create"] }],
   saveZikuConfig: [{ file: ZIKU_CONFIG_FILE, ops: ["update"] }],
-  loadPatternsFile: [{ file: MODULES_FILE, ops: ["read"] }],
-  loadTemplateModulesFile: [{ file: MODULES_FILE, ops: ["read"] }],
 };
 
 // ──────────────────────────────────────────────

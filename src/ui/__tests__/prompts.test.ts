@@ -31,21 +31,19 @@ import {
   inputPrTitle,
   openEditorForConflicts,
   selectDeletedFiles,
-  selectModules,
+  selectDirectories,
   selectOverwriteStrategy,
   selectPushFiles,
 } from "../prompts";
 
-const testModules = [
+const testEntries = [
   {
-    name: "Dev Container",
-    description: "Dev Container config",
-    include: [".devcontainer/**"],
+    label: ".devcontainer",
+    patterns: [".devcontainer/**"],
   },
   {
-    name: "GitHub Actions",
-    description: "CI/CD",
-    include: [".github/**"],
+    label: ".github",
+    patterns: [".github/**"],
   },
 ];
 
@@ -54,19 +52,19 @@ describe("prompts", () => {
     vi.clearAllMocks();
   });
 
-  describe("selectModules", () => {
-    it("should return selected modules as TemplateModule[]", async () => {
-      vi.mocked(p.multiselect).mockResolvedValue(["Dev Container"]);
-      const result = await selectModules(testModules);
-      expect(result).toEqual([testModules[0]]);
+  describe("selectDirectories", () => {
+    it("should return selected patterns", async () => {
+      vi.mocked(p.multiselect).mockResolvedValue([".devcontainer"]);
+      const result = await selectDirectories(testEntries);
+      expect(result).toEqual([".devcontainer/**"]);
     });
 
-    it("should pass all module names as initial values", async () => {
-      vi.mocked(p.multiselect).mockResolvedValue(["Dev Container", "GitHub Actions"]);
-      await selectModules(testModules);
+    it("should pass all directory labels as initial values", async () => {
+      vi.mocked(p.multiselect).mockResolvedValue([".devcontainer", ".github"]);
+      await selectDirectories(testEntries);
       expect(p.multiselect).toHaveBeenCalledWith(
         expect.objectContaining({
-          initialValues: ["Dev Container", "GitHub Actions"],
+          initialValues: [".devcontainer", ".github"],
         }),
       );
     });

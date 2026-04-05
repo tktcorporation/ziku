@@ -12,7 +12,7 @@ import { Effect } from "effect";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { match } from "ts-pattern";
-import type { FileDiff, OverwriteStrategy, TemplateModule } from "../modules/schemas";
+import type { FileDiff, OverwriteStrategy } from "../modules/schemas";
 
 /** ユーザーが Ctrl+C でキャンセルした場合の統一処理 */
 function handleCancel(value: unknown): void {
@@ -24,21 +24,30 @@ function handleCancel(value: unknown): void {
 
 // ─── init ─────────────────────────────────────────────────────
 
-/** モジュール選択（TemplateModule[] を返す）— init 時にテンプレートがモジュール形式の場合に使用 */
-export async function selectModules(moduleList: TemplateModule[]): Promise<TemplateModule[]> {
+/**
+ * テンプレートのトップレベルディレクトリを選択する。
+ *
+ * テンプレートの include パターンからトップレベルディレクトリとルートファイルを抽出し、
+ * ユーザーに選択させる。選択結果はパターン文字列の配列。
+ */
+export async function selectDirectories(
+  entries: Array<{ label: string; patterns: string[] }>,
+): Promise<string[]> {
   const selected = await p.multiselect({
-    message: "Select modules to install",
-    options: moduleList.map((m) => ({
-      value: m.name,
-      label: m.name,
-      hint: m.description,
+    message: "Select directories to sync",
+    options: entries.map((e) => ({
+      value: e.label,
+      label: e.label,
+      hint: e.patterns.join(", "),
     })),
-    initialValues: moduleList.map((m) => m.name),
+    initialValues: entries.map((e) => e.label),
     required: true,
   });
   handleCancel(selected);
-  const selectedNames = new Set(selected as string[]);
-  return moduleList.filter((m) => selectedNames.has(m.name));
+  const selectedLabels = new Set(selected as string[]);
+  return entries
+    .filter((e) => selectedLabels.has(e.label))
+    .flatMap((e) => e.patterns);
 }
 
 /**
@@ -73,7 +82,7 @@ export interface TemplateCandidate {
   owner: string;
   repo: string;
   label: string;
-  /** .ziku/modules.jsonc が存在するか（セットアップ済みか） */
+  /** .ziku/ziku.jsonc が存在するか（セットアップ済みか） */
   ready?: boolean;
 }
 
@@ -176,25 +185,6 @@ export async function inputTemplateSource(defaultValue?: string): Promise<string
   return source as string;
 }
 
-/**
- * テンプレートリポジトリに .ziku/modules.jsonc が存在しない場合の確認
- */
-export async function confirmScaffoldDevenvPR(owner: string, repo: string): Promise<boolean> {
-  p.log.warn(
-    `Template ${pc.cyan(`${owner}/${repo}`)} does not contain ${pc.cyan(".ziku/modules.jsonc")}`,
-  );
-  p.log.message(
-    pc.dim(
-      "This file defines which modules and file patterns ziku manages.\nIt must exist in the template repository to continue.",
-    ),
-  );
-
-  const confirmed = await p.confirm({
-    message: `Create a PR to add .ziku/modules.jsonc to ${owner}/${repo}?`,
-  });
-  handleCancel(confirmed);
-  return confirmed as boolean;
-}
 
 // ─── push ─────────────────────────────────────────────────────
 

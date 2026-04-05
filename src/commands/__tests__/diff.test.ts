@@ -43,6 +43,12 @@ vi.mock("../../utils/ziku-config", async (importOriginal) => {
   return { ...actual };
 });
 
+// utils/lock をモック
+vi.mock("../../utils/lock", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual };
+});
+
 // ui/diff-view をモック
 vi.mock("../../ui/diff-view", () => ({
   renderFileDiff: vi.fn(),
@@ -86,11 +92,16 @@ const mockLogDiffSummary = vi.mocked(logDiffSummary);
 const mockRenderFileDiff = vi.mocked(renderFileDiff);
 
 const validZikuConfig = {
+  include: [".root/**", ".github/**"],
+};
+
+const validLock = {
+  version: "0.1.0",
+  installedAt: "2024-01-01T00:00:00.000Z",
   source: {
     owner: "tktcorporation",
     repo: ".github",
   },
-  include: [".root/**", ".github/**"],
 };
 
 const emptyDiff = {
@@ -163,9 +174,9 @@ describe("diffCommand", () => {
     it("patterns が空の場合は警告", async () => {
       vol.fromJSON({
         "/test/.ziku/ziku.jsonc": JSON.stringify({
-          source: { owner: "tktcorporation", repo: ".github" },
           include: [],
         }),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
       });
 
       await (diffCommand.run as any)({
@@ -180,6 +191,7 @@ describe("diffCommand", () => {
     it("差分がない場合は outro で完了メッセージ", async () => {
       vol.fromJSON({
         "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
       });
 
       mockDetectDiff.mockResolvedValueOnce(emptyDiff);
@@ -197,6 +209,7 @@ describe("diffCommand", () => {
     it("差分がある場合は logDiffSummary を呼ぶ", async () => {
       vol.fromJSON({
         "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
       });
 
       const diffWithChanges = {
@@ -226,6 +239,7 @@ describe("diffCommand", () => {
     it("一時ディレクトリを削除", async () => {
       vol.fromJSON({
         "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
         "/test/.ziku-temp": null,
       });
 
@@ -242,14 +256,15 @@ describe("diffCommand", () => {
       expect(mockDownloadTemplate).toHaveBeenCalled();
     });
 
-    it("config.source からテンプレートソースを構築", async () => {
-      const customConfig = {
-        ...validZikuConfig,
+    it("lock.source からテンプレートソースを構築", async () => {
+      const customLock = {
+        ...validLock,
         source: { owner: "custom-org", repo: "custom-templates" },
       };
 
       vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(customConfig),
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(customLock),
       });
 
       mockDetectDiff.mockResolvedValueOnce(emptyDiff);
@@ -270,6 +285,7 @@ describe("diffCommand", () => {
     it("エラー時も一時ディレクトリを削除", async () => {
       vol.fromJSON({
         "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
         "/test/.ziku-temp": null,
       });
 
@@ -287,6 +303,7 @@ describe("diffCommand", () => {
     it("--verbose のとき renderFileDiff を各変更ファイルに対して呼ぶ", async () => {
       vol.fromJSON({
         "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
       });
 
       const diffWithChanges = {
@@ -315,6 +332,7 @@ describe("diffCommand", () => {
     it("--verbose なしのとき renderFileDiff を呼ばない", async () => {
       vol.fromJSON({
         "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
       });
 
       const diffWithChanges = {
@@ -343,6 +361,7 @@ describe("diffCommand", () => {
     it("--verbose のとき変更ファイルのみ renderFileDiff を呼び、unchanged ファイルはスキップ", async () => {
       vol.fromJSON({
         "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
       });
 
       const unchangedFile = {
