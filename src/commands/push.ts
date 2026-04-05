@@ -6,7 +6,7 @@ import { downloadTemplate } from "giget";
 import { join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
-import { loadPatternsFile, modulesFileExists } from "../modules";
+import { MODULES_FILE, loadPatternsFile, modulesFileExists } from "../modules";
 import type { FileDiff } from "../modules/schemas";
 import { loadLock } from "../utils/lock";
 import { loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
@@ -54,7 +54,6 @@ function registerSyncCleanup(tempDir: string): () => void {
   };
 }
 
-const MODULES_FILE_PATH = ".ziku/modules.jsonc"; // テンプレート側の modules.jsonc パス
 const README_PATH = "README.md";
 
 /**
@@ -378,7 +377,7 @@ export const pushCommand = defineCommand({
           logDiffSummary(diff.files);
 
           if (updatedModulesContent) {
-            log.message(`${pc.green("+")} ${MODULES_FILE_PATH} ${pc.dim("(pattern additions)")}`);
+            log.message(`${pc.green("+")} ${MODULES_FILE} ${pc.dim("(pattern additions)")}`);
           }
 
           log.info("No PR was created (dry run)");
@@ -444,7 +443,7 @@ export const pushCommand = defineCommand({
 
         if (updatedModulesContent) {
           files.push({
-            path: MODULES_FILE_PATH,
+            path: MODULES_FILE,
             content: updatedModulesContent,
           });
         }

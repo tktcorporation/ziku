@@ -6,7 +6,11 @@ import { z } from "zod";
 import type { TemplateModule } from "./schemas";
 import { moduleSchema } from "./schemas";
 
-const MODULES_FILE = ".ziku/modules.jsonc";
+/**
+ * テンプレートリポジトリ側のモジュール定義ファイルパス。
+ * ユーザープロジェクトには存在しない（ユーザー側は ziku.jsonc を使う）。
+ */
+export const MODULES_FILE = ".ziku/modules.jsonc";
 
 /**
  * modules.jsonc の $schema URL。

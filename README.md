@@ -94,8 +94,6 @@ npx ziku track '.eslintrc.*'
 
 <!-- GETTING_STARTED:END -->
 
-<!-- FEATURES:START -->
-
 ## Modules
 
 Templates can organize files into **modules** — named groups of file patterns. During `ziku init`, you pick which modules to apply, and the selected patterns are saved to `.ziku/ziku.jsonc` in your project.
@@ -148,8 +146,6 @@ Template authors define modules in `.ziku/modules.jsonc` inside the template rep
 Module names and descriptions appear in the selection UI during `ziku init`. You can create any number of modules with any file patterns.
 
 </details>
-
-<!-- FEATURES:END -->
 
 <!-- COMMANDS:START -->
 
