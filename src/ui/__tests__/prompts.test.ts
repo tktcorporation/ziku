@@ -348,10 +348,10 @@ describe("prompts", () => {
       expect(execFileSync).toHaveBeenCalledWith("code", ["file1.ts"], { stdio: "inherit" });
 
       process.env.EDITOR = originalEditor;
-      if (originalVisual !== undefined) {
-        process.env.VISUAL = originalVisual;
-      } else {
+      if (originalVisual === undefined) {
         delete process.env.VISUAL;
+      } else {
+        process.env.VISUAL = originalVisual;
       }
     });
 

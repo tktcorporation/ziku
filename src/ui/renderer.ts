@@ -48,7 +48,7 @@ export const log = {
 };
 
 /** スピナー付きで非同期タスクを実行 */
-export async function withSpinner<T>(message: string, task: () => Promise<T>): Promise<T> {
+export function withSpinner<T>(message: string, task: () => Promise<T>): Promise<T> {
   const s = p.spinner();
   s.start(message);
   return Effect.runPromise(
@@ -71,19 +71,21 @@ export function logFileResults(results: { action: string; path: string }[]): {
 
   const lines: string[] = [];
   for (const r of results) {
-    match(r.action)
-      .with("copied", "created", () => {
-        lines.push(`${pc.green("+")} ${r.path}`);
-        added++;
-      })
-      .with("overwritten", () => {
-        lines.push(`${pc.yellow("~")} ${r.path}`);
-        updated++;
-      })
-      .otherwise(() => {
-        lines.push(`${pc.dim("-")} ${pc.dim(r.path)}`);
-        skipped++;
-      });
+    const label = match(r.action)
+      .with("copied", "created", () => "added" as const)
+      .with("overwritten", () => "updated" as const)
+      .otherwise(() => "skipped" as const);
+
+    if (label === "added") {
+      lines.push(`${pc.green("+")} ${r.path}`);
+      added++;
+    } else if (label === "updated") {
+      lines.push(`${pc.yellow("~")} ${r.path}`);
+      updated++;
+    } else {
+      lines.push(`${pc.dim("-")} ${pc.dim(r.path)}`);
+      skipped++;
+    }
   }
 
   const summary = [

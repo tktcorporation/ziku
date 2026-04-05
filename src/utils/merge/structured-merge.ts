@@ -267,10 +267,10 @@ function getJsonDiffs(base: unknown, target: unknown, path: (string | number)[] 
     const childPath = [...path, key];
     if (!(key in baseObj)) {
       diffs.push({ path: childPath, type: "add", value: targetObj[key] });
-    } else if (!(key in targetObj)) {
-      diffs.push({ path: childPath, type: "remove" });
-    } else {
+    } else if (key in targetObj) {
       diffs.push(...getJsonDiffs(baseObj[key], targetObj[key], childPath));
+    } else {
+      diffs.push({ path: childPath, type: "remove" });
     }
   }
 
@@ -342,8 +342,14 @@ function setAtPath(obj: Record<string, unknown>, path: (string | number)[], valu
     }
     current = record[key];
   }
-  if (current !== null && current !== undefined && typeof current === "object") {
-    (current as Record<string | number, unknown>)[path[path.length - 1]] = value;
+  const lastKey = path.at(-1);
+  if (
+    lastKey !== undefined &&
+    current !== null &&
+    current !== undefined &&
+    typeof current === "object"
+  ) {
+    (current as Record<string | number, unknown>)[lastKey] = value;
   }
 }
 
@@ -355,7 +361,13 @@ function deleteAtPath(obj: Record<string, unknown>, path: (string | number)[]): 
     if (current === null || current === undefined || typeof current !== "object") return;
     current = (current as Record<string | number, unknown>)[key];
   }
-  if (current !== null && current !== undefined && typeof current === "object") {
-    delete (current as Record<string | number, unknown>)[path[path.length - 1]];
+  const lastKey = path.at(-1);
+  if (
+    lastKey !== undefined &&
+    current !== null &&
+    current !== undefined &&
+    typeof current === "object"
+  ) {
+    delete (current as Record<string | number, unknown>)[lastKey];
   }
 }

@@ -25,7 +25,7 @@ export async function loadMergedGitignore(dirs: string[]): Promise<Ignore> {
  * gitignore に該当しないファイルのみを返す
  */
 export function filterByGitignore(files: string[], ig: Ignore): string[] {
-  return ig.filter(files);
+  return files.filter((file) => !ig.ignores(file));
 }
 
 /**

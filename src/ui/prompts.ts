@@ -432,7 +432,7 @@ export function openEditorForConflicts(filePaths: string[]): void {
     // エディタが見つからない場合はスキップ
     Effect.runSync(
       Effect.try(() => execFileSync(editor, [filePath], { stdio: "inherit" })).pipe(
-        Effect.orElseSucceed(() => undefined),
+        Effect.orElseSucceed(() => {}),
       ),
     );
   }

@@ -1,0 +1,21 @@
+# try/catch 禁止ルール
+#
+# 背景: EffectTS の型付きエラーチャネルに統一するため、
+# try/catch/finally によるエラーハンドリングを禁止する。
+# Effect.tryPromise, Effect.try, Effect.catchTag 等を使うこと。
+id: no-try-catch
+language: typescript
+rule:
+  kind: try_statement
+severity: error
+message: >-
+  try/catch は禁止です。EffectTS のエラーハンドリングを使ってください。
+  Effect.tryPromise(), Effect.try(), Effect.gen + yield* で置き換えてください。
+note: >-
+  参照: .claude/rules/effect-ts.md
+files:
+  - "src/**/*.ts"
+ignoreFiles:
+  - "src/effect-helpers.ts"
+  - "src/**/__tests__/**"
+  - "src/**/*.test.ts"

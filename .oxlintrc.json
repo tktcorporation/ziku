@@ -39,7 +39,17 @@
     "unicorn/no-nested-ternary": "warn",
     "unicorn/prefer-string-replace-all": "warn",
     "unicorn/no-array-reduce": "off",
+    "unicorn/no-hex-escape": "off",
+    "unicorn/no-immediate-mutation": "off",
+    "unicorn/no-typeof-undefined": "off",
 
+    "no-inline-comments": "off",
+    "no-negated-condition": "off",
+    "max-lines-per-function": "off",
+    "max-lines": "off",
+    "max-classes-per-file": "off",
+
+    "import/max-dependencies": "off",
     "import/no-cycle": "error",
     "import/no-self-import": "error",
     "import/no-duplicates": "error"
@@ -49,8 +59,14 @@
       "files": ["**/__tests__/**", "**/*.test.ts", "**/*.spec.ts"],
       "rules": {
         "typescript/no-explicit-any": "off",
+        "typescript/no-non-null-assertion": "off",
         "typescript/consistent-type-imports": "off",
-        "no-unused-vars": "warn"
+        "no-unused-vars": "warn",
+        "max-lines-per-function": "off",
+        "max-lines": "off",
+        "no-inline-comments": "off",
+        "require-await": "off",
+        "unicorn/no-array-callback-reference": "off"
       }
     }
   ],

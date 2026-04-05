@@ -54,7 +54,7 @@ vi.mock("../../utils/github", () => ({
   checkRepoExists: vi.fn(() => Promise.resolve(true)),
   checkRepoSetup: vi.fn(() => Promise.resolve(true)),
   getGitHubToken: vi.fn(() => "ghp_test"),
-  getAuthenticatedUserLogin: vi.fn(() => Promise.resolve(undefined)),
+  getAuthenticatedUserLogin: vi.fn(() => Promise.resolve()),
   scaffoldTemplateRepo: vi.fn(() => Promise.resolve({ url: "https://github.com/test/repo" })),
   createDevenvScaffoldPR: vi.fn(() =>
     Promise.resolve({ url: "https://github.com/test/repo/pull/1", number: 1, branch: "ziku" }),
@@ -174,7 +174,7 @@ const { pullCommand } = await import("../pull");
 const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy } =
   await import("../../utils/template");
 const { hashFiles } = await import("../../utils/hash");
-const { zikuConfigExists } = await import("../../utils/ziku-config");
+const { zikuConfigExists: _zikuConfigExists } = await import("../../utils/ziku-config");
 const {
   modulesFileExists,
   loadPatternsFile: _loadPatternsFile,
@@ -200,11 +200,9 @@ const mockCheckRepoExists = vi.mocked(checkRepoExists);
 
 // ── helpers ─────────────────────────────────────────────────────
 
-function createZikuJsonc(
-  include: string[],
-  exclude?: string[],
-  source = { owner: "test-org", repo: ".github" },
-): string {
+const DEFAULT_SOURCE = { owner: "test-org", repo: ".github" };
+
+function createZikuJsonc(include: string[], exclude?: string[], source = DEFAULT_SOURCE): string {
   const content: Record<string, unknown> = { source, include };
   if (exclude && exclude.length > 0) content.exclude = exclude;
   return JSON.stringify(content, null, 2);
@@ -222,7 +220,7 @@ const baseLock = {
   baseHashes: {},
 };
 
-const baseSource = { owner: "test-org", repo: ".github" };
+const _baseSource = { owner: "test-org", repo: ".github" };
 
 // ═══════════════════════════════════════════════════════════════
 // E2E Scenarios

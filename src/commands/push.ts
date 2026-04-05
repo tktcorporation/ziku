@@ -116,18 +116,19 @@ export const pushCommand = defineCommand({
     const { config: zikuConfig, rawContent: zikuConfigRaw } = await loadZikuConfig(targetDir);
 
     // lock.json を読み込み（loadLock に集約）
-    let lock;
-    try {
-      lock = await loadLock(targetDir);
-    } catch (error) {
-      if (error instanceof Error && error.message.includes("ENOENT")) {
-        throw new ZikuError(".ziku/lock.json not found.", "Run 'ziku init' first.");
-      }
-      throw new ZikuError(
-        "Invalid .ziku/lock.json format",
-        error instanceof Error ? error.message : String(error),
-      );
-    }
+    // ENOENT → lock未作成、それ以外 → フォーマット不正として ZikuError に変換
+    const lock = await Effect.runPromise(
+      Effect.tryPromise({
+        try: () => loadLock(targetDir),
+        catch: (error) =>
+          error instanceof Error && error.message.includes("ENOENT")
+            ? new ZikuError(".ziku/lock.json not found.", "Run 'ziku init' first.")
+            : new ZikuError(
+                "Invalid .ziku/lock.json format",
+                error instanceof Error ? error.message : String(error),
+              ),
+      }).pipe(Effect.mapError((e) => e)),
+    );
 
     if (lock.pendingMerge) {
       throw new ZikuError(
@@ -234,7 +235,7 @@ export const pushCommand = defineCommand({
               await import("../utils/merge");
 
             const baseInfo = lock.baseRef
-              ? `since ${pc.bold(lock.baseRef!.slice(0, 7))} (your last sync)`
+              ? `since ${pc.bold(lock.baseRef?.slice(0, 7))} (your last sync)`
               : "since your last pull/init";
             log.warn(
               `Template updated ${baseInfo} — ${classification.conflicts.length} conflict(s) detected, attempting auto-merge...`,
@@ -248,7 +249,7 @@ export const pushCommand = defineCommand({
               const baseResult = await Effect.runPromise(
                 Effect.tryPromise(async () => {
                   log.info(
-                    `Downloading base version (${lock.baseRef!.slice(0, 7)}...) for merge...`,
+                    `Downloading base version (${lock.baseRef?.slice(0, 7)}...) for merge...`,
                   );
                   const { downloadTemplateToTemp: downloadBase } =
                     await import("../utils/template");
@@ -326,7 +327,6 @@ export const pushCommand = defineCommand({
                     });
                     if (!proceed) {
                       log.info("Run `ziku pull` first to sync template changes, then push again.");
-                      return;
                     }
                   }
                 }
@@ -515,7 +515,7 @@ export const pushCommand = defineCommand({
         log.message(
           [
             `${pc.dim("To")} ${pc.bold(`${zikuConfig.source.owner}/${zikuConfig.source.repo}`)}`,
-            `  ${lock.baseRef ? `${pc.dim(lock.baseRef.slice(0, 7))}..` : ""}${pc.green(result.branch)}  ${pc.dim(`(${files.length} file${files.length !== 1 ? "s" : ""} changed)`)}`,
+            `  ${lock.baseRef ? `${pc.dim(lock.baseRef.slice(0, 7))}..` : ""}${pc.green(result.branch)}  ${pc.dim(`(${files.length} file${files.length === 1 ? "" : "s"} changed)`)}`,
             "",
             `  ${pc.bold(`PR #${result.number}`)}  ${pc.cyan(result.url)}`,
           ].join("\n"),

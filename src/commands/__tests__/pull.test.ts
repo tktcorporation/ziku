@@ -144,7 +144,7 @@ describe("pullCommand", () => {
     });
     mockLoadLock.mockResolvedValue(baseLock as any);
     mockHashFiles.mockResolvedValue({});
-    mockSaveLock.mockResolvedValue(undefined);
+    mockSaveLock.mockResolvedValue();
   });
 
   describe("meta", () => {

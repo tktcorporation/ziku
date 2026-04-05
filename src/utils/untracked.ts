@@ -128,10 +128,12 @@ export async function detectUntrackedFiles(options: {
 
   // ディレクトリ内の全ファイルを取得
   const allDirFiles = getAllFilesInDirs(targetDir, allBaseDirs);
-  const filteredDirFiles = gitignore.filter(allDirFiles);
+  const filteredDirFiles = allDirFiles.filter((f) => !gitignore.ignores(f));
 
   // ルート直下のファイルを取得（ルートパターンがある場合のみ）
-  const filteredRootFiles = hasRootPatterns ? gitignore.filter(getRootDotFiles(targetDir)) : [];
+  const filteredRootFiles = hasRootPatterns
+    ? getRootDotFiles(targetDir).filter((f) => !gitignore.ignores(f))
+    : [];
 
   // 全ファイルをマージ（重複なし）
   const allFiles = new Set([...filteredDirFiles, ...filteredRootFiles]);

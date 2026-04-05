@@ -30,14 +30,12 @@ export function threeWayMerge({
   // コンフリクトがある場合、パースに失敗した場合はテキストマージにフォールバックする。
   if (filePath && isJsonFile(filePath)) {
     const jsonResult = mergeJsonContent(base, local, template);
-    if (jsonResult !== null && !jsonResult.hasConflicts) {
-      // JSON 構造マージは値レベルでしか差分を検出しないため、
-      // JSONC コメントやフォーマットのみの変更を見落とす。
-      // マージ結果がローカルと同一の場合、テンプレート側の変更（コメント等）が
-      // 反映されていない可能性があるため、テキストマージにフォールバックする。
-      if (jsonResult.content !== String(local)) {
-        return jsonResult;
-      }
+    // JSON 構造マージは値レベルでしか差分を検出しないため、
+    // JSONC コメントやフォーマットのみの変更を見落とす。
+    // マージ結果がローカルと同一の場合、テンプレート側の変更（コメント等）が
+    // 反映されていない可能性があるため、テキストマージにフォールバックする。
+    if (jsonResult !== null && !jsonResult.hasConflicts && jsonResult.content !== String(local)) {
+      return jsonResult;
     }
   }
 

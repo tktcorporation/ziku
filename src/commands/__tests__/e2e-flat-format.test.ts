@@ -49,8 +49,8 @@ vi.mock("../../utils/github", () => ({
   resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
   checkRepoExists: vi.fn(() => Promise.resolve(true)),
   checkRepoSetup: vi.fn(() => Promise.resolve(true)),
-  getGitHubToken: vi.fn(() => undefined),
-  getAuthenticatedUserLogin: vi.fn(() => Promise.resolve(undefined)),
+  getGitHubToken: vi.fn(() => {}),
+  getAuthenticatedUserLogin: vi.fn(() => Promise.resolve()),
   scaffoldTemplateRepo: vi.fn(() => Promise.resolve({ url: "https://github.com/test/repo" })),
   createDevenvScaffoldPR: vi.fn(() =>
     Promise.resolve({
@@ -195,8 +195,9 @@ const { diffCommand } = await import("../diff");
 const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy, copyFile } =
   await import("../../utils/template");
 const { hashFiles } = await import("../../utils/hash");
-const { loadZikuConfig, zikuConfigExists } = await import("../../utils/ziku-config");
-const { loadLock, saveLock } = await import("../../utils/lock");
+const { loadZikuConfig: _loadZikuConfig, zikuConfigExists: _zikuConfigExists } =
+  await import("../../utils/ziku-config");
+const { loadLock: _loadLock, saveLock: _saveLock } = await import("../../utils/lock");
 const { loadPatternsFile, addIncludePattern, saveModulesFile, modulesFileExists } =
   await import("../../modules");
 const { detectDiff } = await import("../../utils/diff");
@@ -210,11 +211,9 @@ const mockModulesFileExists = vi.mocked(modulesFileExists);
 
 // ── helpers ─────────────────────────────────────────────────────
 
-function createZikuJsonc(
-  include: string[],
-  exclude?: string[],
-  source = { owner: "test-org", repo: ".github" },
-): string {
+const DEFAULT_SOURCE = { owner: "test-org", repo: ".github" };
+
+function createZikuJsonc(include: string[], exclude?: string[], source = DEFAULT_SOURCE): string {
   const content: Record<string, unknown> = { source, include };
   if (exclude && exclude.length > 0) {
     content.exclude = exclude;
@@ -236,7 +235,7 @@ const baseLock = {
   baseHashes: {},
 };
 
-const baseSource = { owner: "test-org", repo: ".github" };
+const _baseSource = { owner: "test-org", repo: ".github" };
 
 // ═══════════════════════════════════════════════════════════════
 // E2E Tests

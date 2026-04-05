@@ -246,7 +246,7 @@ describe("merge", () => {
       // ローカルのコメントが保持されていること
       expect(result.content).toContain("ユーザーが追加したコメント");
       // テンプレートの新キーも適用されていること
-      const parsed = JSON.parse(result.content.replace(/\/\/.*$/gm, ""));
+      const parsed = JSON.parse(result.content.replaceAll(/\/\/.*$/gm, ""));
       expect(parsed.b).toBe(2);
       expect(parsed.c).toBe(3);
     });
@@ -351,7 +351,7 @@ describe("merge", () => {
       // ユーザーの mounts 追加が保持されていること
       expect(result.content).toContain("mounts");
       // テンプレートの image 更新も適用されていること
-      const cleaned = result.content.replace(/\/\/.*$/gm, "");
+      const cleaned = result.content.replaceAll(/\/\/.*$/gm, "");
       const parsed = JSON.parse(cleaned);
       expect(parsed.image).toBe("node:22");
     });
@@ -772,7 +772,7 @@ describe("merge", () => {
 
       // JSON 構造マージで d:4 が追加され result !== local → 構造マージ結果を返す
       expect(result.hasConflicts).toBe(false);
-      const cleaned = result.content.replace(/\/\/.*$/gm, "");
+      const cleaned = result.content.replaceAll(/\/\/.*$/gm, "");
       const parsed = JSON.parse(cleaned);
       expect(parsed.c).toBe(3);
       expect(parsed.d).toBe(4);
@@ -1009,16 +1009,16 @@ line2`;
       const result = merge(base, local, template, "devcontainer.json");
 
       // テキストマージの結果を検証
-      if (!result.hasConflicts) {
+      if (result.hasConflicts) {
+        // コンフリクトマーカーがあるなら、ユーザーが解決できる情報が含まれるべき
+        expect(result.content).toContain("<<<<<<< LOCAL");
+      } else {
         // Auto-merged なら image が 22 に更新されているべき
         expect(result.content).toContain('"node:22"');
         // ローカルの docker 追加も保持されているべき
         expect(result.content).toContain("docker");
         // テンプレートの quiet 追加も反映されているべき
         expect(result.content).toContain("quiet");
-      } else {
-        // コンフリクトマーカーがあるなら、ユーザーが解決できる情報が含まれるべき
-        expect(result.content).toContain("<<<<<<< LOCAL");
       }
     });
 
@@ -1199,11 +1199,11 @@ line2`;
 
       const result = merge(base, local, template);
 
-      if (!result.hasConflicts) {
+      if (result.hasConflicts) {
+        expect(result.content).toContain("<<<<<<< LOCAL");
+      } else {
         expect(result.content).toContain("LOCAL");
         expect(result.content).toContain("TEMPLATE");
-      } else {
-        expect(result.content).toContain("<<<<<<< LOCAL");
       }
     });
   });
