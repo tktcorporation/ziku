@@ -40,13 +40,6 @@ export function zikuConfigExists(targetDir: string): boolean {
 }
 
 /**
- * .ziku/ziku.jsonc のパスを取得
- */
-export function getZikuConfigPath(targetDir: string): string {
-  return join(targetDir, ZIKU_CONFIG_FILE);
-}
-
-/**
  * ziku.jsonc コンテンツを生成する
  */
 export function generateZikuJsonc(opts: {

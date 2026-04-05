@@ -22,9 +22,18 @@
     "no-shadow-restricted-names": "error",
 
     "typescript/no-explicit-any": "error",
+    "typescript/no-unsafe-type-assertion": "error",
+    "typescript/no-unsafe-argument": "error",
+    "typescript/no-unsafe-assignment": "error",
+    "typescript/no-unsafe-call": "error",
+    "typescript/no-unsafe-member-access": "error",
+    "typescript/no-unsafe-return": "error",
     "typescript/no-non-null-assertion": "warn",
     "typescript/consistent-type-imports": "error",
     "typescript/no-unnecessary-type-assertion": "off",
+    "typescript/ban-ts-comment": "error",
+    "typescript/no-import-type-side-effects": "error",
+    "typescript/prefer-optional-chain": "warn",
 
     "unicorn/prefer-node-protocol": "error",
     "unicorn/no-null": "off",

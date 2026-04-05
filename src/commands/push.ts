@@ -7,12 +7,9 @@ import { join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
 import { loadPatternsFile, modulesFileExists } from "../modules";
-import type { LockState, ZikuConfig } from "../modules/schemas";
-import { lockSchema } from "../modules/schemas";
-import { LOCK_FILE } from "../utils/lock";
+import type { FileDiff } from "../modules/schemas";
+import { loadLock } from "../utils/lock";
 import {
-  ZIKU_CONFIG_FILE,
-  addIncludePattern,
   loadZikuConfig,
   zikuConfigExists,
 } from "../utils/ziku-config";
@@ -39,7 +36,7 @@ function formatFileStat(file: {
   localContent?: string;
   templateContent?: string;
 }): string {
-  const stats = calculateDiffStats(file as import("../modules/schemas").FileDiff);
+  const stats = calculateDiffStats(file as FileDiff);
   return formatStats(stats);
 }
 
@@ -121,22 +118,19 @@ export const pushCommand = defineCommand({
 
     const { config: zikuConfig, rawContent: zikuConfigRaw } = await loadZikuConfig(targetDir);
 
-    // lock.json を読み込み
-    const lockPath = join(targetDir, LOCK_FILE);
-
-    if (!existsSync(lockPath)) {
-      throw new ZikuError(".ziku/lock.json not found.", "Run 'ziku init' first.");
+    // lock.json を読み込み（loadLock に集約）
+    let lock;
+    try {
+      lock = await loadLock(targetDir);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("ENOENT")) {
+        throw new ZikuError(".ziku/lock.json not found.", "Run 'ziku init' first.");
+      }
+      throw new ZikuError(
+        "Invalid .ziku/lock.json format",
+        error instanceof Error ? error.message : String(error),
+      );
     }
-
-    const lockContent = await readFile(lockPath, "utf-8");
-    const lockData = JSON.parse(lockContent);
-    const lockResult = lockSchema.safeParse(lockData);
-
-    if (!lockResult.success) {
-      throw new ZikuError("Invalid .ziku/lock.json format", lockResult.error.message);
-    }
-
-    const lock: LockState = lockResult.data;
 
     if (lock.pendingMerge) {
       throw new ZikuError(
@@ -206,7 +200,7 @@ export const pushCommand = defineCommand({
 
         // 3-way マージ結果を保持
         const mergedContents = new Map<string, string>();
-        let pushableFilePaths: Set<string> = new Set();
+        const pushableFilePaths: Set<string> = new Set();
 
         // ファイル分類
         {

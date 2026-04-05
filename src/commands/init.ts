@@ -10,7 +10,7 @@ import {
   modulesFileExists,
 } from "../modules/index";
 import { MODULES_SCHEMA_URL } from "../modules/loader";
-import type { FileOperationResult, OverwriteStrategy, TemplateModule } from "../modules/schemas";
+import type { FileOperationResult, LockState, OverwriteStrategy, TemplateModule } from "../modules/schemas";
 import { match } from "ts-pattern";
 import { ZikuError } from "../errors";
 import {
@@ -288,20 +288,16 @@ async function writeLockFile(
     baseRef?: string;
   },
 ): Promise<FileOperationResult> {
-  const lock: Record<string, unknown> = {
+  const lock: LockState = {
     version: "0.1.0",
     installedAt: new Date().toISOString(),
+    ...(opts.baseRef ? { baseRef: opts.baseRef } : {}),
+    ...(opts.baseHashes && Object.keys(opts.baseHashes).length > 0
+      ? { baseHashes: opts.baseHashes }
+      : {}),
   };
 
-  if (opts.baseRef) {
-    lock.baseRef = opts.baseRef;
-  }
-
-  if (opts.baseHashes && Object.keys(opts.baseHashes).length > 0) {
-    lock.baseHashes = opts.baseHashes;
-  }
-
-  await saveLock(targetDir, lock as any);
+  await saveLock(targetDir, lock);
 
   return {
     action: "overwritten",
