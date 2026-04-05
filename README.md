@@ -37,25 +37,18 @@ Your template stays alive, fed by every project that uses it.
 
 ## Getting Started
 
-### 1. Set up your template repository
+ziku has two roles: **template author** (setup) and **template user** (init). If someone else has already set up the template, skip to Step 2.
 
-ziku uses a GitHub repository as the template source. By default, it looks for `{your-org}/.ziku`, then `{your-org}/.github` based on your git remote.
+### Step 1: Create the template (`setup`) — template author
 
-If the repository doesn't exist yet, `npx ziku` will offer to create it for you interactively. You can also create it manually or specify a different source:
+`ziku setup` initializes a template repository by creating `.ziku/ziku.jsonc`. This file defines which file patterns ziku manages.
 
 ```bash
-# Auto-detect from git remote (recommended)
-npx ziku
-
-# Use a specific template repository
-npx ziku --from my-org/my-templates
+# In your template repository
+npx ziku setup
 ```
 
-### 2. Add `.ziku/ziku.jsonc` to your template
-
-The template repository needs a `.ziku/ziku.jsonc` file that defines which file patterns ziku manages. During `ziku init`, users select which directories to sync based on these patterns. You can create this file with `ziku setup`.
-
-Example `ziku.jsonc`:
+This creates `.ziku/ziku.jsonc` with default patterns. Edit it to match your needs:
 
 ```jsonc
 {
@@ -70,81 +63,117 @@ Example `ziku.jsonc`:
 }
 ```
 
-### 3. Apply the template to your project
+You can also set up a remote template repository:
 
 ```bash
-npx ziku
-
-# Or apply to a specific directory
-npx ziku ./my-project
+# Create a PR to add .ziku/ziku.jsonc to a remote repo
+npx ziku setup --remote --from my-org/my-templates
 ```
 
-ziku copies the matching files into your project. `.ziku/ziku.jsonc` (patterns) and `.ziku/lock.json` (sync state + source) are created locally to track what was installed.
+By default, ziku looks for `{your-org}/.ziku`, then `{your-org}/.github` based on your git remote. If the repository doesn't exist, `npx ziku` will offer to create it interactively.
 
-### 4. Keep it in sync
+### Step 2: Apply the template (`init`) — template user
+
+`ziku init` (or just `npx ziku`) downloads the template and lets you select which directories to sync.
+
+```bash
+# Auto-detect template from git remote
+npx ziku
+
+# Use a specific template
+npx ziku --from my-org/my-templates
+
+# Use a local directory as template (no GitHub needed)
+npx ziku --from-dir ../my-template
+```
+
+ziku copies the matching files into your project and creates:
+
+- `.ziku/ziku.jsonc` — selected sync patterns (same format as the template)
+- `.ziku/lock.json` — template source + sync state (hashes, refs)
+
+### Step 3: Keep it in sync
 
 ```bash
 # Push local improvements back to the template
 npx ziku push -m "Add new workflow"
 
-# Pull latest template updates
+# Pull latest template updates (includes new patterns)
 npx ziku pull
 
 # Check what's different
 npx ziku diff
 
-# Add file patterns to track
+# Add file patterns to the sync whitelist
 npx ziku track '.eslintrc.*'
 ```
 
+`push` works with both GitHub (creates a PR) and local templates (copies files directly). `pull` also syncs new patterns added to the template's `ziku.jsonc`.
+
 <!-- GETTING_STARTED:END -->
 
-## Modules
+<!-- FEATURES:START -->
 
-Templates can organize files into **modules** — named groups of file patterns. During `ziku init`, you pick which modules to apply, and the selected patterns are saved to `.ziku/ziku.jsonc` in your project.
+## How it Works
 
-A template might offer modules like:
+```mermaid
+graph LR
 
-| Module | What it might include |
-|---|---|
-| **Linter / Formatter** | `.eslintrc.*`, `.prettierrc`, `biome.json` |
-| **CI / CD** | `.github/workflows/**`, `.gitlab-ci.yml` |
-| **DevContainer** | `.devcontainer/devcontainer.json` |
-| **AI Tooling** | `.claude/`, `.cursor/rules/`, `.mcp.json` |
-| **IaC** | `terraform/modules/**`, `docker-compose.yml` |
+  subgraph Template["Template Repository"]
+    ZIKU_TPL[".ziku/ziku.jsonc"]
+    T_FILES["synced files"]
+  end
 
-After init, your project gets a config that drives `pull`, `push`, and `diff`:
+  subgraph User["User Project"]
+    ZIKU[".ziku/ziku.jsonc"]
+    LOCK[".ziku/lock.json"]
+    U_FILES["synced files"]
+  end
 
-```jsonc
-// .ziku/ziku.jsonc (in your project — auto-generated, customizable)
-{
-  "include": [".eslintrc.*", ".prettierrc", ".github/workflows/**"]
-}
+  setup([setup]) -->|create| ZIKU_TPL
+  init([init]) -->|read| ZIKU_TPL
+  init -->|create| ZIKU & LOCK & U_FILES
+  push([push]) -->|read| ZIKU & LOCK
+  push -->|update| T_FILES
+  pull([pull]) -->|read| ZIKU & LOCK
+  pull -->|update| U_FILES & ZIKU & LOCK
+  diff([diff]) -.->|read| ZIKU & LOCK & U_FILES
+  track([track]) -.->|update| ZIKU
+
 ```
 
-Template source info is stored separately in `.ziku/lock.json`. You can add or remove patterns anytime with `ziku track`.
+> For detailed file operations per command, see [File Lifecycle](docs/architecture/file-lifecycle.md).
 
-<details>
-<summary>Defining patterns in your template</summary>
+### The config file
 
-Template authors define sync patterns in `.ziku/ziku.jsonc` inside the template repository. Both the template and user project use the same format:
+Both the template and user project share the same `.ziku/ziku.jsonc` format — just `include` and `exclude` patterns:
 
 ```jsonc
-// .ziku/ziku.jsonc (in the template repo)
 {
   "include": [
-    ".claude/settings.json",
     ".claude/rules/*.md",
     ".mcp.json",
-    ".devcontainer/**",
-    ".github/**"
+    ".github/workflows/**"
   ]
 }
 ```
 
-During `ziku init`, users select which directories to sync based on these patterns. You can create the initial file with `ziku setup`.
+### Command overview
 
-</details>
+| Command | Who runs it | What it does |
+|---|---|---|
+| **`setup`** | Template author | Initialize a template repository |
+| **`init (user project)`** | Template user | Initialize user project from template |
+| **`pull`** | Template user | Pull latest template updates to local project |
+| **`push`** | Template user | Push local changes to template (GitHub: PR / local: direct copy) |
+| **`diff`** | Template user | Show differences between local and template |
+| **`track`** | Template user | Add file patterns to the sync whitelist |
+
+Template source info (owner/repo or local path) is stored in `.ziku/lock.json`, separate from patterns. When you `pull`, new patterns added to the template's `.ziku/ziku.jsonc` are automatically merged into yours.
+
+> For detailed file operations per command, see [File Lifecycle](docs/architecture/file-lifecycle.md).
+
+<!-- FEATURES:END -->
 
 <!-- COMMANDS:START -->
 

@@ -32,7 +32,7 @@ import { detectUntrackedFiles } from "../utils/untracked";
 
 export const pushLifecycle: CommandLifecycle = {
   name: "push",
-  description: "ローカルの変更をテンプレートに反映（GitHub: PR / ローカル: 直接コピー）",
+  description: "Push local changes to template (GitHub: PR / local: direct copy)",
   ops: [
     { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "patterns を取得" },
     { file: LOCK_FILE, location: "local", op: "read", note: "source, baseRef, baseHashes を取得" },

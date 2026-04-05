@@ -57,39 +57,35 @@ function opLabel(op: Op): string {
   }
 }
 
-/** コンポーネント（ファイル）一覧と、各コマンドとの関係を示す図を生成 */
-function generateComponentDiagram(): string {
+/**
+ * コンポーネント（ファイル）一覧と、各コマンドとの関係を示す mermaid 図を生成。
+ * file-lifecycle.md と README の両方で使用される（SSOT）。
+ */
+export function generateComponentDiagram(): string {
   const lines: string[] = [
     "```mermaid",
     "graph LR",
     "",
-    '  subgraph Template["テンプレートリポジトリ"]',
+    `  subgraph Template["Template Repository"]`,
     `    ZIKU_TPL["${ZIKU_CONFIG_FILE}"]`,
-    '    T_FILES["synced files"]',
+    `    T_FILES["synced files"]`,
     "  end",
     "",
-    '  subgraph User["ユーザープロジェクト"]',
+    `  subgraph User["User Project"]`,
     `    ZIKU["${ZIKU_CONFIG_FILE}"]`,
     `    LOCK["${LOCK_FILE}"]`,
-    '    U_FILES["synced files"]',
+    `    U_FILES["synced files"]`,
     "  end",
     "",
-    "  setup -->|create| ZIKU_TPL",
-    "  init -->|read| ZIKU_TPL",
-    "  init -->|create| ZIKU",
-    "  init -->|create| LOCK",
-    "  init -->|create| U_FILES",
-    "  pull -->|read| ZIKU",
-    "  pull -->|read| LOCK",
-    "  pull -->|update| U_FILES",
-    "  pull -->|update| LOCK",
-    "  push -->|read| ZIKU",
-    "  push -->|read| LOCK",
-    "  push -->|PR| T_FILES",
-    "  diff -->|read| ZIKU",
-    "  diff -->|read| LOCK",
-    "  diff -->|read| U_FILES",
-    "  track -->|update| ZIKU",
+    "  setup([setup]) -->|create| ZIKU_TPL",
+    "  init([init]) -->|read| ZIKU_TPL",
+    "  init -->|create| ZIKU & LOCK & U_FILES",
+    "  push([push]) -->|read| ZIKU & LOCK",
+    "  push -->|update| T_FILES",
+    "  pull([pull]) -->|read| ZIKU & LOCK",
+    "  pull -->|update| U_FILES & ZIKU & LOCK",
+    "  diff([diff]) -.->|read| ZIKU & LOCK & U_FILES",
+    "  track([track]) -.->|update| ZIKU",
     "",
     "```",
   ];
