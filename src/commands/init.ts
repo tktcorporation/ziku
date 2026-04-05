@@ -117,6 +117,10 @@ export const initCommand = defineCommand({
       type: "string",
       description: "Template source as owner/repo (e.g., my-org/my-templates)",
     },
+    "from-dir": {
+      type: "string",
+      description: "Local directory to use as template source (skips GitHub download)",
+    },
   },
   async run({ args }) {
     // ヘッダー表示
@@ -134,28 +138,50 @@ export const initCommand = defineCommand({
       log.message(pc.dim(`Created directory: ${targetDir}`));
     }
 
-    // テンプレートソースを解決（テンプレートリポジトリの存在チェック含む）
-    const { sourceOwner, sourceRepo } = await resolveTemplateSourceWithCheck(
-      args.from as string | undefined,
-      args.yes as boolean,
-    );
+    // ─── 入り口: テンプレートソースの解決 ───
+    // --from-dir（ローカル）と --from（GitHub）で分岐し、templateDir と cleanup を取得。
+    // 以降の処理は共通。
+    const fromDir = args["from-dir"] as string | undefined;
 
-    const templateSourceStr = buildTemplateSource({
-      owner: sourceOwner,
-      repo: sourceRepo,
-    });
-    log.info(`Template: ${pc.cyan(`${sourceOwner}/${sourceRepo}`)}`);
+    let templateDir: string;
+    let cleanup: () => void;
+    let sourceOwner: string;
+    let sourceRepo: string;
 
-    // Step 1: テンプレートをダウンロード
-    log.step("Fetching template...");
+    if (fromDir) {
+      // ローカルディレクトリをテンプレートとして使用（ダウンロード不要）
+      templateDir = resolve(fromDir);
+      cleanup = () => {};
+      // source はローカルパスから推測しない（ziku.jsonc には保存しない or ダミー）
+      sourceOwner = "local";
+      sourceRepo = "template";
+      log.info(`Template: ${pc.cyan(templateDir)} (local)`);
+    } else {
+      // GitHub リポジトリからダウンロード
+      const resolved = await resolveTemplateSourceWithCheck(
+        args.from as string | undefined,
+        args.yes as boolean,
+      );
+      sourceOwner = resolved.sourceOwner;
+      sourceRepo = resolved.sourceRepo;
 
-    const { templateDir, cleanup } = await withSpinner("Downloading template from GitHub...", () =>
-      downloadTemplateToTemp(targetDir, templateSourceStr),
-    );
+      const templateSourceStr = buildTemplateSource({
+        owner: sourceOwner,
+        repo: sourceRepo,
+      });
+      log.info(`Template: ${pc.cyan(`${sourceOwner}/${sourceRepo}`)}`);
 
+      log.step("Fetching template...");
+      const downloaded = await withSpinner("Downloading template from GitHub...", () =>
+        downloadTemplateToTemp(targetDir, templateSourceStr),
+      );
+      templateDir = downloaded.templateDir;
+      cleanup = downloaded.cleanup;
+    }
+
+    // ─── 共通処理: テンプレート適用 ───
     await withFinally(async () => {
       if (!modulesFileExists(templateDir)) {
-        // .ziku/modules.jsonc がテンプレートに存在しない場合のハンドリング
         handleMissingDevenv(sourceOwner, sourceRepo);
       }
 
