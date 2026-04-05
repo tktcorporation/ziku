@@ -98,14 +98,16 @@ npx ziku track '.eslintrc.*'
 
 ## Modules
 
-Modules are groups of file patterns defined in your template's `.ziku/modules.jsonc`. You can freely create any modules that fit your workflow — there are no fixed categories.
+ziku lets you organize synced files into **modules** — named groups of file patterns defined in `.ziku/modules.jsonc`. You can create any modules that fit your workflow; there are no fixed categories.
 
-As an example, this repository's template includes the following modules:
+For example, this repository's template defines:
 
-- **Root** - MCP, mise, and other root-level config files
-- **DevContainer** - VS Code DevContainer with Docker-in-Docker
-- **GitHub** - GitHub Actions and labeler workflows
-- **Claude** - Claude Code project settings
+- **Root** — Editor and tooling configuration (`.mcp.json`, `.mise.toml`, etc.)
+- **DevContainer** — VS Code DevContainer configuration
+- **GitHub** — GitHub Actions workflows and repository settings
+- **Claude** — Claude Code rules and settings
+
+These are just one possible set. Your template might have modules for ESLint configs, Docker Compose files, Terraform modules, or anything else you want to keep in sync across projects.
 
 <!-- FEATURES:END -->
 

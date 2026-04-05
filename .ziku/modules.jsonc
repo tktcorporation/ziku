@@ -2,33 +2,28 @@
   "$schema": "./modules.schema.json",
   "modules": [
     {
-      // Root-level files (not in subdirectories)
+      // Root-level config files shared across projects
       "id": ".",
       "name": "Root",
-      "description": "MCP, mise, and other root-level config files",
-      "setupDescription": "Root config files will be applied",
+      "description": "Editor and tooling configuration",
+      "setupDescription": "Common config files will be applied",
       "patterns": [".mcp.json", ".mise.toml"],
     },
     {
       "id": ".devcontainer",
       "name": "DevContainer",
-      "description": "VS Code DevContainer with Docker-in-Docker",
-      "setupDescription": "Open in VS Code DevContainer for automatic setup",
-      // Whitelist: only files to distribute as template
+      "description": "VS Code DevContainer configuration",
+      "setupDescription": "DevContainer settings will be applied",
       "patterns": [
         ".devcontainer/devcontainer.json",
         ".devcontainer/.gitignore",
-        ".devcontainer/setup-*.sh",
-        ".devcontainer/test-*.sh",
-        ".devcontainer/.env.devcontainer.example",
-        ".devcontainer/run-chrome-devtools-mcp.sh",
       ],
     },
     {
       "id": ".github",
       "name": "GitHub",
-      "description": "GitHub Actions and labeler workflows",
-      "setupDescription": "Auto-labels PRs and links issues on creation",
+      "description": "GitHub Actions workflows and repository settings",
+      "setupDescription": "Workflow templates and repo config will be applied",
       "patterns": [
         ".github/workflows/issue-link.yml",
         ".github/workflows/label.yml",
@@ -39,20 +34,11 @@
     {
       "id": ".claude",
       "name": "Claude",
-      "description": "Claude Code project settings",
-      "setupDescription": "Claude Code project settings will be applied",
+      "description": "Claude Code rules and settings",
+      "setupDescription": "Claude Code settings and rules will be applied",
       "patterns": [
         ".claude/settings.json",
-        ".claude/hooks/*.sh",
         ".claude/rules/*.md",
-        ".claude/rules/jujutsu.md",
-        ".claude/skills/upstream-fix/SKILL.md",
-        ".claude/skills/ui-craft",
-        ".claude/statusline.sh",
-        ".claude/skills/ui-design-research",
-        ".claude/skills/faithful-doc-writing",
-        ".claude/skills/autonomous-dev/SKILL.md",
-        ".claude/hookify.block-blind-kill.local.md",
       ],
     },
   ],
