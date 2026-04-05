@@ -23,7 +23,9 @@ Templates go stale the moment you scaffold them. Each project improves upon the 
 
 - **`init`** — Pull the latest template into your project
 - **`push`** — Push your improvements back to the template
+- **`pull`** — Sync latest template updates with 3-way merge
 - **`diff`** — See what's changed
+- **`track`** — Add file patterns to the sync whitelist
 
 Your template stays alive, fed by every project that uses it.
 
@@ -33,7 +35,7 @@ Your template stays alive, fed by every project that uses it.
 
 ### 1. Set up your template repository
 
-ziku uses a GitHub repository as the template source. By default, it looks for `{your-org}/.ziku` based on your git remote.
+ziku uses a GitHub repository as the template source. By default, it looks for `{your-org}/.ziku`, then `{your-org}/.github` based on your git remote.
 
 If the repository doesn't exist yet, `npx ziku` will offer to create it for you interactively. You can also create it manually or specify a different source:
 
@@ -67,9 +69,12 @@ Example `modules.jsonc`:
 
 ```bash
 npx ziku
+
+# Or apply to a specific directory
+npx ziku ./my-project
 ```
 
-ziku copies the matching files into your project. A `.ziku/ziku.jsonc` (config) and `.ziku/lock.json` (sync state) are created locally to track what was installed.
+ziku copies the matching files into your project. `.ziku/ziku.jsonc` (config) and `.ziku/lock.json` (sync state) are created locally to track what was installed.
 
 ### 4. Keep it in sync
 
@@ -82,29 +87,12 @@ npx ziku pull
 
 # Check what's different
 npx ziku diff
+
+# Add file patterns to track
+npx ziku track '.eslintrc.*'
 ```
 
 <!-- GETTING_STARTED:END -->
-
-<!-- USAGE:START -->
-
-## Usage
-
-```bash
-# Apply template to current directory
-npx ziku
-
-# Apply to a specific directory
-npx ziku ./my-project
-
-# Push your improvements back
-npx ziku push -m "Add new workflow"
-
-# Check what's different
-npx ziku diff
-```
-
-<!-- USAGE:END -->
 
 <!-- FEATURES:START -->
 
@@ -231,6 +219,11 @@ OPTIONS
 ## What You Get
 
 The files you get depend on the patterns configured in your template's `.ziku/modules.jsonc`. After running `ziku init`, your selected patterns are saved in `.ziku/ziku.jsonc` — you can customize them anytime with `ziku track`.
+
+ziku also creates:
+
+- `.ziku/ziku.jsonc` — Your sync configuration (which template, which patterns)
+- `.ziku/lock.json` — Sync state (hashes, base refs) for change detection
 
 <!-- FILES:END -->
 
