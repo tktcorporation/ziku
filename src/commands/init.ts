@@ -1,16 +1,10 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { defineCommand } from "citty";
 import { join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
-import {
-  MODULES_FILE,
-  getModulesFilePath,
-  loadModulesFile,
-  modulesFileExists,
-} from "../modules/index";
+import { MODULES_FILE, loadModulesFile, modulesFileExists } from "../modules/index";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
-import { MODULES_SCHEMA_URL } from "../modules/loader";
 import type {
   FileOperationResult,
   LockState,
@@ -20,7 +14,6 @@ import type {
 import { match } from "ts-pattern";
 import { ZikuError } from "../errors";
 import {
-  confirmScaffoldDevenvPR,
   inputTemplateSource,
   selectMissingTemplateAction,
   selectModules,
@@ -32,12 +25,10 @@ import {
   DEFAULT_TEMPLATE_REPO,
   DEFAULT_TEMPLATE_REPOS,
   detectGitHubOwner,
-  detectGitHubRepo,
 } from "../utils/git-remote";
 import {
   checkRepoExists,
   checkRepoSetup,
-  createDevenvScaffoldPR,
   getAuthenticatedUserLogin,
   getGitHubToken,
   resolveLatestCommitSha,
@@ -58,23 +49,6 @@ import { intro, log, logFileResults, outro, pc, withSpinner } from "../ui/render
 // ビルド時に置換される定数
 declare const __VERSION__: string;
 const version = typeof __VERSION__ !== "undefined" ? __VERSION__ : "dev";
-
-/**
- * init (template repo) のファイル操作メタデータ。
- * ドキュメント自動生成（npm run docs）の SSOT として使われる。
- */
-export const initTemplateLifecycle: CommandLifecycle = {
-  name: "init (template repo)",
-  description: "テンプレートリポジトリの初期化",
-  ops: [
-    {
-      file: MODULES_FILE,
-      location: "template",
-      op: "create",
-      note: "デフォルトパターンで生成（既存ならスキップ）",
-    },
-  ],
-};
 
 /**
  * init (user project) のファイル操作メタデータ。
@@ -166,12 +140,6 @@ export const initCommand = defineCommand({
       args.yes as boolean,
     );
 
-    // テンプレートリポジトリ自体で実行されているか判定
-    if (isCurrentRepoTemplate(targetDir, sourceOwner, sourceRepo)) {
-      handleTemplateRepoInit(targetDir, args.yes as boolean);
-      return;
-    }
-
     const templateSourceStr = buildTemplateSource({
       owner: sourceOwner,
       repo: sourceRepo,
@@ -188,7 +156,7 @@ export const initCommand = defineCommand({
     await withFinally(async () => {
       if (!modulesFileExists(templateDir)) {
         // .ziku/modules.jsonc がテンプレートに存在しない場合のハンドリング
-        await handleMissingDevenv(sourceOwner, sourceRepo, args.yes as boolean);
+        handleMissingDevenv(sourceOwner, sourceRepo);
       }
 
       // テンプレートの modules.jsonc を読み込み、パターンを解決する。
@@ -637,147 +605,12 @@ async function handleMissingTemplate(
 
 /**
  * テンプレートに .ziku/modules.jsonc がない場合のハンドリング。
- * テンプレートリポジトリに scaffold PR を作成するフローに誘導する。
+ * `ziku setup` コマンドへの誘導。
  */
-async function handleMissingDevenv(
-  owner: string,
-  repo: string,
-  nonInteractive: boolean,
-): Promise<never> {
-  if (nonInteractive) {
-    throw new ZikuError(
-      `Template ${owner}/${repo} has no .ziku/modules.jsonc`,
-      "Add .ziku/modules.jsonc to the template repository first, or run interactively to create a PR",
-    );
-  }
-
-  const confirmed = await confirmScaffoldDevenvPR(owner, repo);
-
-  if (!confirmed) {
-    throw new ZikuError(
-      ".ziku/modules.jsonc is required",
-      "Add it to the template repository manually, then run ziku init again",
-    );
-  }
-
-  const token = getGitHubToken();
-  if (!token) {
-    throw new ZikuError(
-      "GitHub token required to create a PR",
-      "Set GITHUB_TOKEN or GH_TOKEN, or run: gh auth login",
-    );
-  }
-
-  // デフォルトモジュールで scaffold PR を作成
-  const modulesContent = generateDefaultModulesJsonc();
-  log.step(`Creating PR to add .ziku/modules.jsonc to ${pc.cyan(`${owner}/${repo}`)}...`);
-  const result = await createDevenvScaffoldPR(token, owner, repo, modulesContent);
-  log.success(`Created PR: ${pc.cyan(result.url)}`);
-
-  throw new ZikuError("Merge the PR first, then run ziku init again", `PR: ${result.url}`);
-}
-
-/**
- * テンプレートリポジトリ scaffold 時のデフォルトモジュール定義。
- * テンプレートに modules.jsonc がない場合に提案する初期構成。
- */
-/**
- * AI agent の設定共有を主な用途として想定したデフォルトモジュール構成。
- * Claude Code のルール・スキル・フックと、MCP 設定、開発環境設定をグループ化する。
- */
-const DEFAULT_SCAFFOLD_MODULES: TemplateModule[] = [
-  {
-    name: "Claude",
-    description: "Claude Code rules, skills, and hooks",
-    include: [
-      ".claude/settings.json",
-      ".claude/rules/*.md",
-      ".claude/skills/**",
-      ".claude/hooks/**",
-    ],
-  },
-  {
-    name: "MCP",
-    description: "MCP server configuration",
-    include: [".mcp.json"],
-  },
-  {
-    name: "DevContainer",
-    description: "VS Code DevContainer setup",
-    include: [".devcontainer/**"],
-  },
-  {
-    name: "GitHub",
-    description: "GitHub Actions workflows",
-    include: [".github/**"],
-  },
-];
-
-/**
- * モジュール形式の modules.jsonc コンテンツを生成する。
- * テンプレートリポジトリの scaffold 用。
- */
-export function generateDefaultModulesJsonc(): string {
-  return JSON.stringify(
-    {
-      $schema: MODULES_SCHEMA_URL,
-      modules: DEFAULT_SCAFFOLD_MODULES,
-    },
-    null,
-    2,
-  );
-}
-
-/**
- * 現在のリポジトリがテンプレートリポジトリ自体かどうかを判定する。
- */
-export function isCurrentRepoTemplate(
-  targetDir: string,
-  sourceOwner: string,
-  sourceRepo: string,
-): boolean {
-  const currentRepo = detectGitHubRepo(targetDir);
-  if (!currentRepo) return false;
-  return (
-    currentRepo.owner.toLowerCase() === sourceOwner.toLowerCase() &&
-    currentRepo.repo.toLowerCase() === sourceRepo.toLowerCase()
-  );
-}
-
-/**
- * テンプレートリポジトリ自体で init を実行した場合のハンドリング。
- * フラット形式の modules.jsonc を生成する。
- */
-function handleTemplateRepoInit(targetDir: string, _nonInteractive: boolean): void {
-  log.info(`Detected: running inside the template repository`);
-
-  if (modulesFileExists(targetDir)) {
-    log.success(".ziku/modules.jsonc already exists");
-    outro("Template repository is already configured.");
-    return;
-  }
-
-  log.step("Generating .ziku/modules.jsonc...");
-
-  const modulesContent = generateDefaultModulesJsonc();
-  const modulesDir = join(targetDir, ".ziku");
-  if (!existsSync(modulesDir)) {
-    mkdirSync(modulesDir, { recursive: true });
-  }
-  const modulesPath = getModulesFilePath(targetDir);
-  writeFileSync(modulesPath, modulesContent);
-
-  log.success("Created .ziku/modules.jsonc");
-
-  outro(
-    [
-      "Template initialized!",
-      "",
-      pc.bold("Next steps:"),
-      `  ${pc.cyan("1.")} Review and customize ${pc.dim(".ziku/modules.jsonc")}`,
-      `  ${pc.cyan("2.")} ${pc.cyan("git add .ziku/ && git commit -m 'chore: add ziku config'")}`,
-      `  ${pc.dim("Then other projects can use this template with")} ${pc.cyan("npx ziku init")}`,
-    ].join("\n"),
+function handleMissingDevenv(owner: string, repo: string): never {
+  throw new ZikuError(
+    `Template ${owner}/${repo} has no .ziku/modules.jsonc`,
+    `Run ${pc.cyan(`ziku setup --remote --from ${owner}/${repo}`)} to create it, or add it manually`,
   );
 }
 

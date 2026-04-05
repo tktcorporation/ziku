@@ -174,6 +174,25 @@ Module names and descriptions appear in the selection UI during `ziku init`. You
 
 ## Commands
 
+### `setup`
+
+Initialize a template repository with .ziku/modules.jsonc
+
+```
+Initialize a template repository with .ziku/modules.jsonc (setup vdev)
+
+USAGE `setup [OPTIONS] [DIR]`
+
+ARGUMENTS
+
+  `DIR="."`    Template repository directory
+
+OPTIONS
+
+  `--remote`    Create a PR to set up a remote template repository instead of local
+    `--from`    Remote template repository as owner/repo (used with --remote)
+```
+
 ### `init`
 
 Apply dev environment template to your project

@@ -6,65 +6,96 @@ ziku が管理するファイルと、各コマンドでの振る舞いを整理
 
 <!-- LIFECYCLE:START -->
 
-## ファイル一覧
-
-| ファイル              | 存在する場所               | 役割                                                                                                                                                             |
-| --------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `.ziku/modules.jsonc` | テンプレートリポジトリのみ | 同期対象の glob パターンを定義する「メニュー表」。init 時にユーザーが選ぶモジュール一覧の元データ。push 時にローカル追加パターンが書き戻される                   |
-| `.ziku/ziku.jsonc`    | ユーザーのプロジェクトのみ | 同期設定。テンプレートの source（owner/repo）と、選択済みの include/exclude パターンを保持。track コマンドで追加可能                                             |
-| `.ziku/lock.json`     | ユーザーのプロジェクトのみ | 同期状態。前回同期時のコミット SHA（baseRef）、ファイルごとの SHA-256 ハッシュ（baseHashes）、未解決マージ情報（pendingMerge）を保持。pull/push の差分検出に使用 |
-
-## ライフサイクル図
+## コンポーネント関係図
 
 ```mermaid
-sequenceDiagram
-    participant T as Template Repo
-    participant U as User Project
+graph LR
 
-    note over T,U: init (template repo)
-    T->>T: create .ziku/modules.jsonc
+  subgraph Template["テンプレートリポジトリ"]
+    MODULES[".ziku/modules.jsonc"]
+    T_FILES["synced files"]
+  end
 
-    note over T,U: init (user project)
-    U->>T: read .ziku/modules.jsonc
-    U->>U: create .ziku/ziku.jsonc
-    U->>U: create .ziku/lock.json
-    U->>U: create synced files
+  subgraph User["ユーザープロジェクト"]
+    ZIKU[".ziku/ziku.jsonc"]
+    LOCK[".ziku/lock.json"]
+    U_FILES["synced files"]
+  end
 
-    note over T,U: pull
-    U->>U: read .ziku/ziku.jsonc
-    U->>U: read .ziku/lock.json
-    U->>T: read synced files
-    U->>U: update synced files
-    U->>U: update .ziku/lock.json
-
-    note over T,U: push
-    U->>U: read .ziku/ziku.jsonc
-    U->>U: read .ziku/lock.json
-    U->>U: read synced files
-    U->>T: read .ziku/modules.jsonc
-    U->>T: read synced files
-    U->>T: update synced files (PR)
-
-    note over T,U: diff
-    U->>U: read .ziku/ziku.jsonc
-    U->>U: read synced files
-    U->>T: read synced files
-
-    note over T,U: track
-    U->>U: read .ziku/ziku.jsonc
-    U->>U: update .ziku/ziku.jsonc
+  setup -->|create| MODULES
+  init -->|read| MODULES
+  init -->|create| ZIKU
+  init -->|create| LOCK
+  init -->|create| U_FILES
+  pull -->|read| ZIKU
+  pull -->|read| LOCK
+  pull -->|update| U_FILES
+  pull -->|update| LOCK
+  push -->|read| ZIKU
+  push -->|read| LOCK
+  push -->|read| MODULES
+  push -->|PR| T_FILES
+  diff -->|read| ZIKU
+  diff -->|read| U_FILES
+  track -->|update| ZIKU
 
 ```
 
+## ファイルごとのライフサイクル
+
+### `.ziku/modules.jsonc`
+
+**場所:** テンプレートリポジトリ  
+**役割:** モジュール定義（Claude Code ルール、MCP 設定などのグループ）
+
+| フェーズ | 詳細                                                        |
+| -------- | ----------------------------------------------------------- |
+| 生成     | `ziku setup` でデフォルトモジュールを含む初期ファイルを作成 |
+| 読み取り | `ziku init` でモジュール選択 UI のデータとして使用          |
+| 読み取り | `ziku push` でテンプレートのパターンとローカルの差分を検出  |
+
+### `.ziku/ziku.jsonc`
+
+**場所:** ユーザープロジェクト  
+**役割:** 同期設定（source + 選択済み include/exclude パターン）
+
+| フェーズ | 詳細                                                        |
+| -------- | ----------------------------------------------------------- |
+| 生成     | `ziku init` でモジュール選択結果をフラット化して保存        |
+| 読み取り | `pull` / `push` / `diff` でパターンとテンプレート情報を取得 |
+| 更新     | `ziku track` で新しいパターンを追加                         |
+
+### `.ziku/lock.json`
+
+**場所:** ユーザープロジェクト  
+**役割:** 同期状態（baseRef, baseHashes, pendingMerge）
+
+| フェーズ | 詳細                                                      |
+| -------- | --------------------------------------------------------- |
+| 生成     | `ziku init` でテンプレートのコミット SHA とハッシュを記録 |
+| 読み取り | `pull` / `push` で前回同期状態との差分検出に使用          |
+| 更新     | `ziku pull` で最新のベースに更新                          |
+
+### synced files
+
+**場所:** 両方  
+**役割:** パターンに一致する実際のファイル群（.claude/rules/\*.md など）
+
+| フェーズ | 詳細                                                     |
+| -------- | -------------------------------------------------------- |
+| 生成     | `ziku init` でテンプレートからコピー                     |
+| 更新     | `ziku pull` で 3-way マージにより同期                    |
+| 更新     | `ziku push` でローカル変更を PR としてテンプレートに送信 |
+
 ## コマンドごとのファイル操作
 
-### `init (template repo)`
+### `setup`
 
 テンプレートリポジトリの初期化
 
-| 操作 | ファイル              | 場所     | 詳細                                         |
-| ---- | --------------------- | -------- | -------------------------------------------- |
-| 作成 | `.ziku/modules.jsonc` | template | デフォルトパターンで生成（既存ならスキップ） |
+| 操作 | ファイル              | 場所     | 詳細                                           |
+| ---- | --------------------- | -------- | ---------------------------------------------- |
+| 作成 | `.ziku/modules.jsonc` | template | デフォルトモジュールで生成（既存ならスキップ） |
 
 ### `init (user project)`
 
@@ -123,21 +154,21 @@ sequenceDiagram
 
 ## 補足
 
-### modules.jsonc の役割
+### modules.jsonc と ziku.jsonc の関係
 
 `.ziku/modules.jsonc` はテンプレートリポジトリにのみ存在する「メニュー表」。
-同期対象のファイルパターンを、モジュール（名前・説明付きのグループ）として定義する。
+`.ziku/ziku.jsonc` はユーザープロジェクトにのみ存在する「選択結果」。
 
-**init 時**: ユーザーがどのモジュールを使うか選ぶ際の選択肢になる。選択結果はフラット化（モジュール構造を外して glob パターンだけにする）され、
-ユーザーのプロジェクトには `.ziku/ziku.jsonc` として保存される。つまり `.ziku/modules.jsonc` 自体はユーザーのプロジェクトにはコピーされない。
+`ziku setup` → テンプレートリポに `.ziku/modules.jsonc` を作成
+`ziku init` → `.ziku/modules.jsonc` を読み、モジュール選択 → 結果を `.ziku/ziku.jsonc` に保存
 
-**push 時**: ユーザーが `ziku track` で追加した新しいパターンがあれば、`.ziku/modules.jsonc` に書き戻される（PR 経由）。
-これにより、他のプロジェクトが init する際にも新パターンが選択肢に含まれるようになる。
+`.ziku/modules.jsonc` 自体はユーザーのプロジェクトにはコピーされない。
+init 後、`.ziku/ziku.jsonc` は `.ziku/modules.jsonc` から独立して管理される。
 
-### ziku.jsonc と modules.jsonc は init 後に独立
+### init 後の独立性
 
-init が完了すると、`.ziku/ziku.jsonc` のパターンはテンプレートの `.ziku/modules.jsonc` から独立して管理される。
-ユーザーが `ziku track` で追加したパターンは `.ziku/ziku.jsonc` にのみ反映され、テンプレートのどのモジュールにも属さない（push するまで）。
-逆に、テンプレート側で `.ziku/modules.jsonc` にモジュールを追加しても、既存ユーザーの `.ziku/ziku.jsonc` には自動反映されない。
+ユーザーが `ziku track` で追加したパターンは `.ziku/ziku.jsonc` にのみ反映される。
+テンプレート側で `.ziku/modules.jsonc` にモジュールを追加しても、既存ユーザーの `.ziku/ziku.jsonc` には自動反映されない。
+最新のモジュールを取り込むには `ziku init` を再実行する。
 
 <!-- LIFECYCLE:END -->

@@ -7,6 +7,7 @@ import { diffCommand } from "./commands/diff";
 import { initCommand } from "./commands/init";
 import { pullCommand } from "./commands/pull";
 import { pushCommand } from "./commands/push";
+import { setupCommand } from "./commands/setup";
 import { trackCommand } from "./commands/track";
 import { ZikuError } from "./errors";
 import { intro, logZikuError, pc } from "./ui/renderer";
@@ -19,6 +20,7 @@ const main = defineCommand({
   },
   subCommands: {
     init: initCommand,
+    setup: setupCommand,
     push: pushCommand,
     pull: pullCommand,
     diff: diffCommand,
@@ -97,9 +99,18 @@ async function run(): Promise<void> {
       const args = process.argv.slice(2);
       const hasSubCommand =
         args.length > 0 &&
-        ["init", "push", "pull", "diff", "track", "--help", "-h", "--version", "-v"].includes(
-          args[0],
-        );
+        [
+          "init",
+          "setup",
+          "push",
+          "pull",
+          "diff",
+          "track",
+          "--help",
+          "-h",
+          "--version",
+          "-v",
+        ].includes(args[0]);
 
       if (!hasSubCommand && args.length > 0 && !args[0].startsWith("-")) {
         // npx ziku . のような形式は init コマンドとして実行
