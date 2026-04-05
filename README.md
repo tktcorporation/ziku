@@ -94,18 +94,58 @@ npx ziku track '.eslintrc.*'
 
 <!-- GETTING_STARTED:END -->
 
-<!-- FEATURES:START -->
-
 ## Modules
 
-Pick what you need:
+Templates can organize files into **modules** — named groups of file patterns. During `ziku init`, you pick which modules to apply, and the selected patterns are saved to `.ziku/ziku.jsonc` in your project.
 
-- **Root** - MCP, mise, and other root-level config files
-- **DevContainer** - VS Code DevContainer with Docker-in-Docker
-- **GitHub** - GitHub Actions and labeler workflows
-- **Claude** - Claude Code project settings
+A template might offer modules like:
 
-<!-- FEATURES:END -->
+| Module | What it might include |
+|---|---|
+| **Linter / Formatter** | `.eslintrc.*`, `.prettierrc`, `biome.json` |
+| **CI / CD** | `.github/workflows/**`, `.gitlab-ci.yml` |
+| **DevContainer** | `.devcontainer/devcontainer.json` |
+| **AI Tooling** | `.claude/`, `.cursor/rules/`, `.mcp.json` |
+| **IaC** | `terraform/modules/**`, `docker-compose.yml` |
+
+After init, your project gets a flat config that drives `pull`, `push`, and `diff`:
+
+```jsonc
+// .ziku/ziku.jsonc (in your project — auto-generated, customizable)
+{
+  "source": { "owner": "my-org", "repo": ".ziku" },
+  "include": [".eslintrc.*", ".prettierrc", ".github/workflows/**"]
+}
+```
+
+You can add or remove patterns anytime with `ziku track`.
+
+<details>
+<summary>Defining modules in your template</summary>
+
+Template authors define modules in `.ziku/modules.jsonc` inside the template repository:
+
+```jsonc
+// .ziku/modules.jsonc (in the template repo)
+{
+  "modules": [
+    {
+      "name": "Linter",
+      "description": "Shared linter and formatter settings",
+      "include": [".eslintrc.*", ".prettierrc"]
+    },
+    {
+      "name": "CI",
+      "description": "GitHub Actions workflow templates",
+      "include": [".github/workflows/**"]
+    }
+  ]
+}
+```
+
+Module names and descriptions appear in the selection UI during `ziku init`. You can create any number of modules with any file patterns.
+
+</details>
 
 <!-- COMMANDS:START -->
 

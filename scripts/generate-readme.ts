@@ -28,7 +28,6 @@ import { resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import type { ArgsDef, CommandDef } from "citty";
 import { renderUsage } from "citty";
-import { parse as parseJsonc } from "jsonc-parser";
 import { z } from "zod";
 import { diffCommand } from "../src/commands/diff";
 import { generateFlatPatternsJsonc, initCommand } from "../src/commands/init";
@@ -37,14 +36,15 @@ import { pushCommand } from "../src/commands/push";
 import { trackCommand } from "../src/commands/track";
 import { modulesFileSchema } from "../src/modules/loader";
 import { zikuConfigSchema } from "../src/modules/schemas";
+import { generateLifecycleDocument } from "../src/docs/lifecycle";
 import { DEFAULT_TEMPLATE_REPOS } from "../src/utils/git-remote";
 import { LOCK_FILE } from "../src/utils/lock";
 import { ZIKU_CONFIG_FILE } from "../src/utils/ziku-config";
 
 const README_PATH = resolve(import.meta.dirname, "../README.md");
+const LIFECYCLE_DOC_PATH = resolve(import.meta.dirname, "../docs/architecture/file-lifecycle.md");
 const MODULES_SCHEMA_PATH = resolve(import.meta.dirname, "../schema/modules.json");
 const ZIKU_SCHEMA_PATH = resolve(import.meta.dirname, "../schema/ziku.json");
-const MODULES_JSONC_PATH = resolve(import.meta.dirname, "../.ziku/modules.jsonc");
 
 // Marker definitions
 const MARKERS = {
@@ -52,10 +52,7 @@ const MARKERS = {
     start: "<!-- GETTING_STARTED:START -->",
     end: "<!-- GETTING_STARTED:END -->",
   },
-  features: {
-    start: "<!-- FEATURES:START -->",
-    end: "<!-- FEATURES:END -->",
-  },
+  // NOTE: FEATURES (Modules section) is manually maintained — not auto-generated.
   commands: {
     start: "<!-- COMMANDS:START -->",
     end: "<!-- COMMANDS:END -->",
@@ -63,6 +60,10 @@ const MARKERS = {
   files: {
     start: "<!-- FILES:START -->",
     end: "<!-- FILES:END -->",
+  },
+  lifecycle: {
+    start: "<!-- LIFECYCLE:START -->",
+    end: "<!-- LIFECYCLE:END -->",
   },
 } as const;
 
@@ -129,24 +130,6 @@ function generateGettingStartedSection(): string {
 }
 
 /**
- * Generate Modules/Features section from .ziku/modules.jsonc
- *
- * テンプレートの modules.jsonc を読み込み、各モジュールの name と description から
- * README の Modules セクションを生成する。モジュール追加・変更時に README が自動追従する。
- */
-async function generateFeaturesSection(): Promise<string> {
-  const raw = await readFile(MODULES_JSONC_PATH, "utf-8");
-  const parsed = parseJsonc(raw) as { modules: { name: string; description: string }[] };
-
-  const lines: string[] = ["## Modules\n", "Pick what you need:\n"];
-  for (const mod of parsed.modules) {
-    lines.push(`- **${mod.name}** - ${mod.description}`);
-  }
-  lines.push("");
-  return lines.join("\n");
-}
-
-/**
  * Generate "What You Get" section from code constants
  *
  * init 後に生成されるファイルのパスをソースコード上の定数から取得し、
@@ -167,8 +150,9 @@ function generateFilesSection(): string {
  * Get description from command meta (handles Resolvable type)
  */
 function getCommandDescription(meta: unknown): string {
-  if (meta && typeof meta === "object" && "description" in meta) {
-    return (meta as { description?: string }).description || "";
+  if (typeof meta === "object" && meta !== null && "description" in meta) {
+    const description = String((meta as Record<string, string>).description ?? "");
+    return description;
   }
   return "";
 }
@@ -249,13 +233,16 @@ async function main(): Promise<void> {
 
   // Generate sections
   const gettingStartedSection = generateGettingStartedSection();
-  const featuresSection = await generateFeaturesSection();
   const commandsSection = await generateCommandsSection();
   const filesSection = generateFilesSection();
+  const lifecycleSection = generateLifecycleDocument();
 
   // Read originals
   let readme = await readFile(README_PATH, "utf-8");
   const originalReadme = readme;
+
+  let lifecycleDoc = await readFile(LIFECYCLE_DOC_PATH, "utf-8");
+  const originalLifecycleDoc = lifecycleDoc;
 
   const originalSchemas: Record<string, string> = {};
   for (const path of [MODULES_SCHEMA_PATH, ZIKU_SCHEMA_PATH]) {
@@ -266,17 +253,31 @@ async function main(): Promise<void> {
     }
   }
 
+  // Update README sections
   readme = updateSection(
     readme,
     MARKERS.gettingStarted.start,
     MARKERS.gettingStarted.end,
     gettingStartedSection,
   );
-  readme = updateSection(readme, MARKERS.features.start, MARKERS.features.end, featuresSection);
   readme = updateSection(readme, MARKERS.commands.start, MARKERS.commands.end, commandsSection);
   readme = updateSection(readme, MARKERS.files.start, MARKERS.files.end, filesSection);
 
   const readmeUpdated = readme !== originalReadme;
+
+  // Update lifecycle doc (write → format → read back canonical form, same as schemas)
+  {
+    const tempLifecycleDoc = updateSection(
+      lifecycleDoc,
+      MARKERS.lifecycle.start,
+      MARKERS.lifecycle.end,
+      lifecycleSection,
+    );
+    await writeFile(LIFECYCLE_DOC_PATH, tempLifecycleDoc);
+    execFileSync("npx", ["oxfmt", "--write", LIFECYCLE_DOC_PATH], { stdio: "ignore" });
+    lifecycleDoc = await readFile(LIFECYCLE_DOC_PATH, "utf-8");
+  }
+  const lifecycleDocUpdated = lifecycleDoc !== originalLifecycleDoc;
 
   // Generate formatted JSON Schemas (write, run formatter, read back canonical form)
   const schemaEntries: [string, string][] = [
@@ -293,7 +294,7 @@ async function main(): Promise<void> {
     }
   }
 
-  const updated = readmeUpdated || schemaUpdates.length > 0;
+  const updated = readmeUpdated || lifecycleDocUpdated || schemaUpdates.length > 0;
 
   if (isCheck) {
     // Restore original schemas if they were overwritten for formatting
@@ -302,9 +303,15 @@ async function main(): Promise<void> {
         await writeFile(path, original);
       }
     }
+    // Restore lifecycle doc
+    if (lifecycleDocUpdated) {
+      await writeFile(LIFECYCLE_DOC_PATH, originalLifecycleDoc);
+    }
 
     if (updated) {
       if (readmeUpdated) console.error("  - README.md is out of date");
+      if (lifecycleDocUpdated)
+        console.error("  - docs/architecture/file-lifecycle.md is out of date");
       for (const name of schemaUpdates) {
         console.error(`  - schema/${name} is out of date`);
       }
@@ -321,6 +328,10 @@ async function main(): Promise<void> {
     await writeFile(README_PATH, readme);
     console.log("  ✅ README.md updated.");
   }
+  if (lifecycleDocUpdated) {
+    await writeFile(LIFECYCLE_DOC_PATH, lifecycleDoc);
+    console.log("  ✅ docs/architecture/file-lifecycle.md updated.");
+  }
   for (const name of schemaUpdates) {
     console.log(`  ✅ schema/${name} updated.`);
   }
@@ -331,7 +342,7 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error) => {
-  console.error("Error:", error.message);
+main().catch((error: unknown) => {
+  console.error("Error:", error instanceof Error ? error.message : String(error));
   process.exit(1);
 });
