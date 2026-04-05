@@ -48,15 +48,30 @@ export const moduleSchema = z.object({
 
 export type TemplateModule = z.infer<typeof moduleSchema>;
 
-// DevEnvConfig
-export const configSchema = z.object({
-  version: z.string(),
-  installedAt: z.string().datetime({ offset: true }),
+// ────────────────────────────────────────────────────────────────
+// ZikuConfig (.ziku/ziku.jsonc) — ユーザー設定: どこから何を同期するか
+// ────────────────────────────────────────────────────────────────
+
+export const zikuConfigSchema = z.object({
+  $schema: z.string().optional(),
   source: z.object({
     owner: z.string(),
     repo: z.string(),
     ref: z.string().optional(),
   }),
+  include: z.array(z.string()),
+  exclude: z.array(z.string()).optional(),
+});
+
+export type ZikuConfig = z.infer<typeof zikuConfigSchema>;
+
+// ────────────────────────────────────────────────────────────────
+// LockState (.ziku/lock.json) — 機械管理: 同期状態
+// ────────────────────────────────────────────────────────────────
+
+export const lockSchema = z.object({
+  version: z.string(),
+  installedAt: z.string().datetime({ offset: true }),
   /**
    * init/pull 時点のテンプレートリポジトリのコミット SHA。
    * pull 時に baseRef〜最新間の差分を取得し、3-way merge のベースとして使用する。
@@ -83,6 +98,30 @@ export const configSchema = z.object({
       /** pull 対象のテンプレートハッシュ（解決後の baseHashes として適用） */
       templateHashes: z.record(z.string(), z.string()),
       /** pull 対象の最新コミット SHA（解決後の baseRef として適用） */
+      latestRef: z.string().optional(),
+    })
+    .optional(),
+});
+
+export type LockState = z.infer<typeof lockSchema>;
+
+/**
+ * @deprecated 後方互換用。新コードでは ZikuConfig + LockState を使用する。
+ */
+export const configSchema = z.object({
+  version: z.string(),
+  installedAt: z.string().datetime({ offset: true }),
+  source: z.object({
+    owner: z.string(),
+    repo: z.string(),
+    ref: z.string().optional(),
+  }),
+  baseRef: z.string().optional(),
+  baseHashes: z.record(z.string(), z.string()).optional(),
+  pendingMerge: z
+    .object({
+      conflicts: z.array(z.string()),
+      templateHashes: z.record(z.string(), z.string()),
       latestRef: z.string().optional(),
     })
     .optional(),

@@ -121,11 +121,14 @@ vi.mock("../../modules/index", async (importOriginal) => {
   };
 });
 
-vi.mock("../../utils/config", () => ({
-  CONFIG_FILE: ".ziku/config.json",
-  loadConfig: vi.fn(),
-  saveConfig: vi.fn(),
-}));
+vi.mock("../../utils/ziku-config", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual };
+});
+vi.mock("../../utils/lock", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual };
+});
 
 vi.mock("../../ui/diff-view", () => ({
   renderFileDiff: vi.fn(),
@@ -171,7 +174,7 @@ const { pullCommand } = await import("../pull");
 const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy } =
   await import("../../utils/template");
 const { hashFiles } = await import("../../utils/hash");
-const { loadConfig } = await import("../../utils/config");
+const { zikuConfigExists } = await import("../../utils/ziku-config");
 const {
   modulesFileExists,
   loadPatternsFile: _loadPatternsFile,
@@ -189,7 +192,6 @@ const mockFetchTemplates = vi.mocked(fetchTemplates);
 const mockWriteFileWithStrategy = vi.mocked(writeFileWithStrategy);
 const mockHashFiles = vi.mocked(hashFiles);
 const mockModulesFileExists = vi.mocked(modulesFileExists);
-const mockLoadConfig = vi.mocked(loadConfig);
 const mockLoadTemplateModulesFile = vi.mocked(loadTemplateModulesFile);
 const mockSelectModules = vi.mocked(selectModules);
 const mockLog = vi.mocked(log);
@@ -198,18 +200,29 @@ const mockCheckRepoExists = vi.mocked(checkRepoExists);
 
 // ── helpers ─────────────────────────────────────────────────────
 
+function createZikuJsonc(
+  include: string[],
+  exclude?: string[],
+  source = { owner: "test-org", repo: ".github" },
+): string {
+  const content: Record<string, unknown> = { source, include };
+  if (exclude && exclude.length > 0) content.exclude = exclude;
+  return JSON.stringify(content, null, 2);
+}
+
 function flatModulesJsonc(include: string[], exclude?: string[]): string {
   const content: Record<string, unknown> = { include };
   if (exclude && exclude.length > 0) content.exclude = exclude;
   return JSON.stringify(content, null, 2);
 }
 
-const baseConfig = {
+const baseLock = {
   version: "0.1.0",
   installedAt: "2024-01-01T00:00:00.000Z",
-  source: { owner: "test-org", repo: ".github" },
   baseHashes: {},
 };
+
+const baseSource = { owner: "test-org", repo: ".github" };
 
 // ═══════════════════════════════════════════════════════════════
 // E2E Scenarios
@@ -225,7 +238,7 @@ describe("E2E: multi-scenario tests", () => {
       cleanup: vi.fn(),
     });
     mockFetchTemplates.mockResolvedValue([]);
-    mockWriteFileWithStrategy.mockResolvedValue({ action: "created", path: ".ziku/config.json" });
+    mockWriteFileWithStrategy.mockResolvedValue({ action: "created", path: ".ziku/ziku.jsonc" });
     mockHashFiles.mockResolvedValue({});
     mockModulesFileExists.mockReturnValue(true);
     mockCheckRepoExists.mockResolvedValue(true);
@@ -454,10 +467,10 @@ describe("E2E: multi-scenario tests", () => {
   // ─────────────────────────────────────────────────────────────
 
   describe("diff: エラーケース", () => {
-    it(".ziku/config.json が存在しない → ZikuError", async () => {
+    it(".ziku/ziku.jsonc が存在しない → ZikuError", async () => {
       vol.fromJSON({
-        "/project/.ziku/modules.jsonc": flatModulesJsonc([".mcp.json"]),
-        // .ziku/config.json なし
+        "/project/.ziku/lock.json": JSON.stringify(baseLock),
+        // .ziku/ziku.jsonc なし
       });
 
       await expect(
@@ -469,10 +482,10 @@ describe("E2E: multi-scenario tests", () => {
       ).rejects.toThrow();
     });
 
-    it("modules.jsonc が存在しない → ZikuError", async () => {
-      mockModulesFileExists.mockReturnValueOnce(false);
+    it("ziku.jsonc が存在しない → ZikuError", async () => {
       vol.fromJSON({
-        "/project/.ziku/config.json": JSON.stringify(baseConfig),
+        "/project/.ziku/lock.json": JSON.stringify(baseLock),
+        // .ziku/ziku.jsonc なし
       });
 
       await expect(
@@ -490,10 +503,10 @@ describe("E2E: multi-scenario tests", () => {
   // ─────────────────────────────────────────────────────────────
 
   describe("track: パターン追加の完全フロー", () => {
-    it("新規パターンを追加して modules.jsonc に反映される", async () => {
-      const initial = flatModulesJsonc([".mcp.json"]);
+    it("新規パターンを追加して ziku.jsonc に反映される", async () => {
+      const initial = createZikuJsonc([".mcp.json"]);
       vol.fromJSON({
-        "/project/.ziku/modules.jsonc": initial,
+        "/project/.ziku/ziku.jsonc": initial,
       });
 
       const originalArgv = process.argv;
@@ -508,7 +521,7 @@ describe("E2E: multi-scenario tests", () => {
       process.argv = originalArgv;
 
       // ファイルが更新されていること
-      const content = vol.readFileSync("/project/.ziku/modules.jsonc", "utf-8") as string;
+      const content = vol.readFileSync("/project/.ziku/ziku.jsonc", "utf-8") as string;
       const parsed = JSON.parse(content);
       expect(parsed.include).toContain(".mcp.json");
       expect(parsed.include).toContain(".github/workflows/*.yml");
@@ -516,7 +529,7 @@ describe("E2E: multi-scenario tests", () => {
 
     it("既に追跡済みのパターン → 変更なし警告", async () => {
       vol.fromJSON({
-        "/project/.ziku/modules.jsonc": flatModulesJsonc([".mcp.json"]),
+        "/project/.ziku/ziku.jsonc": createZikuJsonc([".mcp.json"]),
       });
 
       const originalArgv = process.argv;
@@ -536,7 +549,7 @@ describe("E2E: multi-scenario tests", () => {
 
     it("--list でパターン一覧を表示", async () => {
       vol.fromJSON({
-        "/project/.ziku/modules.jsonc": flatModulesJsonc(
+        "/project/.ziku/ziku.jsonc": createZikuJsonc(
           [".mcp.json", ".devcontainer/**"],
           ["*.local"],
         ),
@@ -551,8 +564,7 @@ describe("E2E: multi-scenario tests", () => {
       // エラーなく完了すること
     });
 
-    it("modules.jsonc がない場合 → ZikuError", async () => {
-      mockModulesFileExists.mockReturnValueOnce(false);
+    it("ziku.jsonc がない場合 → ZikuError", async () => {
       vol.fromJSON({ "/project": null });
 
       await expect(
@@ -566,7 +578,7 @@ describe("E2E: multi-scenario tests", () => {
 
     it("パターン引数なし → ZikuError", async () => {
       vol.fromJSON({
-        "/project/.ziku/modules.jsonc": flatModulesJsonc([".mcp.json"]),
+        "/project/.ziku/ziku.jsonc": createZikuJsonc([".mcp.json"]),
       });
 
       const originalArgv = process.argv;
@@ -589,9 +601,9 @@ describe("E2E: multi-scenario tests", () => {
   // ─────────────────────────────────────────────────────────────
 
   describe("pull: エラーケース", () => {
-    it(".ziku/config.json がない → ZikuError", async () => {
+    it(".ziku/ziku.jsonc がない → ZikuError", async () => {
       vol.fromJSON({
-        "/project/.ziku/modules.jsonc": flatModulesJsonc([".mcp.json"]),
+        "/project/.ziku/lock.json": JSON.stringify(baseLock),
       });
 
       await expect(
@@ -625,17 +637,16 @@ describe("E2E: multi-scenario tests", () => {
         cmd: initCommand,
       });
 
-      // init が書き出した modules.jsonc を取得
-      const initModulesCall = mockWriteFileWithStrategy.mock.calls.find(
-        (call) => call[0].relativePath === ".ziku/modules.jsonc",
+      // init が書き出した ziku.jsonc を取得
+      const initZikuCall = mockWriteFileWithStrategy.mock.calls.find(
+        (call) => call[0].relativePath === ".ziku/ziku.jsonc",
       );
-      expect(initModulesCall).toBeDefined();
-      const initContent = initModulesCall![0].content;
+      expect(initZikuCall).toBeDefined();
+      const initContent = initZikuCall![0].content;
 
       // Step 2: track でパターン追加
       vol.fromJSON({
-        "/project/.ziku/modules.jsonc": initContent,
-        "/project/.ziku/config.json": JSON.stringify(baseConfig),
+        "/project/.ziku/ziku.jsonc": initContent,
       });
 
       const originalArgv = process.argv;
@@ -649,14 +660,11 @@ describe("E2E: multi-scenario tests", () => {
 
       process.argv = originalArgv;
 
-      // modules.jsonc が更新されたことを確認
-      const updatedContent = vol.readFileSync("/project/.ziku/modules.jsonc", "utf-8") as string;
+      // ziku.jsonc が更新されたことを確認
+      const updatedContent = vol.readFileSync("/project/.ziku/ziku.jsonc", "utf-8") as string;
       const updatedParsed = JSON.parse(updatedContent);
       expect(updatedParsed.include).toContain(".mcp.json");
       expect(updatedParsed.include).toContain(".github/workflows/ci.yml");
-
-      // Step 3: diff が新しいパターンで動作
-      mockLoadConfig.mockResolvedValue(baseConfig as any);
 
       await (diffCommand.run as any)({
         args: { dir: "/project", verbose: false },

@@ -154,11 +154,11 @@ describe("initCommand", () => {
     mockFetchTemplates.mockResolvedValue([]);
     mockWriteFileWithStrategy.mockResolvedValue({
       action: "created",
-      path: ".ziku/config.json",
+      path: ".ziku/lock.json",
     });
     mockCopyFile.mockResolvedValue({
       action: "skipped",
-      path: ".ziku/modules.jsonc",
+      path: ".ziku/ziku.jsonc",
     });
     mockHashFiles.mockResolvedValue({});
   });
@@ -324,7 +324,7 @@ describe("initCommand", () => {
       expect(mockCleanup).toHaveBeenCalled();
     });
 
-    it("選択されたモジュールで modules.jsonc を生成する", async () => {
+    it("選択されたモジュールで ziku.jsonc を生成する", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -342,10 +342,10 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
-      // writeFileWithStrategy が modules.jsonc に対して呼ばれる
+      // writeFileWithStrategy が ziku.jsonc に対して呼ばれる
       expect(mockWriteFileWithStrategy).toHaveBeenCalledWith(
         expect.objectContaining({
-          relativePath: ".ziku/modules.jsonc",
+          relativePath: ".ziku/ziku.jsonc",
         }),
       );
     });
@@ -763,7 +763,7 @@ describe("initCommand", () => {
       );
     });
 
-    it(".ziku/config.json に baseHashes が含まれる", async () => {
+    it(".ziku/lock.json に baseHashes が含まれる", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -789,13 +789,10 @@ describe("initCommand", () => {
         expect.any(Array),
       );
 
-      // writeFileWithStrategy に baseHashes が含まれた JSON が渡される
-      const configCall = mockWriteFileWithStrategy.mock.calls.find(
-        (call) => call[0].relativePath === ".ziku/config.json",
-      );
-      expect(configCall).toBeDefined();
-      const configContent = JSON.parse(configCall![0].content);
-      expect(configContent.baseHashes).toEqual(expectedHashes);
+      // saveLock により .ziku/lock.json がファイルシステムに書き出される
+      expect(vol.existsSync("/test/.ziku/lock.json")).toBe(true);
+      const lockContent = JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string);
+      expect(lockContent.baseHashes).toEqual(expectedHashes);
     });
 
     it("テンプレートにマッチするファイルがない場合は baseHashes が省略される", async () => {
@@ -814,13 +811,11 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
-      const configCall = mockWriteFileWithStrategy.mock.calls.find(
-        (call) => call[0].relativePath === ".ziku/config.json",
-      );
-      expect(configCall).toBeDefined();
-      const configContent = JSON.parse(configCall![0].content);
+      // saveLock により .ziku/lock.json がファイルシステムに書き出される
+      expect(vol.existsSync("/test/.ziku/lock.json")).toBe(true);
+      const lockContent = JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string);
       // 空のハッシュマップの場合は baseHashes キーが省略される
-      expect(configContent.baseHashes).toBeUndefined();
+      expect(lockContent.baseHashes).toBeUndefined();
     });
 
     it("テンプレートリポジトリ自体で実行した場合、フラット形式の modules.jsonc を生成する", async () => {

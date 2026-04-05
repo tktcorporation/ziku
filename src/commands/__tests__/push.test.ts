@@ -90,6 +90,18 @@ vi.mock("../../ui/prompts", () => ({
   selectPushFiles: vi.fn(),
 }));
 
+// utils/ziku-config をモック
+vi.mock("../../utils/ziku-config", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual };
+});
+
+// utils/lock をモック
+vi.mock("../../utils/lock", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual };
+});
+
 // modules をモック
 vi.mock("../../modules", () => ({
   modulesFileExists: vi.fn(() => true),
@@ -155,13 +167,18 @@ const mockHashFiles = vi.mocked(hashFiles);
 const mockClassifyFiles = vi.mocked(classifyFiles);
 const mockThreeWayMerge = vi.mocked(threeWayMerge);
 
-const validConfig = {
-  version: "0.1.0",
-  installedAt: "2024-01-01T00:00:00.000Z",
+const validZikuConfig = {
   source: {
     owner: "tktcorporation",
     repo: ".github",
   },
+  include: [".github/**"],
+  exclude: [],
+};
+
+const validLock = {
+  version: "0.1.0",
+  installedAt: "2024-01-01T00:00:00.000Z",
 };
 
 const emptyDiff = {
@@ -255,7 +272,7 @@ describe("pushCommand", () => {
   });
 
   describe("run", () => {
-    it(".ziku/config.json が存在しない場合はエラー", async () => {
+    it(".ziku/ziku.jsonc が存在しない場合はエラー", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -266,12 +283,12 @@ describe("pushCommand", () => {
           rawArgs: [],
           cmd: pushCommand,
         }),
-      ).rejects.toThrow(".ziku/config.json not found.");
+      ).rejects.toThrow(".ziku/ziku.jsonc not found.");
     });
 
-    it("無効な .ziku/config.json 形式の場合はエラー", async () => {
+    it(".ziku/lock.json が存在しない場合はエラー", async () => {
       vol.fromJSON({
-        "/test/.ziku/config.json": JSON.stringify({ invalid: "format" }),
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
       });
 
       await expect(
@@ -280,18 +297,33 @@ describe("pushCommand", () => {
           rawArgs: [],
           cmd: pushCommand,
         }),
-      ).rejects.toThrow("Invalid .ziku/config.json format");
+      ).rejects.toThrow(".ziku/lock.json not found.");
+    });
+
+    it("無効な .ziku/lock.json 形式の場合はエラー", async () => {
+      vol.fromJSON({
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify({ invalid: "format" }),
+      });
+
+      await expect(
+        (pushCommand.run as any)({
+          args: { dir: "/test", dryRun: false, yes: false, edit: false },
+          rawArgs: [],
+          cmd: pushCommand,
+        }),
+      ).rejects.toThrow("Invalid .ziku/lock.json format");
     });
 
     it("patterns が空の場合は警告", async () => {
-      vol.fromJSON({
-        "/test/.ziku/config.json": JSON.stringify(validConfig),
-      });
-
-      mockLoadPatternsFile.mockResolvedValueOnce({
+      const emptyPatternsConfig = {
+        ...validZikuConfig,
         include: [],
-        exclude: [],
-        rawContent: '{"include":[],"exclude":[]}',
+      };
+
+      vol.fromJSON({
+        "/test/.ziku/ziku.jsonc": JSON.stringify(emptyPatternsConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
       });
 
       await (pushCommand.run as any)({
@@ -305,7 +337,8 @@ describe("pushCommand", () => {
 
     it("push 対象ファイルがない場合は情報メッセージ", async () => {
       vol.fromJSON({
-        "/test/.ziku/config.json": JSON.stringify(validConfig),
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
       });
 
       mockGetPushableFiles.mockReturnValue([]);
@@ -321,7 +354,8 @@ describe("pushCommand", () => {
 
     it("--dry-run オプションで PR を作成しない", async () => {
       vol.fromJSON({
-        "/test/.ziku/config.json": JSON.stringify(validConfig),
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
       });
 
       setupPushableFiles([{ path: "file.txt", type: "added", localContent: "content" }]);
@@ -339,7 +373,8 @@ describe("pushCommand", () => {
 
     it("ファイル選択をキャンセルすると PR を作成しない", async () => {
       vol.fromJSON({
-        "/test/.ziku/config.json": JSON.stringify(validConfig),
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
       });
 
       setupPushableFiles([{ path: "file.txt", type: "added", localContent: "content" }]);
@@ -358,7 +393,8 @@ describe("pushCommand", () => {
 
     it("PR 作成前の確認でキャンセル", async () => {
       vol.fromJSON({
-        "/test/.ziku/config.json": JSON.stringify(validConfig),
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
       });
 
       const pushableFile = {
@@ -386,7 +422,8 @@ describe("pushCommand", () => {
 
     it("PR 作成成功（タイトル・本文は自動生成）", async () => {
       vol.fromJSON({
-        "/test/.ziku/config.json": JSON.stringify(validConfig),
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
       });
 
       const pushableFile = {
@@ -430,7 +467,8 @@ describe("pushCommand", () => {
 
     it("GitHub トークンがない場合はプロンプト", async () => {
       vol.fromJSON({
-        "/test/.ziku/config.json": JSON.stringify(validConfig),
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
       });
 
       const pushableFile = {
@@ -462,7 +500,8 @@ describe("pushCommand", () => {
 
     it("--message オプションで PR タイトルを指定", async () => {
       vol.fromJSON({
-        "/test/.ziku/config.json": JSON.stringify(validConfig),
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
       });
 
       const pushableFile = {
@@ -505,7 +544,8 @@ describe("pushCommand", () => {
 
     it("--files オプションで指定ファイルのみ PR に含める", async () => {
       vol.fromJSON({
-        "/test/.ziku/config.json": JSON.stringify(validConfig),
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
       });
 
       const file1 = {
@@ -567,7 +607,8 @@ describe("pushCommand", () => {
 
     it("--files に存在しないファイルを指定すると警告", async () => {
       vol.fromJSON({
-        "/test/.ziku/config.json": JSON.stringify(validConfig),
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
       });
 
       const file1 = {
@@ -605,7 +646,8 @@ describe("pushCommand", () => {
 
     it("--files に一致するファイルがない場合はキャンセル", async () => {
       vol.fromJSON({
-        "/test/.ziku/config.json": JSON.stringify(validConfig),
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
       });
 
       setupPushableFiles([{ path: "file.txt", type: "added", localContent: "content" }]);
@@ -628,7 +670,8 @@ describe("pushCommand", () => {
 
     it("--yes オプションで確認をスキップ", async () => {
       vol.fromJSON({
-        "/test/.ziku/config.json": JSON.stringify(validConfig),
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
       });
 
       const pushableFile = {
@@ -661,15 +704,16 @@ describe("pushCommand", () => {
     });
 
     it("baseHashes が存在しコンフリクトがある場合は警告して確認を求める（baseRef なし）", async () => {
-      const configWithBaseHashes = {
-        ...validConfig,
+      const lockWithBaseHashes = {
+        ...validLock,
         baseHashes: {
           "file.txt": "abc123",
         },
       };
 
       vol.fromJSON({
-        "/test/.ziku/config.json": JSON.stringify(configWithBaseHashes),
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(lockWithBaseHashes),
         "/test/file.txt": "local content",
         "/tmp/template/file.txt": "template content",
       });
@@ -702,15 +746,16 @@ describe("pushCommand", () => {
     });
 
     it("コンフリクトがあっても確認で続行を選べばPRを作成", async () => {
-      const configWithBaseHashes = {
-        ...validConfig,
+      const lockWithBaseHashes = {
+        ...validLock,
         baseHashes: {
           "file.txt": "abc123",
         },
       };
 
       vol.fromJSON({
-        "/test/.ziku/config.json": JSON.stringify(configWithBaseHashes),
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(lockWithBaseHashes),
         "/test/file.txt": "local content",
         "/tmp/template/file.txt": "template content",
       });
@@ -761,8 +806,8 @@ describe("pushCommand", () => {
     });
 
     it("baseRef + baseHashes がある場合に 3-way マージで自動解決", async () => {
-      const configWithBaseRef = {
-        ...validConfig,
+      const lockWithBaseRef = {
+        ...validLock,
         baseRef: "abc123def456",
         baseHashes: {
           "file.txt": "abc123",
@@ -770,7 +815,8 @@ describe("pushCommand", () => {
       };
 
       vol.fromJSON({
-        "/test/.ziku/config.json": JSON.stringify(configWithBaseRef),
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(lockWithBaseRef),
         "/test/file.txt": "local content",
         "/tmp/template/file.txt": "template content",
         // base テンプレートのファイル（downloadTemplateToTemp が /tmp/base-template を返す）
@@ -848,7 +894,8 @@ describe("pushCommand", () => {
 
     it("baseHashes がない場合でもコンフリクト検出を実行（空の baseHashes で分類）", async () => {
       vol.fromJSON({
-        "/test/.ziku/config.json": JSON.stringify(validConfig),
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(validLock),
       });
 
       mockGetPushableFiles.mockReturnValue([]);
@@ -869,8 +916,8 @@ describe("pushCommand", () => {
     });
 
     it("autoUpdate ファイル（テンプレートのみ変更）は classification により push 対象外", async () => {
-      const configWithBaseHashes = {
-        ...validConfig,
+      const lockWithBaseHashes = {
+        ...validLock,
         baseHashes: {
           "file.txt": "abc123",
           "template-only.txt": "def456",
@@ -878,7 +925,8 @@ describe("pushCommand", () => {
       };
 
       vol.fromJSON({
-        "/test/.ziku/config.json": JSON.stringify(configWithBaseHashes),
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(lockWithBaseHashes),
         "/test/file.txt": "local content",
         "/test/template-only.txt": "old template content",
         "/tmp/template/file.txt": "local content",
@@ -924,15 +972,16 @@ describe("pushCommand", () => {
     });
 
     it("baseHashes が存在しコンフリクトがない場合は正常に続行", async () => {
-      const configWithBaseHashes = {
-        ...validConfig,
+      const lockWithBaseHashes = {
+        ...validLock,
         baseHashes: {
           "file.txt": "abc123",
         },
       };
 
       vol.fromJSON({
-        "/test/.ziku/config.json": JSON.stringify(configWithBaseHashes),
+        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
+        "/test/.ziku/lock.json": JSON.stringify(lockWithBaseHashes),
       });
 
       // コンフリクトなし

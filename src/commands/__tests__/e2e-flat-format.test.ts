@@ -148,11 +148,14 @@ vi.mock("../../modules/index", async (importOriginal) => {
   };
 });
 
-vi.mock("../../utils/config", () => ({
-  CONFIG_FILE: ".ziku/config.json",
-  loadConfig: vi.fn(),
-  saveConfig: vi.fn(),
-}));
+vi.mock("../../utils/ziku-config", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual };
+});
+vi.mock("../../utils/lock", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual };
+});
 
 vi.mock("../../ui/diff-view", () => ({
   renderFileDiff: vi.fn(),
@@ -192,7 +195,8 @@ const { diffCommand } = await import("../diff");
 const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy, copyFile } =
   await import("../../utils/template");
 const { hashFiles } = await import("../../utils/hash");
-const { loadConfig, saveConfig } = await import("../../utils/config");
+const { loadZikuConfig, zikuConfigExists } = await import("../../utils/ziku-config");
+const { loadLock, saveLock } = await import("../../utils/lock");
 const { loadPatternsFile, addIncludePattern, saveModulesFile, modulesFileExists } =
   await import("../../modules");
 const { detectDiff } = await import("../../utils/diff");
@@ -202,11 +206,21 @@ const mockFetchTemplates = vi.mocked(fetchTemplates);
 const mockWriteFileWithStrategy = vi.mocked(writeFileWithStrategy);
 const mockCopyFile = vi.mocked(copyFile);
 const mockHashFiles = vi.mocked(hashFiles);
-const mockLoadConfig = vi.mocked(loadConfig);
-const _mockSaveConfig = vi.mocked(saveConfig);
 const mockModulesFileExists = vi.mocked(modulesFileExists);
 
 // ── helpers ─────────────────────────────────────────────────────
+
+function createZikuJsonc(
+  include: string[],
+  exclude?: string[],
+  source = { owner: "test-org", repo: ".github" },
+): string {
+  const content: Record<string, unknown> = { source, include };
+  if (exclude && exclude.length > 0) {
+    content.exclude = exclude;
+  }
+  return JSON.stringify(content, null, 2);
+}
 
 function createFlatModulesJsonc(include: string[], exclude?: string[]): string {
   const content: Record<string, unknown> = { include };
@@ -216,12 +230,13 @@ function createFlatModulesJsonc(include: string[], exclude?: string[]): string {
   return JSON.stringify(content, null, 2);
 }
 
-const baseConfig = {
+const baseLock = {
   version: "0.1.0",
   installedAt: "2024-01-01T00:00:00.000Z",
-  source: { owner: "test-org", repo: ".github" },
   baseHashes: {},
 };
+
+const baseSource = { owner: "test-org", repo: ".github" };
 
 // ═══════════════════════════════════════════════════════════════
 // E2E Tests
@@ -239,11 +254,11 @@ describe("E2E: flat modules.jsonc format", () => {
     mockFetchTemplates.mockResolvedValue([]);
     mockWriteFileWithStrategy.mockResolvedValue({
       action: "created",
-      path: ".ziku/config.json",
+      path: ".ziku/ziku.jsonc",
     });
     mockCopyFile.mockResolvedValue({
       action: "skipped",
-      path: ".ziku/modules.jsonc",
+      path: ".ziku/lock.json",
     });
     mockHashFiles.mockResolvedValue({});
     mockModulesFileExists.mockReturnValue(true);
@@ -265,7 +280,7 @@ describe("E2E: flat modules.jsonc format", () => {
 
       // writeFileWithStrategy で modules.jsonc が書き出される
       const modulesCall = mockWriteFileWithStrategy.mock.calls.find(
-        (call) => call[0].relativePath === ".ziku/modules.jsonc",
+        (call) => call[0].relativePath === ".ziku/ziku.jsonc",
       );
 
       expect(modulesCall).toBeDefined();
@@ -294,7 +309,7 @@ describe("E2E: flat modules.jsonc format", () => {
       });
 
       const modulesCall = mockWriteFileWithStrategy.mock.calls.find(
-        (call) => call[0].relativePath === ".ziku/modules.jsonc",
+        (call) => call[0].relativePath === ".ziku/ziku.jsonc",
       );
 
       expect(modulesCall).toBeDefined();
@@ -314,13 +329,13 @@ describe("E2E: flat modules.jsonc format", () => {
       });
 
       const modulesCall = mockWriteFileWithStrategy.mock.calls.find(
-        (call) => call[0].relativePath === ".ziku/modules.jsonc",
+        (call) => call[0].relativePath === ".ziku/ziku.jsonc",
       );
 
       expect(modulesCall).toBeDefined();
       const content = JSON.parse(modulesCall![0].content);
 
-      expect(content.$schema).toContain("schema/modules.json");
+      expect(content.$schema).toContain("schema/ziku.json");
     });
 
     it("fetchTemplates に FlatPatterns が渡されること", async () => {
@@ -370,7 +385,7 @@ describe("E2E: flat modules.jsonc format", () => {
 
   describe("track → フラット形式にパターン追加", () => {
     it("addIncludePattern で新しいパターンがフラット include に追加される", () => {
-      const initial = createFlatModulesJsonc([".mcp.json", ".devcontainer/**"]);
+      const initial = createZikuJsonc([".mcp.json", ".devcontainer/**"]);
       const updated = addIncludePattern(initial, [".cloud/rules/*.md"]);
 
       const parsed = JSON.parse(updated);
@@ -381,7 +396,7 @@ describe("E2E: flat modules.jsonc format", () => {
     });
 
     it("複数パターンを一度に追加できる", () => {
-      const initial = createFlatModulesJsonc([".mcp.json"]);
+      const initial = createZikuJsonc([".mcp.json"]);
       const updated = addIncludePattern(initial, [".cloud/rules/*.md", ".cloud/config.json"]);
 
       const parsed = JSON.parse(updated);
@@ -391,7 +406,7 @@ describe("E2E: flat modules.jsonc format", () => {
     });
 
     it("既存パターンは重複追加されない", () => {
-      const initial = createFlatModulesJsonc([".mcp.json", ".devcontainer/**"]);
+      const initial = createZikuJsonc([".mcp.json", ".devcontainer/**"]);
       const updated = addIncludePattern(initial, [".mcp.json"]);
 
       const parsed = JSON.parse(updated);
@@ -399,7 +414,7 @@ describe("E2E: flat modules.jsonc format", () => {
     });
 
     it("exclude 付きファイルへのパターン追加でも exclude は維持される", () => {
-      const initial = createFlatModulesJsonc([".mcp.json"], ["*.local"]);
+      const initial = createZikuJsonc([".mcp.json"], ["*.local"]);
       const updated = addIncludePattern(initial, [".github/**"]);
 
       const parsed = JSON.parse(updated);
@@ -435,7 +450,7 @@ describe("E2E: flat modules.jsonc format", () => {
 
     it("trackCommand --list がフラット形式の内容を表示する", async () => {
       vol.fromJSON({
-        "/project/.ziku/modules.jsonc": createFlatModulesJsonc(
+        "/project/.ziku/ziku.jsonc": createZikuJsonc(
           [".mcp.json", ".devcontainer/**"],
           ["*.local"],
         ),
@@ -456,15 +471,16 @@ describe("E2E: flat modules.jsonc format", () => {
   // ─────────────────────────────────────────────────────────────
 
   describe("pull → フラットパターンで正常動作", () => {
-    it("loadPatternsFile で読んだ include/exclude で hashFiles を呼ぶ", async () => {
-      const modulesContent = createFlatModulesJsonc([".mcp.json", ".devcontainer/**"], ["*.local"]);
+    it("ziku.jsonc で読んだ include/exclude で hashFiles を呼ぶ", async () => {
       vol.fromJSON({
-        "/project/.ziku/modules.jsonc": modulesContent,
-        "/project/.ziku/config.json": JSON.stringify(baseConfig),
+        "/project/.ziku/ziku.jsonc": createZikuJsonc(
+          [".mcp.json", ".devcontainer/**"],
+          ["*.local"],
+        ),
+        "/project/.ziku/lock.json": JSON.stringify(baseLock),
         "/project/.mcp.json": "{}",
       });
 
-      mockLoadConfig.mockResolvedValue(baseConfig as any);
       mockHashFiles.mockResolvedValue({});
 
       await (pullCommand.run as any)({
@@ -482,11 +498,10 @@ describe("E2E: flat modules.jsonc format", () => {
 
     it("フラットパターンのみで pull が完走する（モジュール概念なし）", async () => {
       vol.fromJSON({
-        "/project/.ziku/modules.jsonc": createFlatModulesJsonc([".mcp.json"]),
-        "/project/.ziku/config.json": JSON.stringify(baseConfig),
+        "/project/.ziku/ziku.jsonc": createZikuJsonc([".mcp.json"]),
+        "/project/.ziku/lock.json": JSON.stringify(baseLock),
       });
 
-      mockLoadConfig.mockResolvedValue(baseConfig as any);
       mockHashFiles.mockResolvedValue({});
 
       // エラーなく完了すること
@@ -505,8 +520,8 @@ describe("E2E: flat modules.jsonc format", () => {
   describe("diff → フラットパターンで正常動作", () => {
     it("loadPatternsFile からフラットパターンを取得して detectDiff に渡す", async () => {
       vol.fromJSON({
-        "/project/.ziku/modules.jsonc": createFlatModulesJsonc([".mcp.json", ".github/**"]),
-        "/project/.ziku/config.json": JSON.stringify(baseConfig),
+        "/project/.ziku/ziku.jsonc": createZikuJsonc([".mcp.json", ".github/**"]),
+        "/project/.ziku/lock.json": JSON.stringify(baseLock),
       });
 
       await (diffCommand.run as any)({
@@ -544,7 +559,7 @@ describe("E2E: flat modules.jsonc format", () => {
 
       // init が書き出した modules.jsonc の内容を取得
       const modulesCall = mockWriteFileWithStrategy.mock.calls.find(
-        (call) => call[0].relativePath === ".ziku/modules.jsonc",
+        (call) => call[0].relativePath === ".ziku/ziku.jsonc",
       );
       expect(modulesCall).toBeDefined();
       const flatContent = modulesCall![0].content;
@@ -566,11 +581,10 @@ describe("E2E: flat modules.jsonc format", () => {
 
       // Step 3: track 後のファイルを memfs に配置して pull が読める
       vol.fromJSON({
-        "/test/.ziku/modules.jsonc": tracked,
-        "/test/.ziku/config.json": JSON.stringify(baseConfig),
+        "/test/.ziku/ziku.jsonc": tracked,
+        "/test/.ziku/lock.json": JSON.stringify(baseLock),
       });
 
-      mockLoadConfig.mockResolvedValue(baseConfig as any);
       mockHashFiles.mockResolvedValue({});
 
       await (pullCommand.run as any)({
@@ -598,10 +612,11 @@ describe("E2E: flat modules.jsonc format", () => {
 
   describe("format validation", () => {
     it("フラット形式ファイルがテンプレート形式と異なる構造であること", () => {
-      const flat = createFlatModulesJsonc([".mcp.json"], ["*.local"]);
+      const flat = createZikuJsonc([".mcp.json"], ["*.local"]);
       const parsed = JSON.parse(flat);
 
-      // フラット形式
+      // ziku.jsonc 形式
+      expect(parsed).toHaveProperty("source");
       expect(parsed).toHaveProperty("include");
       expect(parsed).not.toHaveProperty("modules");
       expect(Array.isArray(parsed.include)).toBe(true);

@@ -152,7 +152,8 @@ describe("trackCommand", () => {
 
   it("--list のみで patterns なしでも動作する（required: false）", async () => {
     vol.fromJSON({
-      "/project/.ziku/modules.jsonc": JSON.stringify({
+      "/project/.ziku/ziku.jsonc": JSON.stringify({
+        source: { owner: "test", repo: ".ziku" },
         include: [".mcp.json"],
         exclude: [],
       }),

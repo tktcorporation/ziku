@@ -1,18 +1,16 @@
 import { existsSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { withFinally } from "../effect-helpers";
 import { defineCommand } from "citty";
 import { downloadTemplate } from "giget";
 import { join, resolve } from "pathe";
 import { ZikuError } from "../errors";
-import { loadPatternsFile, modulesFileExists } from "../modules";
-import { configSchema } from "../modules/schemas";
 import { renderFileDiff } from "../ui/diff-view";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
-import { CONFIG_FILE } from "../utils/config";
 import { detectDiff, hasDiff } from "../utils/diff";
 import { buildTemplateSource } from "../utils/template";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked";
+import { loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
 
 export const diffCommand = defineCommand({
   meta: {
@@ -36,28 +34,17 @@ export const diffCommand = defineCommand({
     intro("diff");
 
     const targetDir = resolve(args.dir);
-    const configPath = join(targetDir, CONFIG_FILE);
 
-    if (!existsSync(configPath)) {
-      throw new ZikuError(".ziku/config.json not found.", "Run 'ziku init' first.");
+    if (!zikuConfigExists(targetDir)) {
+      throw new ZikuError(".ziku/ziku.jsonc not found.", "Run 'ziku init' first.");
     }
 
-    const configContent = await readFile(configPath, "utf-8");
-    const configData = JSON.parse(configContent);
-    const parseResult = configSchema.safeParse(configData);
+    const { config: zikuConfig } = await loadZikuConfig(targetDir);
 
-    if (!parseResult.success) {
-      throw new ZikuError("Invalid .ziku/config.json format", parseResult.error.message);
-    }
-
-    const config = parseResult.data;
-
-    // ローカルの modules.jsonc からフラットパターンを読み込み
-    if (!modulesFileExists(targetDir)) {
-      throw new ZikuError("No .ziku/modules.jsonc found", "Run `ziku init` to set up the project");
-    }
-
-    const patterns = await loadPatternsFile(targetDir);
+    const patterns = {
+      include: zikuConfig.include,
+      exclude: zikuConfig.exclude ?? [],
+    };
 
     if (patterns.include.length === 0) {
       log.warn("No patterns configured");
@@ -67,7 +54,7 @@ export const diffCommand = defineCommand({
     // Step 1: テンプレートをダウンロード
     log.step("Fetching template...");
 
-    const templateSource = buildTemplateSource(config.source);
+    const templateSource = buildTemplateSource(zikuConfig.source);
     const tempDir = join(targetDir, ".ziku-temp");
 
     const { dir: templateDir } = await withSpinner("Downloading template from GitHub...", () =>

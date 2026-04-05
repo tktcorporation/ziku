@@ -5,11 +5,11 @@ import { Effect } from "effect";
 import { dirname, join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
-import { loadPatternsFile, modulesFileExists } from "../modules";
-import type { DevEnvConfig } from "../modules/schemas";
+import type { LockState } from "../modules/schemas";
 import { selectDeletedFiles } from "../ui/prompts";
 import { intro, log, outro, pc, withSpinner } from "../ui/renderer";
-import { loadConfig, saveConfig } from "../utils/config";
+import { loadLock, saveLock } from "../utils/lock";
+import { loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
 import { resolveLatestCommitSha } from "../utils/github";
 import { hashFiles } from "../utils/hash";
 import {
@@ -54,26 +54,28 @@ export const pullCommand = defineCommand({
     const targetDir = resolve(args.dir);
 
     // Step 1: 設定読み込み（失敗時は ZikuError に変換して throw）
-    const configOrNull = await Effect.runPromise(
-      Effect.tryPromise(() => loadConfig(targetDir)).pipe(Effect.orElseSucceed(() => null)),
-    );
-    if (!configOrNull) {
+    if (!zikuConfigExists(targetDir)) {
       throw new ZikuError("Not initialized", "Run `ziku init` first");
     }
-    const config = configOrNull;
+
+    const { config: zikuConfig } = await loadZikuConfig(targetDir);
+    const lock = await Effect.runPromise(
+      Effect.tryPromise(() => loadLock(targetDir)).pipe(Effect.orElseSucceed(() => null)),
+    );
+    if (!lock) {
+      throw new ZikuError("No .ziku/lock.json found", "Run `ziku init` first");
+    }
 
     // --continue モード
     if (args.continue) {
-      await runContinue(targetDir, config);
+      await runContinue(targetDir, lock);
       return;
     }
 
-    // ローカルの modules.jsonc からフラットパターンを読み込み
-    if (!modulesFileExists(targetDir)) {
-      throw new ZikuError("No .ziku/modules.jsonc found", "Run `ziku init` to set up the project");
-    }
-
-    const { include, exclude } = await loadPatternsFile(targetDir);
+    const { include, exclude } = {
+      include: zikuConfig.include,
+      exclude: zikuConfig.exclude ?? [],
+    };
 
     if (include.length === 0) {
       log.warn("No patterns configured");
@@ -84,7 +86,7 @@ export const pullCommand = defineCommand({
     log.step("Fetching template...");
 
     const { templateDir, cleanup } = await withSpinner("Downloading template from GitHub...", () =>
-      downloadTemplateToTemp(targetDir, `gh:${config.source.owner}/${config.source.repo}`),
+      downloadTemplateToTemp(targetDir, `gh:${zikuConfig.source.owner}/${zikuConfig.source.repo}`),
     );
 
     await withFinally(async () => {
@@ -95,7 +97,7 @@ export const pullCommand = defineCommand({
         hashFiles(templateDir, include, exclude),
         hashFiles(targetDir, include, exclude),
       ]);
-      const baseHashes = config.baseHashes ?? {};
+      const baseHashes = lock.baseHashes ?? {};
 
       // Step 4: ファイル分類
       const classification = classifyFiles({ baseHashes, localHashes, templateHashes });
@@ -150,11 +152,11 @@ export const pullCommand = defineCommand({
         let baseCleanup: (() => void) | undefined;
 
         // ベースバージョンのダウンロード（失敗時は 2-way フォールバック）
-        if (config.baseRef) {
+        if (lock.baseRef) {
           const baseResult = await Effect.runPromise(
             Effect.tryPromise(async () => {
-              log.info(`Downloading base version (${config.baseRef!.slice(0, 7)}...) for merge...`);
-              const baseSource = `gh:${config.source.owner}/${config.source.repo}#${config.baseRef}`;
+              log.info(`Downloading base version (${lock.baseRef!.slice(0, 7)}...) for merge...`);
+              const baseSource = `gh:${zikuConfig.source.owner}/${zikuConfig.source.repo}#${lock.baseRef}`;
               return downloadTemplateToTemp(targetDir, baseSource, "base");
             }).pipe(
               Effect.orElseSucceed(() => {
@@ -205,9 +207,9 @@ export const pullCommand = defineCommand({
         );
 
         if (unresolvedConflicts.length > 0) {
-          const latestRef = await resolveLatestCommitSha(config.source.owner, config.source.repo);
-          await saveConfig(targetDir, {
-            ...config,
+          const latestRef = await resolveLatestCommitSha(zikuConfig.source.owner, zikuConfig.source.repo);
+          await saveLock(targetDir, {
+            ...lock,
             pendingMerge: {
               conflicts: unresolvedConflicts,
               templateHashes: templateHashes,
@@ -246,26 +248,26 @@ export const pullCommand = defineCommand({
       }
 
       // Step 10: 設定を更新
-      const latestRef = await resolveLatestCommitSha(config.source.owner, config.source.repo);
+      const latestRef = await resolveLatestCommitSha(zikuConfig.source.owner, zikuConfig.source.repo);
 
-      const updatedConfig = {
-        ...config,
+      const updatedLock = {
+        ...lock,
         baseHashes: templateHashes,
         ...(latestRef ? { baseRef: latestRef } : {}),
       };
-      await saveConfig(targetDir, updatedConfig);
+      await saveLock(targetDir, updatedLock);
 
       outro("Pull complete");
     }, cleanup);
   },
 });
 
-async function runContinue(targetDir: string, config: DevEnvConfig): Promise<void> {
-  if (!config.pendingMerge) {
+async function runContinue(targetDir: string, lock: LockState): Promise<void> {
+  if (!lock.pendingMerge) {
     throw new ZikuError("No pending merge found", "Run `ziku pull` first to start a merge");
   }
 
-  const { conflicts, templateHashes, latestRef } = config.pendingMerge;
+  const { conflicts, templateHashes, latestRef } = lock.pendingMerge;
 
   const stillConflicted: string[] = [];
   for (const file of conflicts) {
@@ -290,13 +292,13 @@ async function runContinue(targetDir: string, config: DevEnvConfig): Promise<voi
     );
   }
 
-  const updatedConfig = {
-    ...config,
+  const updatedLock = {
+    ...lock,
     baseHashes: templateHashes,
     ...(latestRef ? { baseRef: latestRef } : {}),
     pendingMerge: undefined,
   };
-  await saveConfig(targetDir, updatedConfig);
+  await saveLock(targetDir, updatedLock);
 
   log.success("All conflicts resolved");
   outro("Pull complete");

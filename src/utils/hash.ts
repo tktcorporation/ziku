@@ -18,7 +18,7 @@ export function hashContent(content: string): string {
  * 各ファイルの SHA-256 ハッシュを計算してマップを返す。
  *
  * 背景: init/pull 時に適用したテンプレートファイルのハッシュを
- * .ziku/config.json に記録し、次回 pull 時の差分検出に使用する。
+ * .ziku/lock.json に記録し、次回 pull 時の差分検出に使用する。
  *
  * @param dir - 対象ディレクトリのルートパス
  * @param patterns - glob パターンの配列（例: [".devcontainer/**"]）

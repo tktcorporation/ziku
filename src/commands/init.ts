@@ -37,8 +37,13 @@ import {
   resolveLatestCommitSha,
   scaffoldTemplateRepo,
 } from "../utils/github";
-import { CONFIG_FILE } from "../utils/config";
 import { hashFiles } from "../utils/hash";
+import { LOCK_FILE, saveLock } from "../utils/lock";
+import {
+  ZIKU_CONFIG_FILE,
+  generateZikuJsonc,
+  zikuConfigExists,
+} from "../utils/ziku-config";
 import {
   buildTemplateSource,
   downloadTemplateToTemp,
@@ -156,7 +161,7 @@ export const initCommand = defineCommand({
         args.force as boolean,
         args["overwrite-strategy"] as string | undefined,
         args.yes as boolean,
-        existsSync(resolve(targetDir, CONFIG_FILE)),
+        zikuConfigExists(targetDir),
       );
 
       // Step 2: ファイルをコピー
@@ -178,28 +183,23 @@ export const initCommand = defineCommand({
         allResults.push(envResult);
       }
 
-      // modules.jsonc をローカルに保存（テンプレートのパターンをそのまま使用）
-      const modulesJsoncResult = await writeFlatModulesJsonc(
-        targetDir,
-        flatPatterns,
-        effectiveStrategy,
-      );
-      allResults.push(modulesJsoncResult);
-
       // テンプレートファイルのハッシュを計算（pull 時の差分検出用）
       const baseHashes = await hashFiles(templateDir, flatPatterns.include, flatPatterns.exclude);
 
       // テンプレートリポジトリの最新コミット SHA を取得（3-way マージのベース用）
       const baseRef = await resolveLatestCommitSha(sourceOwner, sourceRepo);
 
-      // 設定ファイル生成（常に更新）
-      const configResult = await createDevEnvConfig(targetDir, {
-        owner: sourceOwner,
-        repo: sourceRepo,
-        baseHashes,
-        baseRef,
+      // .ziku/ziku.jsonc を書き出し（ユーザー設定: source + patterns）
+      const zikuJsoncResult = await writeZikuJsonc(targetDir, {
+        source: { owner: sourceOwner, repo: sourceRepo },
+        patterns: flatPatterns,
+        strategy: effectiveStrategy,
       });
-      allResults.push(configResult);
+      allResults.push(zikuJsoncResult);
+
+      // .ziku/lock.json を書き出し（同期状態: 常に上書き）
+      const lockResult = await writeLockFile(targetDir, { baseHashes, baseRef });
+      allResults.push(lockResult);
 
       // ファイル操作結果を表示（サマリー含む）
       const summary = logFileResults(allResults);
@@ -254,57 +254,59 @@ async function createEnvExample(
 }
 
 /**
- * 設定ファイル (.ziku/config.json) を生成する。常に上書き。
+ * .ziku/ziku.jsonc を書き出す（ユーザー設定: source + patterns）
  */
-async function createDevEnvConfig(
+async function writeZikuJsonc(
   targetDir: string,
-  source: {
-    owner: string;
-    repo: string;
-    baseHashes?: Record<string, string>;
-    baseRef?: string;
+  opts: {
+    source: { owner: string; repo: string };
+    patterns: FlatPatterns;
+    strategy: OverwriteStrategy;
   },
 ): Promise<FileOperationResult> {
-  const config: Record<string, unknown> = {
-    version: "0.1.0",
-    installedAt: new Date().toISOString(),
-    source: { owner: source.owner, repo: source.repo },
-  };
+  const content = generateZikuJsonc({
+    source: opts.source,
+    include: opts.patterns.include,
+    exclude: opts.patterns.exclude,
+  });
 
-  if (source.baseRef) {
-    config.baseRef = source.baseRef;
-  }
-
-  if (source.baseHashes && Object.keys(source.baseHashes).length > 0) {
-    config.baseHashes = source.baseHashes;
-  }
-
-  // .ziku/config.json は常に上書き（設定管理ファイルなので）
   return writeFileWithStrategy({
-    destPath: resolve(targetDir, CONFIG_FILE),
-    content: JSON.stringify(config, null, 2),
-    strategy: "overwrite",
-    relativePath: CONFIG_FILE,
+    destPath: resolve(targetDir, ZIKU_CONFIG_FILE),
+    content,
+    strategy: opts.strategy,
+    relativePath: ZIKU_CONFIG_FILE,
   });
 }
 
 /**
- * フラットパターンで modules.jsonc をローカルに書き出す
+ * .ziku/lock.json を書き出す（同期状態: 常に上書き）
  */
-async function writeFlatModulesJsonc(
+async function writeLockFile(
   targetDir: string,
-  patterns: FlatPatterns,
-  strategy: OverwriteStrategy,
+  opts: {
+    baseHashes?: Record<string, string>;
+    baseRef?: string;
+  },
 ): Promise<FileOperationResult> {
-  const modulesRelPath = ".ziku/modules.jsonc";
-  const content = generateFlatPatternsJsonc(patterns);
+  const lock: Record<string, unknown> = {
+    version: "0.1.0",
+    installedAt: new Date().toISOString(),
+  };
 
-  return writeFileWithStrategy({
-    destPath: getModulesFilePath(targetDir),
-    content,
-    strategy,
-    relativePath: modulesRelPath,
-  });
+  if (opts.baseRef) {
+    lock.baseRef = opts.baseRef;
+  }
+
+  if (opts.baseHashes && Object.keys(opts.baseHashes).length > 0) {
+    lock.baseHashes = opts.baseHashes;
+  }
+
+  await saveLock(targetDir, lock as any);
+
+  return {
+    action: "overwritten",
+    path: LOCK_FILE,
+  };
 }
 
 /**
@@ -663,6 +665,7 @@ const DEFAULT_SCAFFOLD_PATTERNS: FlatPatterns = {
 
 /**
  * フラット形式の modules.jsonc コンテンツを生成する。
+ * テンプレートリポジトリの scaffold 用（modules.jsonc は upstream テンプレート専用）
  */
 export function generateFlatPatternsJsonc(patterns: FlatPatterns): string {
   const content: Record<string, unknown> = {

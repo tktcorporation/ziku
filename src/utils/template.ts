@@ -60,10 +60,10 @@ function ensureGigetCacheDir(): void {
 export type CopyResult = FileOperationResult;
 
 /**
- * DevEnvConfig の source フィールドから giget 用のテンプレートソース文字列を構築する。
+ * ZikuConfig の source フィールドから giget 用のテンプレートソース文字列を構築する。
  *
  * 背景: giget は "gh:owner/repo" または "gh:owner/repo#ref" 形式を期待する。
- * .ziku/config.json の source: { owner, repo, ref? } をこの形式に変換する。
+ * .ziku/ziku.jsonc の source: { owner, repo, ref? } をこの形式に変換する。
  */
 export function buildTemplateSource(source: { owner: string; repo: string; ref?: string }): string {
   const base = `gh:${source.owner}/${source.repo}`;
