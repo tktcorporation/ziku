@@ -1,3 +1,4 @@
+/// <reference types="vitest/globals" />
 /**
  * ライフサイクルメタデータと実装の整合性ガードテスト。
  *
