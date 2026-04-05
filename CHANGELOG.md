@@ -1,5 +1,13 @@
 # @tktco/ziku
 
+## 1.0.1
+
+### Patch Changes
+
+- [#36](https://github.com/tktcorporation/ziku/pull/36) [`80df176`](https://github.com/tktcorporation/ziku/commit/80df1762fd35383f572ed303e13cd698716b18b8) Thanks [@tktcorporation](https://github.com/tktcorporation)! - test: ファイル削除の push → pull 同期を検証する E2E テストを追加
+
+- [#34](https://github.com/tktcorporation/ziku/pull/34) [`9478cf6`](https://github.com/tktcorporation/ziku/commit/9478cf6f79aa70cf6636171b1865bcac8ce33c2a) Thanks [@tktcorporation](https://github.com/tktcorporation)! - README and lifecycle descriptions unified to English
+
 ## 1.0.0
 
 ### Major Changes
