@@ -1,32 +1,38 @@
 {
   "version": "0.1.0",
-  "installedAt": "2026-03-31T01:15:48.232Z",
-  "baseRef": "e25329193a1e11afbdd42d2aa3eb4c8fedc91267",
+  "installedAt": "2026-04-05T19:40:22.438Z",
+  "source": {
+    "owner": "tktcorporation",
+    "repo": ".github"
+  },
+  "baseRef": "6affea8c23ac6c633809f3d35d8cc794c0c17181",
   "baseHashes": {
     ".mcp.json": "bf80bacd0dd7ac8444872085a06e05e99ba3578666f7e457ea97ca6873bdba39",
     ".mise.toml": "fbd353f4b62aa51d3e1c5f53ce9b7682f52dec72cb7db20441eb8f535bc037e0",
     ".claude/hookify.block-blind-kill.local.md": "8d18f2325b741a5b639767bfb36ccce42aea9e135dfc6a414c1d6d20ab73388f",
-    ".claude/settings.json": "74bb50cb03b13c272b11c0a951e907e25ab47c5d29f9f2ee10ea7098af845b7e",
-    ".claude/statusline.sh": "5d4ac64abe18fcf5921c49349325a2ae0ae9b2e2fa4454c98fd00bceccc1bd11",
+    ".claude/hookify.block-revert-others.local.md": "a8616894e27a0d2ea9fb2c2555b876978d9c038eb78fc4d40689092c89861615",
+    ".claude/settings.json": "559a18e63bb40693eb68505970102abfe221434ef0e98fffde9662cd48c705b8",
     ".devcontainer/.env.devcontainer.example": "6d41b16f31ad8d87680ab036c581332fba3555acbddae3193fff496929c13c54",
     ".devcontainer/.gitignore": "d812b42821b26865ba390f4d94ba82194ccc30c06459356701863524338fb8f7",
-    ".devcontainer/devcontainer.json": "6fc9ac9cc66bce27f949ccaca541c64a9e25aa1de27753b5379f46d21ed7d130",
+    ".devcontainer/devcontainer.json": "2e9bcaa01c2653068fbd74f61747f24aec08ed9001d4df2a17ccba07b2148a21",
     ".devcontainer/run-chrome-devtools-mcp.sh": "2eb08c920aa9fddbd5c40e0ce1c0d5ba2085bd1586c4df409b3e97ee645a5fcf",
     ".devcontainer/setup-chrome-devtools-mcp.sh": "7b02ad1b0c763a6483451c290ec4fa10268f9b632f8075eab8a7cd4e2cbc5418",
     ".devcontainer/setup-git-user.sh": "07f1a0cacce8a00385798119b1c7d53450eebe3f87cd8c221f9e5f082d1f49ac",
     ".devcontainer/test-chrome-devtools-mcp.sh": "fe586ac868fdab29366164860c67cffbb814399d430ef99b0275cc452f727d11",
-    ".github/labeler.yml": "dcbfee7a741ed5412190665122925c552922bbbbcd8fe6e19ede4a42067b5360",
     ".claude/rules/code-intent-documentation.md": "70e24e643cac7e23f0fe7e20ff42aeb0a75321af0e1169c10a2193b8343a96eb",
+    ".claude/rules/parallel-work.md": "5c89dcff301705fede8f31bb4574294ffa289359a37bebdfd5723cb9568db071",
     ".claude/rules/pr-ci-watch.md": "66828359ee672ae5941568774a576dbc3a36b87940690e06fc9bdc05ee224aff",
     ".claude/rules/pr-workflow.md": "a14648fd05b47b20d18dd8a83e044f605a74b80c83109b5641d646861c441e7b",
-    ".github/workflows/issue-link.yml": "84c9dbae60c3d93f8e5598d5b2ee92f213677e633bbcf67132ab6b3edef41cfe",
-    ".github/workflows/label.yml": "cbe93885e3fcba84cff42e6607cf26727037ed2820c4f07a590ef3ccee68e694",
+    ".claude/rules/pre-push-verification.md": "bc89d5abcd0dd8b5c1237e5e8d96b1de3cc68c4dd4d9708069079a4f5c906477",
     ".claude/skills/autonomous-dev/SKILL.md": "7b95805981443e9437c8a58209103ebc94121c7d461a9e787a9bcc461c3524fa",
+    ".claude/skills/faithful-doc-writing/SKILL.md": "74dc7e95c164bba2c3148aee4fa2313d20310042cd4efe48574d6b5573a8b0ea",
     ".claude/skills/ui-craft/SKILL.md": "d54fd4939e1a7581db67ffddce073fbb654fe48c0c522a045c9edf60be69be13",
     ".claude/skills/ui-design-research/SKILL.md": "0cc20b5b44338c96294de7e4035e4e08a8989d06806142473e36012ec8bd2d39",
     ".claude/skills/upstream-fix/SKILL.md": "791bdb8a1b183e77093177e37139f2742298843a975c6eed94b8baf164468a6a",
-    ".claude/skills/faithful-doc-writing/SKILL.md": "74dc7e95c164bba2c3148aee4fa2313d20310042cd4efe48574d6b5573a8b0ea",
     ".claude/skills/ui-craft/references/component-libraries.md": "695dd3a627d12b58fd2101db10eb8f059deb82eb6aeafe36b0a12053d1727718",
-    ".claude/skills/ui-design-research/references/research-strategies.md": "ffce2e8b5075caa61556b5d6961bd5ea9ca52a7a0db9ad5f9f0ccbfab7d9787e"
+    ".claude/skills/ui-design-research/references/research-strategies.md": "ffce2e8b5075caa61556b5d6961bd5ea9ca52a7a0db9ad5f9f0ccbfab7d9787e",
+    ".github/labeler.yml": "dcbfee7a741ed5412190665122925c552922bbbbcd8fe6e19ede4a42067b5360",
+    ".github/workflows/issue-link.yml": "84c9dbae60c3d93f8e5598d5b2ee92f213677e633bbcf67132ab6b3edef41cfe",
+    ".github/workflows/label.yml": "cbe93885e3fcba84cff42e6607cf26727037ed2820c4f07a590ef3ccee68e694"
   }
 }

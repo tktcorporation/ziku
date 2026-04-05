@@ -57,10 +57,9 @@
           "**/.pytest_cache/**": true,
           "**/venv/**": true,
           "**/.venv/**": true,
-          // jj workspace（*-ws-* パターン）の監視を除外
-          // Claude Code の並列作業で一時的に作成されるワークスペースが
+          // Claude Code の並列作業で .worktrees/ 内に作成されるワークスペースが
           // VS Code の Git 拡張に検知されてメモリを大量消費するのを防ぐ
-          "**/*-ws-*/**": true
+          "**/.worktrees/**": true
         },
         "search.exclude": {
           "**/node_modules": true,
@@ -71,7 +70,7 @@
           "**/dist": true,
           "**/.next": true,
           "**/coverage": true,
-          "**/*-ws-*": true
+          "**/.worktrees": true
         },
         "git.detectSubmodulesLimit": 0,
         // jj workspace が VS Code の Git 拡張に自動検出されるのを防ぐ

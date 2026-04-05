@@ -57,8 +57,11 @@ function opLabel(op: Op): string {
   }
 }
 
-/** コンポーネント（ファイル）一覧と、各コマンドとの関係を示す図を生成 */
-function generateComponentDiagram(): string {
+/**
+ * コンポーネント（ファイル）一覧と、各コマンドとの関係を示す mermaid 図を生成。
+ * file-lifecycle.md と README の両方で使用される（SSOT）。
+ */
+export function generateComponentDiagram(): string {
   const lines: string[] = [
     "```mermaid",
     "graph LR",
