@@ -97,7 +97,8 @@ jobs:
           mkdir -p /tmp/test-project
           node dist/index.mjs /tmp/test-project --yes
           ls -la /tmp/test-project
-          cat /tmp/test-project/.ziku.json
+          cat /tmp/test-project/.ziku/ziku.jsonc
+          cat /tmp/test-project/.ziku/lock.json
 
   test:
     name: Test (vitest)

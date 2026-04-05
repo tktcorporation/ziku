@@ -1,6 +1,6 @@
 # Dependencies
 node_modules/
-.pnpm-store
+.pnpm-store/
 
 # Build output
 dist/
@@ -22,4 +22,3 @@ Thumbs.db
 # Test output
 coverage/
 .nyc_output/
-
