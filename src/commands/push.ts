@@ -8,8 +8,10 @@ import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
 import { MODULES_FILE, loadPatternsFile, modulesFileExists } from "../modules";
 import type { FileDiff } from "../modules/schemas";
-import { loadLock } from "../utils/lock";
-import { loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
+import { LOCK_FILE, loadLock } from "../utils/lock";
+import { ZIKU_CONFIG_FILE, loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
+import type { CommandLifecycle } from "../docs/lifecycle-types";
+import { SYNCED_FILES } from "../docs/lifecycle-types";
 import {
   confirmAction,
   generatePrBody,
@@ -26,6 +28,44 @@ import { createPullRequest, getGitHubToken } from "../utils/github";
 import { detectAndUpdateReadme } from "../utils/readme";
 import { buildTemplateSource } from "../utils/template";
 import { detectUntrackedFiles } from "../utils/untracked";
+
+/**
+ * push コマンドのファイル操作メタデータ。
+ * ドキュメント自動生成（npm run docs）の SSOT として使われる。
+ */
+export const pushLifecycle: CommandLifecycle = {
+  name: "push",
+  description: "ローカルの変更をテンプレートリポジトリに PR として送信",
+  ops: [
+    { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "source と patterns を取得" },
+    { file: LOCK_FILE, location: "local", op: "read", note: "baseRef, baseHashes を取得" },
+    { file: SYNCED_FILES, location: "local", op: "read", note: "ローカルの変更を検出" },
+    {
+      file: MODULES_FILE,
+      location: "template",
+      op: "read",
+      note: "テンプレートのパターンと比較し、ローカル追加分を検出",
+    },
+    {
+      file: SYNCED_FILES,
+      location: "template",
+      op: "read",
+      note: "テンプレートをダウンロードして差分検出・3-way マージ",
+    },
+    {
+      file: SYNCED_FILES,
+      location: "template",
+      op: "update",
+      note: "変更ファイルを含む PR を作成",
+    },
+    {
+      file: MODULES_FILE,
+      location: "template",
+      op: "update",
+      note: "ローカルで追加されたパターンがあれば PR に含めて更新",
+    },
+  ],
+};
 
 function formatFileStat(file: {
   path: string;

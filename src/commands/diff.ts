@@ -10,7 +10,33 @@ import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/render
 import { detectDiff, hasDiff } from "../utils/diff";
 import { buildTemplateSource } from "../utils/template";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked";
-import { loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
+import { ZIKU_CONFIG_FILE, loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
+import type { CommandLifecycle } from "../docs/lifecycle-types";
+import { SYNCED_FILES } from "../docs/lifecycle-types";
+
+/**
+ * diff コマンドのファイル操作メタデータ。
+ * ドキュメント自動生成（npm run docs）の SSOT として使われる。
+ */
+export const diffLifecycle: CommandLifecycle = {
+  name: "diff",
+  description: "ローカルとテンプレートの差分を表示",
+  ops: [
+    { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "patterns を取得" },
+    {
+      file: SYNCED_FILES,
+      location: "local",
+      op: "read",
+      note: "ローカルファイルを読み取り",
+    },
+    {
+      file: SYNCED_FILES,
+      location: "template",
+      op: "read",
+      note: "テンプレートをダウンロードして比較",
+    },
+  ],
+};
 
 export const diffCommand = defineCommand({
   meta: {
