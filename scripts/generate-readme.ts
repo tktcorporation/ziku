@@ -25,7 +25,7 @@ import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import type { CommandDef } from "citty";
+import type { ArgsDef, CommandDef } from "citty";
 import { renderUsage } from "citty";
 import { z } from "zod";
 import { diffCommand } from "../src/commands/diff";
@@ -145,7 +145,7 @@ async function generateCommandsSection(): Promise<string> {
    * 各コマンドのヘルプをセクションとして生成するヘルパー。
    * 配列リテラルに直接含めることで no-immediate-mutation を回避。
    */
-  const commandSection = async (name: string, cmd: CommandDef) => [
+  const commandSection = async <T extends ArgsDef>(name: string, cmd: CommandDef<T>) => [
     `### \`${name}\`\n`,
     `${getCommandDescription(cmd.meta)}\n`,
     "```",
