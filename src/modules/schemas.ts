@@ -87,6 +87,7 @@ export function isGitHubSource(
 // ────────────────────────────────────────────────────────────────
 
 export const lockSchema = z.object({
+  /** init 時の ziku CLI バージョン（例: "1.0.0"）。デバッグ・互換性判断に使用 */
   version: z.string(),
   installedAt: z.string().datetime({ offset: true }),
   /**

@@ -37,7 +37,7 @@ import { downloadTemplateToTemp } from "../utils/template";
  */
 export const pullLifecycle: CommandLifecycle = {
   name: "pull",
-  description: "テンプレートの最新更新をローカルに反映",
+  description: "Pull latest template updates to local project",
   ops: [
     { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "patterns を取得" },
     { file: LOCK_FILE, location: "local", op: "read", note: "source, baseHashes, baseRef を取得" },

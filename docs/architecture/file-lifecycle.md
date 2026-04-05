@@ -11,33 +11,26 @@ ziku が管理するファイルと、各コマンドでの振る舞いを整理
 ```mermaid
 graph LR
 
-  subgraph Template["テンプレートリポジトリ"]
+  subgraph Template["Template Repository"]
     ZIKU_TPL[".ziku/ziku.jsonc"]
     T_FILES["synced files"]
   end
 
-  subgraph User["ユーザープロジェクト"]
+  subgraph User["User Project"]
     ZIKU[".ziku/ziku.jsonc"]
     LOCK[".ziku/lock.json"]
     U_FILES["synced files"]
   end
 
-  setup -->|create| ZIKU_TPL
-  init -->|read| ZIKU_TPL
-  init -->|create| ZIKU
-  init -->|create| LOCK
-  init -->|create| U_FILES
-  pull -->|read| ZIKU
-  pull -->|read| LOCK
-  pull -->|update| U_FILES
-  pull -->|update| LOCK
-  push -->|read| ZIKU
-  push -->|read| LOCK
-  push -->|PR| T_FILES
-  diff -->|read| ZIKU
-  diff -->|read| LOCK
-  diff -->|read| U_FILES
-  track -->|update| ZIKU
+  setup([setup]) -->|create| ZIKU_TPL
+  init([init]) -->|read| ZIKU_TPL
+  init -->|create| ZIKU & LOCK & U_FILES
+  push([push]) -->|read| ZIKU & LOCK
+  push -->|update| T_FILES
+  pull([pull]) -->|read| ZIKU & LOCK
+  pull -->|update| U_FILES & ZIKU & LOCK
+  diff([diff]) -.->|read| ZIKU & LOCK & U_FILES
+  track([track]) -.->|update| ZIKU
 
 ```
 
@@ -82,7 +75,7 @@ graph LR
 
 ### `setup`
 
-テンプレートリポジトリの初期化
+Initialize a template repository
 
 | 操作 | ファイル           | 場所     | 詳細                                                  |
 | ---- | ------------------ | -------- | ----------------------------------------------------- |
@@ -90,7 +83,7 @@ graph LR
 
 ### `init (user project)`
 
-ユーザープロジェクトの初期化
+Initialize user project from template
 
 | 操作     | ファイル           | 場所     | 詳細                                               |
 | -------- | ------------------ | -------- | -------------------------------------------------- |
@@ -101,7 +94,7 @@ graph LR
 
 ### `pull`
 
-テンプレートの最新更新をローカルに反映
+Pull latest template updates to local project
 
 | 操作     | ファイル           | 場所     | 詳細                                   |
 | -------- | ------------------ | -------- | -------------------------------------- |
@@ -114,7 +107,7 @@ graph LR
 
 ### `push`
 
-ローカルの変更をテンプレートに反映（GitHub: PR / ローカル: 直接コピー）
+Push local changes to template (GitHub: PR / local: direct copy)
 
 | 操作     | ファイル           | 場所     | 詳細                                               |
 | -------- | ------------------ | -------- | -------------------------------------------------- |
@@ -127,7 +120,7 @@ graph LR
 
 ### `diff`
 
-ローカルとテンプレートの差分を表示
+Show differences between local and template
 
 | 操作     | ファイル           | 場所     | 詳細                               |
 | -------- | ------------------ | -------- | ---------------------------------- |
@@ -138,7 +131,7 @@ graph LR
 
 ### `track`
 
-同期対象のパターンを追加
+Add file patterns to the sync whitelist
 
 | 操作     | ファイル           | 場所  | 詳細                            |
 | -------- | ------------------ | ----- | ------------------------------- |

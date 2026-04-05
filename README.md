@@ -119,35 +119,30 @@ npx ziku track '.eslintrc.*'
 ```mermaid
 graph LR
 
-  subgraph Template["テンプレートリポジトリ"]
+  subgraph Template["Template Repository"]
     ZIKU_TPL[".ziku/ziku.jsonc"]
     T_FILES["synced files"]
   end
 
-  subgraph User["ユーザープロジェクト"]
+  subgraph User["User Project"]
     ZIKU[".ziku/ziku.jsonc"]
     LOCK[".ziku/lock.json"]
     U_FILES["synced files"]
   end
 
-  setup -->|create| ZIKU_TPL
-  init -->|read| ZIKU_TPL
-  init -->|create| ZIKU
-  init -->|create| LOCK
-  init -->|create| U_FILES
-  pull -->|read| ZIKU
-  pull -->|read| LOCK
-  pull -->|update| U_FILES
-  pull -->|update| LOCK
-  push -->|read| ZIKU
-  push -->|read| LOCK
-  push -->|PR| T_FILES
-  diff -->|read| ZIKU
-  diff -->|read| LOCK
-  diff -->|read| U_FILES
-  track -->|update| ZIKU
+  setup([setup]) -->|create| ZIKU_TPL
+  init([init]) -->|read| ZIKU_TPL
+  init -->|create| ZIKU & LOCK & U_FILES
+  push([push]) -->|read| ZIKU & LOCK
+  push -->|update| T_FILES
+  pull([pull]) -->|read| ZIKU & LOCK
+  pull -->|update| U_FILES & ZIKU & LOCK
+  diff([diff]) -.->|read| ZIKU & LOCK & U_FILES
+  track([track]) -.->|update| ZIKU
 
 ```
+
+> For detailed file operations per command, see [File Lifecycle](docs/architecture/file-lifecycle.md).
 
 ### The config file
 
@@ -167,12 +162,12 @@ Both the template and user project share the same `.ziku/ziku.jsonc` format — 
 
 | Command | Who runs it | What it does |
 |---|---|---|
-| **`setup`** | Template author | テンプレートリポジトリの初期化 |
-| **`init (user project)`** | Template user | ユーザープロジェクトの初期化 |
-| **`pull`** | Template user | テンプレートの最新更新をローカルに反映 |
-| **`push`** | Template user | ローカルの変更をテンプレートに反映（GitHub: PR / ローカル: 直接コピー） |
-| **`diff`** | Template user | ローカルとテンプレートの差分を表示 |
-| **`track`** | Template user | 同期対象のパターンを追加 |
+| **`setup`** | Template author | Initialize a template repository |
+| **`init (user project)`** | Template user | Initialize user project from template |
+| **`pull`** | Template user | Pull latest template updates to local project |
+| **`push`** | Template user | Push local changes to template (GitHub: PR / local: direct copy) |
+| **`diff`** | Template user | Show differences between local and template |
+| **`track`** | Template user | Add file patterns to the sync whitelist |
 
 Template source info (owner/repo or local path) is stored in `.ziku/lock.json`, separate from patterns. When you `pull`, new patterns added to the template's `.ziku/ziku.jsonc` are automatically merged into yours.
 

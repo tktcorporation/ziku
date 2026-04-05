@@ -184,6 +184,7 @@ function generateFeaturesSection(): string {
     "## How it Works\n",
     generateComponentDiagram(),
     "",
+    `> For detailed file operations per command, see [File Lifecycle](docs/architecture/file-lifecycle.md).\n`,
     "### The config file\n",
     `Both the template and user project share the same \`${ZIKU_CONFIG_FILE}\` format — just \`include\` and \`exclude\` patterns:\n`,
     "```jsonc",

@@ -52,7 +52,7 @@ const version = typeof __VERSION__ !== "undefined" ? __VERSION__ : "dev";
  */
 export const initUserLifecycle: CommandLifecycle = {
   name: "init (user project)",
-  description: "ユーザープロジェクトの初期化",
+  description: "Initialize user project from template",
   ops: [
     {
       file: ZIKU_CONFIG_FILE,
@@ -338,7 +338,7 @@ async function writeLockFile(
   },
 ): Promise<FileOperationResult> {
   const lock: LockState = {
-    version: "0.1.0",
+    version,
     installedAt: new Date().toISOString(),
     source: opts.source,
     ...(opts.baseRef ? { baseRef: opts.baseRef } : {}),

@@ -17,7 +17,7 @@ import type { CommandLifecycle } from "../docs/lifecycle-types";
  */
 export const trackLifecycle: CommandLifecycle = {
   name: "track",
-  description: "同期対象のパターンを追加",
+  description: "Add file patterns to the sync whitelist",
   ops: [
     {
       file: ZIKU_CONFIG_FILE,
