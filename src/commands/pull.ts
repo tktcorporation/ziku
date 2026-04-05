@@ -154,8 +154,8 @@ export const pullCommand = defineCommand({
         // ベースバージョンのダウンロード（失敗時は 2-way フォールバック）
         if (lock.baseRef) {
           const baseResult = await Effect.runPromise(
-            Effect.tryPromise(async () => {
-              log.info(`Downloading base version (${lock.baseRef!.slice(0, 7)}...) for merge...`);
+            Effect.tryPromise(() => {
+              log.info(`Downloading base version (${lock.baseRef?.slice(0, 7)}...) for merge...`);
               const baseSource = `gh:${zikuConfig.source.owner}/${zikuConfig.source.repo}#${lock.baseRef}`;
               return downloadTemplateToTemp(targetDir, baseSource, "base");
             }).pipe(

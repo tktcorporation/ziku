@@ -53,8 +53,8 @@ vi.mock("../../utils/github", () => ({
   resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
   checkRepoExists: vi.fn(() => Promise.resolve(true)),
   checkRepoSetup: vi.fn(() => Promise.resolve(true)),
-  getGitHubToken: vi.fn(() => undefined),
-  getAuthenticatedUserLogin: vi.fn(() => Promise.resolve(undefined)),
+  getGitHubToken: vi.fn(() => {}),
+  getAuthenticatedUserLogin: vi.fn(() => Promise.resolve()),
   scaffoldTemplateRepo: vi.fn(() =>
     Promise.resolve({ url: "https://github.com/detected-org/.github" }),
   ),
@@ -198,10 +198,10 @@ describe("init: セットアップ UX", () => {
     });
     mockHashFiles.mockResolvedValue({});
     mockDetectGitHubOwner.mockReturnValue("detected-org");
-    mockGetAuthenticatedUserLogin.mockResolvedValue(undefined);
+    mockGetAuthenticatedUserLogin.mockResolvedValue();
     mockCheckRepoExists.mockResolvedValue(true);
     mockCheckRepoSetup.mockResolvedValue(true);
-    mockGetGitHubToken.mockReturnValue(undefined);
+    mockGetGitHubToken.mockReturnValue();
     mockSelectTemplateCandidate.mockResolvedValue({ owner: "detected-org", repo: ".github" });
     mockModulesFileExists.mockReturnValue(false);
     mockConfirmScaffoldDevenvPR.mockResolvedValue(true);
@@ -259,7 +259,7 @@ describe("init: セットアップ UX", () => {
     it("リポジトリ作成時に GitHub トークンがなければエラー", async () => {
       mockCheckRepoExists.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
       mockSelectMissingTemplateAction.mockResolvedValueOnce("create-repo");
-      mockGetGitHubToken.mockReturnValue(undefined);
+      mockGetGitHubToken.mockReturnValue();
 
       await expect(runInit({})).rejects.toThrow("GitHub token required");
     });
@@ -561,7 +561,7 @@ describe("init: セットアップ UX", () => {
       mockCheckRepoExists.mockResolvedValueOnce(true);
       mockModulesFileExists.mockReturnValue(false);
       mockConfirmScaffoldDevenvPR.mockResolvedValueOnce(true);
-      mockGetGitHubToken.mockReturnValue(undefined);
+      mockGetGitHubToken.mockReturnValue();
 
       await expect(runInit({})).rejects.toThrow("GitHub token required");
     });

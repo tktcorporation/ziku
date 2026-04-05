@@ -58,8 +58,7 @@ async function loadPatternsFromFile(
  * 機能セクションを生成
  */
 function generateFeaturesSection(patterns: string[]): string {
-  const lines: string[] = [];
-  lines.push("## 機能\n");
+  const lines: string[] = ["## 機能\n"];
 
   // パターンをディレクトリごとにグルーピング
   const groups = new Map<string, string[]>();
@@ -67,7 +66,7 @@ function generateFeaturesSection(patterns: string[]): string {
     const firstSegment = pattern.split("/")[0];
     const group = firstSegment.startsWith(".") ? firstSegment : "Root";
     if (!groups.has(group)) groups.set(group, []);
-    groups.get(group)!.push(pattern);
+    groups.get(group)?.push(pattern);
   }
 
   for (const [group, groupPatterns] of groups) {
@@ -82,8 +81,7 @@ function generateFeaturesSection(patterns: string[]): string {
  * 生成されるファイルセクションを生成
  */
 function generateFilesSection(patterns: string[]): string {
-  const lines: string[] = [];
-  lines.push("## 生成されるファイル\n");
+  const lines: string[] = ["## 生成されるファイル\n"];
   lines.push("以下のパターンに一致するファイルが同期されます：\n");
 
   for (const pattern of patterns) {

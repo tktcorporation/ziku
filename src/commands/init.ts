@@ -242,7 +242,7 @@ AWS_DEFAULT_REGION=ap-northeast-1
 WAKATIME_API_KEY=
 `;
 
-async function createEnvExample(
+function createEnvExample(
   targetDir: string,
   strategy: OverwriteStrategy,
 ): Promise<FileOperationResult> {
@@ -257,7 +257,7 @@ async function createEnvExample(
 /**
  * .ziku/ziku.jsonc を書き出す（ユーザー設定: source + patterns）
  */
-async function writeZikuJsonc(
+function writeZikuJsonc(
   targetDir: string,
   opts: {
     source: { owner: string; repo: string };
@@ -376,7 +376,7 @@ async function selectModulesFromTemplate(
 
   // インタラクティブ: モジュール選択 UI
   log.step("Selecting modules...");
-  return selectModules(moduleList);
+  return await selectModules(moduleList);
 }
 
 /**
@@ -404,7 +404,7 @@ async function resolveEffectiveStrategy(
 
   if (nonInteractive) return "overwrite";
 
-  return selectOverwriteStrategy({ isReinit: configExists });
+  return await selectOverwriteStrategy({ isReinit: configExists });
 }
 
 /**
@@ -594,7 +594,9 @@ async function handleMissingTemplate(
       const { url } = await scaffoldTemplateRepo(token, owner, repo);
       log.success(`Created template repository: ${pc.cyan(url)}`);
       log.info(pc.dim("Waiting for repository to be ready..."));
-      await new Promise((done) => setTimeout(done, 5000));
+      await new Promise((done) => {
+        setTimeout(done, 5000);
+      });
 
       return { sourceOwner: owner, sourceRepo: repo };
     })
@@ -696,7 +698,7 @@ export function isCurrentRepoTemplate(
  * テンプレートリポジトリ自体で init を実行した場合のハンドリング。
  * フラット形式の modules.jsonc を生成する。
  */
-async function handleTemplateRepoInit(targetDir: string, _nonInteractive: boolean): Promise<void> {
+function handleTemplateRepoInit(targetDir: string, _nonInteractive: boolean): void {
   log.info(`Detected: running inside the template repository`);
 
   if (modulesFileExists(targetDir)) {

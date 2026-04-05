@@ -62,10 +62,7 @@ function mergeWithPerHunkMarkers(base: string, local: string, template: string):
 
     const hunkApplied = tryApplyHunk(localLines, hunk);
 
-    if (hunkApplied !== null) {
-      resultLines.push(...hunkApplied);
-      localIdx = hunkLocalStart + hunk.oldLines;
-    } else {
+    if (hunkApplied === null) {
       // hunk 適用失敗 → この hunk 部分だけにコンフリクトマーカー
       hasConflicts = true;
 
@@ -90,6 +87,9 @@ function mergeWithPerHunkMarkers(base: string, local: string, template: string):
       resultLines.push(...templateSection);
       resultLines.push(">>>>>>> TEMPLATE");
 
+      localIdx = hunkLocalStart + hunk.oldLines;
+    } else {
+      resultLines.push(...hunkApplied);
       localIdx = hunkLocalStart + hunk.oldLines;
     }
   }

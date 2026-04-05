@@ -152,7 +152,7 @@ const { hashFiles } = await import("../../utils/hash");
 const { classifyFiles, threeWayMerge } = await import("../../utils/merge");
 const { loadPatternsFile } = await import("../../modules");
 const mockDownloadTemplate = vi.mocked(downloadTemplate);
-const mockLoadPatternsFile = vi.mocked(loadPatternsFile);
+const _mockLoadPatternsFile = vi.mocked(loadPatternsFile);
 const mockDetectDiff = vi.mocked(detectDiff);
 const mockGetPushableFiles = vi.mocked(getPushableFiles);
 const mockGetGitHubToken = vi.mocked(getGitHubToken);
@@ -479,7 +479,7 @@ describe("pushCommand", () => {
 
       setupPushableFiles([pushableFile]);
       mockSelectPushFiles.mockResolvedValueOnce([pushableFile]);
-      mockGetGitHubToken.mockReturnValue(undefined);
+      mockGetGitHubToken.mockReturnValue();
       mockInputGitHubToken.mockResolvedValueOnce("ghp_prompted_token");
       mockConfirmAction.mockResolvedValueOnce(true);
       mockCreatePullRequest.mockResolvedValueOnce({

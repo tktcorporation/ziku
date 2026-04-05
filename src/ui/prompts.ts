@@ -88,7 +88,7 @@ export async function selectTemplateCandidate(
 ): Promise<{ owner: string; repo: string } | "specify-other"> {
   const options = [
     ...candidates.map((c) => {
-      const readyHint = c.ready === true ? " (ready)" : c.ready === false ? " (not set up)" : "";
+      const readyHint = c.ready === true ? " (ready)" : (c.ready === false ? " (not set up)" : "");
       return {
         value: `${c.owner}/${c.repo}` as string,
         label: `${c.owner}/${c.repo}`,
@@ -432,7 +432,7 @@ export function openEditorForConflicts(filePaths: string[]): void {
     // エディタが見つからない場合はスキップ
     Effect.runSync(
       Effect.try(() => execFileSync(editor, [filePath], { stdio: "inherit" })).pipe(
-        Effect.orElseSucceed(() => undefined),
+        Effect.orElseSucceed(() => {}),
       ),
     );
   }

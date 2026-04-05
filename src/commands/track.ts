@@ -68,7 +68,7 @@ export const trackCommand = defineCommand({
     // パターン引数のパース
     const rawArgs = process.argv.slice(2);
     const trackIdx = rawArgs.indexOf("track");
-    const argsAfterTrack = trackIdx !== -1 ? rawArgs.slice(trackIdx + 1) : rawArgs;
+    const argsAfterTrack = trackIdx === -1 ? rawArgs : rawArgs.slice(trackIdx + 1);
 
     const patterns: string[] = [];
     let i = 0;

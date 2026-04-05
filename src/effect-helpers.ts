@@ -18,7 +18,7 @@ export async function withFinally<T>(
   cleanup: () => void | Promise<void>,
 ): Promise<T> {
   const effect = Effect.tryPromise({ try: fn, catch: (e) => e }).pipe(
-    Effect.ensuring(Effect.promise(async () => cleanup())),
+    Effect.ensuring(Effect.promise(() => Promise.resolve(cleanup()))),
   );
   const exit = await Effect.runPromiseExit(effect);
   if (Exit.isSuccess(exit)) return exit.value;

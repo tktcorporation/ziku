@@ -64,13 +64,11 @@ function generateGettingStartedSection(): string {
     exclude: [],
   });
 
-  const lines: string[] = [];
-  lines.push("## Getting Started\n");
-
-  lines.push("### 1. Set up your template repository\n");
-  lines.push(
+  const lines: string[] = [
+    "## Getting Started\n",
+    "### 1. Set up your template repository\n",
     `ziku uses a GitHub repository as the template source. By default, it looks for \`{your-org}/${DEFAULT_TEMPLATE_REPO}\` based on your git remote.\n`,
-  );
+  ];
   lines.push(
     "If the repository doesn't exist yet, `npx ziku` will offer to create it for you interactively. You can also create it manually or specify a different source:\n",
   );
@@ -118,10 +116,7 @@ function generateGettingStartedSection(): string {
  * Generate Usage section
  */
 function generateUsageSection(): string {
-  const lines: string[] = [];
-  lines.push("## Usage\n");
-  lines.push("```bash");
-  lines.push("# Apply template to current directory");
+  const lines: string[] = ["## Usage\n", "```bash", "# Apply template to current directory"];
   lines.push("npx ziku");
   lines.push("");
   lines.push("# Apply to a specific directory");
@@ -150,12 +145,12 @@ function getCommandDescription(meta: unknown): string {
  * Generate Commands section
  */
 async function generateCommandsSection(): Promise<string> {
-  const sections: string[] = [];
-  sections.push("## Commands\n");
-
   // init command
-  sections.push("### `init`\n");
-  sections.push(`${getCommandDescription(initCommand.meta)}\n`);
+  const sections: string[] = [
+    "## Commands\n",
+    "### `init`\n",
+    `${getCommandDescription(initCommand.meta)}\n`,
+  ];
   sections.push("```");
   sections.push(cleanUsageOutput(await renderUsage(initCommand)));
   sections.push("```\n");
@@ -296,10 +291,10 @@ async function main(): Promise<void> {
   if (schemaUpdated) {
     console.log("  ✅ schema/modules.json updated.");
   }
-  if (!updated) {
-    console.log("\n✅ Documentation is already up to date.\n");
-  } else {
+  if (updated) {
     console.log("");
+  } else {
+    console.log("\n✅ Documentation is already up to date.\n");
   }
 }
 

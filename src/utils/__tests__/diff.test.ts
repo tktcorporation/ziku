@@ -122,7 +122,7 @@ describe("diff", () => {
 
       const result = colorizeUnifiedDiff(diff);
 
-      expect(result).toBe("\x1b[32m+added line\x1b[0m");
+      expect(result).toBe("\x1B[32m+added line\x1B[0m");
     });
 
     it("削除行を赤色にする", () => {
@@ -130,7 +130,7 @@ describe("diff", () => {
 
       const result = colorizeUnifiedDiff(diff);
 
-      expect(result).toBe("\x1b[31m-removed line\x1b[0m");
+      expect(result).toBe("\x1B[31m-removed line\x1B[0m");
     });
 
     it("ハンク行をシアン色にする", () => {
@@ -138,7 +138,7 @@ describe("diff", () => {
 
       const result = colorizeUnifiedDiff(diff);
 
-      expect(result).toBe("\x1b[36m@@ -1,3 +1,4 @@\x1b[0m");
+      expect(result).toBe("\x1B[36m@@ -1,3 +1,4 @@\x1B[0m");
     });
 
     it("ヘッダー行をボールドにする", () => {
@@ -146,8 +146,8 @@ describe("diff", () => {
 
       const result = colorizeUnifiedDiff(diff);
 
-      expect(result).toContain("\x1b[1m--- file.txt\x1b[0m");
-      expect(result).toContain("\x1b[1m+++ file.txt\x1b[0m");
+      expect(result).toContain("\x1B[1m--- file.txt\x1B[0m");
+      expect(result).toContain("\x1B[1m+++ file.txt\x1B[0m");
     });
 
     it("コンテキスト行はそのまま", () => {
@@ -170,12 +170,12 @@ describe("diff", () => {
       const result = colorizeUnifiedDiff(diff);
 
       const lines = result.split("\n");
-      expect(lines[0]).toBe("\x1b[1m--- file.txt\x1b[0m");
-      expect(lines[1]).toBe("\x1b[1m+++ file.txt\x1b[0m");
-      expect(lines[2]).toBe("\x1b[36m@@ -1,3 +1,3 @@\x1b[0m");
+      expect(lines[0]).toBe("\x1B[1m--- file.txt\x1B[0m");
+      expect(lines[1]).toBe("\x1B[1m+++ file.txt\x1B[0m");
+      expect(lines[2]).toBe("\x1B[36m@@ -1,3 +1,3 @@\x1B[0m");
       expect(lines[3]).toBe(" line1");
-      expect(lines[4]).toBe("\x1b[31m-old line\x1b[0m");
-      expect(lines[5]).toBe("\x1b[32m+new line\x1b[0m");
+      expect(lines[4]).toBe("\x1B[31m-old line\x1B[0m");
+      expect(lines[5]).toBe("\x1B[32m+new line\x1B[0m");
       expect(lines[6]).toBe(" line3");
     });
 

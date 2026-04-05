@@ -235,7 +235,7 @@ export const pushCommand = defineCommand({
               await import("../utils/merge");
 
             const baseInfo = lock.baseRef
-              ? `since ${pc.bold(lock.baseRef!.slice(0, 7))} (your last sync)`
+              ? `since ${pc.bold(lock.baseRef?.slice(0, 7))} (your last sync)`
               : "since your last pull/init";
             log.warn(
               `Template updated ${baseInfo} — ${classification.conflicts.length} conflict(s) detected, attempting auto-merge...`,
@@ -249,7 +249,7 @@ export const pushCommand = defineCommand({
               const baseResult = await Effect.runPromise(
                 Effect.tryPromise(async () => {
                   log.info(
-                    `Downloading base version (${lock.baseRef!.slice(0, 7)}...) for merge...`,
+                    `Downloading base version (${lock.baseRef?.slice(0, 7)}...) for merge...`,
                   );
                   const { downloadTemplateToTemp: downloadBase } =
                     await import("../utils/template");
@@ -327,7 +327,6 @@ export const pushCommand = defineCommand({
                     });
                     if (!proceed) {
                       log.info("Run `ziku pull` first to sync template changes, then push again.");
-                      return;
                     }
                   }
                 }
@@ -469,9 +468,9 @@ export const pushCommand = defineCommand({
           const icon =
             pf.type === "added"
               ? pc.green("+")
-              : pf.type === "modified"
+              : (pf.type === "modified"
                 ? pc.yellow("~")
-                : pc.red("-");
+                : pc.red("-"));
           fileLines.push(`  ${icon} ${pf.path.padEnd(50)} ${stat}`);
         }
         for (const f of files) {
@@ -516,7 +515,7 @@ export const pushCommand = defineCommand({
         log.message(
           [
             `${pc.dim("To")} ${pc.bold(`${zikuConfig.source.owner}/${zikuConfig.source.repo}`)}`,
-            `  ${lock.baseRef ? `${pc.dim(lock.baseRef.slice(0, 7))}..` : ""}${pc.green(result.branch)}  ${pc.dim(`(${files.length} file${files.length !== 1 ? "s" : ""} changed)`)}`,
+            `  ${lock.baseRef ? `${pc.dim(lock.baseRef.slice(0, 7))}..` : ""}${pc.green(result.branch)}  ${pc.dim(`(${files.length} file${files.length === 1 ? "" : "s"} changed)`)}`,
             "",
             `  ${pc.bold(`PR #${result.number}`)}  ${pc.cyan(result.url)}`,
           ].join("\n"),

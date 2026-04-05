@@ -136,7 +136,7 @@ export async function writeFileWithStrategy(
   }
 
   // 既存ファイルの処理 - ts-pattern で網羅的にマッチ
-  return match(strategy)
+  return await match(strategy)
     .with("overwrite", () => {
       writeFileSync(destPath, content);
       return { action: "overwritten" as const, path: relativePath };
