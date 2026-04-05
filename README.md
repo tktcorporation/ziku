@@ -117,7 +117,7 @@ npx ziku track '.eslintrc.*'
 ## How it Works
 
 ```mermaid
-graph LR
+graph TB
 
   subgraph Template["Template Repository"]
     ZIKU_TPL[".ziku/ziku.jsonc"]

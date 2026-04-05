@@ -64,7 +64,7 @@ function opLabel(op: Op): string {
 export function generateComponentDiagram(): string {
   const lines: string[] = [
     "```mermaid",
-    "graph LR",
+    "graph TB",
     "",
     `  subgraph Template["Template Repository"]`,
     `    ZIKU_TPL["${ZIKU_CONFIG_FILE}"]`,
