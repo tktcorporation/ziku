@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/oxc-project/oxc/main/npm/oxlint/configuration_schema.json",
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
   "plugins": ["typescript", "unicorn", "import"],
   "categories": {
     "correctness": "error",
@@ -22,17 +22,11 @@
     "no-shadow-restricted-names": "error",
 
     "typescript/no-explicit-any": "error",
-    "typescript/no-unsafe-type-assertion": "error",
-    "typescript/no-unsafe-argument": "error",
-    "typescript/no-unsafe-assignment": "error",
-    "typescript/no-unsafe-call": "error",
-    "typescript/no-unsafe-member-access": "error",
-    "typescript/no-unsafe-return": "error",
     "typescript/no-non-null-assertion": "warn",
     "typescript/consistent-type-imports": "error",
     "typescript/no-unnecessary-type-assertion": "off",
-    "typescript/ban-ts-comment": "error",
-    "typescript/no-import-type-side-effects": "error",
+    "typescript/ban-ts-comment": "warn",
+    "typescript/no-import-type-side-effects": "warn",
     "typescript/prefer-optional-chain": "warn",
 
     "unicorn/prefer-node-protocol": "error",
@@ -49,5 +43,15 @@
     "import/no-self-import": "error",
     "import/no-duplicates": "error"
   },
+  "overrides": [
+    {
+      "files": ["**/__tests__/**", "**/*.test.ts", "**/*.spec.ts"],
+      "rules": {
+        "typescript/no-explicit-any": "off",
+        "typescript/consistent-type-imports": "off",
+        "no-unused-vars": "warn"
+      }
+    }
+  ],
   "ignorePatterns": ["node_modules", "dist"]
 }

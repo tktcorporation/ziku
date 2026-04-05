@@ -9,10 +9,7 @@ import { ZikuError } from "../errors";
 import { loadPatternsFile, modulesFileExists } from "../modules";
 import type { FileDiff } from "../modules/schemas";
 import { loadLock } from "../utils/lock";
-import {
-  loadZikuConfig,
-  zikuConfigExists,
-} from "../utils/ziku-config";
+import { loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
 import {
   confirmAction,
   generatePrBody,
@@ -462,9 +459,7 @@ export const pushCommand = defineCommand({
         // Step 4: サマリー表示 + 確認
         const destination = `${zikuConfig.source.owner}/${zikuConfig.source.repo}`;
         const baseBranch = zikuConfig.source.ref || "main";
-        const baseHashStr = lock.baseRef
-          ? `  ${pc.dim(`since ${lock.baseRef.slice(0, 7)}`)}`
-          : "";
+        const baseHashStr = lock.baseRef ? `  ${pc.dim(`since ${lock.baseRef.slice(0, 7)}`)}` : "";
 
         const fileLines: string[] = [];
         for (const pf of pushableFiles) {

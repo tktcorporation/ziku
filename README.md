@@ -206,10 +206,10 @@ OPTIONS
 
 ### `track`
 
-Add file patterns to the tracking whitelist in modules.jsonc
+Add file patterns to the tracking whitelist in ziku.jsonc
 
 ```
-Add file patterns to the tracking whitelist in modules.jsonc (track)
+Add file patterns to the tracking whitelist in ziku.jsonc (track)
 
 USAGE `track [OPTIONS] [PATTERNS]`
 

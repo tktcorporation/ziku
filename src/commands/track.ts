@@ -47,7 +47,9 @@ export const trackCommand = defineCommand({
 
     // --list モード
     if (args.list) {
-      const { config: { include, exclude: excludeRaw } } = await loadZikuConfig(targetDir);
+      const {
+        config: { include, exclude: excludeRaw },
+      } = await loadZikuConfig(targetDir);
       const exclude = excludeRaw ?? [];
       log.info("Tracked patterns:");
       for (const pattern of include) {

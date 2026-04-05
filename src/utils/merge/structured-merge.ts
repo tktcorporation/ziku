@@ -33,7 +33,14 @@ export function mergeJsonContent(
   const { base: baseObj, local: localObj, template: templateObj } = parsed.value;
 
   // パースできたが値が null/undefined の場合はフォールバック
-  if (baseObj == null || localObj == null || templateObj == null) {
+  if (
+    baseObj === null ||
+    baseObj === undefined ||
+    localObj === null ||
+    localObj === undefined ||
+    templateObj === null ||
+    templateObj === undefined
+  ) {
     return null;
   }
 
@@ -142,7 +149,14 @@ export function mergeYamlContent(
   if (Option.isNone(parsed)) return null;
   const { base: baseObj, local: localObj, template: templateObj } = parsed.value;
 
-  if (baseObj == null || localObj == null || templateObj == null) {
+  if (
+    baseObj === null ||
+    baseObj === undefined ||
+    localObj === null ||
+    localObj === undefined ||
+    templateObj === null ||
+    templateObj === undefined
+  ) {
     return null;
   }
 
@@ -279,7 +293,7 @@ function pathsOverlap(pathA: (string | number)[], pathB: (string | number)[]): b
 function getValueAtPath(obj: unknown, path: (string | number)[]): unknown {
   let current = obj;
   for (const key of path) {
-    if (current == null || typeof current !== "object") return undefined;
+    if (current === null || current === undefined || typeof current !== "object") return undefined;
     current = (current as Record<string | number, unknown>)[key];
   }
   return current;
@@ -288,7 +302,7 @@ function getValueAtPath(obj: unknown, path: (string | number)[]): unknown {
 /** 2つの値を深い比較で等しいか判定する */
 function deepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
-  if (a == null || b == null) return false;
+  if (a === null || a === undefined || b === null || b === undefined) return false;
   if (typeof a !== typeof b) return false;
   if (typeof a !== "object") return false;
 
@@ -316,14 +330,19 @@ function setAtPath(obj: Record<string, unknown>, path: (string | number)[], valu
   let current: unknown = obj;
   for (let i = 0; i < path.length - 1; i++) {
     const key = path[i];
-    if (current == null || typeof current !== "object") return;
+    if (current === null || current === undefined || typeof current !== "object") return;
     const record = current as Record<string | number, unknown>;
-    if (!(key in record) || record[key] == null || typeof record[key] !== "object") {
+    if (
+      !(key in record) ||
+      record[key] === null ||
+      record[key] === undefined ||
+      typeof record[key] !== "object"
+    ) {
       record[key] = {};
     }
     current = record[key];
   }
-  if (current != null && typeof current === "object") {
+  if (current !== null && current !== undefined && typeof current === "object") {
     (current as Record<string | number, unknown>)[path[path.length - 1]] = value;
   }
 }
@@ -333,10 +352,10 @@ function deleteAtPath(obj: Record<string, unknown>, path: (string | number)[]): 
   let current: unknown = obj;
   for (let i = 0; i < path.length - 1; i++) {
     const key = path[i];
-    if (current == null || typeof current !== "object") return;
+    if (current === null || current === undefined || typeof current !== "object") return;
     current = (current as Record<string | number, unknown>)[key];
   }
-  if (current != null && typeof current === "object") {
+  if (current !== null && current !== undefined && typeof current === "object") {
     delete (current as Record<string | number, unknown>)[path[path.length - 1]];
   }
 }

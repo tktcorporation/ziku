@@ -207,7 +207,10 @@ export const pullCommand = defineCommand({
         );
 
         if (unresolvedConflicts.length > 0) {
-          const latestRef = await resolveLatestCommitSha(zikuConfig.source.owner, zikuConfig.source.repo);
+          const latestRef = await resolveLatestCommitSha(
+            zikuConfig.source.owner,
+            zikuConfig.source.repo,
+          );
           await saveLock(targetDir, {
             ...lock,
             pendingMerge: {
@@ -248,7 +251,10 @@ export const pullCommand = defineCommand({
       }
 
       // Step 10: 設定を更新
-      const latestRef = await resolveLatestCommitSha(zikuConfig.source.owner, zikuConfig.source.repo);
+      const latestRef = await resolveLatestCommitSha(
+        zikuConfig.source.owner,
+        zikuConfig.source.repo,
+      );
 
       const updatedLock = {
         ...lock,

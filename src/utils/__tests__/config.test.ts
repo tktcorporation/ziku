@@ -120,7 +120,8 @@ describe("saveZikuConfig", () => {
   it("コンテンツをファイルとして保存できる", async () => {
     vol.fromJSON({ "/project/.ziku": null });
 
-    const content = '{\n  "source": { "owner": "test", "repo": "test" },\n  "include": [".github/**"]\n}\n';
+    const content =
+      '{\n  "source": { "owner": "test", "repo": "test" },\n  "include": [".github/**"]\n}\n';
     await saveZikuConfig("/project", content);
 
     const saved = vol.readFileSync("/project/.ziku/ziku.jsonc", "utf8") as string;
@@ -350,7 +351,10 @@ describe("saveLock", () => {
 
   it("既存ファイルを上書きできる", async () => {
     vol.fromJSON({
-      "/project/.ziku/lock.json": JSON.stringify({ version: "0.0.1", installedAt: "2024-01-01T00:00:00+00:00" }),
+      "/project/.ziku/lock.json": JSON.stringify({
+        version: "0.0.1",
+        installedAt: "2024-01-01T00:00:00+00:00",
+      }),
     });
 
     const newLock = {

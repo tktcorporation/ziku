@@ -737,9 +737,6 @@ describe("initCommand", () => {
 
       const { inputTemplateSource } = await import("../../ui/prompts");
       const mockInputTemplateSource = vi.mocked(inputTemplateSource);
-      const { checkRepoExists } = await import("../../utils/github");
-      const mockCheckRepoExists = vi.mocked(checkRepoExists);
-
       // ユーザーが custom-org/templates を入力
       mockInputTemplateSource.mockResolvedValueOnce("custom-org/templates");
       mockCheckRepoExists.mockResolvedValueOnce(true);

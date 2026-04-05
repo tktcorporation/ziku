@@ -10,7 +10,12 @@ import {
   modulesFileExists,
 } from "../modules/index";
 import { MODULES_SCHEMA_URL } from "../modules/loader";
-import type { FileOperationResult, LockState, OverwriteStrategy, TemplateModule } from "../modules/schemas";
+import type {
+  FileOperationResult,
+  LockState,
+  OverwriteStrategy,
+  TemplateModule,
+} from "../modules/schemas";
 import { match } from "ts-pattern";
 import { ZikuError } from "../errors";
 import {
@@ -39,11 +44,7 @@ import {
 } from "../utils/github";
 import { hashFiles } from "../utils/hash";
 import { LOCK_FILE, saveLock } from "../utils/lock";
-import {
-  ZIKU_CONFIG_FILE,
-  generateZikuJsonc,
-  zikuConfigExists,
-} from "../utils/ziku-config";
+import { ZIKU_CONFIG_FILE, generateZikuJsonc, zikuConfigExists } from "../utils/ziku-config";
 import {
   buildTemplateSource,
   downloadTemplateToTemp,
@@ -592,7 +593,7 @@ async function handleMissingTemplate(
       const { url } = await scaffoldTemplateRepo(token, owner, repo);
       log.success(`Created template repository: ${pc.cyan(url)}`);
       log.info(pc.dim("Waiting for repository to be ready..."));
-      await new Promise((resolve) => setTimeout(resolve, 5000));
+      await new Promise((done) => setTimeout(done, 5000));
 
       return { sourceOwner: owner, sourceRepo: repo };
     })
