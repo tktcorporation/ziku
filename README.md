@@ -53,18 +53,30 @@ npx ziku --from my-org/my-templates
 
 ### 2. Add `.ziku/modules.jsonc` to your template
 
-The template repository needs a `.ziku/modules.jsonc` file that defines which file patterns ziku manages. If this file is missing, ziku will offer to create a PR that adds one with a default configuration.
+The template repository needs a `.ziku/modules.jsonc` file that defines which file patterns ziku manages. Each module groups related files and appears as a selectable option during `ziku init`. If this file is missing, ziku will offer to create a PR that adds one with a default configuration.
 
 Example `modules.jsonc`:
 
 ```jsonc
 {
   "$schema": "https://raw.githubusercontent.com/tktcorporation/ziku/main/schema/modules.json",
-  "include": [
-    ".editorconfig",
-    ".mcp.json",
-    ".mise.toml",
-    ".github/**"
+  "modules": [
+    {
+      "name": "Editor",
+      "description": "Editor and tooling configuration",
+      "include": [
+        ".editorconfig",
+        ".mcp.json",
+        ".mise.toml"
+      ]
+    },
+    {
+      "name": "CI",
+      "description": "GitHub Actions workflows",
+      "include": [
+        ".github/workflows/**"
+      ]
+    }
   ]
 }
 ```
