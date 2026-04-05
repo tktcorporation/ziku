@@ -5,50 +5,56 @@
     "correctness": "error",
     "suspicious": "error",
     "pedantic": "warn",
+    "perf": "warn",
+    "style": "off",
+    "restriction": "off",
     "nursery": "off"
   },
   "rules": {
-    "no-unused-vars": "error",
-    "no-console": "off",
-    "eqeqeq": "error",
-    "no-var": "error",
-    "prefer-const": "error",
+    /** ── Security: restriction ルールから個別に有効化 ── */
     "no-eval": "error",
-    "no-implied-eval": "error",
     "no-new-func": "error",
-    "no-empty": "error",
-    "no-debugger": "error",
     "no-alert": "error",
-    "no-shadow-restricted-names": "error",
+    "no-script-url": "error",
 
+    /** ── Promoted: pedantic/style → error に昇格 ── */
+    "prefer-const": "error",
+    "no-var": "error",
+
+    /** ── CLI ツールのため console 許可 ── */
+    "no-console": "off",
+
+    /** ── TypeScript 厳格化 ── */
     "typescript/no-explicit-any": "error",
+    "typescript/consistent-type-imports": "error",
     "typescript/no-non-null-assertion": "warn",
     "typescript/no-unsafe-type-assertion": "warn",
-    "typescript/consistent-type-imports": "error",
-    "typescript/no-unnecessary-type-assertion": "off",
     "typescript/ban-ts-comment": "warn",
     "typescript/no-import-type-side-effects": "warn",
     "typescript/prefer-optional-chain": "warn",
+    "typescript/no-unnecessary-type-assertion": "off",
 
-    "unicorn/prefer-node-protocol": "error",
+    /** ── Unicorn: プロジェクト慣習に合わない pedantic ルールを無効化 ── */
+    "unicorn/no-useless-undefined": "off",
     "unicorn/no-null": "off",
     "unicorn/prevent-abbreviations": "off",
     "unicorn/filename-case": "off",
     "unicorn/no-process-exit": "off",
     "unicorn/prefer-top-level-await": "off",
-    "unicorn/no-nested-ternary": "warn",
-    "unicorn/prefer-string-replace-all": "warn",
     "unicorn/no-array-reduce": "off",
-    "unicorn/no-hex-escape": "off",
-    "unicorn/no-immediate-mutation": "off",
     "unicorn/no-typeof-undefined": "off",
 
+    /** ── Perf: CLI のファイル I/O は意図的に逐次処理のため無効化 ── */
+    "no-await-in-loop": "off",
+
+    /** ── Pedantic: コードベースに合わない制約ルールを無効化 ── */
     "no-inline-comments": "off",
     "no-negated-condition": "off",
     "max-lines-per-function": "off",
     "max-lines": "off",
     "max-classes-per-file": "off",
 
+    /** ── Import ── */
     "import/max-dependencies": "off",
     "import/no-cycle": "error",
     "import/no-self-import": "error",
@@ -64,9 +70,9 @@
         "no-unused-vars": "warn",
         "max-lines-per-function": "off",
         "max-lines": "off",
-        "no-inline-comments": "off",
         "require-await": "off",
-        "unicorn/no-array-callback-reference": "off"
+        "unicorn/no-array-callback-reference": "off",
+        "unicorn/no-useless-undefined": "off"
       }
     }
   ],

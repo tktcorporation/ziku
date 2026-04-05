@@ -69,7 +69,7 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
         Effect.map(({ data }) =>
           !Array.isArray(data) && data.type === "file" ? data.sha : undefined,
         ),
-        Effect.orElseSucceed(() => undefined),
+        Effect.orElseSucceed((): string | undefined => undefined),
       ),
     );
 
