@@ -98,16 +98,35 @@ npx ziku track '.eslintrc.*'
 
 ## Modules
 
-ziku lets you organize synced files into **modules** — named groups of file patterns defined in `.ziku/modules.jsonc`. You can create any modules that fit your workflow; there are no fixed categories.
+ziku lets you organize synced files into **modules** — named groups of file patterns defined in `.ziku/modules.jsonc`. During `ziku init`, users pick which modules to apply.
 
-For example, this repository's template defines:
+You can define any modules that match your team's stack. For example:
 
-- **Root** — Editor and tooling configuration (`.mcp.json`, `.mise.toml`, etc.)
-- **DevContainer** — VS Code DevContainer configuration
-- **GitHub** — GitHub Actions workflows and repository settings
-- **Claude** — Claude Code rules and settings
+| Module | What you might include |
+|---|---|
+| **Linter / Formatter** | `.eslintrc.*`, `.prettierrc`, `biome.json` |
+| **CI / CD** | `.github/workflows/**`, `.gitlab-ci.yml` |
+| **DevContainer** | `.devcontainer/devcontainer.json` |
+| **AI Tooling** | `.claude/`, `.cursor/rules/`, `.mcp.json` |
+| **IaC** | `terraform/modules/**`, `docker-compose.yml` |
 
-These are just one possible set. Your template might have modules for ESLint configs, Docker Compose files, Terraform modules, or anything else you want to keep in sync across projects.
+```jsonc
+// .ziku/modules.jsonc — define as many modules as you need
+{
+  "modules": [
+    {
+      "name": "Linter",
+      "description": "Shared linter and formatter settings",
+      "patterns": [".eslintrc.*", ".prettierrc"]
+    },
+    {
+      "name": "CI",
+      "description": "GitHub Actions workflow templates",
+      "patterns": [".github/workflows/**"]
+    }
+  ]
+}
+```
 
 <!-- FEATURES:END -->
 
