@@ -198,8 +198,7 @@ const { hashFiles } = await import("../../utils/hash");
 const { loadZikuConfig: _loadZikuConfig, zikuConfigExists: _zikuConfigExists } =
   await import("../../utils/ziku-config");
 const { loadLock: _loadLock, saveLock: _saveLock } = await import("../../utils/lock");
-const { loadPatternsFile, addIncludePattern, saveModulesFile, modulesFileExists } =
-  await import("../../modules");
+const { loadPatternsFile, addIncludePattern, modulesFileExists } = await import("../../modules");
 const { detectDiff } = await import("../../utils/diff");
 
 const mockDownloadTemplateToTemp = vi.mocked(downloadTemplateToTemp);
@@ -421,7 +420,7 @@ describe("E2E: flat modules.jsonc format", () => {
       expect(parsed.exclude).toContain("*.local");
     });
 
-    it("loadPatternsFile → addIncludePattern → saveModulesFile の一連の流れ", async () => {
+    it("loadPatternsFile → addIncludePattern → 書き戻しの一連の流れ", async () => {
       const initial = createFlatModulesJsonc([".mcp.json", ".devcontainer/**"]);
       vol.fromJSON({
         "/project/.ziku/modules.jsonc": initial,
@@ -436,8 +435,8 @@ describe("E2E: flat modules.jsonc format", () => {
       // 追加
       const updated = addIncludePattern(rawContent, [".cloud/rules/*.md"]);
 
-      // 保存
-      await saveModulesFile("/project", updated);
+      // 保存（実際の push では PR 経由で更新するが、ここでは直接書き込みで検証）
+      vol.writeFileSync("/project/.ziku/modules.jsonc", updated);
 
       // 再読み込みで確認
       const after = await loadPatternsFile("/project");

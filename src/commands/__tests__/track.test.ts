@@ -61,8 +61,8 @@ vi.spyOn(process, "exit").mockImplementation(() => {
 });
 
 // モック後にインポート
-const { loadPatternsFile, saveModulesFile, modulesFileExists } = await import("../../modules");
-const { addIncludePattern } = await import("../../utils/ziku-config");
+const { modulesFileExists } = await import("../../modules");
+const { addIncludePattern, saveZikuConfig } = await import("../../utils/ziku-config");
 
 describe("track command - core logic", () => {
   beforeEach(() => {
@@ -107,10 +107,11 @@ describe("track command - core logic", () => {
     });
   });
 
-  describe("modules.jsonc の読み書き", () => {
+  describe("ziku.jsonc の読み書き", () => {
     it("パターン追加後にファイルを正しく保存できる", async () => {
       const initialContent = JSON.stringify(
         {
+          source: { owner: "test", repo: ".ziku" },
           include: [".mcp.json"],
           exclude: [],
         },
@@ -119,14 +120,13 @@ describe("track command - core logic", () => {
       );
 
       vol.fromJSON({
-        "/project/.ziku/modules.jsonc": initialContent,
+        "/project/.ziku/ziku.jsonc": initialContent,
       });
 
-      const { rawContent } = await loadPatternsFile("/project");
-      const updated = addIncludePattern(rawContent, [".cloud/rules/*.md"]);
-      await saveModulesFile("/project", updated);
+      const updated = addIncludePattern(initialContent, [".cloud/rules/*.md"]);
+      await saveZikuConfig("/project", updated);
 
-      const saved = vol.readFileSync("/project/.ziku/modules.jsonc", "utf8") as string;
+      const saved = vol.readFileSync("/project/.ziku/ziku.jsonc", "utf8") as string;
       const parsed = JSON.parse(saved);
       expect(parsed.include).toContain(".mcp.json");
       expect(parsed.include).toContain(".cloud/rules/*.md");

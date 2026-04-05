@@ -114,7 +114,6 @@ vi.mock("../../modules", () => ({
     }),
   ),
   addIncludePattern: vi.fn(),
-  saveModulesFile: vi.fn(),
 }));
 
 // ui/renderer をモック

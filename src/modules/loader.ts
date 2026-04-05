@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { applyEdits, modify, parse } from "jsonc-parser";
 import { join } from "pathe";
 import { z } from "zod";
@@ -27,20 +27,25 @@ export const templateModulesFileSchema = z.object({
 });
 
 /**
- * ローカル側の modules.jsonc スキーマ（フラット形式 — ランタイム用）
+ * フラット形式の modules.jsonc スキーマ。
+ *
+ * 背景: handleTemplateRepoInit や scaffold PR で生成される簡易形式。
+ * モジュール選択 UI を使わず、include/exclude だけで同期対象を定義する。
+ * loadPatternsFile 内でフォールバックとして使用する。
  */
-export const localPatternsFileSchema = z.object({
+const flatPatternsFileSchema = z.object({
   $schema: z.string().optional(),
   include: z.array(z.string()),
   exclude: z.array(z.string()).optional(),
 });
 
-export type LocalPatternsFile = z.infer<typeof localPatternsFileSchema>;
-
 /**
- * 両形式をカバーする統合スキーマ（JSON Schema 生成用）
+ * 両形式をカバーする統合スキーマ（JSON Schema 生成用）。
+ *
+ * テンプレートリポジトリの modules.jsonc はモジュール形式が標準だが、
+ * scaffold 時に生成されるフラット形式も有効な形式として許容する。
  */
-export const modulesFileSchema = z.union([localPatternsFileSchema, templateModulesFileSchema]);
+export const modulesFileSchema = z.union([flatPatternsFileSchema, templateModulesFileSchema]);
 
 /**
  * テンプレートの modules.jsonc を読み込み（モジュール形式）。
@@ -66,31 +71,12 @@ export async function loadTemplateModulesFile(
 }
 
 /**
- * ローカルの modules.jsonc を読み込み（フラット形式）
- */
-export async function loadLocalPatternsFile(
-  baseDir: string,
-): Promise<{ include: string[]; exclude: string[]; rawContent: string }> {
-  const filePath = join(baseDir, MODULES_FILE);
-
-  if (!existsSync(filePath)) {
-    throw new Error(`${MODULES_FILE} が見つかりません: ${filePath}`);
-  }
-
-  const content = await readFile(filePath, "utf-8");
-  const parsed = parse(content);
-  const validated = localPatternsFileSchema.parse(parsed);
-
-  return {
-    include: validated.include,
-    exclude: validated.exclude ?? [],
-    rawContent: content,
-  };
-}
-
-/**
- * modules.jsonc がどちらの形式かを判定して読み込み
- * テンプレート形式（modules配列）の場合はフラット化して返す
+ * テンプレートの modules.jsonc を読み込み、include/exclude パターンに展開して返す。
+ *
+ * モジュール形式 → 全モジュールの include/exclude をフラット化。
+ * フラット形式（scaffold 生成） → そのまま返す。
+ *
+ * 呼び出し元: init（フォールバック）、push（テンプレートのパターン取得）
  */
 export async function loadPatternsFile(
   baseDir: string,
@@ -104,17 +90,17 @@ export async function loadPatternsFile(
   const content = await readFile(filePath, "utf-8");
   const parsed = parse(content);
 
-  // フラット形式を先に試行
-  const localResult = localPatternsFileSchema.safeParse(parsed);
-  if (localResult.success) {
+  // フラット形式を先に試行（scaffold で生成された場合）
+  const flatResult = flatPatternsFileSchema.safeParse(parsed);
+  if (flatResult.success) {
     return {
-      include: localResult.data.include,
-      exclude: localResult.data.exclude ?? [],
+      include: flatResult.data.include,
+      exclude: flatResult.data.exclude ?? [],
       rawContent: content,
     };
   }
 
-  // テンプレート形式にフォールバック（フラット化して返す）
+  // モジュール形式にフォールバック（標準のテンプレート形式）
   const templateResult = templateModulesFileSchema.safeParse(parsed);
   if (templateResult.success) {
     return {
@@ -128,11 +114,17 @@ export async function loadPatternsFile(
 }
 
 /**
- * ローカルの modules.jsonc にパターンを追加
+ * フラット形式の modules.jsonc に include パターンを追加する。
+ *
+ * 背景: push 時にローカルで追加されたパターンをテンプレートの modules.jsonc に
+ * 書き戻すために使用。フラット形式（scaffold 生成）のファイルのみ対応。
+ * モジュール形式のファイルに対して呼ぶと include フィールドがルートに作成されるため、
+ * 呼び出し元でフラット形式であることを確認する必要がある。
+ *
  * @returns 更新後の JSONC 文字列
  */
 export function addIncludePattern(rawContent: string, patterns: string[]): string {
-  const parsed = parse(rawContent) as LocalPatternsFile;
+  const parsed = parse(rawContent) as { include?: string[] };
   const existing = parsed.include ?? [];
   const newPatterns = patterns.filter((p) => !existing.includes(p));
 
@@ -146,14 +138,6 @@ export function addIncludePattern(rawContent: string, patterns: string[]): strin
   });
 
   return applyEdits(rawContent, edits);
-}
-
-/**
- * modules.jsonc を保存
- */
-export async function saveModulesFile(baseDir: string, content: string): Promise<void> {
-  const filePath = join(baseDir, MODULES_FILE);
-  await writeFile(filePath, content);
 }
 
 /**
