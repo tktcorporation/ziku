@@ -1,19 +1,15 @@
-import { existsSync } from "node:fs";
-import { rm } from "node:fs/promises";
-import { withFinally } from "../effect-helpers";
 import { defineCommand } from "citty";
-import { Effect } from "effect";
-import { downloadTemplate } from "giget";
-import { join, resolve } from "pathe";
-import { isLocalSource } from "../modules/schemas";
+import { Cause, Effect, Exit, Option } from "effect";
+import { resolve } from "pathe";
+import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
 import { renderFileDiff } from "../ui/diff-view";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
 import { detectDiff, hasDiff } from "../utils/diff";
-import { buildTemplateSource } from "../utils/template";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked";
-import { ZIKU_CONFIG_FILE, loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
-import { LOCK_FILE, loadLock } from "../utils/lock";
+import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
+import { LOCK_FILE } from "../utils/lock";
+import { loadCommandContext } from "../services/command-context";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 
@@ -65,56 +61,40 @@ export const diffCommand = defineCommand({
 
     const targetDir = resolve(args.dir);
 
-    if (!zikuConfigExists(targetDir)) {
-      throw new ZikuError(".ziku/ziku.jsonc not found.", "Run 'ziku init' first.");
-    }
-
-    const { config: zikuConfig } = await loadZikuConfig(targetDir);
-
-    // source は lock.json から取得
-    const lock = await Effect.runPromise(
-      Effect.tryPromise(() => loadLock(targetDir)).pipe(
-        Effect.mapError(
-          () => new ZikuError(".ziku/lock.json not found.", "Run 'ziku init' first."),
+    // loadCommandContext で設定読み込み + テンプレート解決を DRY 化（Effect DI）
+    // TaggedError → ZikuError に変換し、Exit から取り出して re-throw
+    const exit = await Effect.runPromiseExit(
+      loadCommandContext(targetDir).pipe(
+        Effect.mapError((err) =>
+          err._tag === "FileNotFoundError"
+            ? new ZikuError(`${err.path} not found.`, "Run 'ziku init' first.")
+            : new ZikuError("Failed to load configuration", String(err)),
         ),
       ),
     );
-    const source = lock.source;
-
-    const patterns = {
-      include: zikuConfig.include,
-      exclude: zikuConfig.exclude ?? [],
-    };
-
-    if (patterns.include.length === 0) {
-      log.warn("No patterns configured");
-      return;
+    if (Exit.isFailure(exit)) {
+      const error = Cause.failureOption(exit.cause);
+      throw Option.isSome(error) ? error.value : Cause.squash(exit.cause);
     }
+    const ctx = exit.value;
 
-    // Step 1: テンプレートを取得
-    let templateDir: string;
-    let tempDir: string | undefined;
+    const { config, source, templateDir, cleanup } = ctx;
 
-    if (isLocalSource(source)) {
-      templateDir = resolve(source.path);
-      log.info(`Template: ${pc.cyan(templateDir)} (local)`);
-    } else {
-      log.step("Fetching template...");
-      const templateSource = buildTemplateSource(source);
-      const td = join(targetDir, ".ziku-temp");
-      tempDir = td;
-      const { dir } = await withSpinner("Downloading template from GitHub...", () =>
-        downloadTemplate(templateSource, {
-          dir: td,
-          force: true,
-        }),
-      );
-      templateDir = dir;
-    }
+    log.info(`Template: ${pc.cyan(templateDir)}${"path" in source ? " (local)" : ""}`);
 
     await withFinally(
       async () => {
-        // Step 2: 差分を検出
+        const patterns = {
+          include: config.include,
+          exclude: config.exclude ?? [],
+        };
+
+        if (patterns.include.length === 0) {
+          log.warn("No patterns configured");
+          return;
+        }
+
+        // Step 1: 差分を検出
         log.step("Detecting changes...");
 
         const diff = await withSpinner("Analyzing differences...", () =>
@@ -170,11 +150,7 @@ export const diffCommand = defineCommand({
           outro("No changes — in sync with template.");
         }
       },
-      async () => {
-        if (tempDir && existsSync(tempDir)) {
-          await rm(tempDir, { recursive: true, force: true });
-        }
-      },
+      cleanup,
     );
   },
 });

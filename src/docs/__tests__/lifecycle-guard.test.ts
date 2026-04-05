@@ -36,11 +36,19 @@ import { initUserLifecycle } from "../../commands/init";
  *
  * saveLock は init では "create"、pull では "update" のため ops に両方を含める。
  */
+/**
+ * loadCommandContext は内部で ziku.jsonc + lock.json を読み込むため、
+ * これを import しているコマンドは両方の read ops を持つべき。
+ */
 const IMPORT_OP_MAP: Record<string, { file: string; ops: string[] }[]> = {
   loadZikuConfig: [{ file: ZIKU_CONFIG_FILE, ops: ["read"] }],
   loadLock: [{ file: LOCK_FILE, ops: ["read"] }],
   saveLock: [{ file: LOCK_FILE, ops: ["update", "create"] }],
   saveZikuConfig: [{ file: ZIKU_CONFIG_FILE, ops: ["update"] }],
+  loadCommandContext: [
+    { file: ZIKU_CONFIG_FILE, ops: ["read"] },
+    { file: LOCK_FILE, ops: ["read"] },
+  ],
 };
 
 // ──────────────────────────────────────────────
