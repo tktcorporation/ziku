@@ -9,7 +9,7 @@ ziku が管理するファイルと、各コマンドでの振る舞いを整理
 ## コンポーネント関係図
 
 ```mermaid
-graph LR
+graph TB
 
   subgraph Template["Template Repository"]
     ZIKU_TPL[".ziku/ziku.jsonc"]

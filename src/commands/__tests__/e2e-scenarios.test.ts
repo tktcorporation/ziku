@@ -176,6 +176,22 @@ vi.mock("../../utils/diff", () => ({
   getPushableFiles: vi.fn(() => []),
 }));
 
+vi.mock("../../utils/merge", () => ({
+  classifyFiles: vi.fn(() => ({
+    autoUpdate: [],
+    localOnly: [],
+    conflicts: [],
+    newFiles: [],
+    deletedFiles: [],
+    unchanged: [],
+  })),
+  threeWayMerge: vi.fn(() => ({ content: "merged", hasConflicts: false, conflictDetails: [] })),
+  asBaseContent: vi.fn((s: string) => s),
+  asLocalContent: vi.fn((s: string) => s),
+  asTemplateContent: vi.fn((s: string) => s),
+  hasConflictMarkers: vi.fn(() => ({ found: false })),
+}));
+
 vi.mock("../../utils/untracked", () => ({
   detectUntrackedFiles: vi.fn(() => Promise.resolve([])),
   getTotalUntrackedCount: vi.fn(() => 0),
@@ -189,16 +205,18 @@ const { initCommand } = await import("../init");
 const { trackCommand } = await import("../track");
 const { diffCommand } = await import("../diff");
 const { pullCommand } = await import("../pull");
+const { pushCommand } = await import("../push");
 
 const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy } =
   await import("../../utils/template");
 const { hashFiles } = await import("../../utils/hash");
 const { zikuConfigExists: _zikuConfigExists } = await import("../../utils/ziku-config");
 const { loadTemplateConfig } = await import("../../utils/template-config");
-const { selectDirectories } = await import("../../ui/prompts");
+const { selectDirectories, selectDeletedFiles, selectPushFiles } = await import("../../ui/prompts");
 const { log } = await import("../../ui/renderer");
 const { detectDiff } = await import("../../utils/diff");
-const { checkRepoExists } = await import("../../utils/github");
+const { checkRepoExists, createPullRequest } = await import("../../utils/github");
+const { classifyFiles } = await import("../../utils/merge");
 
 const mockDownloadTemplateToTemp = vi.mocked(downloadTemplateToTemp);
 const mockFetchTemplates = vi.mocked(fetchTemplates);
@@ -206,9 +224,13 @@ const mockWriteFileWithStrategy = vi.mocked(writeFileWithStrategy);
 const mockHashFiles = vi.mocked(hashFiles);
 const mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
 const mockSelectDirectories = vi.mocked(selectDirectories);
+const mockSelectDeletedFiles = vi.mocked(selectDeletedFiles);
+const mockSelectPushFiles = vi.mocked(selectPushFiles);
 const mockLog = vi.mocked(log);
 const mockDetectDiff = vi.mocked(detectDiff);
 const mockCheckRepoExists = vi.mocked(checkRepoExists);
+const mockCreatePullRequest = vi.mocked(createPullRequest);
+const mockClassifyFiles = vi.mocked(classifyFiles);
 
 // ── helpers ─────��───────────────────────────────────────────────
 
@@ -743,6 +765,288 @@ describe("E2E: multi-scenario tests", () => {
       expect(mockLog.warn).toHaveBeenCalledWith("No patterns to apply");
       // fetchTemplates は呼ばれない
       expect(mockFetchTemplates).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  // Scenario 11: ファイル削除の push → pull 同期（モック版）
+  //
+  // classifyFiles をモックして削除フローを検証:
+  //   1. push でファイルをテンプレートに追加
+  //   2. テンプレートからファイルを削除
+  //   3. pull で --force 削除が同期される
+  //   4. pull で selectDeletedFiles による選択的削除
+  //   5. baseHashes の更新を確認
+  // ─────────────────────────────────────────────────────────────
+
+  describe("ファイル削除の push → pull 同期（モック版）", () => {
+    const localSource = { path: "/template" };
+    const localLock = {
+      version: "0.1.0",
+      installedAt: "2024-01-01T00:00:00.000Z",
+      source: localSource,
+      baseHashes: {
+        ".mcp.json": "hash-mcp",
+        ".claude/rules/style.md": "hash-style",
+      },
+    };
+
+    /**
+     * テンプレートとプロジェクトの初期状態を構築するヘルパー。
+     * init 相当の状態を memfs 上に直接構築する（init コマンドの再テストを避ける）。
+     */
+    function setupInitialState() {
+      vol.fromJSON({
+        // テンプレート側
+        "/template/.ziku/ziku.jsonc": createZikuJsonc([".mcp.json", ".claude/rules/*.md"]),
+        "/template/.mcp.json": '{"servers":{}}',
+        "/template/.claude/rules/style.md": "# Style Guide",
+
+        // プロジェクト側（init 済み）
+        "/project/.ziku/ziku.jsonc": createZikuJsonc([".mcp.json", ".claude/rules/*.md"]),
+        "/project/.ziku/lock.json": JSON.stringify(localLock, null, 2),
+        "/project/.mcp.json": '{"servers":{}}',
+        "/project/.claude/rules/style.md": "# Style Guide",
+      });
+
+      // downloadTemplateToTemp がローカルテンプレートを返す
+      mockDownloadTemplateToTemp.mockResolvedValue({
+        templateDir: "/template",
+        cleanup: vi.fn(),
+      });
+    }
+
+    it("push で追加したファイルがテンプレート削除後の pull で同期削除される", async () => {
+      setupInitialState();
+
+      // ── Step 1: push — 新ファイルをテンプレートに追加 ──
+
+      vol.mkdirSync("/project/.claude/rules", { recursive: true });
+      vol.writeFileSync("/project/.claude/rules/testing.md", "# Testing Guide");
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [".claude/rules/testing.md"],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        unchanged: [".mcp.json", ".claude/rules/style.md"],
+      });
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [
+          {
+            path: ".claude/rules/testing.md",
+            type: "added",
+            localContent: "# Testing Guide",
+          },
+        ],
+        summary: { added: 1, modified: 0, deleted: 0, unchanged: 2 },
+      } as any);
+      mockSelectPushFiles.mockResolvedValueOnce([
+        {
+          path: ".claude/rules/testing.md",
+          type: "added",
+          localContent: "# Testing Guide",
+        },
+      ] as any);
+      // push 後の baseHashes 更新用
+      mockHashFiles.mockResolvedValueOnce({
+        ".mcp.json": "hash-mcp",
+        ".claude/rules/style.md": "hash-style",
+        ".claude/rules/testing.md": "hash-testing",
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/project", dryRun: false, yes: true, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      // テンプレートにファイルがコピーされた
+      expect(vol.existsSync("/template/.claude/rules/testing.md")).toBe(true);
+      // PR は作成されない（ローカルソース）
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+
+      // ── Step 2: テンプレートからファイルを削除 ──
+
+      vol.unlinkSync("/template/.claude/rules/testing.md");
+
+      // ── Step 3: pull — 削除が --force で同期される ──
+
+      // テンプレート側（testing.md なし）、ローカル側（testing.md あり）
+      mockHashFiles
+        .mockResolvedValueOnce({
+          ".mcp.json": "hash-mcp",
+          ".claude/rules/style.md": "hash-style",
+        })
+        .mockResolvedValueOnce({
+          ".mcp.json": "hash-mcp",
+          ".claude/rules/style.md": "hash-style",
+          ".claude/rules/testing.md": "hash-testing",
+        });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [".claude/rules/testing.md"],
+        unchanged: [".mcp.json", ".claude/rules/style.md"],
+      });
+
+      // push で更新された lock を反映
+      const updatedLock = JSON.parse(
+        vol.readFileSync("/project/.ziku/lock.json", "utf8") as string,
+      );
+      updatedLock.baseHashes = {
+        ".mcp.json": "hash-mcp",
+        ".claude/rules/style.md": "hash-style",
+        ".claude/rules/testing.md": "hash-testing",
+      };
+      vol.writeFileSync("/project/.ziku/lock.json", JSON.stringify(updatedLock, null, 2));
+
+      await (pullCommand.run as any)({
+        args: { dir: "/project", force: true, continue: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // --force なので selectDeletedFiles は呼ばれない
+      expect(mockSelectDeletedFiles).not.toHaveBeenCalled();
+      // ファイルがローカルから削除された
+      expect(vol.existsSync("/project/.claude/rules/testing.md")).toBe(false);
+      // 他のファイルはそのまま
+      expect(vol.existsSync("/project/.mcp.json")).toBe(true);
+      expect(vol.existsSync("/project/.claude/rules/style.md")).toBe(true);
+
+      // baseHashes から testing.md が消えている
+      const finalLock = JSON.parse(vol.readFileSync("/project/.ziku/lock.json", "utf8") as string);
+      expect(finalLock.baseHashes).not.toHaveProperty(".claude/rules/testing.md");
+      expect(finalLock.baseHashes).toHaveProperty(".mcp.json");
+      expect(finalLock.baseHashes).toHaveProperty(".claude/rules/style.md");
+    });
+
+    it("pull で selectDeletedFiles を通じてユーザーが選択的に削除できる", async () => {
+      setupInitialState();
+
+      // 複数ファイルが削除対象
+      vol.writeFileSync("/project/.claude/rules/deprecated-a.md", "old content A");
+      vol.writeFileSync("/project/.claude/rules/deprecated-b.md", "old content B");
+
+      const lockWithExtra = {
+        ...localLock,
+        baseHashes: {
+          ...localLock.baseHashes,
+          ".claude/rules/deprecated-a.md": "hash-dep-a",
+          ".claude/rules/deprecated-b.md": "hash-dep-b",
+        },
+      };
+      vol.writeFileSync("/project/.ziku/lock.json", JSON.stringify(lockWithExtra, null, 2));
+
+      // テンプレート側（deprecated ファイルなし）、ローカル側（deprecated ファイルあり）
+      mockHashFiles
+        .mockResolvedValueOnce({
+          ".mcp.json": "hash-mcp",
+          ".claude/rules/style.md": "hash-style",
+        })
+        .mockResolvedValueOnce({
+          ".mcp.json": "hash-mcp",
+          ".claude/rules/style.md": "hash-style",
+          ".claude/rules/deprecated-a.md": "hash-dep-a",
+          ".claude/rules/deprecated-b.md": "hash-dep-b",
+        });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [".claude/rules/deprecated-a.md", ".claude/rules/deprecated-b.md"],
+        unchanged: [".mcp.json", ".claude/rules/style.md"],
+      });
+
+      // ユーザーが deprecated-a.md のみ削除を選択
+      mockSelectDeletedFiles.mockResolvedValueOnce([".claude/rules/deprecated-a.md"]);
+
+      await (pullCommand.run as any)({
+        args: { dir: "/project", force: false, continue: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockSelectDeletedFiles).toHaveBeenCalledWith([
+        ".claude/rules/deprecated-a.md",
+        ".claude/rules/deprecated-b.md",
+      ]);
+
+      // 選択した deprecated-a.md のみ削除された
+      expect(vol.existsSync("/project/.claude/rules/deprecated-a.md")).toBe(false);
+      // 選択しなかった deprecated-b.md は残っている
+      expect(vol.existsSync("/project/.claude/rules/deprecated-b.md")).toBe(true);
+    });
+
+    it("GitHub テンプレートでの pull 時にファイル削除と baseHashes 更新が行われる", async () => {
+      const ghLock = {
+        version: "0.1.0",
+        installedAt: "2024-01-01T00:00:00.000Z",
+        source: DEFAULT_SOURCE,
+        baseRef: "abc123",
+        baseHashes: {
+          ".mcp.json": "hash-mcp",
+          ".claude/rules/style.md": "hash-style",
+          "config/old.json": "hash-old",
+        },
+      };
+
+      vol.fromJSON({
+        "/project/.ziku/ziku.jsonc": createZikuJsonc([
+          ".mcp.json",
+          ".claude/rules/*.md",
+          "config/**",
+        ]),
+        "/project/.ziku/lock.json": JSON.stringify(ghLock, null, 2),
+        "/project/.mcp.json": '{"servers":{}}',
+        "/project/.claude/rules/style.md": "# Style Guide",
+        "/project/config/old.json": '{"deprecated": true}',
+        // テンプレート（config/old.json が削除済み）
+        "/tmp/template/.mcp.json": '{"servers":{}}',
+        "/tmp/template/.claude/rules/style.md": "# Style Guide",
+      });
+
+      mockHashFiles
+        .mockResolvedValueOnce({
+          ".mcp.json": "hash-mcp",
+          ".claude/rules/style.md": "hash-style",
+        })
+        .mockResolvedValueOnce({
+          ".mcp.json": "hash-mcp",
+          ".claude/rules/style.md": "hash-style",
+          "config/old.json": "hash-old",
+        });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: ["config/old.json"],
+        unchanged: [".mcp.json", ".claude/rules/style.md"],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/project", force: true, continue: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // ファイルが削除された
+      expect(vol.existsSync("/project/config/old.json")).toBe(false);
+
+      // lock.json の baseHashes が更新された
+      const finalLock = JSON.parse(vol.readFileSync("/project/.ziku/lock.json", "utf8") as string);
+      expect(finalLock.baseHashes).not.toHaveProperty("config/old.json");
+      expect(finalLock.baseHashes).toHaveProperty(".mcp.json");
+      expect(finalLock.baseRef).toBe("abc123");
     });
   });
 });
