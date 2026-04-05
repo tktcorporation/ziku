@@ -56,7 +56,12 @@ export const lifecycle: CommandLifecycle[] = [
     name: "init (template repo)",
     description: "テンプレートリポジトリの初期化",
     ops: [
-      { file: MODULES_FILE, location: "template", op: "create", note: "デフォルトパターンで生成（既存ならスキップ）" },
+      {
+        file: MODULES_FILE,
+        location: "template",
+        op: "create",
+        note: "デフォルトパターンで生成（既存ならスキップ）",
+      },
     ],
   },
   {
@@ -64,9 +69,24 @@ export const lifecycle: CommandLifecycle[] = [
     description: "ユーザープロジェクトの初期化",
     ops: [
       { file: MODULES_FILE, location: "template", op: "read", note: "モジュール選択 UI に使用" },
-      { file: ZIKU_CONFIG_FILE, location: "local", op: "create", note: "選択パターンをフラット化して保存" },
-      { file: LOCK_FILE, location: "local", op: "create", note: "ベースコミット SHA + ハッシュを記録" },
-      { file: SYNCED_FILES, location: "local", op: "create", note: "テンプレートからパターンに一致するファイルをコピー" },
+      {
+        file: ZIKU_CONFIG_FILE,
+        location: "local",
+        op: "create",
+        note: "選択パターンをフラット化して保存",
+      },
+      {
+        file: LOCK_FILE,
+        location: "local",
+        op: "create",
+        note: "ベースコミット SHA + ハッシュを記録",
+      },
+      {
+        file: SYNCED_FILES,
+        location: "local",
+        op: "create",
+        note: "テンプレートからパターンに一致するファイルをコピー",
+      },
     ],
   },
   {
@@ -75,9 +95,24 @@ export const lifecycle: CommandLifecycle[] = [
     ops: [
       { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "source と patterns を取得" },
       { file: LOCK_FILE, location: "local", op: "read", note: "前回の baseHashes, baseRef を取得" },
-      { file: SYNCED_FILES, location: "template", op: "read", note: "テンプレートをダウンロードして差分比較" },
-      { file: SYNCED_FILES, location: "local", op: "update", note: "自動更新・新規追加・3-way マージ・削除" },
-      { file: LOCK_FILE, location: "local", op: "update", note: "新しい baseHashes, baseRef で上書き" },
+      {
+        file: SYNCED_FILES,
+        location: "template",
+        op: "read",
+        note: "テンプレートをダウンロードして差分比較",
+      },
+      {
+        file: SYNCED_FILES,
+        location: "local",
+        op: "update",
+        note: "自動更新・新規追加・3-way マージ・削除",
+      },
+      {
+        file: LOCK_FILE,
+        location: "local",
+        op: "update",
+        note: "新しい baseHashes, baseRef で上書き",
+      },
     ],
   },
   {
@@ -87,8 +122,18 @@ export const lifecycle: CommandLifecycle[] = [
       { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "source と patterns を取得" },
       { file: LOCK_FILE, location: "local", op: "read", note: "baseRef, baseHashes を取得" },
       { file: SYNCED_FILES, location: "local", op: "read", note: "ローカルの変更を検出" },
-      { file: SYNCED_FILES, location: "template", op: "update", note: "変更ファイルを含む PR を作成" },
-      { file: MODULES_FILE, location: "template", op: "update", note: "ローカルで追加されたパターンがあれば更新" },
+      {
+        file: SYNCED_FILES,
+        location: "template",
+        op: "update",
+        note: "変更ファイルを含む PR を作成",
+      },
+      {
+        file: MODULES_FILE,
+        location: "template",
+        op: "update",
+        note: "ローカルで追加されたパターンがあれば更新",
+      },
     ],
   },
   {
@@ -96,15 +141,30 @@ export const lifecycle: CommandLifecycle[] = [
     description: "ローカルとテンプレートの差分を表示",
     ops: [
       { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "patterns を取得" },
-      { file: SYNCED_FILES, location: "template", op: "read", note: "テンプレートをダウンロードして比較" },
+      {
+        file: SYNCED_FILES,
+        location: "template",
+        op: "read",
+        note: "テンプレートをダウンロードして比較",
+      },
     ],
   },
   {
     name: "track",
     description: "同期対象のパターンを追加",
     ops: [
-      { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "現在の include パターンを取得" },
-      { file: ZIKU_CONFIG_FILE, location: "local", op: "update", note: "新しいパターンを include に追加" },
+      {
+        file: ZIKU_CONFIG_FILE,
+        location: "local",
+        op: "read",
+        note: "現在の include パターンを取得",
+      },
+      {
+        file: ZIKU_CONFIG_FILE,
+        location: "local",
+        op: "update",
+        note: "新しいパターンを include に追加",
+      },
     ],
   },
 ];
@@ -116,15 +176,24 @@ export const lifecycle: CommandLifecycle[] = [
 /** ファイル一覧テーブルを生成 */
 function generateFileSummaryTable(): string {
   const files = [
-    { file: MODULES_FILE, location: "テンプレートリポジトリのみ", role: "モジュール定義（名前・説明・パターン）。init 時の選択 UI に使われる" },
-    { file: ZIKU_CONFIG_FILE, location: "ユーザーのプロジェクトのみ", role: "同期設定。テンプレートの source と、選択済みの include/exclude パターンを保持" },
-    { file: LOCK_FILE, location: "ユーザーのプロジェクトのみ", role: "同期状態。ベースコミット SHA、ファイルハッシュ、未解決マージ情報を保持" },
+    {
+      file: MODULES_FILE,
+      location: "テンプレートリポジトリのみ",
+      role: "モジュール定義（名前・説明・パターン）。init 時の選択 UI に使われる",
+    },
+    {
+      file: ZIKU_CONFIG_FILE,
+      location: "ユーザーのプロジェクトのみ",
+      role: "同期設定。テンプレートの source と、選択済みの include/exclude パターンを保持",
+    },
+    {
+      file: LOCK_FILE,
+      location: "ユーザーのプロジェクトのみ",
+      role: "同期状態。ベースコミット SHA、ファイルハッシュ、未解決マージ情報を保持",
+    },
   ];
 
-  const lines = [
-    "| ファイル | 存在する場所 | 役割 |",
-    "|---|---|---|",
-  ];
+  const lines = ["| ファイル | 存在する場所 | 役割 |", "|---|---|---|"];
   for (const f of files) {
     lines.push(`| \`${f.file}\` | ${f.location} | ${f.role} |`);
   }
@@ -134,9 +203,12 @@ function generateFileSummaryTable(): string {
 /** 操作の種類を絵文字付きラベルに変換 */
 function opLabel(op: Op): string {
   switch (op) {
-    case "read": return "読み取り";
-    case "create": return "作成";
-    case "update": return "更新";
+    case "read":
+      return "読み取り";
+    case "create":
+      return "作成";
+    case "update":
+      return "更新";
   }
 }
 
@@ -175,9 +247,14 @@ function generateMermaidDiagram(): string {
 
     for (const op of cmd.ops) {
       const fileLabel = op.file === SYNCED_FILES ? "synced files" : op.file;
-      const arrow = op.location === "template"
-        ? (op.op === "read" ? `U->>T: read ${fileLabel}` : `T->>T: ${op.op} ${fileLabel}`)
-        : (op.op === "read" ? `U->>U: read ${fileLabel}` : `U->>U: ${op.op} ${fileLabel}`);
+      const arrow =
+        op.location === "template"
+          ? op.op === "read"
+            ? `U->>T: read ${fileLabel}`
+            : `T->>T: ${op.op} ${fileLabel}`
+          : op.op === "read"
+            ? `U->>U: read ${fileLabel}`
+            : `U->>U: ${op.op} ${fileLabel}`;
 
       // push の template update は U→T
       if (cmd.name === "push" && op.location === "template" && op.op === "update") {

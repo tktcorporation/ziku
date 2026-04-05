@@ -14,10 +14,7 @@
       "name": "DevContainer",
       "description": "VS Code DevContainer configuration",
       "setupDescription": "DevContainer settings will be applied",
-      "patterns": [
-        ".devcontainer/devcontainer.json",
-        ".devcontainer/.gitignore",
-      ],
+      "patterns": [".devcontainer/devcontainer.json", ".devcontainer/.gitignore"],
     },
     {
       "id": ".github",
@@ -36,10 +33,7 @@
       "name": "Claude",
       "description": "Claude Code rules and settings",
       "setupDescription": "Claude Code settings and rules will be applied",
-      "patterns": [
-        ".claude/settings.json",
-        ".claude/rules/*.md",
-      ],
+      "patterns": [".claude/settings.json", ".claude/rules/*.md"],
     },
   ],
 }

@@ -26,7 +26,6 @@ import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { parse as parseJsonc } from "jsonc-parser";
 import { renderUsage } from "citty";
 import { z } from "zod";
 import { diffCommand } from "../src/commands/diff";
@@ -45,7 +44,6 @@ const README_PATH = resolve(import.meta.dirname, "../README.md");
 const LIFECYCLE_DOC_PATH = resolve(import.meta.dirname, "../docs/architecture/file-lifecycle.md");
 const MODULES_SCHEMA_PATH = resolve(import.meta.dirname, "../schema/modules.json");
 const ZIKU_SCHEMA_PATH = resolve(import.meta.dirname, "../schema/ziku.json");
-const MODULES_JSONC_PATH = resolve(import.meta.dirname, "../.ziku/modules.jsonc");
 
 // Marker definitions
 const MARKERS = {
@@ -160,8 +158,9 @@ function generateFilesSection(): string {
  * Get description from command meta (handles Resolvable type)
  */
 function getCommandDescription(meta: unknown): string {
-  if (meta && typeof meta === "object" && "description" in meta) {
-    return (meta as { description?: string }).description || "";
+  if (typeof meta === "object" && meta !== null && "description" in meta) {
+    const description = String((meta as Record<string, string>).description ?? "");
+    return description;
   }
   return "";
 }
@@ -291,13 +290,18 @@ async function main(): Promise<void> {
 
   const readmeUpdated = readme !== originalReadme;
 
-  // Update lifecycle doc
-  lifecycleDoc = updateSection(
-    lifecycleDoc,
-    MARKERS.lifecycle.start,
-    MARKERS.lifecycle.end,
-    lifecycleSection,
-  );
+  // Update lifecycle doc (write → format → read back canonical form, same as schemas)
+  {
+    const tempLifecycleDoc = updateSection(
+      lifecycleDoc,
+      MARKERS.lifecycle.start,
+      MARKERS.lifecycle.end,
+      lifecycleSection,
+    );
+    await writeFile(LIFECYCLE_DOC_PATH, tempLifecycleDoc);
+    execFileSync("npx", ["oxfmt", "--write", LIFECYCLE_DOC_PATH], { stdio: "ignore" });
+    lifecycleDoc = await readFile(LIFECYCLE_DOC_PATH, "utf-8");
+  }
   const lifecycleDocUpdated = lifecycleDoc !== originalLifecycleDoc;
 
   // Generate formatted JSON Schemas (write, run formatter, read back canonical form)
@@ -331,7 +335,8 @@ async function main(): Promise<void> {
 
     if (updated) {
       if (readmeUpdated) console.error("  - README.md is out of date");
-      if (lifecycleDocUpdated) console.error("  - docs/architecture/file-lifecycle.md is out of date");
+      if (lifecycleDocUpdated)
+        console.error("  - docs/architecture/file-lifecycle.md is out of date");
       for (const name of schemaUpdates) {
         console.error(`  - schema/${name} is out of date`);
       }
@@ -362,7 +367,7 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error) => {
-  console.error("Error:", error.message);
+main().catch((error: unknown) => {
+  console.error("Error:", error instanceof Error ? error.message : String(error));
   process.exit(1);
 });
