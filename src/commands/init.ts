@@ -4,11 +4,14 @@ import { Effect } from "effect";
 import { join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import {
+  MODULES_FILE,
   getModulesFilePath,
   loadPatternsFile,
   loadTemplateModulesFile,
   modulesFileExists,
 } from "../modules/index";
+import type { CommandLifecycle } from "../docs/lifecycle-types";
+import { SYNCED_FILES } from "../docs/lifecycle-types";
 import { MODULES_SCHEMA_URL } from "../modules/loader";
 import type {
   FileOperationResult,
@@ -57,6 +60,53 @@ import { intro, log, logFileResults, outro, pc, withSpinner } from "../ui/render
 // ビルド時に置換される定数
 declare const __VERSION__: string;
 const version = typeof __VERSION__ !== "undefined" ? __VERSION__ : "dev";
+
+/**
+ * init (template repo) のファイル操作メタデータ。
+ * ドキュメント自動生成（npm run docs）の SSOT として使われる。
+ */
+export const initTemplateLifecycle: CommandLifecycle = {
+  name: "init (template repo)",
+  description: "テンプレートリポジトリの初期化",
+  ops: [
+    {
+      file: MODULES_FILE,
+      location: "template",
+      op: "create",
+      note: "デフォルトパターンで生成（既存ならスキップ）",
+    },
+  ],
+};
+
+/**
+ * init (user project) のファイル操作メタデータ。
+ * ドキュメント自動生成（npm run docs）の SSOT として使われる。
+ */
+export const initUserLifecycle: CommandLifecycle = {
+  name: "init (user project)",
+  description: "ユーザープロジェクトの初期化",
+  ops: [
+    { file: MODULES_FILE, location: "template", op: "read", note: "モジュール選択 UI に使用" },
+    {
+      file: ZIKU_CONFIG_FILE,
+      location: "local",
+      op: "create",
+      note: "選択パターンをフラット化して保存",
+    },
+    {
+      file: LOCK_FILE,
+      location: "local",
+      op: "create",
+      note: "ベースコミット SHA + ハッシュを記録",
+    },
+    {
+      file: SYNCED_FILES,
+      location: "local",
+      op: "create",
+      note: "テンプレートからパターンに一致するファイルをコピー",
+    },
+  ],
+};
 
 export const initCommand = defineCommand({
   meta: {

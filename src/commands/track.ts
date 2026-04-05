@@ -3,11 +3,36 @@ import { resolve } from "pathe";
 import { ZikuError } from "../errors";
 import { intro, log, outro, pc } from "../ui/renderer";
 import {
+  ZIKU_CONFIG_FILE,
   addIncludePattern,
   loadZikuConfig,
   saveZikuConfig,
   zikuConfigExists,
 } from "../utils/ziku-config";
+import type { CommandLifecycle } from "../docs/lifecycle-types";
+
+/**
+ * track コマンドのファイル操作メタデータ。
+ * ドキュメント自動生成（npm run docs）の SSOT として使われる。
+ */
+export const trackLifecycle: CommandLifecycle = {
+  name: "track",
+  description: "同期対象のパターンを追加",
+  ops: [
+    {
+      file: ZIKU_CONFIG_FILE,
+      location: "local",
+      op: "read",
+      note: "現在の include パターンを取得",
+    },
+    {
+      file: ZIKU_CONFIG_FILE,
+      location: "local",
+      op: "update",
+      note: "新しいパターンを include に追加",
+    },
+  ],
+};
 
 export const trackCommand = defineCommand({
   meta: {

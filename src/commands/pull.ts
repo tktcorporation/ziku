@@ -8,8 +8,10 @@ import { ZikuError } from "../errors";
 import type { LockState } from "../modules/schemas";
 import { selectDeletedFiles } from "../ui/prompts";
 import { intro, log, outro, pc, withSpinner } from "../ui/renderer";
-import { loadLock, saveLock } from "../utils/lock";
-import { loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
+import { LOCK_FILE, loadLock, saveLock } from "../utils/lock";
+import { ZIKU_CONFIG_FILE, loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
+import type { CommandLifecycle } from "../docs/lifecycle-types";
+import { SYNCED_FILES } from "../docs/lifecycle-types";
 import { resolveLatestCommitSha } from "../utils/github";
 import { hashFiles } from "../utils/hash";
 import {
@@ -21,6 +23,37 @@ import {
   threeWayMerge,
 } from "../utils/merge";
 import { downloadTemplateToTemp } from "../utils/template";
+
+/**
+ * pull コマンドのファイル操作メタデータ。
+ * ドキュメント自動生成（npm run docs）の SSOT として使われる。
+ */
+export const pullLifecycle: CommandLifecycle = {
+  name: "pull",
+  description: "テンプレートの最新更新をローカルに反映",
+  ops: [
+    { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "source と patterns を取得" },
+    { file: LOCK_FILE, location: "local", op: "read", note: "前回の baseHashes, baseRef を取得" },
+    {
+      file: SYNCED_FILES,
+      location: "template",
+      op: "read",
+      note: "テンプレートをダウンロードして差分比較",
+    },
+    {
+      file: SYNCED_FILES,
+      location: "local",
+      op: "update",
+      note: "自動更新・新規追加・3-way マージ・削除",
+    },
+    {
+      file: LOCK_FILE,
+      location: "local",
+      op: "update",
+      note: "新しい baseHashes, baseRef で上書き",
+    },
+  ],
+};
 
 /**
  * テンプレートの最新更新をローカルに反映するコマンド。
