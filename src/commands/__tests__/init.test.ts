@@ -85,7 +85,7 @@ vi.mock("../../modules/index", async (importOriginal) => {
   return {
     ...original,
     modulesFileExists: vi.fn(() => true),
-    loadTemplateModulesFile: vi.fn(() =>
+    loadModulesFile: vi.fn(() =>
       Promise.resolve({
         modules: [
           {
@@ -116,7 +116,7 @@ vi.mock("../../modules/index", async (importOriginal) => {
 });
 
 // モック後にインポート
-const { initCommand, isCurrentRepoTemplate, generateFlatPatternsJsonc } = await import("../init");
+const { initCommand, isCurrentRepoTemplate, generateDefaultModulesJsonc } = await import("../init");
 const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy, copyFile } =
   await import("../../utils/template");
 const { detectGitHubOwner, detectGitHubRepo } = await import("../../utils/git-remote");
@@ -815,7 +815,7 @@ describe("initCommand", () => {
       expect(lockContent.baseHashes).toBeUndefined();
     });
 
-    it("テンプレートリポジトリ自体で実行した場合、フラット形式の modules.jsonc を生成する", async () => {
+    it("テンプレートリポジトリ自体で実行した場合、モジュール形式の modules.jsonc を生成する", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -833,15 +833,15 @@ describe("initCommand", () => {
 
       // テンプレートをダウンロードしない
       expect(mockDownloadTemplateToTemp).not.toHaveBeenCalled();
-      // modules.jsonc がフラット形式で生成される
+      // modules.jsonc がモジュール形式で生成される
       expect(vol.existsSync("/test/.ziku/modules.jsonc")).toBe(true);
       const content = vol.readFileSync("/test/.ziku/modules.jsonc", "utf-8") as string;
       const parsed = JSON.parse(content);
-      expect(parsed.include).toBeDefined();
-      expect(Array.isArray(parsed.include)).toBe(true);
-      expect(parsed.include.length).toBeGreaterThan(0);
-      // モジュール形式ではない
-      expect(parsed.modules).toBeUndefined();
+      expect(parsed.modules).toBeDefined();
+      expect(Array.isArray(parsed.modules)).toBe(true);
+      expect(parsed.modules.length).toBeGreaterThan(0);
+      expect(parsed.modules[0].name).toBeDefined();
+      expect(parsed.modules[0].include).toBeDefined();
     });
 
     it("テンプレートリポジトリで modules.jsonc が既にある場合はスキップ", async () => {
@@ -922,33 +922,23 @@ describe("isCurrentRepoTemplate", () => {
   });
 });
 
-describe("generateFlatPatternsJsonc", () => {
-  it("include と $schema を含むフラット JSON を生成する", () => {
-    const content = generateFlatPatternsJsonc({
-      include: [".github/**", ".devcontainer/**"],
-      exclude: [],
-    });
+describe("generateDefaultModulesJsonc", () => {
+  it("modules 形式と $schema を含む JSON を生成する", () => {
+    const content = generateDefaultModulesJsonc();
     const parsed = JSON.parse(content);
     expect(parsed.$schema).toBeDefined();
-    expect(parsed.include).toEqual([".github/**", ".devcontainer/**"]);
-    expect(parsed.exclude).toBeUndefined();
+    expect(parsed.modules).toBeDefined();
+    expect(Array.isArray(parsed.modules)).toBe(true);
+    expect(parsed.modules.length).toBeGreaterThan(0);
   });
 
-  it("exclude がある場合は含める", () => {
-    const content = generateFlatPatternsJsonc({
-      include: [".github/**"],
-      exclude: [".github/CODEOWNERS"],
-    });
+  it("デフォルトモジュールに name と description と include がある", () => {
+    const content = generateDefaultModulesJsonc();
     const parsed = JSON.parse(content);
-    expect(parsed.exclude).toEqual([".github/CODEOWNERS"]);
-  });
-
-  it("空の include で空配列を含む JSON を生成する", () => {
-    const content = generateFlatPatternsJsonc({
-      include: [],
-      exclude: [],
-    });
-    const parsed = JSON.parse(content);
-    expect(parsed.include).toEqual([]);
+    const mod = parsed.modules[0];
+    expect(mod.name).toBeDefined();
+    expect(mod.description).toBeDefined();
+    expect(Array.isArray(mod.include)).toBe(true);
+    expect(mod.include.length).toBeGreaterThan(0);
   });
 });

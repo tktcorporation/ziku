@@ -115,7 +115,7 @@ vi.mock("../../modules/index", async (importOriginal) => {
   return {
     ...original,
     modulesFileExists: vi.fn(() => false),
-    loadTemplateModulesFile: vi.fn(),
+    loadModulesFile: vi.fn(),
   };
 });
 
@@ -271,8 +271,8 @@ describe("init: セットアップ UX", () => {
       mockCheckRepoExists.mockResolvedValueOnce(true);
       // Template has modules.jsonc
       mockModulesFileExists.mockReturnValue(true);
-      const { loadTemplateModulesFile } = await import("../../modules/index");
-      vi.mocked(loadTemplateModulesFile).mockResolvedValue({
+      const { loadModulesFile } = await import("../../modules/index");
+      vi.mocked(loadModulesFile).mockResolvedValue({
         modules: [
           {
             name: "Root",
@@ -350,8 +350,8 @@ describe("init: セットアップ UX", () => {
       mockCheckRepoExists.mockResolvedValueOnce(true);
       // Template has modules.jsonc
       mockModulesFileExists.mockReturnValue(true);
-      const { loadTemplateModulesFile } = await import("../../modules/index");
-      vi.mocked(loadTemplateModulesFile).mockResolvedValue({
+      const { loadModulesFile } = await import("../../modules/index");
+      vi.mocked(loadModulesFile).mockResolvedValue({
         modules: [
           {
             name: "Root",
@@ -388,8 +388,8 @@ describe("init: セットアップ UX", () => {
         .mockResolvedValueOnce(true); // detected-org/.github
 
       mockModulesFileExists.mockReturnValue(true);
-      const { loadTemplateModulesFile } = await import("../../modules/index");
-      vi.mocked(loadTemplateModulesFile).mockResolvedValue({
+      const { loadModulesFile } = await import("../../modules/index");
+      vi.mocked(loadModulesFile).mockResolvedValue({
         modules: [{ name: "Root", description: "Root", include: [".mcp.json"] }],
         rawContent: '{"modules":[]}',
       });
@@ -411,8 +411,8 @@ describe("init: セットアップ UX", () => {
         .mockResolvedValueOnce(false); // detected-org/.github
 
       mockModulesFileExists.mockReturnValue(true);
-      const { loadTemplateModulesFile } = await import("../../modules/index");
-      vi.mocked(loadTemplateModulesFile).mockResolvedValue({
+      const { loadModulesFile } = await import("../../modules/index");
+      vi.mocked(loadModulesFile).mockResolvedValue({
         modules: [{ name: "Root", description: "Root", include: [".mcp.json"] }],
         rawContent: '{"modules":[]}',
       });
@@ -431,8 +431,8 @@ describe("init: セットアップ UX", () => {
       mockCheckRepoSetup.mockResolvedValue(true);
 
       mockModulesFileExists.mockReturnValue(true);
-      const { loadTemplateModulesFile } = await import("../../modules/index");
-      vi.mocked(loadTemplateModulesFile).mockResolvedValue({
+      const { loadModulesFile } = await import("../../modules/index");
+      vi.mocked(loadModulesFile).mockResolvedValue({
         modules: [{ name: "Root", description: "Root", include: [".mcp.json"] }],
         rawContent: '{"modules":[]}',
       });
@@ -468,8 +468,8 @@ describe("init: セットアップ UX", () => {
         repo: ".ziku",
       });
       mockModulesFileExists.mockReturnValue(true);
-      const { loadTemplateModulesFile } = await import("../../modules/index");
-      vi.mocked(loadTemplateModulesFile).mockResolvedValue({
+      const { loadModulesFile } = await import("../../modules/index");
+      vi.mocked(loadModulesFile).mockResolvedValue({
         modules: [{ name: "Root", description: "Root", include: [".mcp.json"] }],
         rawContent: '{"modules":[]}',
       });
@@ -497,8 +497,8 @@ describe("init: セットアップ UX", () => {
       mockCheckRepoExists.mockResolvedValueOnce(true);
       // Template has modules.jsonc
       mockModulesFileExists.mockReturnValue(true);
-      const { loadTemplateModulesFile } = await import("../../modules/index");
-      vi.mocked(loadTemplateModulesFile).mockResolvedValue({
+      const { loadModulesFile } = await import("../../modules/index");
+      vi.mocked(loadModulesFile).mockResolvedValue({
         modules: [
           {
             name: "Root",

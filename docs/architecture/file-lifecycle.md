@@ -44,7 +44,6 @@ sequenceDiagram
     U->>T: read .ziku/modules.jsonc
     U->>T: read synced files
     U->>T: update synced files (PR)
-    U->>T: update .ziku/modules.jsonc (PR)
 
     note over T,U: diff
     U->>U: read .ziku/ziku.jsonc
@@ -102,7 +101,6 @@ sequenceDiagram
 | 読み取り | `.ziku/modules.jsonc` | template | テンプレートのパターンと比較し、ローカル追加分を検出 |
 | 読み取り | synced files          | template | テンプレートをダウンロードして差分検出・3-way マージ |
 | 更新     | synced files          | template | 変更ファイルを含む PR を作成                         |
-| 更新     | `.ziku/modules.jsonc` | template | ローカルで追加されたパターンがあれば PR に含めて更新 |
 
 ### `diff`
 

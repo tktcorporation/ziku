@@ -6,7 +6,7 @@ import { downloadTemplate } from "giget";
 import { join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
-import { MODULES_FILE, isFlatFormat, loadPatternsFile, modulesFileExists } from "../modules";
+import { MODULES_FILE, flattenModules, loadModulesFile, modulesFileExists } from "../modules";
 import type { FileDiff } from "../modules/schemas";
 import { LOCK_FILE, loadLock } from "../utils/lock";
 import { ZIKU_CONFIG_FILE, loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
@@ -57,12 +57,6 @@ export const pushLifecycle: CommandLifecycle = {
       location: "template",
       op: "update",
       note: "変更ファイルを含む PR を作成",
-    },
-    {
-      file: MODULES_FILE,
-      location: "template",
-      op: "update",
-      note: "ローカルで追加されたパターンがあれば PR に含めて更新",
     },
   ],
 };
@@ -205,34 +199,26 @@ export const pushCommand = defineCommand({
         );
 
         // テンプレート側のパターンを読み込み、ローカル追加を検出
-        let updatedModulesContent: string | undefined;
         let effectiveInclude = localPatterns.include;
         let effectiveExclude = localPatterns.exclude;
 
         if (modulesFileExists(templateDir)) {
-          const templatePatterns = await loadPatternsFile(templateDir);
+          const { modules } = await loadModulesFile(templateDir);
+          const templatePatterns = flattenModules(modules);
           const newPatterns = detectLocalPatternAdditions(
             localPatterns.include,
             templatePatterns.include,
           );
 
           if (newPatterns.length > 0) {
+            // modules.jsonc はモジュール形式のため、どのモジュールに追加すべきか
+            // 自動判定できない。ユーザーに手動追加を案内する。
             log.info(
               `Detected ${newPatterns.length} new pattern(s) from local: ${newPatterns.join(", ")}`,
             );
-
-            // フラット形式のテンプレートのみ自動追加に対応。
-            // モジュール形式ではどのモジュールに追加すべきか自動判定できないためスキップ。
-            if (isFlatFormat(templatePatterns.rawContent)) {
-              const { addIncludePattern: addModulePattern } = await import("../modules/loader");
-              updatedModulesContent = addModulePattern(templatePatterns.rawContent, newPatterns);
-            } else {
-              log.warn(
-                `Template uses module format — add these patterns manually to ${MODULES_FILE}:`,
-              );
-              for (const p of newPatterns) {
-                log.message(`  ${pc.dim("+")} ${p}`);
-              }
+            log.warn(`Add these patterns manually to ${MODULES_FILE}:`);
+            for (const p of newPatterns) {
+              log.message(`  ${pc.dim("+")} ${p}`);
             }
           }
 
@@ -412,7 +398,7 @@ export const pushCommand = defineCommand({
           (f) => (f.type === "added" || f.type === "modified") && pushableFilePaths.has(f.path),
         );
 
-        if (pushableFiles.length === 0 && !updatedModulesContent) {
+        if (pushableFiles.length === 0) {
           log.info("No changes to push");
           log.step("Current status:");
           logDiffSummary(diff.files);
@@ -424,11 +410,6 @@ export const pushCommand = defineCommand({
           log.info("Dry run mode");
           log.step("Files that would be included in PR:");
           logDiffSummary(diff.files);
-
-          if (updatedModulesContent) {
-            log.message(`${pc.green("+")} ${MODULES_FILE} ${pc.dim("(pattern additions)")}`);
-          }
-
           log.info("No PR was created (dry run)");
           return;
         }
@@ -446,7 +427,7 @@ export const pushCommand = defineCommand({
           }
           const requestedSet = new Set(requestedPaths);
           pushableFiles = pushableFiles.filter((f) => requestedSet.has(f.path));
-          if (pushableFiles.length === 0 && !updatedModulesContent) {
+          if (pushableFiles.length === 0) {
             log.info("No matching files found. Cancelled.");
             return;
           }
@@ -454,7 +435,7 @@ export const pushCommand = defineCommand({
         } else {
           log.step("Selecting files...");
           pushableFiles = await selectPushFiles(pushableFiles);
-          if (pushableFiles.length === 0 && !updatedModulesContent) {
+          if (pushableFiles.length === 0) {
             log.info("No files selected. Cancelled.");
             return;
           }
@@ -489,13 +470,6 @@ export const pushCommand = defineCommand({
           path: f.path,
           content: mergedContents.get(f.path) ?? f.localContent ?? "",
         }));
-
-        if (updatedModulesContent) {
-          files.push({
-            path: MODULES_FILE,
-            content: updatedModulesContent,
-          });
-        }
 
         if (readmeResult?.updated) {
           files.push({

@@ -106,15 +106,19 @@ vi.mock("../../utils/lock", async (importOriginal) => {
 vi.mock("../../modules", () => ({
   MODULES_FILE: ".ziku/modules.jsonc",
   modulesFileExists: vi.fn(() => true),
-  isFlatFormat: vi.fn(() => true),
-  loadPatternsFile: vi.fn(() =>
+  loadModulesFile: vi.fn(() =>
     Promise.resolve({
-      include: [".root/**", ".github/**"],
-      exclude: [],
-      rawContent: '{"include":[".root/**",".github/**"],"exclude":[]}',
+      modules: [
+        { name: "Root", description: "Root", include: [".root/**"] },
+        { name: "GitHub", description: "GitHub", include: [".github/**"] },
+      ],
+      rawContent: '{"modules":[]}',
     }),
   ),
-  addIncludePattern: vi.fn(),
+  flattenModules: vi.fn(() => ({
+    include: [".root/**", ".github/**"],
+    exclude: [],
+  })),
 }));
 
 // ui/renderer をモック
@@ -151,9 +155,7 @@ const { confirmAction, inputGitHubToken, inputPrTitle, inputPrBody, selectPushFi
 const { log } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
 const { classifyFiles, threeWayMerge } = await import("../../utils/merge");
-const { loadPatternsFile } = await import("../../modules");
 const mockDownloadTemplate = vi.mocked(downloadTemplate);
-const _mockLoadPatternsFile = vi.mocked(loadPatternsFile);
 const mockDetectDiff = vi.mocked(detectDiff);
 const mockGetPushableFiles = vi.mocked(getPushableFiles);
 const mockGetGitHubToken = vi.mocked(getGitHubToken);
