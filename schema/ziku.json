@@ -6,20 +6,34 @@
       "type": "string"
     },
     "source": {
-      "type": "object",
-      "properties": {
-        "owner": {
-          "type": "string"
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "owner": {
+              "type": "string"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "ref": {
+              "type": "string"
+            }
+          },
+          "required": ["owner", "repo"],
+          "additionalProperties": false
         },
-        "repo": {
-          "type": "string"
-        },
-        "ref": {
-          "type": "string"
+        {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": ["path"],
+          "additionalProperties": false
         }
-      },
-      "required": ["owner", "repo"],
-      "additionalProperties": false
+      ]
     },
     "include": {
       "type": "array",

@@ -4,6 +4,7 @@ import { withFinally } from "../effect-helpers";
 import { defineCommand } from "citty";
 import { downloadTemplate } from "giget";
 import { join, resolve } from "pathe";
+import { isLocalSource } from "../modules/schemas";
 import { ZikuError } from "../errors";
 import { renderFileDiff } from "../ui/diff-view";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
@@ -77,18 +78,26 @@ export const diffCommand = defineCommand({
       return;
     }
 
-    // Step 1: テンプレートをダウンロード
-    log.step("Fetching template...");
+    // Step 1: テンプレートを取得
+    let templateDir: string;
+    let tempDir: string | undefined;
 
-    const templateSource = buildTemplateSource(zikuConfig.source);
-    const tempDir = join(targetDir, ".ziku-temp");
-
-    const { dir: templateDir } = await withSpinner("Downloading template from GitHub...", () =>
-      downloadTemplate(templateSource, {
-        dir: tempDir,
-        force: true,
-      }),
-    );
+    if (isLocalSource(zikuConfig.source)) {
+      templateDir = resolve(zikuConfig.source.path);
+      log.info(`Template: ${pc.cyan(templateDir)} (local)`);
+    } else {
+      log.step("Fetching template...");
+      const templateSource = buildTemplateSource(zikuConfig.source);
+      const td = join(targetDir, ".ziku-temp");
+      tempDir = td;
+      const { dir } = await withSpinner("Downloading template from GitHub...", () =>
+        downloadTemplate(templateSource, {
+          dir: td,
+          force: true,
+        }),
+      );
+      templateDir = dir;
+    }
 
     await withFinally(
       async () => {
@@ -149,7 +158,7 @@ export const diffCommand = defineCommand({
         }
       },
       async () => {
-        if (existsSync(tempDir)) {
+        if (tempDir && existsSync(tempDir)) {
           await rm(tempDir, { recursive: true, force: true });
         }
       },

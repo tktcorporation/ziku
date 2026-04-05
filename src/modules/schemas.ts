@@ -54,16 +54,34 @@ export type TemplateModule = z.infer<typeof moduleSchema>;
 
 export const zikuConfigSchema = z.object({
   $schema: z.string().optional(),
-  source: z.object({
-    owner: z.string(),
-    repo: z.string(),
-    ref: z.string().optional(),
-  }),
+  source: z.union([
+    z.object({
+      owner: z.string(),
+      repo: z.string(),
+      ref: z.string().optional(),
+    }),
+    z.object({
+      /** ローカルテンプレートディレクトリの絶対パス */
+      path: z.string(),
+    }),
+  ]),
   include: z.array(z.string()),
   exclude: z.array(z.string()).optional(),
 });
 
 export type ZikuConfig = z.infer<typeof zikuConfigSchema>;
+
+/** source がローカルパスかどうか判定する */
+export function isLocalSource(source: ZikuConfig["source"]): source is { path: string } {
+  return "path" in source;
+}
+
+/** source が GitHub リポジトリかどうか判定する */
+export function isGitHubSource(
+  source: ZikuConfig["source"],
+): source is { owner: string; repo: string; ref?: string } {
+  return "owner" in source;
+}
 
 // ────────────────────────────────────────────────────────────────
 // LockState (.ziku/lock.json) — 機械管理: 同期状態

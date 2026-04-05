@@ -16,6 +16,7 @@ import {
   suggestModuleAdditions,
 } from "../modules";
 import type { FileDiff, TemplateModule } from "../modules/schemas";
+import { isLocalSource } from "../modules/schemas";
 import { LOCK_FILE, loadLock } from "../utils/lock";
 import { ZIKU_CONFIG_FILE, loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
@@ -187,22 +188,32 @@ export const pushCommand = defineCommand({
       return;
     }
 
-    // Step 1: テンプレートをダウンロード
-    log.step("Fetching template...");
+    // Step 1: テンプレートを取得
+    // ローカルソースの場合はダウンロード不要、パスを直接使用
+    let templateDir: string;
+    let tempDir: string | undefined;
+    let unregisterCleanup: (() => void) | undefined;
 
-    const templateSource = buildTemplateSource(zikuConfig.source);
-    const tempDir = join(targetDir, ".ziku-temp");
-    const unregisterCleanup = registerSyncCleanup(tempDir);
+    if (isLocalSource(zikuConfig.source)) {
+      templateDir = resolve(zikuConfig.source.path);
+      log.info(`Template: ${pc.cyan(templateDir)} (local)`);
+    } else {
+      log.step("Fetching template...");
+      const templateSource = buildTemplateSource(zikuConfig.source);
+      const td = join(targetDir, ".ziku-temp");
+      tempDir = td;
+      unregisterCleanup = registerSyncCleanup(td);
+      const { dir } = await withSpinner("Downloading template from GitHub...", () =>
+        downloadTemplate(templateSource, {
+          dir: td,
+          force: true,
+        }),
+      );
+      templateDir = dir;
+    }
 
     await withFinally(
       async () => {
-        const { dir: templateDir } = await withSpinner("Downloading template from GitHub...", () =>
-          downloadTemplate(templateSource, {
-            dir: tempDir,
-            force: true,
-          }),
-        );
-
         // テンプレート側のパターンを読み込み、パターン結合
         let effectiveInclude = localPatterns.include;
         let effectiveExclude = localPatterns.exclude;
@@ -557,8 +568,8 @@ export const pushCommand = defineCommand({
         outro(`Review and merge at ${pc.cyan(result.url)}`);
       },
       async () => {
-        unregisterCleanup();
-        if (existsSync(tempDir)) {
+        unregisterCleanup?.();
+        if (tempDir && existsSync(tempDir)) {
           await rm(tempDir, { recursive: true, force: true });
         }
       },
