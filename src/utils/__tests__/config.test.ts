@@ -314,6 +314,7 @@ describe("saveLock", () => {
     const lock = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
+      source: { owner: "test", repo: ".ziku" },
     };
 
     await saveLock("/project", lock);
@@ -328,6 +329,7 @@ describe("saveLock", () => {
     const lock = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
+      source: { owner: "test", repo: ".ziku" },
     };
 
     await saveLock("/project", lock);
@@ -349,6 +351,7 @@ describe("saveLock", () => {
     const newLock = {
       version: "2.0.0",
       installedAt: "2024-06-01T00:00:00+09:00",
+      source: { owner: "test", repo: ".ziku" },
       baseRef: "newref",
     };
 
@@ -364,6 +367,7 @@ describe("saveLock", () => {
     const lock = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
+      source: { owner: "test", repo: ".ziku" },
     };
 
     await saveLock("/project", lock);

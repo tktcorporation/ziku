@@ -80,11 +80,13 @@ const mockRenderFileDiff = vi.mocked(renderFileDiff);
  * テスト用の CommandContext を生成するヘルパー。
  * DI のおかげでテンプレートダウンロードや設定読み込みのモックが不要。
  */
-function mockContext(overrides?: Partial<{
-  include: string[];
-  source: { owner: string; repo: string };
-  templateDir: string;
-}>) {
+function mockContext(
+  overrides?: Partial<{
+    include: string[];
+    source: { owner: string; repo: string };
+    templateDir: string;
+  }>,
+) {
   const cleanup = vi.fn();
   return {
     effect: Effect.succeed({
@@ -97,6 +99,7 @@ function mockContext(overrides?: Partial<{
       source: overrides?.source ?? { owner: "tktcorporation", repo: ".github" },
       templateDir: overrides?.templateDir ?? "/tmp/template",
       cleanup,
+      resolveBaseRef: Effect.succeed(undefined as string | undefined),
     }),
     cleanup,
   };
@@ -292,9 +295,17 @@ describe("diffCommand", () => {
       const { effect } = mockContext();
       mockLoadCommandContext.mockReturnValue(effect);
 
-      const unchangedFile = { path: "unchanged.txt", type: "unchanged" as const, localContent: "same" };
+      const unchangedFile = {
+        path: "unchanged.txt",
+        type: "unchanged" as const,
+        localContent: "same",
+      };
       const addedFile = { path: "added.txt", type: "added" as const, localContent: "new" };
-      const modifiedFile = { path: "modified.txt", type: "modified" as const, localContent: "changed" };
+      const modifiedFile = {
+        path: "modified.txt",
+        type: "modified" as const,
+        localContent: "changed",
+      };
 
       const diffWithMixed = {
         files: [addedFile, unchangedFile, modifiedFile],

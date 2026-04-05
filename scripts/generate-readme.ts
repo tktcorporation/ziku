@@ -281,9 +281,7 @@ async function main(): Promise<void> {
   const lifecycleDocUpdated = lifecycleDoc !== originalLifecycleDoc;
 
   // Generate formatted JSON Schema (write, run formatter, read back canonical form)
-  const schemaEntries: [string, string][] = [
-    [ZIKU_SCHEMA_PATH, zikuJsonSchema],
-  ];
+  const schemaEntries: [string, string][] = [[ZIKU_SCHEMA_PATH, zikuJsonSchema]];
   const schemaUpdates: string[] = [];
   for (const [path, content] of schemaEntries) {
     await writeFile(path, `${content}\n`);

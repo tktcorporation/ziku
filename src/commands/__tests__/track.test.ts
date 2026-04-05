@@ -61,7 +61,8 @@ vi.spyOn(process, "exit").mockImplementation(() => {
 });
 
 // モック後にインポート
-const { addIncludePattern, saveZikuConfig, zikuConfigExists } = await import("../../utils/ziku-config");
+const { addIncludePattern, saveZikuConfig, zikuConfigExists } =
+  await import("../../utils/ziku-config");
 
 describe("track command - core logic", () => {
   beforeEach(() => {
@@ -110,7 +111,6 @@ describe("track command - core logic", () => {
     it("パターン追加後にファイルを正しく保存できる", async () => {
       const initialContent = JSON.stringify(
         {
-  
           include: [".mcp.json"],
           exclude: [],
         },
@@ -152,7 +152,6 @@ describe("trackCommand", () => {
   it("--list のみで patterns なしでも動作する（required: false）", async () => {
     vol.fromJSON({
       "/project/.ziku/ziku.jsonc": JSON.stringify({
-
         include: [".mcp.json"],
         exclude: [],
       }),

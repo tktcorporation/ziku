@@ -45,9 +45,7 @@ export async function selectDirectories(
   });
   handleCancel(selected);
   const selectedLabels = new Set(selected as string[]);
-  return entries
-    .filter((e) => selectedLabels.has(e.label))
-    .flatMap((e) => e.patterns);
+  return entries.filter((e) => selectedLabels.has(e.label)).flatMap((e) => e.patterns);
 }
 
 /**
@@ -184,7 +182,6 @@ export async function inputTemplateSource(defaultValue?: string): Promise<string
   handleCancel(source);
   return source as string;
 }
-
 
 // ─── push ─────────────────────────────────────────────────────
 

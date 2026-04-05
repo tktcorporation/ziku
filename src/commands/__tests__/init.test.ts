@@ -100,7 +100,7 @@ vi.mock("../../utils/template-config", () => ({
       }
     }
     const entries: Array<{ label: string; patterns: string[] }> = [];
-    for (const [dir, pats] of [...dirMap.entries()].toSorted()) {
+    for (const [dir, pats] of [...dirMap.entries()].toSorted((a, b) => a[0].localeCompare(b[0]))) {
       entries.push({ label: dir, patterns: pats });
     }
     if (rootFiles.length > 0) {
@@ -133,7 +133,7 @@ const mockSelectDirectories = vi.mocked(selectDirectories);
 const mockSelectOverwriteStrategy = vi.mocked(selectOverwriteStrategy);
 const mockLog = vi.mocked(log);
 const mockHashFiles = vi.mocked(hashFiles);
-const mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
+const _mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
 const mockCheckRepoExists = vi.mocked(checkRepoExists);
 const mockCheckRepoSetup = vi.mocked(checkRepoSetup);
 

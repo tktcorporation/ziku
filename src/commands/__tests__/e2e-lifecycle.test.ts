@@ -190,7 +190,7 @@ vi.mock("../../utils/template-config", () => ({
       }
     }
     const entries: Array<{ label: string; patterns: string[] }> = [];
-    for (const [dir, pats] of [...dirMap.entries()].toSorted()) {
+    for (const [dir, pats] of [...dirMap.entries()].toSorted((a, b) => a[0].localeCompare(b[0]))) {
       entries.push({ label: dir, patterns: pats });
     }
     if (rootFiles.length > 0) {
@@ -267,7 +267,7 @@ function runInitFromDir(dir: string, fromDir: string) {
   });
 }
 
-function runDiff(dir: string) {
+function _runDiff(dir: string) {
   return (diffCommand.run as any)({
     args: { dir, verbose: false },
     rawArgs: [],
@@ -308,10 +308,10 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
     vi.clearAllMocks();
 
     // fetchTemplates: /template から targetDir にファイルをコピーする実装
-    mockFetchTemplates.mockImplementation(async (opts: any) => {
+    mockFetchTemplates.mockImplementation((async (opts: any) => {
       const targetDir = opts.targetDir as string;
       const templateDir = opts.templateDir ?? "/template";
-      const results: Array<{ action: string; path: string }> = [];
+      const results: Array<{ action: "copied" | "created" | "overwritten" | "skipped" | "skipped_ignored"; path: string }> = [];
 
       const allFiles = vol.toJSON();
       for (const [fullPath, content] of Object.entries(allFiles)) {
@@ -328,7 +328,7 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
         results.push({ action: "copied", path: relativePath });
       }
       return results;
-    });
+    }) as any);
   });
 
   it("完全なライフサイクルが正しく動作する", async () => {
@@ -340,9 +340,7 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
     await runSetup("/template");
 
     expect(vol.existsSync("/template/.ziku/ziku.jsonc")).toBe(true);
-    const zikuJsonc = JSON.parse(
-      vol.readFileSync("/template/.ziku/ziku.jsonc", "utf8") as string,
-    );
+    const zikuJsonc = JSON.parse(vol.readFileSync("/template/.ziku/ziku.jsonc", "utf8") as string);
     expect(zikuJsonc.include).toBeDefined();
     expect(zikuJsonc.include.length).toBeGreaterThan(0);
     // $schema が含まれること
@@ -379,9 +377,7 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
 
     // lock.json が作成された（source を含む）
     expect(vol.existsSync("/projectA/.ziku/lock.json")).toBe(true);
-    const lockA = JSON.parse(
-      vol.readFileSync("/projectA/.ziku/lock.json", "utf8") as string,
-    );
+    const lockA = JSON.parse(vol.readFileSync("/projectA/.ziku/lock.json", "utf8") as string);
     expect(lockA.source).toBeDefined();
     expect(lockA.source.owner).toBe("test-org");
     expect(lockA.version).toBeDefined();
@@ -420,10 +416,7 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
     // ═══════════════════════════════════════════════════════════
 
     vol.mkdirSync("/projectA/.claude/rules", { recursive: true });
-    vol.writeFileSync(
-      "/projectA/.claude/rules/testing.md",
-      "# Testing Guide\nWrite tests first.",
-    );
+    vol.writeFileSync("/projectA/.claude/rules/testing.md", "# Testing Guide\nWrite tests first.");
 
     mockClassifyFiles.mockReturnValueOnce({
       autoUpdate: [],
@@ -524,10 +517,7 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
       vol.readFileSync("/template/.ziku/ziku.jsonc", "utf8") as string,
     );
     templateConfig.include.push(".eslintrc.json");
-    vol.writeFileSync(
-      "/template/.ziku/ziku.jsonc",
-      JSON.stringify(templateConfig, null, 2),
-    );
+    vol.writeFileSync("/template/.ziku/ziku.jsonc", JSON.stringify(templateConfig, null, 2));
 
     // loadTemplateConfig モックを更新して新パターンを含める
     mockLoadTemplateConfig.mockReturnValue(
@@ -565,9 +555,7 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
       "# Testing Guide\nWrite tests first.",
     );
     expect(vol.existsSync("/projectB/.eslintrc.json")).toBe(true);
-    expect(vol.readFileSync("/projectB/.eslintrc.json", "utf8")).toBe(
-      '{"extends": ["next"]}',
-    );
+    expect(vol.readFileSync("/projectB/.eslintrc.json", "utf8")).toBe('{"extends": ["next"]}');
 
     // B の ziku.jsonc にも .eslintrc.json パターンが追加された（テンプレートからマージ）
     const projectBConfig = JSON.parse(
@@ -619,16 +607,12 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
 
     for (const project of projects) {
       // ziku.jsonc はパターンのみ（source なし）
-      const config = JSON.parse(
-        vol.readFileSync(`${project}/.ziku/ziku.jsonc`, "utf8") as string,
-      );
+      const config = JSON.parse(vol.readFileSync(`${project}/.ziku/ziku.jsonc`, "utf8") as string);
       expect(config.include).toBeDefined();
       expect(config.source).toBeUndefined();
 
       // lock.json は source + 同期状態
-      const lock = JSON.parse(
-        vol.readFileSync(`${project}/.ziku/lock.json`, "utf8") as string,
-      );
+      const lock = JSON.parse(vol.readFileSync(`${project}/.ziku/lock.json`, "utf8") as string);
       expect(lock.source).toBeDefined();
       expect(lock.version).toBeDefined();
     }
@@ -646,10 +630,10 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
     vi.clearAllMocks();
 
     // fetchTemplates: テンプレートからプロジェクトにコピー
-    mockFetchTemplates.mockImplementation(async (opts: any) => {
+    mockFetchTemplates.mockImplementation((async (opts: any) => {
       const targetDir = opts.targetDir as string;
       const templateDir = opts.templateDir ?? "/template";
-      const results: Array<{ action: string; path: string }> = [];
+      const results: Array<{ action: "copied" | "created" | "overwritten" | "skipped" | "skipped_ignored"; path: string }> = [];
 
       const allFiles = vol.toJSON();
       for (const [fullPath, content] of Object.entries(allFiles)) {
@@ -666,7 +650,7 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
         results.push({ action: "copied", path: relativePath });
       }
       return results;
-    });
+    }) as any);
   });
 
   it("ローカルテンプレートでの完全なライフサイクルが動作する", async () => {
@@ -704,9 +688,7 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
     expect(vol.existsSync("/projectA/.ziku/lock.json")).toBe(true);
 
     // lock.json の source がローカルパス
-    const lockA = JSON.parse(
-      vol.readFileSync("/projectA/.ziku/lock.json", "utf8") as string,
-    );
+    const lockA = JSON.parse(vol.readFileSync("/projectA/.ziku/lock.json", "utf8") as string);
     expect(lockA.source.path).toBe("/template");
 
     // ファイルがコピーされた
@@ -725,10 +707,7 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
     // ─── Step 5: プロジェクトA でファイル追加 → push（ローカル直接コピー）───
 
     vol.mkdirSync("/projectA/.claude/rules", { recursive: true });
-    vol.writeFileSync(
-      "/projectA/.claude/rules/testing.md",
-      "# Testing Guide\nWrite tests first.",
-    );
+    vol.writeFileSync("/projectA/.claude/rules/testing.md", "# Testing Guide\nWrite tests first.");
 
     mockClassifyFiles.mockReturnValueOnce({
       autoUpdate: [],
@@ -784,9 +763,7 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
       unchanged: [".claude/rules/style.md", ".claude/rules/testing.md", ".mcp.json"],
     });
     mockDetectDiff.mockResolvedValueOnce({
-      files: [
-        { path: ".eslintrc.json", type: "added", localContent: '{"extends": ["next"]}' },
-      ],
+      files: [{ path: ".eslintrc.json", type: "added", localContent: '{"extends": ["next"]}' }],
       summary: { added: 1, modified: 0, deleted: 0, unchanged: 3 },
     } as any);
     mockSelectPushFiles.mockResolvedValueOnce([
@@ -800,9 +777,7 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
 
     // ─── Step 7: テンプレートの ziku.jsonc を更新（新パターン反映）───
 
-    const tplConfig = JSON.parse(
-      vol.readFileSync("/template/.ziku/ziku.jsonc", "utf8") as string,
-    );
+    const tplConfig = JSON.parse(vol.readFileSync("/template/.ziku/ziku.jsonc", "utf8") as string);
     tplConfig.include.push(".eslintrc.json");
     vol.writeFileSync("/template/.ziku/ziku.jsonc", JSON.stringify(tplConfig, null, 2));
 
@@ -865,15 +840,11 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
     // ─── 最終検証: ローカルソースの設定構造 ───
 
     for (const project of projects) {
-      const config = JSON.parse(
-        vol.readFileSync(`${project}/.ziku/ziku.jsonc`, "utf8") as string,
-      );
+      const config = JSON.parse(vol.readFileSync(`${project}/.ziku/ziku.jsonc`, "utf8") as string);
       expect(config.include).toBeDefined();
       expect(config.source).toBeUndefined();
 
-      const lock = JSON.parse(
-        vol.readFileSync(`${project}/.ziku/lock.json`, "utf8") as string,
-      );
+      const lock = JSON.parse(vol.readFileSync(`${project}/.ziku/lock.json`, "utf8") as string);
       // ローカルソース: path フィールドを持つ
       expect(lock.source.path).toBe("/template");
     }

@@ -221,11 +221,7 @@ function logPushSummary(
     if (!files.some((f) => f.path === pf.path)) continue;
     const stat = formatFileStat(pf);
     const icon =
-      pf.type === "added"
-        ? pc.green("+")
-        : pf.type === "modified"
-          ? pc.yellow("~")
-          : pc.red("-");
+      pf.type === "added" ? pc.green("+") : pf.type === "modified" ? pc.yellow("~") : pc.red("-");
     fileLines.push(`  ${icon} ${pf.path.padEnd(50)} ${stat}`);
   }
   for (const f of files) {
@@ -325,123 +321,129 @@ export const pushCommand = defineCommand({
       return;
     }
 
-    await withFinally(
-      async () => {
-        // ─── 共通: 差分検出 + ファイル選択 ───
+    await withFinally(async () => {
+      // ─── 共通: 差分検出 + ファイル選択 ───
 
-        const mergedContents = new Map<string, string>();
-        const pushableFilePaths: Set<string> = new Set();
+      const mergedContents = new Map<string, string>();
+      const pushableFilePaths: Set<string> = new Set();
 
-        {
-          const { classifyFiles } = await import("../utils/merge");
+      {
+        const { classifyFiles } = await import("../utils/merge");
 
-          const templateHashes = await hashFiles(templateDir, patterns.include, patterns.exclude);
-          const localHashes = await hashFiles(targetDir, patterns.include, patterns.exclude);
+        const templateHashes = await hashFiles(templateDir, patterns.include, patterns.exclude);
+        const localHashes = await hashFiles(targetDir, patterns.include, patterns.exclude);
 
-          const classification = classifyFiles({
-            baseHashes: lock.baseHashes ?? {},
-            localHashes,
-            templateHashes,
+        const classification = classifyFiles({
+          baseHashes: lock.baseHashes ?? {},
+          localHashes,
+          templateHashes,
+        });
+
+        for (const file of classification.localOnly) pushableFilePaths.add(file);
+        for (const file of classification.conflicts) pushableFilePaths.add(file);
+
+        if (classification.autoUpdate.length > 0) {
+          log.info(
+            `Skipping ${classification.autoUpdate.length} file(s) only changed in template (use \`ziku pull\` to sync):`,
+          );
+          for (const file of classification.autoUpdate) {
+            log.message(`  ${pc.dim("↓")} ${pc.dim(file)}`);
+          }
+        }
+
+        if (classification.conflicts.length > 0) {
+          await resolveConflicts(classification.conflicts, {
+            targetDir,
+            templateDir,
+            source,
+            lock,
+            mergedContents,
+            args: { yes: args.yes as boolean },
           });
-
-          for (const file of classification.localOnly) pushableFilePaths.add(file);
-          for (const file of classification.conflicts) pushableFilePaths.add(file);
-
-          if (classification.autoUpdate.length > 0) {
-            log.info(
-              `Skipping ${classification.autoUpdate.length} file(s) only changed in template (use \`ziku pull\` to sync):`,
-            );
-            for (const file of classification.autoUpdate) {
-              log.message(`  ${pc.dim("↓")} ${pc.dim(file)}`);
-            }
-          }
-
-          if (classification.conflicts.length > 0) {
-            await resolveConflicts(classification.conflicts, {
-              targetDir,
-              templateDir,
-              source,
-              lock,
-              mergedContents,
-              args: { yes: args.yes as boolean },
-            });
-          }
         }
+      }
 
-        if (!args.yes) {
-          const untrackedByFolder = await detectUntrackedFiles({ targetDir, patterns });
-          if (untrackedByFolder.length > 0) {
-            const untrackedCount = untrackedByFolder.reduce((sum, f) => sum + f.files.length, 0);
-            log.info(`${untrackedCount} untracked file(s) detected (not included in push)`);
-          }
+      if (!args.yes) {
+        const untrackedByFolder = await detectUntrackedFiles({ targetDir, patterns });
+        if (untrackedByFolder.length > 0) {
+          const untrackedCount = untrackedByFolder.reduce((sum, f) => sum + f.files.length, 0);
+          log.info(`${untrackedCount} untracked file(s) detected (not included in push)`);
         }
+      }
 
-        log.step("Detecting changes...");
+      log.step("Detecting changes...");
 
-        const diff = await withSpinner("Analyzing differences...", () =>
-          detectDiff({ targetDir, templateDir, patterns }),
-        );
+      const diff = await withSpinner("Analyzing differences...", () =>
+        detectDiff({ targetDir, templateDir, patterns }),
+      );
 
-        let pushableFiles = diff.files.filter(
-          (f) => (f.type === "added" || f.type === "modified") && pushableFilePaths.has(f.path),
-        );
+      let pushableFiles = diff.files.filter(
+        (f) => (f.type === "added" || f.type === "modified") && pushableFilePaths.has(f.path),
+      );
 
+      if (pushableFiles.length === 0) {
+        log.info("No changes to push");
+        log.step("Current status:");
+        logDiffSummary(diff.files);
+        return;
+      }
+
+      if (args.dryRun) {
+        log.info("Dry run mode");
+        log.step("Files that would be pushed:");
+        logDiffSummary(diff.files);
+        return;
+      }
+
+      // ファイル選択
+      if (args.files) {
+        const requestedPaths = (args.files as string)
+          .split(",")
+          .map((p) => p.trim())
+          .filter(Boolean);
+        const availablePaths = new Set(pushableFiles.map((f) => f.path));
+        const notFound = requestedPaths.filter((p) => !availablePaths.has(p));
+        if (notFound.length > 0) log.warn(`Files not found: ${notFound.join(", ")}`);
+        const requestedSet = new Set(requestedPaths);
+        pushableFiles = pushableFiles.filter((f) => requestedSet.has(f.path));
         if (pushableFiles.length === 0) {
-          log.info("No changes to push");
-          log.step("Current status:");
-          logDiffSummary(diff.files);
+          log.info("No matching files. Cancelled.");
           return;
         }
-
-        if (args.dryRun) {
-          log.info("Dry run mode");
-          log.step("Files that would be pushed:");
-          logDiffSummary(diff.files);
+        log.info(`${pushableFiles.length} file(s) selected via --files`);
+      } else {
+        log.step("Selecting files...");
+        pushableFiles = await selectPushFiles(pushableFiles);
+        if (pushableFiles.length === 0) {
+          log.info("No files selected. Cancelled.");
           return;
         }
+      }
 
-        // ファイル選択
-        if (args.files) {
-          const requestedPaths = (args.files as string).split(",").map((p) => p.trim()).filter(Boolean);
-          const availablePaths = new Set(pushableFiles.map((f) => f.path));
-          const notFound = requestedPaths.filter((p) => !availablePaths.has(p));
-          if (notFound.length > 0) log.warn(`Files not found: ${notFound.join(", ")}`);
-          const requestedSet = new Set(requestedPaths);
-          pushableFiles = pushableFiles.filter((f) => requestedSet.has(f.path));
-          if (pushableFiles.length === 0) { log.info("No matching files. Cancelled."); return; }
-          log.info(`${pushableFiles.length} file(s) selected via --files`);
-        } else {
-          log.step("Selecting files...");
-          pushableFiles = await selectPushFiles(pushableFiles);
-          if (pushableFiles.length === 0) { log.info("No files selected. Cancelled."); return; }
-        }
+      const files = pushableFiles.map((f) => ({
+        path: f.path,
+        content: mergedContents.get(f.path) ?? f.localContent ?? "",
+      }));
 
-        const files = pushableFiles.map((f) => ({
-          path: f.path,
-          content: mergedContents.get(f.path) ?? f.localContent ?? "",
-        }));
+      // ─── 分岐: ソース���別に応じた push 戦略 (ts-pattern + Effect) ───
 
-        // ─── 分岐: ソース���別に応じた push 戦略 (ts-pattern + Effect) ───
-
-        await runCommandEffect(
-          match(source)
-            .with({ owner: P.string, repo: P.string }, (ghSource) =>
-              pushToGitHub(ghSource, { files, pushableFiles }, ctx, {
-                message: args.message as string | undefined,
-                edit: args.edit as boolean,
-                yes: args.yes as boolean,
-              }),
-            )
-            .with({ path: P.string }, (localSource) =>
-              pushToLocal(localSource, { files, pushableFiles }, ctx, targetDir, {
-                yes: args.yes as boolean,
-              }),
-            )
-            .exhaustive(),
-        );
-      },
-      cleanup,
-    );
+      await runCommandEffect(
+        match(source)
+          .with({ owner: P.string, repo: P.string }, (ghSource) =>
+            pushToGitHub(ghSource, { files, pushableFiles }, ctx, {
+              message: args.message as string | undefined,
+              edit: args.edit as boolean,
+              yes: args.yes as boolean,
+            }),
+          )
+          .with({ path: P.string }, (localSource) =>
+            pushToLocal(localSource, { files, pushableFiles }, ctx, targetDir, {
+              yes: args.yes as boolean,
+            }),
+          )
+          .exhaustive(),
+      );
+    }, cleanup);
   },
 });
 
@@ -470,8 +472,8 @@ async function resolveConflicts(
 
   // ベースバージョンのダウンロード（GitHub ソースの場合のみ）
   const baseResult = await match(ctx.source)
-    .with({ owner: P.string, repo: P.string }, async (ghSource) => {
-      if (!ctx.lock.baseRef) return null;
+    .with({ owner: P.string, repo: P.string }, (ghSource) => {
+      if (!ctx.lock.baseRef) return Promise.resolve(null);
       return Effect.runPromise(
         Effect.tryPromise(async () => {
           log.info(`Downloading base version (${ctx.lock.baseRef?.slice(0, 7)}...) for merge...`);

@@ -103,10 +103,18 @@ function generateFileLifecycleTable(): string {
     {
       file: ZIKU_CONFIG_FILE,
       location: "両方（テンプレート + ユーザー）",
-      description: "同期対象パターン定義（include/exclude）。テンプレートとユーザーで同一フォーマット",
+      description:
+        "同期対象パターン定義（include/exclude）。テンプレートとユーザーで同一フォーマット",
       lifecycle: [
-        { phase: "生成", detail: "`ziku setup` でデフォルトパターンを含む初期ファイルをテンプレートに作成" },
-        { phase: "読み取り", detail: "`ziku init` でテンプレートのパターンを読み、ディレクトリ選択 UI のデータとして使用" },
+        {
+          phase: "生成",
+          detail: "`ziku setup` でデフォルトパターンを含む初期ファイルをテンプレートに作成",
+        },
+        {
+          phase: "読み取り",
+          detail:
+            "`ziku init` でテンプレートのパターンを読み、ディレクトリ選択 UI のデータとして使用",
+        },
         { phase: "生成", detail: "`ziku init` で選択結果をユーザープロジェクトに保存" },
         {
           phase: "読み取り",
@@ -120,8 +128,14 @@ function generateFileLifecycleTable(): string {
       location: "ユーザープロジェクト",
       description: "同期状態 + ソース情報（source, baseRef, baseHashes, pendingMerge）",
       lifecycle: [
-        { phase: "生成", detail: "`ziku init` でソース情報 + テンプレートのコミット SHA とハッシュを記録" },
-        { phase: "読み取り", detail: "`pull` / `push` / `diff` でソースと前回同期状態との差分検出に使用" },
+        {
+          phase: "生成",
+          detail: "`ziku init` でソース情報 + テンプレートのコミット SHA とハッシュを記録",
+        },
+        {
+          phase: "読み取り",
+          detail: "`pull` / `push` / `diff` でソースと前回同期状態との差分検出に使用",
+        },
         { phase: "更新", detail: "`ziku pull` で最新のベースに更新" },
       ],
     },

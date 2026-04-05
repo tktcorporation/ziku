@@ -126,29 +126,24 @@ After init, your project gets a flat config that drives `pull`, `push`, and `dif
 You can add or remove patterns anytime with `ziku track`.
 
 <details>
-<summary>Defining modules in your template</summary>
+<summary>Defining patterns in your template</summary>
 
-Template authors define modules in `.ziku/modules.jsonc` inside the template repository:
+Template authors define sync patterns in `.ziku/ziku.jsonc` inside the template repository:
 
 ```jsonc
-// .ziku/modules.jsonc (in the template repo)
+// .ziku/ziku.jsonc (in the template repo)
 {
-  "modules": [
-    {
-      "name": "Linter",
-      "description": "Shared linter and formatter settings",
-      "include": [".eslintrc.*", ".prettierrc"]
-    },
-    {
-      "name": "CI",
-      "description": "GitHub Actions workflow templates",
-      "include": [".github/workflows/**"]
-    }
+  "include": [
+    ".claude/settings.json",
+    ".claude/rules/*.md",
+    ".mcp.json",
+    ".devcontainer/**",
+    ".github/**"
   ]
 }
 ```
 
-Module names and descriptions appear in the selection UI during `ziku init`. You can create any number of modules with any file patterns.
+During `ziku init`, users select which directories to sync based on these patterns. You can create the initial file with `ziku setup`.
 
 </details>
 

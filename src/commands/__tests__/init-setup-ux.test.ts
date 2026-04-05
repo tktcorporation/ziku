@@ -14,7 +14,7 @@
 import { vol } from "memfs";
 import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ZikuError, TemplateNotConfiguredError } from "../../errors";
+import { TemplateNotConfiguredError } from "../../errors";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -114,7 +114,7 @@ vi.mock("../../utils/template-config", () => ({
       }
     }
     const entries: Array<{ label: string; patterns: string[] }> = [];
-    for (const [dir, pats] of [...dirMap.entries()].toSorted()) {
+    for (const [dir, pats] of [...dirMap.entries()].toSorted((a, b) => a[0].localeCompare(b[0]))) {
       entries.push({ label: dir, patterns: pats });
     }
     if (rootFiles.length > 0) {

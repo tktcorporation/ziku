@@ -167,12 +167,14 @@ const emptyDiff = {
  * テスト用の CommandContext を生成するヘルパー。
  * DI のおかげでテンプレートダウンロードや設定読み込みのモックが不要。
  */
-function mockContext(overrides?: Partial<{
-  config: Record<string, unknown>;
-  lock: Record<string, unknown>;
-  source: { owner: string; repo: string } | { path: string };
-  templateDir: string;
-}>) {
+function mockContext(
+  overrides?: {
+    config?: typeof validZikuConfig;
+    lock?: typeof validLock & Record<string, unknown>;
+    source?: { owner: string; repo: string } | { path: string };
+    templateDir?: string;
+  },
+) {
   const cleanup = vi.fn();
   const source = overrides?.source ?? { owner: "tktcorporation", repo: ".github" };
   return {
@@ -182,6 +184,7 @@ function mockContext(overrides?: Partial<{
       source,
       templateDir: overrides?.templateDir ?? "/tmp/template",
       cleanup,
+      resolveBaseRef: Effect.succeed(undefined as string | undefined),
     }),
     cleanup,
   };
@@ -390,9 +393,7 @@ describe("pushCommand", () => {
         cmd: pushCommand,
       });
 
-      expect(mockLog.info).toHaveBeenCalledWith(
-        "Cancelled.",
-      );
+      expect(mockLog.info).toHaveBeenCalledWith("Cancelled.");
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
@@ -589,9 +590,7 @@ describe("pushCommand", () => {
         cmd: pushCommand,
       });
 
-      expect(mockLog.warn).toHaveBeenCalledWith(
-        "Files not found: nonexistent.txt",
-      );
+      expect(mockLog.warn).toHaveBeenCalledWith("Files not found: nonexistent.txt");
       expect(mockCreatePullRequest).toHaveBeenCalled();
     });
 
@@ -670,7 +669,7 @@ describe("pushCommand", () => {
         source: { path: "/local/template" },
         lock: {
           ...validLock,
-          source: { path: "/local/template" },
+          source: { path: "/local/template" } as any,
         },
       });
       mockLoadCommandContext.mockReturnValue(effect);

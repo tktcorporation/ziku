@@ -38,11 +38,7 @@ import {
 import { hashFiles } from "../utils/hash";
 import { LOCK_FILE, saveLock } from "../utils/lock";
 import { ZIKU_CONFIG_FILE, generateZikuJsonc, zikuConfigExists } from "../utils/ziku-config";
-import {
-  downloadTemplateToTemp,
-  fetchTemplates,
-  writeFileWithStrategy,
-} from "../utils/template";
+import { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy } from "../utils/template";
 import type { FlatPatterns } from "../utils/patterns";
 import { intro, log, logFileResults, outro, pc, withSpinner } from "../ui/renderer";
 
@@ -168,10 +164,7 @@ export const initCommand = defineCommand({
 
       log.step("Fetching template...");
       const downloaded = await withSpinner("Downloading template from GitHub...", () =>
-        downloadTemplateToTemp(
-          targetDir,
-          `gh:${resolved.sourceOwner}/${resolved.sourceRepo}`,
-        ),
+        downloadTemplateToTemp(targetDir, `gh:${resolved.sourceOwner}/${resolved.sourceRepo}`),
       );
       templateDir = downloaded.templateDir;
       cleanup = downloaded.cleanup;
@@ -193,10 +186,9 @@ export const initCommand = defineCommand({
             return Effect.fail(new ZikuError(`Template has no .ziku/ziku.jsonc`, hint));
           }),
           Effect.catchTag("ParseError", (err) =>
-            Effect.fail(new ZikuError(
-              `Failed to parse template .ziku/ziku.jsonc`,
-              String(err.cause),
-            )),
+            Effect.fail(
+              new ZikuError(`Failed to parse template .ziku/ziku.jsonc`, String(err.cause)),
+            ),
           ),
         ),
       );
@@ -418,9 +410,7 @@ async function selectDirsFromTemplate(
         `Available directories: ${validLabels.join(", ")}`,
       );
     }
-    return entries
-      .filter((e) => requestedLabels.includes(e.label))
-      .flatMap((e) => e.patterns);
+    return entries.filter((e) => requestedLabels.includes(e.label)).flatMap((e) => e.patterns);
   }
 
   // インタラクティブ: ディレクトリ選択 UI

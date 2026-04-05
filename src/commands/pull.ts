@@ -10,7 +10,12 @@ import type { LockState, TemplateSource } from "../modules/schemas";
 import { selectDeletedFiles } from "../ui/prompts";
 import { intro, log, outro, pc } from "../ui/renderer";
 import { LOCK_FILE, loadLock, saveLock } from "../utils/lock";
-import { ZIKU_CONFIG_FILE, saveZikuConfig, generateZikuJsonc, zikuConfigExists } from "../utils/ziku-config";
+import {
+  ZIKU_CONFIG_FILE,
+  saveZikuConfig,
+  generateZikuJsonc,
+  zikuConfigExists,
+} from "../utils/ziku-config";
 import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
 import { loadTemplateConfig } from "../utils/template-config";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
@@ -189,10 +194,12 @@ export const pullCommand = defineCommand({
       }
 
       // コンフリクト解決
-      const unresolvedConflicts = await resolveConflicts(
-        classification.conflicts,
-        { targetDir, templateDir, source, lock },
-      );
+      const unresolvedConflicts = await resolveConflicts(classification.conflicts, {
+        targetDir,
+        templateDir,
+        source,
+        lock,
+      });
 
       if (unresolvedConflicts.length > 0) {
         // resolveBaseRef で isGitHubSource 分岐を吸収
@@ -244,11 +251,7 @@ export const pullCommand = defineCommand({
  * テンプレートからファイルをコピーする共通処理。
  * autoUpdate と newFiles で同じロジックを使う（DRY）。
  */
-async function applyFiles(
-  files: string[],
-  templateDir: string,
-  targetDir: string,
-): Promise<void> {
+async function applyFiles(files: string[], templateDir: string, targetDir: string): Promise<void> {
   for (const file of files) {
     const content = await readFile(join(templateDir, file), "utf-8");
     const destPath = join(targetDir, file);
@@ -282,7 +285,7 @@ async function resolveConflicts(
   // ts-pattern でソース種別に応じたベースダウンロードを分岐
   if (ctx.lock.baseRef) {
     const downloadResult = await match(ctx.source)
-      .with({ owner: P.string, repo: P.string }, async (ghSource) => {
+      .with({ owner: P.string, repo: P.string }, (ghSource) => {
         return Effect.runPromise(
           Effect.tryPromise(() => {
             log.info(`Downloading base version (${ctx.lock.baseRef?.slice(0, 7)}...) for merge...`);

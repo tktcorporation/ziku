@@ -65,9 +65,7 @@ export class CommandContext extends Context.Tag("CommandContext")<
  *     loadCommandContext(targetDir).pipe(Effect.mapError(toZikuError)),
  *   );
  */
-export async function runCommandEffect<A>(
-  effect: Effect.Effect<A, ZikuError>,
-): Promise<A> {
+export async function runCommandEffect<A>(effect: Effect.Effect<A, ZikuError>): Promise<A> {
   const exit = await Effect.runPromiseExit(effect);
   if (Exit.isSuccess(exit)) return exit.value;
 
@@ -155,9 +153,7 @@ export function makeCommandContextLayer(
  *
  * 各コマンドで繰り返される mapError パターンを DRY 化。
  */
-export function toZikuError(
-  err: FileNotFoundError | ParseError | TemplateError,
-): ZikuError {
+export function toZikuError(err: FileNotFoundError | ParseError | TemplateError): ZikuError {
   if (err._tag === "FileNotFoundError") {
     return new ZikuError(`${err.path} not found.`, "Run 'ziku init' first.");
   }

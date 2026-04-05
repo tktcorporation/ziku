@@ -130,7 +130,7 @@ vi.mock("../../utils/template-config", () => ({
       }
     }
     const entries: Array<{ label: string; patterns: string[] }> = [];
-    for (const [dir, pats] of [...dirMap.entries()].toSorted()) {
+    for (const [dir, pats] of [...dirMap.entries()].toSorted((a, b) => a[0].localeCompare(b[0]))) {
       entries.push({ label: dir, patterns: pats });
     }
     if (rootFiles.length > 0) {
@@ -220,13 +220,17 @@ function createZikuJsonc(include: string[], exclude?: string[]): string {
   return JSON.stringify(content, null, 2);
 }
 
-function createLockJson(source = DEFAULT_SOURCE): string {
-  return JSON.stringify({
-    version: "0.1.0",
-    installedAt: "2024-01-01T00:00:00.000Z",
-    source,
-    baseHashes: {},
-  }, null, 2);
+function _createLockJson(source = DEFAULT_SOURCE): string {
+  return JSON.stringify(
+    {
+      version: "0.1.0",
+      installedAt: "2024-01-01T00:00:00.000Z",
+      source,
+      baseHashes: {},
+    },
+    null,
+    2,
+  );
 }
 
 const baseLock = {

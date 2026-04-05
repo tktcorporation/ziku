@@ -69,60 +69,55 @@ export const diffCommand = defineCommand({
 
     log.info(`Template: ${pc.cyan(templateDir)}${"path" in source ? " (local)" : ""}`);
 
-    await withFinally(
-      async () => {
-        const patterns = {
-          include: config.include,
-          exclude: config.exclude ?? [],
-        };
+    await withFinally(async () => {
+      const patterns = {
+        include: config.include,
+        exclude: config.exclude ?? [],
+      };
 
-        if (patterns.include.length === 0) {
-          log.warn("No patterns configured");
-          return;
+      if (patterns.include.length === 0) {
+        log.warn("No patterns configured");
+        return;
+      }
+
+      log.step("Detecting changes...");
+
+      const diff = await withSpinner("Analyzing differences...", () =>
+        detectDiff({ targetDir, templateDir, patterns }),
+      );
+
+      const untrackedByFolder = await detectUntrackedFiles({ targetDir, patterns });
+      const untrackedCount = getTotalUntrackedCount(untrackedByFolder);
+
+      if (hasDiff(diff)) {
+        logDiffSummary(diff.files);
+
+        if (args.verbose) {
+          for (const file of diff.files.filter((f) => f.type !== "unchanged")) {
+            renderFileDiff(file);
+          }
         }
 
-        log.step("Detecting changes...");
+        if (untrackedCount > 0) {
+          logUntrackedFiles(untrackedByFolder, untrackedCount);
+        }
 
-        const diff = await withSpinner("Analyzing differences...", () =>
-          detectDiff({ targetDir, templateDir, patterns }),
+        outro("Run 'ziku push' to push changes.");
+      } else if (untrackedCount > 0) {
+        log.success("Tracked files are in sync.");
+        log.warn(`However, ${untrackedCount} untracked file(s) exist outside the sync whitelist:`);
+        const untrackedLines = untrackedByFolder.flatMap((group) =>
+          group.files.map((file) => `  ${pc.dim("•")} ${file.path}`),
         );
-
-        const untrackedByFolder = await detectUntrackedFiles({ targetDir, patterns });
-        const untrackedCount = getTotalUntrackedCount(untrackedByFolder);
-
-        if (hasDiff(diff)) {
-          logDiffSummary(diff.files);
-
-          if (args.verbose) {
-            for (const file of diff.files.filter((f) => f.type !== "unchanged")) {
-              renderFileDiff(file);
-            }
-          }
-
-          if (untrackedCount > 0) {
-            logUntrackedFiles(untrackedByFolder, untrackedCount);
-          }
-
-          outro("Run 'ziku push' to push changes.");
-        } else if (untrackedCount > 0) {
-          log.success("Tracked files are in sync.");
-          log.warn(
-            `However, ${untrackedCount} untracked file(s) exist outside the sync whitelist:`,
-          );
-          const untrackedLines = untrackedByFolder.flatMap((group) =>
-            group.files.map((file) => `  ${pc.dim("•")} ${file.path}`),
-          );
-          log.message(untrackedLines.join("\n"));
-          log.info(
-            `Use ${pc.cyan("npx ziku track <pattern>")} to add them, then ${pc.cyan("push")} to sync.`,
-          );
-          outro("Tracked files are in sync, but untracked files exist.");
-        } else {
-          outro("No changes — in sync with template.");
-        }
-      },
-      cleanup,
-    );
+        log.message(untrackedLines.join("\n"));
+        log.info(
+          `Use ${pc.cyan("npx ziku track <pattern>")} to add them, then ${pc.cyan("push")} to sync.`,
+        );
+        outro("Tracked files are in sync, but untracked files exist.");
+      } else {
+        outro("No changes — in sync with template.");
+      }
+    }, cleanup);
   },
 });
 

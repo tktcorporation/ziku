@@ -45,10 +45,7 @@ export function zikuConfigExists(targetDir: string): boolean {
  * テンプレート側・ユーザー側で同一フォーマット。
  * source 情報は lock.json に分離されたため、ここにはパターンのみ。
  */
-export function generateZikuJsonc(opts: {
-  include: string[];
-  exclude: string[];
-}): string {
+export function generateZikuJsonc(opts: { include: string[]; exclude: string[] }): string {
   const content: Record<string, unknown> = {
     $schema: ZIKU_CONFIG_SCHEMA_URL,
     include: opts.include,

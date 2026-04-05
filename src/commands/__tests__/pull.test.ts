@@ -288,7 +288,7 @@ describe("pullCommand", () => {
       const { effect } = mockContext({
         lock: {
           ...baseLock,
-          baseHashes: {},
+          baseHashes: {} as any,
         },
       });
       mockLoadCommandContext.mockReturnValue(effect);
@@ -617,7 +617,7 @@ describe("pullCommand", () => {
         lock: {
           ...baseLock,
           baseRef: "abc123",
-          baseHashes: { "settings.json": "old-hash" },
+          baseHashes: { "settings.json": "old-hash" } as any,
         },
       });
       mockLoadCommandContext.mockReturnValue(effect);
@@ -633,11 +633,10 @@ describe("pullCommand", () => {
 
       // base ダウンロード用（loadCommandContext が template を解決済みなので、
       // downloadTemplateToTemp は base 用の1回のみ呼ばれる）
-      mockDownloadTemplateToTemp
-        .mockResolvedValueOnce({
-          templateDir: "/tmp/base",
-          cleanup: vi.fn(),
-        });
+      mockDownloadTemplateToTemp.mockResolvedValueOnce({
+        templateDir: "/tmp/base",
+        cleanup: vi.fn(),
+      });
 
       mockThreeWayMerge.mockReturnValueOnce({
         content: '{"merged": true}',
