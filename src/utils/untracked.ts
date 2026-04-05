@@ -60,7 +60,7 @@ export function getAllFilesInDirs(baseDir: string, dirs: string[]): string[] {
     cwd: baseDir,
     dot: true,
     onlyFiles: true,
-  }).sort();
+  }).toSorted();
 }
 
 /**
@@ -71,7 +71,7 @@ export function getRootDotFiles(baseDir: string): string[] {
     cwd: baseDir,
     dot: true,
     onlyFiles: true,
-  }).sort();
+  }).toSorted();
 }
 
 /**
@@ -160,7 +160,7 @@ export async function detectUntrackedFiles(options: {
   }
 
   const result: UntrackedFilesByFolder[] = [];
-  const sortedFolders = Array.from(filesByFolder.keys()).sort((a, b) => {
+  const sortedFolders = Array.from(filesByFolder.keys()).toSorted((a, b) => {
     if (a === "root") return 1;
     if (b === "root") return -1;
     return a.localeCompare(b);
@@ -171,7 +171,7 @@ export async function detectUntrackedFiles(options: {
     if (files.length > 0) {
       result.push({
         folder,
-        files: files.sort((a, b) => a.path.localeCompare(b.path)),
+        files: files.toSorted((a, b) => a.path.localeCompare(b.path)),
       });
     }
   }

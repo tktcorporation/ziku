@@ -62,7 +62,7 @@ vi.spyOn(process, "exit").mockImplementation(() => {
 
 // モック後にインポート
 const { loadPatternsFile, saveModulesFile, modulesFileExists } = await import("../../modules");
-const { addIncludePattern } = await import("../../modules/loader");
+const { addIncludePattern } = await import("../../utils/ziku-config");
 
 describe("track command - core logic", () => {
   beforeEach(() => {
@@ -152,7 +152,8 @@ describe("trackCommand", () => {
 
   it("--list のみで patterns なしでも動作する（required: false）", async () => {
     vol.fromJSON({
-      "/project/.ziku/modules.jsonc": JSON.stringify({
+      "/project/.ziku/ziku.jsonc": JSON.stringify({
+        source: { owner: "test", repo: ".ziku" },
         include: [".mcp.json"],
         exclude: [],
       }),

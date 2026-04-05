@@ -18,7 +18,7 @@ export function resolvePatterns(baseDir: string, patterns: string[], ignore?: st
     onlyFiles: true,
     ignore: ignore ?? [],
   });
-  return files.sort();
+  return files.toSorted();
 }
 
 /**
@@ -98,8 +98,8 @@ export function compareDirectories(
   }
 
   return {
-    localOnly: localOnly.sort(),
-    templateOnly: templateOnly.sort(),
-    both: both.sort(),
+    localOnly: localOnly.toSorted(),
+    templateOnly: templateOnly.toSorted(),
+    both: both.toSorted(),
   };
 }

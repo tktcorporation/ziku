@@ -246,8 +246,8 @@ export async function scaffoldTemplateRepo(
   targetOwner: string,
   targetRepo: string,
 ): Promise<{ url: string }> {
-  const { Octokit } = await import("@octokit/rest");
-  const octokit = new Octokit({ auth: token });
+  const { Octokit: OctokitClient } = await import("@octokit/rest");
+  const octokit = new OctokitClient({ auth: token });
 
   // org か personal かを判定
   const isOrg = await Effect.runPromise(

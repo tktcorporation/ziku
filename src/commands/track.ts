@@ -1,18 +1,18 @@
 import { defineCommand } from "citty";
 import { resolve } from "pathe";
 import { ZikuError } from "../errors";
+import { intro, log, outro, pc } from "../ui/renderer";
 import {
   addIncludePattern,
-  loadPatternsFile,
-  modulesFileExists,
-  saveModulesFile,
-} from "../modules";
-import { intro, log, outro, pc } from "../ui/renderer";
+  loadZikuConfig,
+  saveZikuConfig,
+  zikuConfigExists,
+} from "../utils/ziku-config";
 
 export const trackCommand = defineCommand({
   meta: {
     name: "track",
-    description: "Add file patterns to the tracking whitelist in modules.jsonc",
+    description: "Add file patterns to the tracking whitelist in ziku.jsonc",
   },
   args: {
     patterns: {
@@ -38,16 +38,19 @@ export const trackCommand = defineCommand({
 
     const targetDir = resolve(args.dir);
 
-    if (!modulesFileExists(targetDir)) {
+    if (!zikuConfigExists(targetDir)) {
       throw new ZikuError(
-        ".ziku/modules.jsonc not found.",
+        ".ziku/ziku.jsonc not found.",
         "Run 'ziku init' first to set up the project.",
       );
     }
 
     // --list モード
     if (args.list) {
-      const { include, exclude } = await loadPatternsFile(targetDir);
+      const {
+        config: { include, exclude: excludeRaw },
+      } = await loadZikuConfig(targetDir);
+      const exclude = excludeRaw ?? [];
       log.info("Tracked patterns:");
       for (const pattern of include) {
         log.message(`  ${pc.dim("→")} ${pattern}`);
@@ -92,7 +95,7 @@ export const trackCommand = defineCommand({
       );
     }
 
-    const { rawContent } = await loadPatternsFile(targetDir);
+    const { rawContent } = await loadZikuConfig(targetDir);
 
     const updatedContent = addIncludePattern(rawContent, patterns);
 
@@ -101,11 +104,11 @@ export const trackCommand = defineCommand({
       return;
     }
 
-    await saveModulesFile(targetDir, updatedContent);
+    await saveZikuConfig(targetDir, updatedContent);
 
     log.success("Patterns added!");
     const details = ["Added:", ...patterns.map((p) => `  ${pc.green("+")} ${p}`)];
     log.message(details.join("\n"));
-    outro("Updated .ziku/modules.jsonc");
+    outro("Updated .ziku/ziku.jsonc");
   },
 });

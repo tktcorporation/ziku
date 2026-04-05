@@ -88,7 +88,7 @@ export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
   }
 
   return {
-    files: files.sort((a, b) => a.path.localeCompare(b.path)),
+    files: files.toSorted((a, b) => a.path.localeCompare(b.path)),
     summary: { added, modified, deleted, unchanged },
   };
 }

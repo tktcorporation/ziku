@@ -190,11 +190,11 @@ describe("init: セットアップ UX", () => {
     mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
     mockWriteFileWithStrategy.mockResolvedValue({
       action: "created",
-      path: ".ziku.json",
+      path: ".ziku/lock.json",
     });
     mockCopyFile.mockResolvedValue({
       action: "skipped",
-      path: ".ziku/modules.jsonc",
+      path: ".ziku/ziku.jsonc",
     });
     mockHashFiles.mockResolvedValue({});
     mockDetectGitHubOwner.mockReturnValue("detected-org");

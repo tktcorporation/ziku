@@ -10,7 +10,12 @@ import {
   modulesFileExists,
 } from "../modules/index";
 import { MODULES_SCHEMA_URL } from "../modules/loader";
-import type { FileOperationResult, OverwriteStrategy, TemplateModule } from "../modules/schemas";
+import type {
+  FileOperationResult,
+  LockState,
+  OverwriteStrategy,
+  TemplateModule,
+} from "../modules/schemas";
 import { match } from "ts-pattern";
 import { ZikuError } from "../errors";
 import {
@@ -38,6 +43,8 @@ import {
   scaffoldTemplateRepo,
 } from "../utils/github";
 import { hashFiles } from "../utils/hash";
+import { LOCK_FILE, saveLock } from "../utils/lock";
+import { ZIKU_CONFIG_FILE, generateZikuJsonc, zikuConfigExists } from "../utils/ziku-config";
 import {
   buildTemplateSource,
   downloadTemplateToTemp,
@@ -155,7 +162,7 @@ export const initCommand = defineCommand({
         args.force as boolean,
         args["overwrite-strategy"] as string | undefined,
         args.yes as boolean,
-        existsSync(resolve(targetDir, ".ziku.json")),
+        zikuConfigExists(targetDir),
       );
 
       // Step 2: ファイルをコピー
@@ -177,28 +184,23 @@ export const initCommand = defineCommand({
         allResults.push(envResult);
       }
 
-      // modules.jsonc をローカルに保存（テンプレートのパターンをそのまま使用）
-      const modulesJsoncResult = await writeFlatModulesJsonc(
-        targetDir,
-        flatPatterns,
-        effectiveStrategy,
-      );
-      allResults.push(modulesJsoncResult);
-
       // テンプレートファイルのハッシュを計算（pull 時の差分検出用）
       const baseHashes = await hashFiles(templateDir, flatPatterns.include, flatPatterns.exclude);
 
       // テンプレートリポジトリの最新コミット SHA を取得（3-way マージのベース用）
       const baseRef = await resolveLatestCommitSha(sourceOwner, sourceRepo);
 
-      // 設定ファイル生成（常に更新）
-      const configResult = await createDevEnvConfig(targetDir, {
-        owner: sourceOwner,
-        repo: sourceRepo,
-        baseHashes,
-        baseRef,
+      // .ziku/ziku.jsonc を書き出し（ユーザー設定: source + patterns）
+      const zikuJsoncResult = await writeZikuJsonc(targetDir, {
+        source: { owner: sourceOwner, repo: sourceRepo },
+        patterns: flatPatterns,
+        strategy: effectiveStrategy,
       });
-      allResults.push(configResult);
+      allResults.push(zikuJsoncResult);
+
+      // .ziku/lock.json を書き出し（同期状態: 常に上書き）
+      const lockResult = await writeLockFile(targetDir, { baseHashes, baseRef });
+      allResults.push(lockResult);
 
       // ファイル操作結果を表示（サマリー含む）
       const summary = logFileResults(allResults);
@@ -214,7 +216,7 @@ export const initCommand = defineCommand({
         [
           "Setup complete!",
           "",
-          `${pc.bold("Next steps:")}`,
+          pc.bold("Next steps:"),
           `  ${pc.cyan("git add . && git commit -m 'chore: add ziku config'")}`,
           `  ${pc.dim("Commit the changes")}`,
           `  ${pc.cyan("npx ziku diff")}`,
@@ -253,57 +255,56 @@ async function createEnvExample(
 }
 
 /**
- * 設定ファイル (.ziku.json) を生成する。常に上書き。
+ * .ziku/ziku.jsonc を書き出す（ユーザー設定: source + patterns）
  */
-async function createDevEnvConfig(
+async function writeZikuJsonc(
   targetDir: string,
-  source: {
-    owner: string;
-    repo: string;
-    baseHashes?: Record<string, string>;
-    baseRef?: string;
+  opts: {
+    source: { owner: string; repo: string };
+    patterns: FlatPatterns;
+    strategy: OverwriteStrategy;
   },
 ): Promise<FileOperationResult> {
-  const config: Record<string, unknown> = {
-    version: "0.1.0",
-    installedAt: new Date().toISOString(),
-    source: { owner: source.owner, repo: source.repo },
-  };
+  const content = generateZikuJsonc({
+    source: opts.source,
+    include: opts.patterns.include,
+    exclude: opts.patterns.exclude,
+  });
 
-  if (source.baseRef) {
-    config.baseRef = source.baseRef;
-  }
-
-  if (source.baseHashes && Object.keys(source.baseHashes).length > 0) {
-    config.baseHashes = source.baseHashes;
-  }
-
-  // .ziku.json は常に上書き（設定管理ファイルなので）
   return writeFileWithStrategy({
-    destPath: resolve(targetDir, ".ziku.json"),
-    content: JSON.stringify(config, null, 2),
-    strategy: "overwrite",
-    relativePath: ".ziku.json",
+    destPath: resolve(targetDir, ZIKU_CONFIG_FILE),
+    content,
+    strategy: opts.strategy,
+    relativePath: ZIKU_CONFIG_FILE,
   });
 }
 
 /**
- * フラットパターンで modules.jsonc をローカルに書き出す
+ * .ziku/lock.json を書き出す（同期状態: 常に上書き）
  */
-async function writeFlatModulesJsonc(
+async function writeLockFile(
   targetDir: string,
-  patterns: FlatPatterns,
-  strategy: OverwriteStrategy,
+  opts: {
+    baseHashes?: Record<string, string>;
+    baseRef?: string;
+  },
 ): Promise<FileOperationResult> {
-  const modulesRelPath = ".ziku/modules.jsonc";
-  const content = generateFlatPatternsJsonc(patterns);
+  const lock: LockState = {
+    version: "0.1.0",
+    installedAt: new Date().toISOString(),
+    ...(opts.baseRef ? { baseRef: opts.baseRef } : {}),
+    ...(opts.baseHashes && Object.keys(opts.baseHashes).length > 0
+      ? { baseHashes: opts.baseHashes }
+      : {}),
+  };
 
-  return writeFileWithStrategy({
-    destPath: getModulesFilePath(targetDir),
-    content,
-    strategy,
-    relativePath: modulesRelPath,
-  });
+  const isNew = !existsSync(join(targetDir, LOCK_FILE));
+  await saveLock(targetDir, lock);
+
+  return {
+    action: isNew ? "created" : "overwritten",
+    path: LOCK_FILE,
+  };
 }
 
 /**
@@ -593,7 +594,7 @@ async function handleMissingTemplate(
       const { url } = await scaffoldTemplateRepo(token, owner, repo);
       log.success(`Created template repository: ${pc.cyan(url)}`);
       log.info(pc.dim("Waiting for repository to be ready..."));
-      await new Promise((resolve) => setTimeout(resolve, 5000));
+      await new Promise((done) => setTimeout(done, 5000));
 
       return { sourceOwner: owner, sourceRepo: repo };
     })
@@ -662,6 +663,7 @@ const DEFAULT_SCAFFOLD_PATTERNS: FlatPatterns = {
 
 /**
  * フラット形式の modules.jsonc コンテンツを生成する。
+ * テンプレートリポジトリの scaffold 用（modules.jsonc は upstream テンプレート専用）
  */
 export function generateFlatPatternsJsonc(patterns: FlatPatterns): string {
   const content: Record<string, unknown> = {
@@ -719,7 +721,7 @@ async function handleTemplateRepoInit(targetDir: string, _nonInteractive: boolea
     [
       "Template initialized!",
       "",
-      `${pc.bold("Next steps:")}`,
+      pc.bold("Next steps:"),
       `  ${pc.cyan("1.")} Review and customize ${pc.dim(".ziku/modules.jsonc")}`,
       `  ${pc.cyan("2.")} ${pc.cyan("git add .ziku/ && git commit -m 'chore: add ziku config'")}`,
       `  ${pc.dim("Then other projects can use this template with")} ${pc.cyan("npx ziku init")}`,

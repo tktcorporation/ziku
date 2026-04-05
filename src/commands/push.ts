@@ -6,9 +6,10 @@ import { downloadTemplate } from "giget";
 import { join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
-import { addIncludePattern, loadPatternsFile, modulesFileExists } from "../modules";
-import type { DevEnvConfig } from "../modules/schemas";
-import { configSchema } from "../modules/schemas";
+import { loadPatternsFile, modulesFileExists } from "../modules";
+import type { FileDiff } from "../modules/schemas";
+import { loadLock } from "../utils/lock";
+import { loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
 import {
   confirmAction,
   generatePrBody,
@@ -32,7 +33,7 @@ function formatFileStat(file: {
   localContent?: string;
   templateContent?: string;
 }): string {
-  const stats = calculateDiffStats(file as import("../modules/schemas").FileDiff);
+  const stats = calculateDiffStats(file as FileDiff);
   return formatStats(stats);
 }
 
@@ -53,7 +54,7 @@ function registerSyncCleanup(tempDir: string): () => void {
   };
 }
 
-const MODULES_FILE_PATH = ".ziku/modules.jsonc";
+const MODULES_FILE_PATH = ".ziku/modules.jsonc"; // テンプレート側の modules.jsonc パス
 const README_PATH = "README.md";
 
 /**
@@ -107,36 +108,40 @@ export const pushCommand = defineCommand({
     intro("push");
 
     const targetDir = resolve(args.dir);
-    const configPath = join(targetDir, ".ziku.json");
 
-    if (!existsSync(configPath)) {
-      throw new ZikuError(".ziku.json not found.", "Run 'ziku init' first.");
+    if (!zikuConfigExists(targetDir)) {
+      throw new ZikuError(".ziku/ziku.jsonc not found.", "Run 'ziku init' first.");
     }
 
-    const configContent = await readFile(configPath, "utf-8");
-    const configData = JSON.parse(configContent);
-    const parseResult = configSchema.safeParse(configData);
+    const { config: zikuConfig, rawContent: zikuConfigRaw } = await loadZikuConfig(targetDir);
 
-    if (!parseResult.success) {
-      throw new ZikuError("Invalid .ziku.json format", parseResult.error.message);
-    }
-
-    const config: DevEnvConfig = parseResult.data;
-
-    if (config.pendingMerge) {
+    // lock.json を読み込み（loadLock に集約）
+    let lock;
+    try {
+      lock = await loadLock(targetDir);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("ENOENT")) {
+        throw new ZikuError(".ziku/lock.json not found.", "Run 'ziku init' first.");
+      }
       throw new ZikuError(
-        "Unresolved merge conflicts from `ziku pull`",
-        "Resolve conflicts in these files, then run `ziku pull --continue`:\n" +
-          config.pendingMerge.conflicts.map((f) => `  • ${f}`).join("\n"),
+        "Invalid .ziku/lock.json format",
+        error instanceof Error ? error.message : String(error),
       );
     }
 
-    // ローカルの modules.jsonc からフラットパターンを読み込み
-    if (!modulesFileExists(targetDir)) {
-      throw new ZikuError("No .ziku/modules.jsonc found", "Run `ziku init` to set up the project");
+    if (lock.pendingMerge) {
+      throw new ZikuError(
+        "Unresolved merge conflicts from `ziku pull`",
+        "Resolve conflicts in these files, then run `ziku pull --continue`:\n" +
+          lock.pendingMerge.conflicts.map((f) => `  • ${f}`).join("\n"),
+      );
     }
 
-    const localPatterns = await loadPatternsFile(targetDir);
+    const localPatterns = {
+      include: zikuConfig.include,
+      exclude: zikuConfig.exclude ?? [],
+      rawContent: zikuConfigRaw,
+    };
 
     if (localPatterns.include.length === 0) {
       log.warn("No patterns configured");
@@ -146,7 +151,7 @@ export const pushCommand = defineCommand({
     // Step 1: テンプレートをダウンロード
     log.step("Fetching template...");
 
-    const templateSource = buildTemplateSource(config.source);
+    const templateSource = buildTemplateSource(zikuConfig.source);
     const tempDir = join(targetDir, ".ziku-temp");
     const unregisterCleanup = registerSyncCleanup(tempDir);
 
@@ -176,9 +181,10 @@ export const pushCommand = defineCommand({
               `Detected ${newPatterns.length} new pattern(s) from local: ${newPatterns.join(", ")}`,
             );
             // テンプレートの modules.jsonc に新パターンを追加
-            const { loadPatternsFile: loadRaw } = await import("../modules/loader");
+            const { loadPatternsFile: loadRaw, addIncludePattern: addModulePattern } =
+              await import("../modules/loader");
             const templateRaw = await loadRaw(templateDir);
-            updatedModulesContent = addIncludePattern(templateRaw.rawContent, newPatterns);
+            updatedModulesContent = addModulePattern(templateRaw.rawContent, newPatterns);
           }
 
           // マージされたパターンを使用
@@ -191,7 +197,7 @@ export const pushCommand = defineCommand({
 
         // 3-way マージ結果を保持
         const mergedContents = new Map<string, string>();
-        let pushableFilePaths: Set<string> = new Set();
+        const pushableFilePaths: Set<string> = new Set();
 
         // ファイル分類
         {
@@ -202,7 +208,7 @@ export const pushCommand = defineCommand({
           const localHashes = await hashFiles(targetDir, patterns.include, patterns.exclude);
 
           const classification = classifyFiles({
-            baseHashes: config.baseHashes ?? {},
+            baseHashes: lock.baseHashes ?? {},
             localHashes,
             templateHashes,
           });
@@ -227,8 +233,8 @@ export const pushCommand = defineCommand({
             const { threeWayMerge, asBaseContent, asLocalContent, asTemplateContent } =
               await import("../utils/merge");
 
-            const baseInfo = config.baseRef
-              ? `since ${pc.bold(config.baseRef.slice(0, 7))} (your last sync)`
+            const baseInfo = lock.baseRef
+              ? `since ${pc.bold(lock.baseRef!.slice(0, 7))} (your last sync)`
               : "since your last pull/init";
             log.warn(
               `Template updated ${baseInfo} — ${classification.conflicts.length} conflict(s) detected, attempting auto-merge...`,
@@ -238,15 +244,15 @@ export const pushCommand = defineCommand({
             let baseCleanup: (() => void) | undefined;
 
             // ベースバージョンのダウンロード（失敗時はフォールバック）
-            if (config.baseRef) {
+            if (lock.baseRef) {
               const baseResult = await Effect.runPromise(
                 Effect.tryPromise(async () => {
                   log.info(
-                    `Downloading base version (${config.baseRef!.slice(0, 7)}...) for merge...`,
+                    `Downloading base version (${lock.baseRef!.slice(0, 7)}...) for merge...`,
                   );
                   const { downloadTemplateToTemp: downloadBase } =
                     await import("../utils/template");
-                  const baseSource = `gh:${config.source.owner}/${config.source.repo}#${config.baseRef}`;
+                  const baseSource = `gh:${zikuConfig.source.owner}/${zikuConfig.source.repo}#${lock.baseRef}`;
                   return downloadBase(targetDir, baseSource);
                 }).pipe(
                   Effect.orElseSucceed(() => {
@@ -451,11 +457,9 @@ export const pushCommand = defineCommand({
         }
 
         // Step 4: サマリー表示 + 確認
-        const destination = `${config.source.owner}/${config.source.repo}`;
-        const baseBranch = config.source.ref || "main";
-        const baseHashStr = config.baseRef
-          ? `  ${pc.dim(`since ${config.baseRef.slice(0, 7)}`)}`
-          : "";
+        const destination = `${zikuConfig.source.owner}/${zikuConfig.source.repo}`;
+        const baseBranch = zikuConfig.source.ref || "main";
+        const baseHashStr = lock.baseRef ? `  ${pc.dim(`since ${lock.baseRef.slice(0, 7)}`)}` : "";
 
         const fileLines: string[] = [];
         for (const pf of pushableFiles) {
@@ -498,20 +502,20 @@ export const pushCommand = defineCommand({
 
         const result = await withSpinner("Creating PR on GitHub...", () =>
           createPullRequest(token, {
-            owner: config.source.owner,
-            repo: config.source.repo,
+            owner: zikuConfig.source.owner,
+            repo: zikuConfig.source.repo,
             files,
             title,
             body,
-            baseBranch: config.source.ref || "main",
+            baseBranch: zikuConfig.source.ref || "main",
           }),
         );
 
         log.success("Pull request created!");
         log.message(
           [
-            `${pc.dim("To")} ${pc.bold(`${config.source.owner}/${config.source.repo}`)}`,
-            `  ${config.baseRef ? `${pc.dim(config.baseRef.slice(0, 7))}..` : ""}${pc.green(result.branch)}  ${pc.dim(`(${files.length} file${files.length !== 1 ? "s" : ""} changed)`)}`,
+            `${pc.dim("To")} ${pc.bold(`${zikuConfig.source.owner}/${zikuConfig.source.repo}`)}`,
+            `  ${lock.baseRef ? `${pc.dim(lock.baseRef.slice(0, 7))}..` : ""}${pc.green(result.branch)}  ${pc.dim(`(${files.length} file${files.length !== 1 ? "s" : ""} changed)`)}`,
             "",
             `  ${pc.bold(`PR #${result.number}`)}  ${pc.cyan(result.url)}`,
           ].join("\n"),

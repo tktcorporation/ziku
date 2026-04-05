@@ -20,9 +20,16 @@ vi.mock("../../utils/template", () => ({
   ),
 }));
 
-vi.mock("../../utils/config", () => ({
-  loadConfig: vi.fn(),
-  saveConfig: vi.fn(),
+vi.mock("../../utils/ziku-config", () => ({
+  ZIKU_CONFIG_FILE: ".ziku/ziku.jsonc",
+  loadZikuConfig: vi.fn(),
+  zikuConfigExists: vi.fn(),
+}));
+
+vi.mock("../../utils/lock", () => ({
+  LOCK_FILE: ".ziku/lock.json",
+  loadLock: vi.fn(),
+  saveLock: vi.fn(),
 }));
 
 vi.mock("../../utils/hash", () => ({
@@ -93,23 +100,31 @@ const { pullCommand } = await import("../pull");
 const { selectDeletedFiles } = await import("../../ui/prompts");
 const mockSelectDeletedFiles = vi.mocked(selectDeletedFiles);
 const { downloadTemplateToTemp } = await import("../../utils/template");
-const { loadConfig, saveConfig } = await import("../../utils/config");
+const { loadZikuConfig, zikuConfigExists } = await import("../../utils/ziku-config");
+const { loadLock, saveLock } = await import("../../utils/lock");
 const { hashFiles } = await import("../../utils/hash");
 const { classifyFiles, threeWayMerge } = await import("../../utils/merge");
 const { log } = await import("../../ui/renderer");
 
 const mockDownloadTemplateToTemp = vi.mocked(downloadTemplateToTemp);
-const mockLoadConfig = vi.mocked(loadConfig);
-const mockSaveConfig = vi.mocked(saveConfig);
+const mockZikuConfigExists = vi.mocked(zikuConfigExists);
+const mockLoadZikuConfig = vi.mocked(loadZikuConfig);
+const mockLoadLock = vi.mocked(loadLock);
+const mockSaveLock = vi.mocked(saveLock);
 const mockHashFiles = vi.mocked(hashFiles);
 const mockClassifyFiles = vi.mocked(classifyFiles);
 const mockThreeWayMerge = vi.mocked(threeWayMerge);
 const mockLog = vi.mocked(log);
 
-const baseConfig = {
+const baseZikuConfig = {
+  source: { owner: "tktcorporation", repo: ".github" },
+  include: [".mcp.json", ".mise.toml"],
+  exclude: [],
+};
+
+const baseLock = {
   version: "0.1.0",
   installedAt: "2024-01-01T00:00:00.000Z",
-  source: { owner: "tktcorporation", repo: ".github" },
   baseHashes: { ".mcp.json": "abc123" },
 };
 
@@ -122,9 +137,14 @@ describe("pullCommand", () => {
       templateDir: "/tmp/template",
       cleanup: vi.fn(),
     });
-    mockLoadConfig.mockResolvedValue(baseConfig);
+    mockZikuConfigExists.mockReturnValue(true);
+    mockLoadZikuConfig.mockResolvedValue({
+      config: baseZikuConfig as any,
+      rawContent: JSON.stringify(baseZikuConfig),
+    });
+    mockLoadLock.mockResolvedValue(baseLock as any);
     mockHashFiles.mockResolvedValue({});
-    mockSaveConfig.mockResolvedValue(undefined);
+    mockSaveLock.mockResolvedValue(undefined);
   });
 
   describe("meta", () => {
@@ -138,7 +158,7 @@ describe("pullCommand", () => {
 
   describe("run", () => {
     it("初期化されていない場合はエラー", async () => {
-      mockLoadConfig.mockRejectedValueOnce(new Error("ENOENT"));
+      mockZikuConfigExists.mockReturnValueOnce(false);
 
       await expect(
         (pullCommand.run as any)({
@@ -230,8 +250,8 @@ describe("pullCommand", () => {
       });
 
       // baseHashes にエントリがないケース（readBaseContent が undefined を返す）
-      mockLoadConfig.mockResolvedValueOnce({
-        ...baseConfig,
+      mockLoadLock.mockResolvedValueOnce({
+        ...baseLock,
         baseHashes: {},
       });
 
@@ -398,7 +418,7 @@ describe("pullCommand", () => {
         cmd: pullCommand,
       });
 
-      expect(mockSaveConfig).toHaveBeenCalledWith(
+      expect(mockSaveLock).toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
           baseHashes: newTemplateHashes,
@@ -460,7 +480,7 @@ describe("pullCommand", () => {
         cmd: pullCommand,
       });
 
-      expect(mockSaveConfig).toHaveBeenCalledWith(
+      expect(mockSaveLock).toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
           pendingMerge: expect.objectContaining({
@@ -469,7 +489,7 @@ describe("pullCommand", () => {
         }),
       );
       // baseHashes/baseRef は更新されない（pendingMerge に保留）
-      expect(mockSaveConfig).not.toHaveBeenCalledWith(
+      expect(mockSaveLock).not.toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
           baseHashes: expect.any(Object),
@@ -479,8 +499,8 @@ describe("pullCommand", () => {
     });
 
     it("--continue: pendingMerge がない場合はエラー", async () => {
-      mockLoadConfig.mockResolvedValueOnce({
-        ...baseConfig,
+      mockLoadLock.mockResolvedValueOnce({
+        ...baseLock,
         pendingMerge: undefined,
       });
 
@@ -498,8 +518,8 @@ describe("pullCommand", () => {
         "/test/.mcp.json": "<<<<<<< LOCAL\nlocal\n=======\ntemplate\n>>>>>>> TEMPLATE",
       });
 
-      mockLoadConfig.mockResolvedValueOnce({
-        ...baseConfig,
+      mockLoadLock.mockResolvedValueOnce({
+        ...baseLock,
         pendingMerge: {
           conflicts: [".mcp.json"],
           templateHashes: { ".mcp.json": "hash123" },
@@ -521,8 +541,8 @@ describe("pullCommand", () => {
         "/test/.mcp.json": "resolved content (no conflict markers)",
       });
 
-      mockLoadConfig.mockResolvedValueOnce({
-        ...baseConfig,
+      mockLoadLock.mockResolvedValueOnce({
+        ...baseLock,
         pendingMerge: {
           conflicts: [".mcp.json"],
           templateHashes: { ".mcp.json": "newhash" },
@@ -536,7 +556,7 @@ describe("pullCommand", () => {
         cmd: pullCommand,
       });
 
-      expect(mockSaveConfig).toHaveBeenCalledWith(
+      expect(mockSaveLock).toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
           baseHashes: { ".mcp.json": "newhash" },
@@ -558,8 +578,8 @@ describe("pullCommand", () => {
         "/tmp/base/settings.json": '{"base": true}',
       });
 
-      mockLoadConfig.mockResolvedValueOnce({
-        ...baseConfig,
+      mockLoadLock.mockResolvedValueOnce({
+        ...baseLock,
         baseRef: "abc123",
         baseHashes: { "settings.json": "old-hash" },
       });
@@ -668,7 +688,7 @@ describe("pullCommand", () => {
       expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining("Auto-merged"));
       expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining(".mcp.json"));
       // pendingMerge は保存されない（正常完了パス）
-      expect(mockSaveConfig).not.toHaveBeenCalledWith(
+      expect(mockSaveLock).not.toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({ pendingMerge: expect.anything() }),
       );
@@ -716,7 +736,7 @@ describe("pullCommand", () => {
       // b.txt はコンフリクト
       expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining("b.txt"));
       // 未解決コンフリクトがあるので pendingMerge が保存される
-      expect(mockSaveConfig).toHaveBeenCalledWith(
+      expect(mockSaveLock).toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
           pendingMerge: expect.objectContaining({
@@ -764,13 +784,13 @@ describe("pullCommand", () => {
       expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining("a.json"));
       expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining("b.json"));
       // pendingMerge なしで正常完了
-      expect(mockSaveConfig).toHaveBeenCalledWith(
+      expect(mockSaveLock).toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
           baseHashes: expect.any(Object),
         }),
       );
-      expect(mockSaveConfig).not.toHaveBeenCalledWith(
+      expect(mockSaveLock).not.toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
           pendingMerge: expect.anything(),

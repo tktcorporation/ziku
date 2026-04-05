@@ -69,7 +69,7 @@ Example `modules.jsonc`:
 npx ziku
 ```
 
-ziku copies the matching files into your project. A `.ziku.json` config and `.ziku/modules.jsonc` are created locally to track what was installed.
+ziku copies the matching files into your project. A `.ziku/ziku.jsonc` (config) and `.ziku/lock.json` (sync state) are created locally to track what was installed.
 
 ### 4. Keep it in sync
 
@@ -206,10 +206,10 @@ OPTIONS
 
 ### `track`
 
-Add file patterns to the tracking whitelist in modules.jsonc
+Add file patterns to the tracking whitelist in ziku.jsonc
 
 ```
-Add file patterns to the tracking whitelist in modules.jsonc (track)
+Add file patterns to the tracking whitelist in ziku.jsonc (track)
 
 USAGE `track [OPTIONS] [PATTERNS]`
 
@@ -230,14 +230,7 @@ OPTIONS
 
 ## What You Get
 
-Files generated based on selected modules:
-
-- **Root (`./`)** — MCP, mise, and other root-level config files
-- **`.devcontainer/`** — VS Code DevContainer with Docker-in-Docker
-- **`.github/`** — GitHub Actions and labeler workflows
-- **`.claude/`** — Claude Code project settings
-
-> See [`.ziku/modules.jsonc`](./.ziku/modules.jsonc) for the full list of tracked file patterns.
+The files you get depend on the patterns configured in your template's `.ziku/modules.jsonc`. After running `ziku init`, your selected patterns are saved in `.ziku/ziku.jsonc` — you can customize them anytime with `ziku track`.
 
 <!-- FILES:END -->
 
