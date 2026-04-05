@@ -15,9 +15,14 @@ vi.mock("node:fs/promises", async () => {
 });
 
 // loadCommandContext をモック（DI の恩恵: 低レベルモック不要）
-vi.mock("../../services/command-context", () => ({
-  loadCommandContext: vi.fn(),
-}));
+// runCommandEffect / toZikuError は実際の実装を使い、loadCommandContext だけモックする
+vi.mock("../../services/command-context", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../services/command-context")>();
+  return {
+    ...actual,
+    loadCommandContext: vi.fn(),
+  };
+});
 
 // utils/diff をモック
 vi.mock("../../utils/diff", () => ({

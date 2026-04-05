@@ -15,9 +15,14 @@ vi.mock("node:fs/promises", async () => {
 });
 
 // loadCommandContext をモック（DI の恩恵: 低レベルモック不要）
-vi.mock("../../services/command-context", () => ({
-  loadCommandContext: vi.fn(),
-}));
+// runCommandEffect / toZikuError は実際の実装を使い、loadCommandContext だけモックする
+vi.mock("../../services/command-context", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../services/command-context")>();
+  return {
+    ...actual,
+    loadCommandContext: vi.fn(),
+  };
+});
 
 // utils/diff をモック
 vi.mock("../../utils/diff", () => ({
@@ -296,9 +301,7 @@ describe("pushCommand", () => {
     });
 
     it("無効な .ziku/lock.json 形式の場合はエラー", async () => {
-      // ParseError は loadCommandContext の mapError で "Failed to load configuration" になる
-      // しかし push.ts の実装では ParseError を直接返さず、FileNotFoundError 以外は
-      // "Failed to load configuration" にマッピングされる
+      // ParseError は toZikuError で "Failed to parse configuration" に変換される
       const { ParseError } = await import("../../errors");
       mockLoadCommandContext.mockReturnValue(
         Effect.fail(new ParseError({ path: ".ziku/lock.json", cause: "invalid format" })),
@@ -310,7 +313,7 @@ describe("pushCommand", () => {
           rawArgs: [],
           cmd: pushCommand,
         }),
-      ).rejects.toThrow("Failed to load configuration");
+      ).rejects.toThrow("Failed to parse configuration");
     });
 
     it("patterns が空の場合は警告", async () => {

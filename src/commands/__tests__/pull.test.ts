@@ -15,9 +15,14 @@ vi.mock("node:fs/promises", async () => {
 });
 
 // loadCommandContext をモック（DI の恩恵: 低レベルモック不要）
-vi.mock("../../services/command-context", () => ({
-  loadCommandContext: vi.fn(),
-}));
+// runCommandEffect / toZikuError は実際の実装を使い、loadCommandContext だけモックする
+vi.mock("../../services/command-context", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../services/command-context")>();
+  return {
+    ...actual,
+    loadCommandContext: vi.fn(),
+  };
+});
 
 vi.mock("../../utils/template", () => ({
   downloadTemplateToTemp: vi.fn(),
@@ -132,12 +137,12 @@ const baseLock = {
  * テスト用の CommandContext を生成するヘルパー。
  * 通常モード（--continue 以外）で loadCommandContext の戻り値として使う。
  */
-function mockContext(overrides?: Partial<{
-  config: Record<string, unknown>;
-  lock: Record<string, unknown>;
-  source: { owner: string; repo: string };
-  templateDir: string;
-}>) {
+function mockContext(overrides?: {
+  config?: { include: string[]; exclude?: string[] };
+  lock?: typeof baseLock & Record<string, unknown>;
+  source?: { owner: string; repo: string };
+  templateDir?: string;
+}) {
   const cleanup = vi.fn();
   const source = overrides?.source ?? { owner: "tktcorporation", repo: ".github" };
   return {
@@ -147,6 +152,8 @@ function mockContext(overrides?: Partial<{
       source,
       templateDir: overrides?.templateDir ?? "/tmp/template",
       cleanup,
+      /** テスト用: GitHub API 呼び出しをスキップし undefined を返す */
+      resolveBaseRef: Effect.succeed(undefined as string | undefined),
     }),
     cleanup,
   };

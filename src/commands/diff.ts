@@ -1,15 +1,14 @@
 import { defineCommand } from "citty";
-import { Cause, Effect, Exit, Option } from "effect";
+import { Effect } from "effect";
 import { resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
-import { ZikuError } from "../errors";
 import { renderFileDiff } from "../ui/diff-view";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
 import { detectDiff, hasDiff } from "../utils/diff";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked";
 import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
 import { LOCK_FILE } from "../utils/lock";
-import { loadCommandContext } from "../services/command-context";
+import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 
@@ -61,22 +60,10 @@ export const diffCommand = defineCommand({
 
     const targetDir = resolve(args.dir);
 
-    // loadCommandContext で設定読み込み + テンプレート解決を DRY 化（Effect DI）
-    // TaggedError → ZikuError に変換し、Exit から取り出して re-throw
-    const exit = await Effect.runPromiseExit(
-      loadCommandContext(targetDir).pipe(
-        Effect.mapError((err) =>
-          err._tag === "FileNotFoundError"
-            ? new ZikuError(`${err.path} not found.`, "Run 'ziku init' first.")
-            : new ZikuError("Failed to load configuration", String(err)),
-        ),
-      ),
+    // loadCommandContext + runCommandEffect で設定読み込み・テンプレート解決を DRY 化
+    const ctx = await runCommandEffect(
+      loadCommandContext(targetDir).pipe(Effect.mapError(toZikuError)),
     );
-    if (Exit.isFailure(exit)) {
-      const error = Cause.failureOption(exit.cause);
-      throw Option.isSome(error) ? error.value : Cause.squash(exit.cause);
-    }
-    const ctx = exit.value;
 
     const { config, source, templateDir, cleanup } = ctx;
 
@@ -94,18 +81,15 @@ export const diffCommand = defineCommand({
           return;
         }
 
-        // Step 1: 差分を検出
         log.step("Detecting changes...");
 
         const diff = await withSpinner("Analyzing differences...", () =>
           detectDiff({ targetDir, templateDir, patterns }),
         );
 
-        // 未トラックファイルを検出
         const untrackedByFolder = await detectUntrackedFiles({ targetDir, patterns });
         const untrackedCount = getTotalUntrackedCount(untrackedByFolder);
 
-        // 結果表示
         if (hasDiff(diff)) {
           logDiffSummary(diff.files);
 
@@ -116,20 +100,7 @@ export const diffCommand = defineCommand({
           }
 
           if (untrackedCount > 0) {
-            log.warn(`${untrackedCount} untracked file(s) found outside the sync whitelist:`);
-            const untrackedLines = untrackedByFolder.flatMap((group) =>
-              group.files.map((file) => `  ${pc.dim("•")} ${file.path}`),
-            );
-            log.message(untrackedLines.join("\n"));
-            log.info(
-              `To include these files in sync, add them to tracking with the ${pc.cyan("track")} command:`,
-            );
-            log.message(pc.dim(`  npx ziku track "<pattern>"`));
-            log.message(
-              pc.dim(
-                `  Example: npx ziku track "${untrackedByFolder[0]?.files[0]?.path || ".cloud/rules/*.md"}"`,
-              ),
-            );
+            logUntrackedFiles(untrackedByFolder, untrackedCount);
           }
 
           outro("Run 'ziku push' to push changes.");
@@ -154,3 +125,23 @@ export const diffCommand = defineCommand({
     );
   },
 });
+
+function logUntrackedFiles(
+  untrackedByFolder: Array<{ files: Array<{ path: string }> }>,
+  untrackedCount: number,
+): void {
+  log.warn(`${untrackedCount} untracked file(s) found outside the sync whitelist:`);
+  const untrackedLines = untrackedByFolder.flatMap((group) =>
+    group.files.map((file) => `  ${pc.dim("•")} ${file.path}`),
+  );
+  log.message(untrackedLines.join("\n"));
+  log.info(
+    `To include these files in sync, add them to tracking with the ${pc.cyan("track")} command:`,
+  );
+  log.message(pc.dim(`  npx ziku track "<pattern>"`));
+  log.message(
+    pc.dim(
+      `  Example: npx ziku track "${untrackedByFolder[0]?.files[0]?.path || ".cloud/rules/*.md"}"`,
+    ),
+  );
+}

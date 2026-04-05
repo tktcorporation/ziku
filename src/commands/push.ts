@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { defineCommand } from "citty";
-import { Cause, Effect, Exit, Option } from "effect";
+import { Effect } from "effect";
 import { join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
@@ -9,7 +9,7 @@ import type { FileDiff } from "../modules/schemas";
 import { isLocalSource } from "../modules/schemas";
 import { LOCK_FILE } from "../utils/lock";
 import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
-import { loadCommandContext } from "../services/command-context";
+import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 import {
@@ -109,21 +109,11 @@ export const pushCommand = defineCommand({
 
     const targetDir = resolve(args.dir);
 
-    // loadCommandContext で設定読み込み + テンプレート解決を DRY 化
-    const exit = await Effect.runPromiseExit(
-      loadCommandContext(targetDir).pipe(
-        Effect.mapError((err) =>
-          err._tag === "FileNotFoundError"
-            ? new ZikuError(`${err.path} not found.`, "Run 'ziku init' first.")
-            : new ZikuError("Failed to load configuration", String(err)),
-        ),
-      ),
+    // loadCommandContext + runCommandEffect で DRY 化
+    const ctx = await runCommandEffect(
+      loadCommandContext(targetDir).pipe(Effect.mapError(toZikuError)),
     );
-    if (Exit.isFailure(exit)) {
-      const error = Cause.failureOption(exit.cause);
-      throw Option.isSome(error) ? error.value : Cause.squash(exit.cause);
-    }
-    const { config, lock, source, templateDir, cleanup } = exit.value;
+    const { config, lock, source, templateDir, cleanup } = ctx;
 
     if (lock.pendingMerge) {
       cleanup();

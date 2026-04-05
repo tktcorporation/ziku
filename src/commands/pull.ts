@@ -1,21 +1,20 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { defineCommand } from "citty";
-import { Cause, Effect, Exit, Option } from "effect";
+import { Effect } from "effect";
 import { dirname, join, resolve } from "pathe";
+import { match, P } from "ts-pattern";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
-import type { LockState } from "../modules/schemas";
-import { isGitHubSource } from "../modules/schemas";
+import type { LockState, TemplateSource } from "../modules/schemas";
 import { selectDeletedFiles } from "../ui/prompts";
 import { intro, log, outro, pc } from "../ui/renderer";
 import { LOCK_FILE, loadLock, saveLock } from "../utils/lock";
 import { ZIKU_CONFIG_FILE, saveZikuConfig, generateZikuJsonc, zikuConfigExists } from "../utils/ziku-config";
-import { loadCommandContext } from "../services/command-context";
+import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
 import { loadTemplateConfig } from "../utils/template-config";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
-import { resolveLatestCommitSha } from "../utils/github";
 import { hashFiles } from "../utils/hash";
 import {
   asBaseContent,
@@ -107,21 +106,12 @@ export const pullCommand = defineCommand({
       return;
     }
 
-    // loadCommandContext で設定読み込み + テンプレート解決を DRY 化
-    const exit = await Effect.runPromiseExit(
-      loadCommandContext(targetDir).pipe(
-        Effect.mapError((err) =>
-          err._tag === "FileNotFoundError"
-            ? new ZikuError(`${err.path} not found.`, "Run 'ziku init' first.")
-            : new ZikuError("Failed to load configuration", String(err)),
-        ),
-      ),
+    // loadCommandContext + runCommandEffect で DRY 化
+    const ctx = await runCommandEffect(
+      loadCommandContext(targetDir).pipe(Effect.mapError(toZikuError)),
     );
-    if (Exit.isFailure(exit)) {
-      const error = Cause.failureOption(exit.cause);
-      throw Option.isSome(error) ? error.value : Cause.squash(exit.cause);
-    }
-    const { config, lock, source, templateDir, cleanup } = exit.value;
+
+    const { config, lock, source, templateDir, cleanup, resolveBaseRef } = ctx;
 
     log.info(`Template: ${pc.cyan(templateDir)}${"path" in source ? " (local)" : ""}`);
 
@@ -137,9 +127,7 @@ export const pullCommand = defineCommand({
     await withFinally(async () => {
       // テンプレートの ziku.jsonc から新パターンをマージ
       const templateConfig = await Effect.runPromise(
-        loadTemplateConfig(templateDir).pipe(
-          Effect.orElseSucceed(() => null),
-        ),
+        loadTemplateConfig(templateDir).pipe(Effect.orElseSucceed(() => null)),
       );
 
       let mergedInclude = include;
@@ -164,7 +152,6 @@ export const pullCommand = defineCommand({
         }
       }
 
-      // ハッシュ計算（マージ後のパターンで実行）
       log.step("Analyzing changes...");
 
       const [templateHashes, localHashes] = await Promise.all([
@@ -190,133 +177,41 @@ export const pullCommand = defineCommand({
       logPullSummary(classification);
 
       // 自動更新ファイルを適用
-      for (const file of classification.autoUpdate) {
-        const content = await readFile(join(templateDir, file), "utf-8");
-        const destPath = join(targetDir, file);
-        const destDir = dirname(destPath);
-        if (!existsSync(destDir)) {
-          await mkdir(destDir, { recursive: true });
-        }
-        await writeFile(destPath, content, "utf-8");
-      }
+      await applyFiles(classification.autoUpdate, templateDir, targetDir);
       if (classification.autoUpdate.length > 0) {
         log.success(`Updated ${classification.autoUpdate.length} file(s)`);
       }
 
       // 新規ファイルを追加
-      for (const file of classification.newFiles) {
-        const content = await readFile(join(templateDir, file), "utf-8");
-        const destPath = join(targetDir, file);
-        const destDir = dirname(destPath);
-        if (!existsSync(destDir)) {
-          await mkdir(destDir, { recursive: true });
-        }
-        await writeFile(destPath, content, "utf-8");
-      }
+      await applyFiles(classification.newFiles, templateDir, targetDir);
       if (classification.newFiles.length > 0) {
         log.success(`Added ${classification.newFiles.length} new file(s)`);
       }
 
       // コンフリクト解決
-      const unresolvedConflicts: string[] = [];
-      if (classification.conflicts.length > 0) {
-        let baseTemplateDir: string | undefined;
-        let baseCleanup: (() => void) | undefined;
+      const unresolvedConflicts = await resolveConflicts(
+        classification.conflicts,
+        { targetDir, templateDir, source, lock },
+      );
 
-        if (lock.baseRef && isGitHubSource(source)) {
-          const baseResult = await Effect.runPromise(
-            Effect.tryPromise(() => {
-              log.info(`Downloading base version (${lock.baseRef?.slice(0, 7)}...) for merge...`);
-              const baseSource = `gh:${source.owner}/${source.repo}#${lock.baseRef}`;
-              return downloadTemplateToTemp(targetDir, baseSource, "base");
-            }).pipe(
-              Effect.orElseSucceed(() => {
-                log.warn(
-                  "Could not download base version. Falling back to 2-way conflict markers.",
-                );
-                return null;
-              }),
-            ),
-          );
-          if (baseResult) {
-            baseTemplateDir = baseResult.templateDir;
-            baseCleanup = baseResult.cleanup;
-          }
-        }
-
-        await withFinally(
-          async () => {
-            for (const file of classification.conflicts) {
-              const localContent = await readFile(join(targetDir, file), "utf-8");
-              const templateContent = await readFile(join(templateDir, file), "utf-8");
-
-              let baseContent = "";
-              if (baseTemplateDir && existsSync(join(baseTemplateDir, file))) {
-                baseContent = await readFile(join(baseTemplateDir, file), "utf-8");
-              }
-
-              const result = threeWayMerge({
-                base: asBaseContent(baseContent),
-                local: asLocalContent(localContent),
-                template: asTemplateContent(templateContent),
-                filePath: file,
-              });
-              await writeFile(join(targetDir, file), result.content, "utf-8");
-              if (result.hasConflicts) {
-                unresolvedConflicts.push(file);
-                log.warn(`Conflict in ${pc.cyan(file)} — manual resolution needed`);
-              } else {
-                log.success(`Auto-merged: ${pc.cyan(file)}`);
-              }
-            }
-
-            if (unresolvedConflicts.length > 0) {
-              log.warn("Some files have conflicts. Resolve them, then run `ziku pull --continue`");
-            }
+      if (unresolvedConflicts.length > 0) {
+        // resolveBaseRef で isGitHubSource 分岐を吸収
+        const latestRef = await Effect.runPromise(resolveBaseRef);
+        await saveLock(targetDir, {
+          ...lock,
+          pendingMerge: {
+            conflicts: unresolvedConflicts,
+            templateHashes,
+            ...(latestRef ? { latestRef } : {}),
           },
-          () => baseCleanup?.(),
-        );
-
-        if (unresolvedConflicts.length > 0) {
-          const latestRef = isGitHubSource(source)
-            ? await resolveLatestCommitSha(source.owner, source.repo)
-            : undefined;
-          await saveLock(targetDir, {
-            ...lock,
-            pendingMerge: {
-              conflicts: unresolvedConflicts,
-              templateHashes: templateHashes,
-              ...(latestRef ? { latestRef } : {}),
-            },
-          });
-          outro("Merge paused — resolve conflicts then run `ziku pull --continue`");
-          return;
-        }
+        });
+        outro("Merge paused — resolve conflicts then run `ziku pull --continue`");
+        return;
       }
 
       // 削除されたファイルを処理
       if (classification.deletedFiles.length > 0) {
-        let filesToDelete: string[];
-
-        if (args.force) {
-          filesToDelete = classification.deletedFiles;
-          log.info(`Deleting ${filesToDelete.length} file(s) removed from template...`);
-        } else {
-          filesToDelete = await selectDeletedFiles(classification.deletedFiles);
-        }
-
-        for (const file of filesToDelete) {
-          await Effect.runPromise(
-            Effect.tryPromise(async () => {
-              await rm(join(targetDir, file), { force: true });
-              log.success(`Deleted: ${file}`);
-            }).pipe(
-              Effect.orElseSucceed(() => {
-                log.warn(`Could not delete: ${file}`);
-              }),
-            ),
-          );
-        }
+        await handleDeletedFiles(classification.deletedFiles, targetDir, args.force as boolean);
       }
 
       // パターンが更新された場合、ユーザーの ziku.jsonc を上書き
@@ -329,9 +224,8 @@ export const pullCommand = defineCommand({
         log.success(`Updated ${ZIKU_CONFIG_FILE} with new patterns from template`);
       }
 
-      const latestRef = isGitHubSource(source)
-        ? await resolveLatestCommitSha(source.owner, source.repo)
-        : undefined;
+      // resolveBaseRef で isGitHubSource 分岐を吸収
+      const latestRef = await Effect.runPromise(resolveBaseRef);
 
       await saveLock(targetDir, {
         ...lock,
@@ -343,6 +237,138 @@ export const pullCommand = defineCommand({
     }, cleanup);
   },
 });
+
+// ─── ヘルパー関数 ───
+
+/**
+ * テンプレートからファイルをコピーする共通処理。
+ * autoUpdate と newFiles で同じロジックを使う（DRY）。
+ */
+async function applyFiles(
+  files: string[],
+  templateDir: string,
+  targetDir: string,
+): Promise<void> {
+  for (const file of files) {
+    const content = await readFile(join(templateDir, file), "utf-8");
+    const destPath = join(targetDir, file);
+    const destDir = dirname(destPath);
+    if (!existsSync(destDir)) {
+      await mkdir(destDir, { recursive: true });
+    }
+    await writeFile(destPath, content, "utf-8");
+  }
+}
+
+/**
+ * コンフリクトファイルを 3-way マージで解決する。
+ * 未解決のコンフリクトパスを返す。
+ */
+async function resolveConflicts(
+  conflicts: string[],
+  ctx: {
+    targetDir: string;
+    templateDir: string;
+    source: TemplateSource;
+    lock: LockState;
+  },
+): Promise<string[]> {
+  if (conflicts.length === 0) return [];
+
+  const unresolvedConflicts: string[] = [];
+  let baseTemplateDir: string | undefined;
+  let baseCleanup: (() => void) | undefined;
+
+  // ts-pattern でソース種別に応じたベースダウンロードを分岐
+  if (ctx.lock.baseRef) {
+    const downloadResult = await match(ctx.source)
+      .with({ owner: P.string, repo: P.string }, async (ghSource) => {
+        return Effect.runPromise(
+          Effect.tryPromise(() => {
+            log.info(`Downloading base version (${ctx.lock.baseRef?.slice(0, 7)}...) for merge...`);
+            return downloadTemplateToTemp(
+              ctx.targetDir,
+              `gh:${ghSource.owner}/${ghSource.repo}#${ctx.lock.baseRef}`,
+              "base",
+            );
+          }).pipe(
+            Effect.orElseSucceed(() => {
+              log.warn("Could not download base version. Falling back to 2-way conflict markers.");
+              return null;
+            }),
+          ),
+        );
+      })
+      .with({ path: P.string }, () => Promise.resolve(null))
+      .exhaustive();
+
+    if (downloadResult) {
+      baseTemplateDir = downloadResult.templateDir;
+      baseCleanup = downloadResult.cleanup;
+    }
+  }
+
+  await withFinally(
+    async () => {
+      for (const file of conflicts) {
+        const localContent = await readFile(join(ctx.targetDir, file), "utf-8");
+        const templateContent = await readFile(join(ctx.templateDir, file), "utf-8");
+
+        let baseContent = "";
+        if (baseTemplateDir && existsSync(join(baseTemplateDir, file))) {
+          baseContent = await readFile(join(baseTemplateDir, file), "utf-8");
+        }
+
+        const result = threeWayMerge({
+          base: asBaseContent(baseContent),
+          local: asLocalContent(localContent),
+          template: asTemplateContent(templateContent),
+          filePath: file,
+        });
+        await writeFile(join(ctx.targetDir, file), result.content, "utf-8");
+        if (result.hasConflicts) {
+          unresolvedConflicts.push(file);
+          log.warn(`Conflict in ${pc.cyan(file)} — manual resolution needed`);
+        } else {
+          log.success(`Auto-merged: ${pc.cyan(file)}`);
+        }
+      }
+
+      if (unresolvedConflicts.length > 0) {
+        log.warn("Some files have conflicts. Resolve them, then run `ziku pull --continue`");
+      }
+    },
+    () => baseCleanup?.(),
+  );
+
+  return unresolvedConflicts;
+}
+
+/**
+ * テンプレートで削除されたファイルを処理する。
+ */
+async function handleDeletedFiles(
+  deletedFiles: string[],
+  targetDir: string,
+  force: boolean,
+): Promise<void> {
+  const filesToDelete = force
+    ? (log.info(`Deleting ${deletedFiles.length} file(s) removed from template...`), deletedFiles)
+    : await selectDeletedFiles(deletedFiles);
+
+  for (const file of filesToDelete) {
+    await Effect.runPromise(
+      Effect.tryPromise(async () => {
+        await rm(join(targetDir, file), { force: true });
+        log.success(`Deleted: ${file}`);
+      }).pipe(
+        Effect.orElseSucceed(() => {
+          log.warn(`Could not delete: ${file}`);
+        }),
+      ),
+    );
+  }
+}
 
 async function runContinue(targetDir: string, lock: LockState): Promise<void> {
   if (!lock.pendingMerge) {
