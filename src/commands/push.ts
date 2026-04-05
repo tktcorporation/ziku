@@ -116,18 +116,19 @@ export const pushCommand = defineCommand({
     const { config: zikuConfig, rawContent: zikuConfigRaw } = await loadZikuConfig(targetDir);
 
     // lock.json を読み込み（loadLock に集約）
-    let lock;
-    try {
-      lock = await loadLock(targetDir);
-    } catch (error) {
-      if (error instanceof Error && error.message.includes("ENOENT")) {
-        throw new ZikuError(".ziku/lock.json not found.", "Run 'ziku init' first.");
-      }
-      throw new ZikuError(
-        "Invalid .ziku/lock.json format",
-        error instanceof Error ? error.message : String(error),
-      );
-    }
+    // ENOENT → lock未作成、それ以外 → フォーマット不正として ZikuError に変換
+    const lock = await Effect.runPromise(
+      Effect.tryPromise({
+        try: () => loadLock(targetDir),
+        catch: (error) =>
+          error instanceof Error && error.message.includes("ENOENT")
+            ? new ZikuError(".ziku/lock.json not found.", "Run 'ziku init' first.")
+            : new ZikuError(
+                "Invalid .ziku/lock.json format",
+                error instanceof Error ? error.message : String(error),
+              ),
+      }).pipe(Effect.mapError((e) => e)),
+    );
 
     if (lock.pendingMerge) {
       throw new ZikuError(
