@@ -289,7 +289,7 @@ async function main(): Promise<void> {
     execFileSync("npx", ["oxfmt", "--write", path], { stdio: "ignore" });
     const formatted = await readFile(path, "utf-8");
     if (originalSchemas[path] !== formatted) {
-      schemaUpdates.push(path.split("/").pop()!);
+      schemaUpdates.push(path.split("/").pop() ?? path);
     }
   }
 
