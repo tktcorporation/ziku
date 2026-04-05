@@ -11,7 +11,7 @@ import type {
   OverwriteStrategy,
   TemplateModule,
 } from "../modules/schemas";
-import { match } from "ts-pattern";
+import { P, match } from "ts-pattern";
 import { ZikuError } from "../errors";
 import {
   inputTemplateSource,
@@ -145,16 +145,13 @@ export const initCommand = defineCommand({
 
     let templateDir: string;
     let cleanup: () => void;
-    let sourceOwner: string;
-    let sourceRepo: string;
+    let source: { owner: string; repo: string } | { dir: string };
 
     if (fromDir) {
       // ローカルディレクトリをテンプレートとして使用（ダウンロード不要）
       templateDir = resolve(fromDir);
       cleanup = () => {};
-      // source はローカルパスから推測しない（ziku.jsonc には保存しない or ダミー）
-      sourceOwner = "local";
-      sourceRepo = "template";
+      source = { path: templateDir };
       log.info(`Template: ${pc.cyan(templateDir)} (local)`);
     } else {
       // GitHub リポジトリからダウンロード
@@ -162,14 +159,10 @@ export const initCommand = defineCommand({
         args.from as string | undefined,
         args.yes as boolean,
       );
-      sourceOwner = resolved.sourceOwner;
-      sourceRepo = resolved.sourceRepo;
+      source = { owner: resolved.sourceOwner, repo: resolved.sourceRepo };
 
-      const templateSourceStr = buildTemplateSource({
-        owner: sourceOwner,
-        repo: sourceRepo,
-      });
-      log.info(`Template: ${pc.cyan(`${sourceOwner}/${sourceRepo}`)}`);
+      const templateSourceStr = buildTemplateSource(source as { owner: string; repo: string });
+      log.info(`Template: ${pc.cyan(`${resolved.sourceOwner}/${resolved.sourceRepo}`)}`);
 
       log.step("Fetching template...");
       const downloaded = await withSpinner("Downloading template from GitHub...", () =>
@@ -182,12 +175,17 @@ export const initCommand = defineCommand({
     // ─── 共通処理: テンプレート適用 ───
     await withFinally(async () => {
       if (!modulesFileExists(templateDir)) {
-        handleMissingDevenv(sourceOwner, sourceRepo);
+        // ローカルソースの場合はテンプレートパスを表示、GitHub の場合は setup 誘導
+        const hint = match(source)
+          .with({ path: P.string }, (s) => `Add .ziku/modules.jsonc to ${s.path}`)
+          .with(
+            { owner: P.string, repo: P.string },
+            (s) => `Run ziku setup --remote --from ${s.owner}/${s.repo}`,
+          )
+          .exhaustive();
+        throw new ZikuError(`Template has no .ziku/modules.jsonc`, hint);
       }
 
-      // テンプレートの modules.jsonc を読み込み、パターンを解決する。
-      // モジュール形式 → モジュール選択 UI → フラット化
-      // フラット形式 → そのまま使用
       const flatPatterns = await resolveTemplatePatterns(
         templateDir,
         args.yes as boolean,
@@ -229,12 +227,15 @@ export const initCommand = defineCommand({
       // テンプレートファイルのハッシュを計算（pull 時の差分検出用）
       const baseHashes = await hashFiles(templateDir, flatPatterns.include, flatPatterns.exclude);
 
-      // テンプレートリポジトリの最新コミット SHA を取得（3-way マージのベース用）
-      const baseRef = await resolveLatestCommitSha(sourceOwner, sourceRepo);
+      // baseRef: GitHub ソースの場合のみコミット SHA を取得
+      const baseRef = await match(source)
+        .with({ owner: P.string, repo: P.string }, (s) => resolveLatestCommitSha(s.owner, s.repo))
+        .with({ path: P.string }, () => Promise.resolve(undefined))
+        .exhaustive();
 
       // .ziku/ziku.jsonc を書き出し（ユーザー設定: source + patterns）
       const zikuJsoncResult = await writeZikuJsonc(targetDir, {
-        source: { owner: sourceOwner, repo: sourceRepo },
+        source,
         patterns: flatPatterns,
         strategy: effectiveStrategy,
       });
@@ -302,7 +303,7 @@ function createEnvExample(
 function writeZikuJsonc(
   targetDir: string,
   opts: {
-    source: { owner: string; repo: string };
+    source: { owner: string; repo: string } | { path: string };
     patterns: FlatPatterns;
     strategy: OverwriteStrategy;
   },
@@ -627,17 +628,6 @@ async function handleMissingTemplate(
     })
     .with("specify-source", () => promptTemplateSource())
     .exhaustive();
-}
-
-/**
- * テンプレートに .ziku/modules.jsonc がない場合のハンドリング。
- * `ziku setup` コマンドへの誘導。
- */
-function handleMissingDevenv(owner: string, repo: string): never {
-  throw new ZikuError(
-    `Template ${owner}/${repo} has no .ziku/modules.jsonc`,
-    `Run ${pc.cyan(`ziku setup --remote --from ${owner}/${repo}`)} to create it, or add it manually`,
-  );
 }
 
 /**

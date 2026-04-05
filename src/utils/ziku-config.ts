@@ -43,13 +43,13 @@ export function zikuConfigExists(targetDir: string): boolean {
  * ziku.jsonc コンテンツを生成する
  */
 export function generateZikuJsonc(opts: {
-  source: { owner: string; repo: string };
+  source: { owner: string; repo: string } | { dir: string };
   include: string[];
   exclude: string[];
 }): string {
   const content: Record<string, unknown> = {
     $schema: ZIKU_CONFIG_SCHEMA_URL,
-    source: { owner: opts.source.owner, repo: opts.source.repo },
+    source: opts.source,
     include: opts.include,
   };
   if (opts.exclude.length > 0) {

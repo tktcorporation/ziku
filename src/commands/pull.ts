@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
 import type { LockState } from "../modules/schemas";
+import { isLocalSource, isGitHubSource } from "../modules/schemas";
 import { selectDeletedFiles } from "../ui/prompts";
 import { intro, log, outro, pc, withSpinner } from "../ui/renderer";
 import { LOCK_FILE, loadLock, saveLock } from "../utils/lock";
@@ -115,12 +116,25 @@ export const pullCommand = defineCommand({
       return;
     }
 
-    // Step 2: テンプレートをダウンロード
-    log.step("Fetching template...");
+    // Step 2: テンプレートを取得
+    let templateDir: string;
+    let cleanup: () => void;
 
-    const { templateDir, cleanup } = await withSpinner("Downloading template from GitHub...", () =>
-      downloadTemplateToTemp(targetDir, `gh:${zikuConfig.source.owner}/${zikuConfig.source.repo}`),
-    );
+    if (isLocalSource(zikuConfig.source)) {
+      templateDir = resolve(zikuConfig.source.path);
+      cleanup = () => {};
+      log.info(`Template: ${pc.cyan(templateDir)} (local)`);
+    } else {
+      log.step("Fetching template...");
+      const downloaded = await withSpinner("Downloading template from GitHub...", () =>
+        downloadTemplateToTemp(
+          targetDir,
+          `gh:${zikuConfig.source.owner}/${zikuConfig.source.repo}`,
+        ),
+      );
+      templateDir = downloaded.templateDir;
+      cleanup = downloaded.cleanup;
+    }
 
     await withFinally(async () => {
       // Step 3: ハッシュ計算
@@ -185,7 +199,7 @@ export const pullCommand = defineCommand({
         let baseCleanup: (() => void) | undefined;
 
         // ベースバージョンのダウンロード（失敗時は 2-way フォールバック）
-        if (lock.baseRef) {
+        if (lock.baseRef && isGitHubSource(zikuConfig.source)) {
           const baseResult = await Effect.runPromise(
             Effect.tryPromise(() => {
               log.info(`Downloading base version (${lock.baseRef?.slice(0, 7)}...) for merge...`);
@@ -240,10 +254,9 @@ export const pullCommand = defineCommand({
         );
 
         if (unresolvedConflicts.length > 0) {
-          const latestRef = await resolveLatestCommitSha(
-            zikuConfig.source.owner,
-            zikuConfig.source.repo,
-          );
+          const latestRef = isGitHubSource(zikuConfig.source)
+            ? await resolveLatestCommitSha(zikuConfig.source.owner, zikuConfig.source.repo)
+            : undefined;
           await saveLock(targetDir, {
             ...lock,
             pendingMerge: {
@@ -284,10 +297,9 @@ export const pullCommand = defineCommand({
       }
 
       // Step 10: 設定を更新
-      const latestRef = await resolveLatestCommitSha(
-        zikuConfig.source.owner,
-        zikuConfig.source.repo,
-      );
+      const latestRef = isGitHubSource(zikuConfig.source)
+        ? await resolveLatestCommitSha(zikuConfig.source.owner, zikuConfig.source.repo)
+        : undefined;
 
       const updatedLock = {
         ...lock,

@@ -213,6 +213,7 @@ OPTIONS
              `-m, --modules`    Comma-separated module names to apply (non-interactive)
   `-s, --overwrite-strategy`    Overwrite strategy: overwrite, skip, or prompt
                     `--from`    Template source as owner/repo (e.g., my-org/my-templates)
+                `--from-dir`    Local directory to use as template source (skips GitHub download)
 ```
 
 ### `push`
