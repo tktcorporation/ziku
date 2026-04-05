@@ -1,5 +1,30 @@
 # @tktco/ziku
 
+## 0.26.0
+
+### Minor Changes
+
+- [#17](https://github.com/tktcorporation/ziku/pull/17) [`357c8e4`](https://github.com/tktcorporation/ziku/commit/357c8e461379e4112c31bac4a739179df0655d78) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Reorganize config files: split `.ziku.json` into `.ziku/ziku.jsonc` (user config) and `.ziku/lock.json` (sync state)
+
+  - User settings (source, include/exclude patterns) are now in `.ziku/ziku.jsonc` with JSONC support
+  - Machine state (version, baseRef, baseHashes, pendingMerge) is now in `.ziku/lock.json`
+  - Fix oxlint config not being auto-detected (rename to `.oxlintrc.json`)
+  - Add strict TypeScript lint rules (no-unsafe-type-assertion, no-unsafe-argument, etc.)
+
+- [#13](https://github.com/tktcorporation/ziku/pull/13) [`fc73f2f`](https://github.com/tktcorporation/ziku/commit/fc73f2fb92fbf3c364d30b275ae33ec2739ee483) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Improve template source detection for `ziku init`
+
+  - Detect template candidates from both authenticated GitHub user and git remote owner
+  - Interactive mode presents candidates for selection when multiple are found
+  - `--from` now accepts owner name only (e.g., `--from my-org`) and auto-completes to `{owner}/.github`
+  - Non-interactive mode (`--yes`) auto-uses a single candidate, errors with disambiguation hint when multiple found
+
+- [#15](https://github.com/tktcorporation/ziku/pull/15) [`ba32fee`](https://github.com/tktcorporation/ziku/commit/ba32fee60a9b4aba04bf88e181bd2a75e90d4617) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Support `.ziku` as template repository name in addition to `.github`
+
+  - Template auto-detection now checks both `.ziku` and `.github` repositories (`.ziku` preferred)
+  - `--from owner` resolves to the first existing repo among `.ziku` / `.github`
+  - Setup-aware candidate selection: repos with `.ziku/modules.jsonc` are prioritized
+  - Interactive UI shows `(ready)` / `(not set up)` hints for each candidate
+
 ## 0.25.0
 
 ### Minor Changes
