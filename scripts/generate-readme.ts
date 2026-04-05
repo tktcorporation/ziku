@@ -68,46 +68,37 @@ function generateGettingStartedSection(): string {
     "## Getting Started\n",
     "### 1. Set up your template repository\n",
     `ziku uses a GitHub repository as the template source. By default, it looks for \`{your-org}/${DEFAULT_TEMPLATE_REPO}\` based on your git remote.\n`,
-  ];
-  lines.push(
     "If the repository doesn't exist yet, `npx ziku` will offer to create it for you interactively. You can also create it manually or specify a different source:\n",
-  );
-  lines.push("```bash");
-  lines.push("# Auto-detect from git remote (recommended)");
-  lines.push("npx ziku");
-  lines.push("");
-  lines.push("# Use a specific template repository");
-  lines.push("npx ziku --from my-org/my-templates");
-  lines.push("```\n");
-
-  lines.push("### 2. Add `.ziku/modules.jsonc` to your template\n");
-  lines.push(
+    "```bash",
+    "# Auto-detect from git remote (recommended)",
+    "npx ziku",
+    "",
+    "# Use a specific template repository",
+    "npx ziku --from my-org/my-templates",
+    "```\n",
+    "### 2. Add `.ziku/modules.jsonc` to your template\n",
     "The template repository needs a `.ziku/modules.jsonc` file that defines which file patterns ziku manages. If this file is missing, ziku will offer to create a PR that adds one with a default configuration.\n",
-  );
-  lines.push("Example `modules.jsonc`:\n");
-  lines.push("```jsonc");
-  lines.push(exampleJson);
-  lines.push("```\n");
-
-  lines.push("### 3. Apply the template to your project\n");
-  lines.push("```bash");
-  lines.push("npx ziku");
-  lines.push("```\n");
-  lines.push(
+    "Example `modules.jsonc`:\n",
+    "```jsonc",
+    exampleJson,
+    "```\n",
+    "### 3. Apply the template to your project\n",
+    "```bash",
+    "npx ziku",
+    "```\n",
     "ziku copies the matching files into your project. A `.ziku/ziku.jsonc` (config) and `.ziku/lock.json` (sync state) are created locally to track what was installed.\n",
-  );
-
-  lines.push("### 4. Keep it in sync\n");
-  lines.push("```bash");
-  lines.push("# Push local improvements back to the template");
-  lines.push('npx ziku push -m "Add new workflow"');
-  lines.push("");
-  lines.push("# Pull latest template updates");
-  lines.push("npx ziku pull");
-  lines.push("");
-  lines.push("# Check what's different");
-  lines.push("npx ziku diff");
-  lines.push("```\n");
+    "### 4. Keep it in sync\n",
+    "```bash",
+    "# Push local improvements back to the template",
+    'npx ziku push -m "Add new workflow"',
+    "",
+    "# Pull latest template updates",
+    "npx ziku pull",
+    "",
+    "# Check what's different",
+    "npx ziku diff",
+    "```\n",
+  ];
 
   return lines.join("\n");
 }
@@ -116,18 +107,22 @@ function generateGettingStartedSection(): string {
  * Generate Usage section
  */
 function generateUsageSection(): string {
-  const lines: string[] = ["## Usage\n", "```bash", "# Apply template to current directory"];
-  lines.push("npx ziku");
-  lines.push("");
-  lines.push("# Apply to a specific directory");
-  lines.push("npx ziku ./my-project");
-  lines.push("");
-  lines.push("# Push your improvements back");
-  lines.push('npx ziku push -m "Add new workflow"');
-  lines.push("");
-  lines.push("# Check what's different");
-  lines.push("npx ziku diff");
-  lines.push("```\n");
+  const lines: string[] = [
+    "## Usage\n",
+    "```bash",
+    "# Apply template to current directory",
+    "npx ziku",
+    "",
+    "# Apply to a specific directory",
+    "npx ziku ./my-project",
+    "",
+    "# Push your improvements back",
+    'npx ziku push -m "Add new workflow"',
+    "",
+    "# Check what's different",
+    "npx ziku diff",
+    "```\n",
+  ];
   return lines.join("\n");
 }
 
@@ -145,43 +140,26 @@ function getCommandDescription(meta: unknown): string {
  * Generate Commands section
  */
 async function generateCommandsSection(): Promise<string> {
-  // init command
+  /**
+   * 各コマンドのヘルプをセクションとして生成するヘルパー。
+   * 配列リテラルに直接含めることで no-immediate-mutation を回避。
+   */
+  const commandSection = async (name: string, cmd: { meta: unknown }) => [
+    `### \`${name}\`\n`,
+    `${getCommandDescription(cmd.meta)}\n`,
+    "```",
+    cleanUsageOutput(await renderUsage(cmd)),
+    "```\n",
+  ];
+
   const sections: string[] = [
     "## Commands\n",
-    "### `init`\n",
-    `${getCommandDescription(initCommand.meta)}\n`,
+    ...(await commandSection("init", initCommand)),
+    ...(await commandSection("push", pushCommand)),
+    ...(await commandSection("pull", pullCommand)),
+    ...(await commandSection("diff", diffCommand)),
+    ...(await commandSection("track", trackCommand)),
   ];
-  sections.push("```");
-  sections.push(cleanUsageOutput(await renderUsage(initCommand)));
-  sections.push("```\n");
-
-  // push command
-  sections.push("### `push`\n");
-  sections.push(`${getCommandDescription(pushCommand.meta)}\n`);
-  sections.push("```");
-  sections.push(cleanUsageOutput(await renderUsage(pushCommand)));
-  sections.push("```\n");
-
-  // pull command
-  sections.push("### `pull`\n");
-  sections.push(`${getCommandDescription(pullCommand.meta)}\n`);
-  sections.push("```");
-  sections.push(cleanUsageOutput(await renderUsage(pullCommand)));
-  sections.push("```\n");
-
-  // diff command
-  sections.push("### `diff`\n");
-  sections.push(`${getCommandDescription(diffCommand.meta)}\n`);
-  sections.push("```");
-  sections.push(cleanUsageOutput(await renderUsage(diffCommand)));
-  sections.push("```\n");
-
-  // track command
-  sections.push("### `track`\n");
-  sections.push(`${getCommandDescription(trackCommand.meta)}\n`);
-  sections.push("```");
-  sections.push(cleanUsageOutput(await renderUsage(trackCommand)));
-  sections.push("```\n");
 
   return sections.join("\n");
 }

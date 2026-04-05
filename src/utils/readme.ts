@@ -81,8 +81,10 @@ function generateFeaturesSection(patterns: string[]): string {
  * 生成されるファイルセクションを生成
  */
 function generateFilesSection(patterns: string[]): string {
-  const lines: string[] = ["## 生成されるファイル\n"];
-  lines.push("以下のパターンに一致するファイルが同期されます：\n");
+  const lines: string[] = [
+    "## 生成されるファイル\n",
+    "以下のパターンに一致するファイルが同期されます：\n",
+  ];
 
   for (const pattern of patterns) {
     const displayPattern = pattern.includes("*") ? `\`${pattern}\` (パターン)` : `\`${pattern}\``;
