@@ -189,6 +189,26 @@ function generateCommandTables(): string {
  * ライフサイクルドキュメント全体を生成する。
  * マーカー間に挿入される Markdown を返す。
  */
+/**
+ * 各コマンドの notes フィールドから「補足」セクションを自動生成する。
+ *
+ * 背景: 以前はハードコードされた散文だったが、コマンド実装と乖離するリスクがあった。
+ * notes をコマンドファイルにコロケーションすることで、動作変更時に更新漏れを防ぐ。
+ */
+function generateNotesSection(): string {
+  const commandsWithNotes = lifecycle.filter((cmd) => cmd.notes && cmd.notes.length > 0);
+  if (commandsWithNotes.length === 0) return "";
+
+  const lines: string[] = ["## 補足\n"];
+  for (const cmd of commandsWithNotes) {
+    lines.push(`### ${cmd.name}\n`);
+    for (const note of cmd.notes ?? []) {
+      lines.push(`${note}\n`);
+    }
+  }
+  return lines.join("\n");
+}
+
 export function generateLifecycleDocument(): string {
   const sections = [
     "## コンポーネント関係図\n",
@@ -198,19 +218,7 @@ export function generateLifecycleDocument(): string {
     generateFileLifecycleTable(),
     "## コマンドごとのファイル操作\n",
     generateCommandTables(),
-    "## 補足\n",
-    "### ziku.jsonc の役割\n",
-    `\`${ZIKU_CONFIG_FILE}\` はテンプレートとユーザープロジェクトの両方に存在する。`,
-    "同一フォーマット（include/exclude パターンのみ）で、source 情報は含まない。\n",
-    `\`ziku setup\` → テンプレートリポに \`${ZIKU_CONFIG_FILE}\` を作成`,
-    `\`ziku init\` → テンプレートの \`${ZIKU_CONFIG_FILE}\` を読み、ディレクトリ選択 → 結果をユーザーの \`${ZIKU_CONFIG_FILE}\` に保存\n`,
-    "### source 情報の分離\n",
-    `テンプレートの取得元（owner/repo またはローカルパス）は \`${LOCK_FILE}\` に保存される。`,
-    `これにより \`${ZIKU_CONFIG_FILE}\` はテンプレート・ユーザー間で完全に同一フォーマットになる。\n`,
-    "### init 後の独立性\n",
-    `ユーザーが \`ziku track\` で追加したパターンは \`${ZIKU_CONFIG_FILE}\` にのみ反映される。`,
-    `テンプレート側で \`${ZIKU_CONFIG_FILE}\` にパターンを追加しても、既存ユーザーの \`${ZIKU_CONFIG_FILE}\` には自動反映されない。`,
-    `最新のパターンを取り込むには \`ziku init\` を再実行する。\n`,
+    generateNotesSection(),
   ];
 
   return sections.join("\n");

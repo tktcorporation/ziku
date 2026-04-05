@@ -140,23 +140,20 @@ Add file patterns to the sync whitelist
 
 ## 補足
 
-### ziku.jsonc の役割
+### init (user project)
 
-`.ziku/ziku.jsonc` はテンプレートとユーザープロジェクトの両方に存在する。
-同一フォーマット（include/exclude パターンのみ）で、source 情報は含まない。
+`ziku.jsonc` はテンプレートとユーザープロジェクトの両方に存在する。同一フォーマット（include/exclude パターンのみ）で、source 情報は含まない。
 
-`ziku setup` → テンプレートリポに `.ziku/ziku.jsonc` を作成
-`ziku init` → テンプレートの `.ziku/ziku.jsonc` を読み、ディレクトリ選択 → 結果をユーザーの `.ziku/ziku.jsonc` に保存
+テンプレートの取得元（owner/repo またはローカルパス）は `lock.json` に保存される。これにより `ziku.jsonc` はテンプレート・ユーザー間で完全に同一フォーマットになる。
 
-### source 情報の分離
+### pull
 
-テンプレートの取得元（owner/repo またはローカルパス）は `.ziku/lock.json` に保存される。
-これにより `.ziku/ziku.jsonc` はテンプレート・ユーザー間で完全に同一フォーマットになる。
+テンプレートの `ziku.jsonc` に新しいパターンが追加された場合、pull 時にユーザーの `ziku.jsonc` へ自動マージされる。既存パターンはそのまま維持される。
 
-### init 後の独立性
+テンプレートで削除されたファイルは `--force` で自動削除、またはユーザーが選択的に削除できる。
 
-ユーザーが `ziku track` で追加したパターンは `.ziku/ziku.jsonc` にのみ反映される。
-テンプレート側で `.ziku/ziku.jsonc` にパターンを追加しても、既存ユーザーの `.ziku/ziku.jsonc` には自動反映されない。
-最新のパターンを取り込むには `ziku init` を再実行する。
+### track
+
+`ziku track` で追加したパターンはローカルの `ziku.jsonc` にのみ反映される。テンプレートに反映するには `ziku push` でテンプレートの `ziku.jsonc` を更新する。
 
 <!-- LIFECYCLE:END -->
