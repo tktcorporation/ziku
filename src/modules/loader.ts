@@ -118,8 +118,7 @@ export async function loadPatternsFile(
  *
  * 背景: push 時にローカルで追加されたパターンをテンプレートの modules.jsonc に
  * 書き戻すために使用。フラット形式（scaffold 生成）のファイルのみ対応。
- * モジュール形式のファイルに対して呼ぶと include フィールドがルートに作成されるため、
- * 呼び出し元でフラット形式であることを確認する必要がある。
+ * 呼び出し前に isFlatFormat() でフラット形式であることを確認すること。
  *
  * @returns 更新後の JSONC 文字列
  */
@@ -138,6 +137,18 @@ export function addIncludePattern(rawContent: string, patterns: string[]): strin
   });
 
   return applyEdits(rawContent, edits);
+}
+
+/**
+ * modules.jsonc がフラット形式かどうかを判定する。
+ *
+ * 背景: addIncludePattern はフラット形式のみ対応。
+ * モジュール形式に対して呼ぶとファイルが壊れるため、
+ * 呼び出し元で事前にこの関数でチェックする。
+ */
+export function isFlatFormat(rawContent: string): boolean {
+  const parsed = parse(rawContent);
+  return flatPatternsFileSchema.safeParse(parsed).success;
 }
 
 /**

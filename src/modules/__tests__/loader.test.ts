@@ -17,6 +17,7 @@ const {
   loadTemplateModulesFile,
   loadPatternsFile,
   addIncludePattern,
+  isFlatFormat,
   getModulesFilePath,
   modulesFileExists,
 } = await import("../loader");
@@ -271,6 +272,30 @@ describe("addIncludePattern", () => {
 
     const parsed = JSON.parse(result);
     expect(parsed.include).toEqual(["new-pattern.txt"]);
+  });
+});
+
+describe("isFlatFormat", () => {
+  it("フラット形式を正しく判定する", () => {
+    const flat = JSON.stringify({ include: [".mcp.json"], exclude: [] });
+    expect(isFlatFormat(flat)).toBe(true);
+  });
+
+  it("exclude 省略のフラット形式を正しく判定する", () => {
+    const flat = JSON.stringify({ include: [".mcp.json"] });
+    expect(isFlatFormat(flat)).toBe(true);
+  });
+
+  it("モジュール形式を false と判定する", () => {
+    const modules = JSON.stringify({
+      modules: [{ name: "A", description: "A", include: ["a.txt"] }],
+    });
+    expect(isFlatFormat(modules)).toBe(false);
+  });
+
+  it("不正な形式を false と判定する", () => {
+    const invalid = JSON.stringify({ invalid: true });
+    expect(isFlatFormat(invalid)).toBe(false);
   });
 });
 

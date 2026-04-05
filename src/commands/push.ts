@@ -6,7 +6,7 @@ import { downloadTemplate } from "giget";
 import { join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
-import { MODULES_FILE, loadPatternsFile, modulesFileExists } from "../modules";
+import { MODULES_FILE, isFlatFormat, loadPatternsFile, modulesFileExists } from "../modules";
 import type { FileDiff } from "../modules/schemas";
 import { LOCK_FILE, loadLock } from "../utils/lock";
 import { ZIKU_CONFIG_FILE, loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
@@ -220,11 +220,20 @@ export const pushCommand = defineCommand({
             log.info(
               `Detected ${newPatterns.length} new pattern(s) from local: ${newPatterns.join(", ")}`,
             );
-            // テンプレートの modules.jsonc に新パターンを追加
-            const { loadPatternsFile: loadRaw, addIncludePattern: addModulePattern } =
-              await import("../modules/loader");
-            const templateRaw = await loadRaw(templateDir);
-            updatedModulesContent = addModulePattern(templateRaw.rawContent, newPatterns);
+
+            // フラット形式のテンプレートのみ自動追加に対応。
+            // モジュール形式ではどのモジュールに追加すべきか自動判定できないためスキップ。
+            if (isFlatFormat(templatePatterns.rawContent)) {
+              const { addIncludePattern: addModulePattern } = await import("../modules/loader");
+              updatedModulesContent = addModulePattern(templatePatterns.rawContent, newPatterns);
+            } else {
+              log.warn(
+                `Template uses module format — add these patterns manually to ${MODULES_FILE}:`,
+              );
+              for (const p of newPatterns) {
+                log.message(`  ${pc.dim("+")} ${p}`);
+              }
+            }
           }
 
           // マージされたパターンを使用

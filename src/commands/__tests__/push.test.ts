@@ -106,6 +106,7 @@ vi.mock("../../utils/lock", async (importOriginal) => {
 vi.mock("../../modules", () => ({
   MODULES_FILE: ".ziku/modules.jsonc",
   modulesFileExists: vi.fn(() => true),
+  isFlatFormat: vi.fn(() => true),
   loadPatternsFile: vi.fn(() =>
     Promise.resolve({
       include: [".root/**", ".github/**"],

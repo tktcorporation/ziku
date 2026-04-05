@@ -3,6 +3,7 @@ export {
   MODULES_FILE,
   addIncludePattern,
   getModulesFilePath,
+  isFlatFormat,
   loadPatternsFile,
   loadTemplateModulesFile,
   modulesFileExists,
