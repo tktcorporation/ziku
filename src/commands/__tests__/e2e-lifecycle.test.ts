@@ -311,7 +311,10 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
     mockFetchTemplates.mockImplementation((async (opts: any) => {
       const targetDir = opts.targetDir as string;
       const templateDir = opts.templateDir ?? "/template";
-      const results: Array<{ action: "copied" | "created" | "overwritten" | "skipped" | "skipped_ignored"; path: string }> = [];
+      const results: Array<{
+        action: "copied" | "created" | "overwritten" | "skipped" | "skipped_ignored";
+        path: string;
+      }> = [];
 
       const allFiles = vol.toJSON();
       for (const [fullPath, content] of Object.entries(allFiles)) {
@@ -633,7 +636,10 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
     mockFetchTemplates.mockImplementation((async (opts: any) => {
       const targetDir = opts.targetDir as string;
       const templateDir = opts.templateDir ?? "/template";
-      const results: Array<{ action: "copied" | "created" | "overwritten" | "skipped" | "skipped_ignored"; path: string }> = [];
+      const results: Array<{
+        action: "copied" | "created" | "overwritten" | "skipped" | "skipped_ignored";
+        path: string;
+      }> = [];
 
       const allFiles = vol.toJSON();
       for (const [fullPath, content] of Object.entries(allFiles)) {

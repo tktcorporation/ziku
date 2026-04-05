@@ -167,14 +167,12 @@ const emptyDiff = {
  * テスト用の CommandContext を生成するヘルパー。
  * DI のおかげでテンプレートダウンロードや設定読み込みのモックが不要。
  */
-function mockContext(
-  overrides?: {
-    config?: typeof validZikuConfig;
-    lock?: typeof validLock & Record<string, unknown>;
-    source?: { owner: string; repo: string } | { path: string };
-    templateDir?: string;
-  },
-) {
+function mockContext(overrides?: {
+  config?: typeof validZikuConfig;
+  lock?: typeof validLock & Record<string, unknown>;
+  source?: { owner: string; repo: string } | { path: string };
+  templateDir?: string;
+}) {
   const cleanup = vi.fn();
   const source = overrides?.source ?? { owner: "tktcorporation", repo: ".github" };
   return {

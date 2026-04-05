@@ -113,22 +113,21 @@ A template might offer modules like:
 | **AI Tooling** | `.claude/`, `.cursor/rules/`, `.mcp.json` |
 | **IaC** | `terraform/modules/**`, `docker-compose.yml` |
 
-After init, your project gets a flat config that drives `pull`, `push`, and `diff`:
+After init, your project gets a config that drives `pull`, `push`, and `diff`:
 
 ```jsonc
 // .ziku/ziku.jsonc (in your project — auto-generated, customizable)
 {
-  "source": { "owner": "my-org", "repo": ".ziku" },
   "include": [".eslintrc.*", ".prettierrc", ".github/workflows/**"]
 }
 ```
 
-You can add or remove patterns anytime with `ziku track`.
+Template source info is stored separately in `.ziku/lock.json`. You can add or remove patterns anytime with `ziku track`.
 
 <details>
 <summary>Defining patterns in your template</summary>
 
-Template authors define sync patterns in `.ziku/ziku.jsonc` inside the template repository:
+Template authors define sync patterns in `.ziku/ziku.jsonc` inside the template repository. Both the template and user project use the same format:
 
 ```jsonc
 // .ziku/ziku.jsonc (in the template repo)
@@ -195,10 +194,10 @@ OPTIONS
 
 ### `push`
 
-Push local changes to the template repository as a PR
+Push local changes to the template (PR for GitHub, direct copy for local)
 
 ```
-Push local changes to the template repository as a PR (push)
+Push local changes to the template (PR for GitHub, direct copy for local) (push)
 
 USAGE `push [OPTIONS] [DIR]`
 
@@ -208,11 +207,11 @@ ARGUMENTS
 
 OPTIONS
 
-   `-n, --dryRun`    Preview only, don't create PR
-  `-m, --message`    PR title
+   `-n, --dryRun`    Preview only, don't push
+  `-m, --message`    PR title (GitHub only)
   `-y, -f, --yes`    Skip confirmation prompts
-         `--edit`    Edit PR title and description before creating
-        `--files`    Comma-separated file paths to include in PR (skips file selection prompt)
+         `--edit`    Edit PR title and description before creating (GitHub only)
+        `--files`    Comma-separated file paths to include (skips file selection prompt)
 ```
 
 ### `pull`

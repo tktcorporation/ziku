@@ -114,15 +114,16 @@ graph LR
 
 ### `push`
 
-ローカルの変更をテンプレートリポジトリに PR として送信
+ローカルの変更をテンプレートに反映（GitHub: PR / ローカル: 直接コピー）
 
-| 操作     | ファイル           | 場所     | 詳細                                                 |
-| -------- | ------------------ | -------- | ---------------------------------------------------- |
-| 読み取り | `.ziku/ziku.jsonc` | local    | patterns を取得                                      |
-| 読み取り | `.ziku/lock.json`  | local    | source, baseRef, baseHashes を取得                   |
-| 読み取り | synced files       | local    | ローカルの変更を検出                                 |
-| 読み取り | synced files       | template | テンプレートをダウンロードして差分検出・3-way マージ |
-| 更新     | synced files       | template | 変更ファイルを含む PR を作成                         |
+| 操作     | ファイル           | 場所     | 詳細                                               |
+| -------- | ------------------ | -------- | -------------------------------------------------- |
+| 読み取り | `.ziku/ziku.jsonc` | local    | patterns を取得                                    |
+| 読み取り | `.ziku/lock.json`  | local    | source, baseRef, baseHashes を取得                 |
+| 読み取り | synced files       | local    | ローカルの変更を検出                               |
+| 読み取り | synced files       | template | テンプレートと差分検出・3-way マージ               |
+| 更新     | synced files       | template | GitHub: PR を作成 / ローカル: ファイルを直接コピー |
+| 更新     | `.ziku/lock.json`  | local    | baseHashes を更新                                  |
 
 ### `diff`
 
