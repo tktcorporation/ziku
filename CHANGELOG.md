@@ -1,5 +1,11 @@
 # @tktco/ziku
 
+## 0.26.1
+
+### Patch Changes
+
+- [#19](https://github.com/tktcorporation/ziku/pull/19) [`b8726ea`](https://github.com/tktcorporation/ziku/commit/b8726ea7fb65fbd4e80b0f5aa211707c2542cbbf) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Fix release workflow npm upgrade, add ast-grep try/catch lint rule, resolve oxlint warnings
+
 ## 0.26.0
 
 ### Minor Changes
