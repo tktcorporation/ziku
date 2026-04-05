@@ -33,6 +33,7 @@ import { diffCommand } from "../src/commands/diff";
 import { initCommand } from "../src/commands/init";
 import { pullCommand } from "../src/commands/pull";
 import { pushCommand } from "../src/commands/push";
+import { setupCommand } from "../src/commands/setup";
 import { trackCommand } from "../src/commands/track";
 import { MODULES_SCHEMA_URL, modulesFileSchema } from "../src/modules/loader";
 import { zikuConfigSchema } from "../src/modules/schemas";
@@ -195,6 +196,7 @@ async function generateCommandsSection(): Promise<string> {
 
   const sections: string[] = [
     "## Commands\n",
+    ...(await commandSection("setup", setupCommand)),
     ...(await commandSection("init", initCommand)),
     ...(await commandSection("push", pushCommand)),
     ...(await commandSection("pull", pullCommand)),

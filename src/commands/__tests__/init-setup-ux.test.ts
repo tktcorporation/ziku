@@ -155,14 +155,14 @@ const mockSelectMissingTemplateAction = vi.mocked(selectMissingTemplateAction);
 const mockSelectTemplateCandidate = vi.mocked(selectTemplateCandidate);
 const mockInputTemplateSource = vi.mocked(inputTemplateSource);
 const mockConfirmScaffoldDevenvPR = vi.mocked(confirmScaffoldDevenvPR);
-const mockLog = vi.mocked(log);
+const _mockLog = vi.mocked(log);
 const mockHashFiles = vi.mocked(hashFiles);
 const mockCheckRepoExists = vi.mocked(checkRepoExists);
 const mockCheckRepoSetup = vi.mocked(checkRepoSetup);
 const mockGetAuthenticatedUserLogin = vi.mocked(getAuthenticatedUserLogin);
 const mockGetGitHubToken = vi.mocked(getGitHubToken);
 const mockScaffoldTemplateRepo = vi.mocked(scaffoldTemplateRepo);
-const mockCreateDevenvScaffoldPR = vi.mocked(createDevenvScaffoldPR);
+const _mockCreateDevenvScaffoldPR = vi.mocked(createDevenvScaffoldPR);
 const mockModulesFileExists = vi.mocked(modulesFileExists);
 
 // コマンド実行ヘルパー
@@ -233,26 +233,20 @@ describe("init: セットアップ UX", () => {
       ]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
-      // After creating repo, handleMissingDevenv will throw because modules.jsonc doesn't exist
-      // But first we need modulesFileExists to return false for the template
+      // リポ作成後、modules.jsonc がないのでエラーになる（ziku setup への誘導）
       mockModulesFileExists.mockReturnValue(false);
-      mockConfirmScaffoldDevenvPR.mockResolvedValueOnce(true);
-      mockGetGitHubToken.mockReturnValue("ghp_test_token");
 
       const promise = runInit({}).catch((e: unknown) => e);
       await vi.advanceTimersByTimeAsync(6000);
       const error = await promise;
 
-      // handleMissingDevenv always throws after creating PR
       expect(error).toBeInstanceOf(ZikuError);
+      expect((error as ZikuError).message).toContain("has no .ziku/modules.jsonc");
 
       expect(mockScaffoldTemplateRepo).toHaveBeenCalledWith(
         "ghp_test_token",
         "detected-org",
         ".ziku",
-      );
-      expect(mockLog.success).toHaveBeenCalledWith(
-        expect.stringContaining("https://github.com/detected-org/.ziku"),
       );
     });
 
@@ -526,61 +520,18 @@ describe("init: セットアップ UX", () => {
   // ─── .ziku/modules.jsonc がテンプレートにない場合 ───
 
   describe("テンプレートに .ziku/modules.jsonc がない場合", () => {
-    it("非インタラクティブモードではエラーを投げる", async () => {
+    it("ziku setup への誘導エラーを投げる", async () => {
       mockCheckRepoExists.mockResolvedValueOnce(true);
       mockModulesFileExists.mockReturnValue(false);
 
-      await expect(runInit({ yes: true })).rejects.toThrow("has no .ziku/modules.jsonc");
-    });
-
-    it("PR 作成を承認すると PR を作成してエラーを投げる（マージ後に再実行）", async () => {
-      mockCheckRepoExists.mockResolvedValueOnce(true);
-      mockModulesFileExists.mockReturnValue(false);
-      mockConfirmScaffoldDevenvPR.mockResolvedValueOnce(true);
-      mockGetGitHubToken.mockReturnValue("ghp_test_token");
-      mockCreateDevenvScaffoldPR.mockResolvedValueOnce({
-        url: "https://github.com/detected-org/.github/pull/1",
-        number: 1,
-        branch: "ziku-scaffold",
-      });
-
-      await expect(runInit({})).rejects.toThrow("Merge the PR first");
-
-      expect(mockCreateDevenvScaffoldPR).toHaveBeenCalledWith(
-        "ghp_test_token",
-        "detected-org",
-        ".github",
-        expect.stringContaining("modules"),
-      );
-      expect(mockLog.success).toHaveBeenCalledWith(
-        expect.stringContaining("https://github.com/detected-org/.github/pull/1"),
-      );
-    });
-
-    it("PR 作成で GitHub トークンがなければエラー", async () => {
-      mockCheckRepoExists.mockResolvedValueOnce(true);
-      mockModulesFileExists.mockReturnValue(false);
-      mockConfirmScaffoldDevenvPR.mockResolvedValueOnce(true);
-      mockGetGitHubToken.mockReturnValue(undefined);
-
-      await expect(runInit({})).rejects.toThrow("GitHub token required");
-    });
-
-    it("PR 作成を拒否するとエラーを投げる", async () => {
-      mockCheckRepoExists.mockResolvedValueOnce(true);
-      mockModulesFileExists.mockReturnValue(false);
-      mockConfirmScaffoldDevenvPR.mockResolvedValueOnce(false);
-
-      await expect(runInit({})).rejects.toThrow(".ziku/modules.jsonc is required");
-
-      expect(mockCreateDevenvScaffoldPR).not.toHaveBeenCalled();
+      await expect(runInit({})).rejects.toThrow("has no .ziku/modules.jsonc");
     });
   });
 
   // ─── E2E: テンプレートなし → 作成 → .ziku スキャフォールド PR → エラー ───
 
-  describe("E2E: テンプレートなし → 作成 → .ziku スキャフォールド PR → マージ待ち", () => {
-    it("全フローが正常に完了する（PR 作成後にマージ待ちエラー）", async () => {
+  describe("E2E: テンプレートなし → 作成 → modules.jsonc なし → setup 誘導", () => {
+    it("リポ作成後に modules.jsonc がなければ setup への誘導エラー", async () => {
       // 1. テンプレートリポが存在しない（.ziku, .github 両方）
       mockCheckRepoExists.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
       // 2. ユーザーがリポジトリ作成を選択
@@ -589,70 +540,41 @@ describe("init: セットアップ UX", () => {
       mockScaffoldTemplateRepo.mockResolvedValueOnce({
         url: "https://github.com/detected-org/.ziku",
       });
-      // 3. テンプレートに .ziku/modules.jsonc がない
+      // 3. テンプレートに .ziku/modules.jsonc がない → setup 誘導エラー
       mockModulesFileExists.mockReturnValue(false);
-      // 4. ユーザーが PR 作成を承認
-      mockConfirmScaffoldDevenvPR.mockResolvedValueOnce(true);
-      mockCreateDevenvScaffoldPR.mockResolvedValueOnce({
-        url: "https://github.com/detected-org/.ziku/pull/1",
-        number: 1,
-        branch: "ziku-scaffold",
-      });
 
       const promise = runInit({}).catch((e: unknown) => e);
       await vi.advanceTimersByTimeAsync(6000);
       const error = await promise;
 
-      // handleMissingDevenv always throws after PR creation
       expect(error).toBeInstanceOf(ZikuError);
-      expect((error as ZikuError).message).toContain("Merge the PR first");
+      expect((error as ZikuError).message).toContain("has no .ziku/modules.jsonc");
 
-      // リポジトリ作成（優先候補の .ziku）
       expect(mockScaffoldTemplateRepo).toHaveBeenCalledWith(
         "ghp_test_token",
         "detected-org",
         ".ziku",
-      );
-      // .ziku スキャフォールド PR
-      expect(mockCreateDevenvScaffoldPR).toHaveBeenCalledWith(
-        "ghp_test_token",
-        "detected-org",
-        ".ziku",
-        expect.stringContaining("modules"),
       );
     });
   });
 
   // ─── E2E: カスタムソース → .ziku なし → PR → マージ待ちエラー ───
 
-  describe("E2E: カスタムソース → .ziku なし → PR → マージ待ちエラー", () => {
-    it("全フローが正常に完了する", async () => {
+  describe("E2E: カスタムソース → .ziku なし → setup 誘導", () => {
+    it("modules.jsonc がなければ setup への誘導エラー", async () => {
       // 2候補とも存在しない
       mockCheckRepoExists.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
       mockSelectMissingTemplateAction.mockResolvedValueOnce("specify-source");
       mockInputTemplateSource.mockResolvedValueOnce("my-org/my-templates");
       mockCheckRepoExists.mockResolvedValueOnce(true);
-      // .ziku がない
+      // .ziku がない → setup 誘導エラー
       mockModulesFileExists.mockReturnValue(false);
-      mockConfirmScaffoldDevenvPR.mockResolvedValueOnce(true);
-      mockGetGitHubToken.mockReturnValue("ghp_test_token");
-      mockCreateDevenvScaffoldPR.mockResolvedValueOnce({
-        url: "https://github.com/my-org/my-templates/pull/1",
-        number: 1,
-        branch: "ziku-scaffold",
-      });
 
-      await expect(runInit({})).rejects.toThrow("Merge the PR first");
+      await expect(runInit({})).rejects.toThrow("has no .ziku/modules.jsonc");
 
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),
         "gh:my-org/my-templates",
-      );
-      expect(mockCreateDevenvScaffoldPR).toHaveBeenCalledWith(
-        "ghp_test_token",
-        "my-org",
-        "my-templates",
-        expect.stringContaining("modules"),
       );
     });
   });

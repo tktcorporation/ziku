@@ -119,6 +119,9 @@ vi.mock("../../modules", () => ({
     include: [".root/**", ".github/**"],
     exclude: [],
   })),
+  isFileMatchedByModules: vi.fn(() => true),
+  suggestModuleAdditions: vi.fn(() => []),
+  addModulesToJsonc: vi.fn((raw: string) => raw),
 }));
 
 // ui/renderer をモック

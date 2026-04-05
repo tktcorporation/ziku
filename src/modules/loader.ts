@@ -76,6 +76,121 @@ export function flattenModules(modules: TemplateModule[]): {
 }
 
 /**
+ * ファイルパスがいずれかのモジュールの include パターンにマッチするか判定する。
+ *
+ * 背景: push 時に新しいファイルがテンプレートの modules.jsonc でカバーされているか
+ * チェックし、カバーされていなければ modules.jsonc の更新が必要と判定するため。
+ */
+export function isFileMatchedByModules(filePath: string, modules: TemplateModule[]): boolean {
+  for (const mod of modules) {
+    for (const pattern of mod.include) {
+      if (matchGlob(filePath, pattern)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * マッチしないファイルパスからモジュール追加提案を生成する。
+ *
+ * ヒューリスティック: トップレベルディレクトリごとにグループ化し、
+ * `{dir}/**` パターンで新モジュールを提案する。
+ * ルートレベルのファイルは個別パターンで追加する。
+ */
+export function suggestModuleAdditions(
+  unmatchedFiles: string[],
+  existingModules: TemplateModule[],
+): TemplateModule[] {
+  // トップレベルディレクトリでグループ化
+  const dirGroups = new Map<string, string[]>();
+  const rootFiles: string[] = [];
+
+  for (const file of unmatchedFiles) {
+    const slashIndex = file.indexOf("/");
+    if (slashIndex === -1) {
+      rootFiles.push(file);
+    } else {
+      const dir = file.slice(0, slashIndex);
+      const existing = dirGroups.get(dir);
+      if (existing) {
+        existing.push(file);
+      } else {
+        dirGroups.set(dir, [file]);
+      }
+    }
+  }
+
+  const additions: TemplateModule[] = [];
+
+  // ディレクトリごとに新モジュールを提案
+  for (const [dir, _files] of dirGroups) {
+    // 既存モジュールに同名があれば、そのモジュールのパターンを拡張すべきだが
+    // modules.jsonc の書き換えは複雑なので、新モジュールとして追加する
+    const existingNames = new Set(existingModules.map((m) => m.name.toLowerCase()));
+    const name = existingNames.has(dir.replace(/^\./, "").toLowerCase())
+      ? `${dir.replace(/^\./, "")} (new)`
+      : dir.replace(/^\./, "");
+    additions.push({
+      name,
+      description: `Files under ${dir}/`,
+      include: [`${dir}/**`],
+    });
+  }
+
+  // ルートレベルファイルは個別パターンで追加
+  if (rootFiles.length > 0) {
+    additions.push({
+      name: "Root files",
+      description: "Root-level configuration files",
+      include: rootFiles,
+    });
+  }
+
+  return additions;
+}
+
+/**
+ * modules.jsonc の JSON 文字列に新しいモジュールを追加する。
+ *
+ * @returns 更新後の JSON 文字列
+ */
+export function addModulesToJsonc(rawContent: string, newModules: TemplateModule[]): string {
+  if (newModules.length === 0) return rawContent;
+
+  const parsed = parse(rawContent) as { $schema?: string; modules: TemplateModule[] };
+  const updated = {
+    ...parsed,
+    modules: [...parsed.modules, ...newModules],
+  };
+  return JSON.stringify(updated, null, 2);
+}
+
+/**
+ * 簡易 glob マッチ。
+ *
+ * `**` はディレクトリの任意の深さ、`*` はファイル名のワイルドカード。
+ * 完全な glob 実装ではないが、modules.jsonc のパターンに十分。
+ */
+function matchGlob(filePath: string, pattern: string): boolean {
+  // 完全一致
+  if (filePath === pattern) return true;
+
+  // `dir/**` — ディレクトリ以下の全ファイル
+  if (pattern.endsWith("/**")) {
+    const prefix = pattern.slice(0, -3);
+    return filePath.startsWith(`${prefix}/`);
+  }
+
+  // `dir/*.ext` — ディレクトリ直下の特定拡張子
+  if (pattern.includes("*") && !pattern.includes("**")) {
+    const regex = new RegExp(`^${pattern.replaceAll(".", "\\.").replaceAll("*", "[^/]*")}$`);
+    return regex.test(filePath);
+  }
+
+  return false;
+}
+
+/**
  * モジュールファイルのパスを取得
  */
 export function getModulesFilePath(baseDir: string): string {
