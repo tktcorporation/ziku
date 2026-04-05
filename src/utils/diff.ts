@@ -189,11 +189,11 @@ export function colorizeUnifiedDiff(diff: string): string {
     .split("\n")
     .map((line) => {
       if (line.startsWith("+++") || line.startsWith("---")) {
-        return `\x1B[1m${line}\x1B[0m`; // Bold
+        return `\u001B[1m${line}\u001B[0m`; // Bold
       }
-      if (line.startsWith("+")) return `\x1B[32m${line}\x1B[0m`; // Green
-      if (line.startsWith("-")) return `\x1B[31m${line}\x1B[0m`; // Red
-      if (line.startsWith("@@")) return `\x1B[36m${line}\x1B[0m`; // Cyan
+      if (line.startsWith("+")) return `\u001B[32m${line}\u001B[0m`; // Green
+      if (line.startsWith("-")) return `\u001B[31m${line}\u001B[0m`; // Red
+      if (line.startsWith("@@")) return `\u001B[36m${line}\u001B[0m`; // Cyan
       return line;
     })
     .join("\n");
