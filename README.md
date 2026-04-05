@@ -69,7 +69,7 @@ Example `modules.jsonc`:
 npx ziku
 ```
 
-ziku copies the matching files into your project. A `.ziku.json` config and `.ziku/modules.jsonc` are created locally to track what was installed.
+ziku copies the matching files into your project. A `.ziku/config.json` and `.ziku/modules.jsonc` are created locally to track what was installed.
 
 ### 4. Keep it in sync
 

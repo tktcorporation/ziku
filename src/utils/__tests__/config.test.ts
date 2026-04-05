@@ -20,7 +20,7 @@ describe("loadConfig", () => {
     vol.reset();
   });
 
-  it("正常な .ziku.json を読み込める", async () => {
+  it("正常な .ziku/config.json を読み込める", async () => {
     const config = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
@@ -32,7 +32,7 @@ describe("loadConfig", () => {
     };
 
     vol.fromJSON({
-      "/project/.ziku.json": JSON.stringify(config),
+      "/project/.ziku/config.json": JSON.stringify(config),
     });
 
     const result = await loadConfig("/project");
@@ -52,7 +52,7 @@ describe("loadConfig", () => {
     };
 
     vol.fromJSON({
-      "/project/.ziku.json": JSON.stringify(config),
+      "/project/.ziku/config.json": JSON.stringify(config),
     });
 
     const result = await loadConfig("/project");
@@ -68,7 +68,7 @@ describe("loadConfig", () => {
 
   it("不正な JSON の場合はエラー", async () => {
     vol.fromJSON({
-      "/project/.ziku.json": "{ invalid json }",
+      "/project/.ziku/config.json": "{ invalid json }",
     });
 
     await expect(loadConfig("/project")).rejects.toThrow();
@@ -76,7 +76,7 @@ describe("loadConfig", () => {
 
   it("スキーマに合わない場合はエラー", async () => {
     vol.fromJSON({
-      "/project/.ziku.json": JSON.stringify({
+      "/project/.ziku/config.json": JSON.stringify({
         version: "1.0.0",
         // installedAt が欠けている
         source: { owner: "test", repo: "test" },
@@ -88,7 +88,7 @@ describe("loadConfig", () => {
 
   it("installedAt が不正な datetime 形式の場合はエラー", async () => {
     vol.fromJSON({
-      "/project/.ziku.json": JSON.stringify({
+      "/project/.ziku/config.json": JSON.stringify({
         version: "1.0.0",
         installedAt: "invalid-date",
         source: { owner: "test", repo: "test" },
@@ -121,7 +121,7 @@ describe("saveConfig", () => {
 
     await saveConfig("/project", config);
 
-    const saved = vol.readFileSync("/project/.ziku.json", "utf8");
+    const saved = vol.readFileSync("/project/.ziku/config.json", "utf8");
     expect(JSON.parse(saved as string)).toEqual(config);
   });
 
@@ -141,7 +141,7 @@ describe("saveConfig", () => {
 
     await saveConfig("/project", config);
 
-    const saved = vol.readFileSync("/project/.ziku.json", "utf8") as string;
+    const saved = vol.readFileSync("/project/.ziku/config.json", "utf8") as string;
 
     // 整形されていることを確認
     expect(saved).toContain("\n");
@@ -152,7 +152,7 @@ describe("saveConfig", () => {
 
   it("既存ファイルを上書きできる", async () => {
     vol.fromJSON({
-      "/project/.ziku.json": JSON.stringify({ old: "data" }),
+      "/project/.ziku/config.json": JSON.stringify({ old: "data" }),
     });
 
     const newConfig = {
@@ -166,7 +166,7 @@ describe("saveConfig", () => {
 
     await saveConfig("/project", newConfig);
 
-    const saved = vol.readFileSync("/project/.ziku.json", "utf8");
+    const saved = vol.readFileSync("/project/.ziku/config.json", "utf8");
     expect(JSON.parse(saved as string)).toEqual(newConfig);
   });
 });

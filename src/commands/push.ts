@@ -9,6 +9,7 @@ import { ZikuError } from "../errors";
 import { addIncludePattern, loadPatternsFile, modulesFileExists } from "../modules";
 import type { DevEnvConfig } from "../modules/schemas";
 import { configSchema } from "../modules/schemas";
+import { CONFIG_FILE } from "../utils/config";
 import {
   confirmAction,
   generatePrBody,
@@ -107,10 +108,10 @@ export const pushCommand = defineCommand({
     intro("push");
 
     const targetDir = resolve(args.dir);
-    const configPath = join(targetDir, ".ziku.json");
+    const configPath = join(targetDir, CONFIG_FILE);
 
     if (!existsSync(configPath)) {
-      throw new ZikuError(".ziku.json not found.", "Run 'ziku init' first.");
+      throw new ZikuError(".ziku/config.json not found.", "Run 'ziku init' first.");
     }
 
     const configContent = await readFile(configPath, "utf-8");
@@ -118,7 +119,7 @@ export const pushCommand = defineCommand({
     const parseResult = configSchema.safeParse(configData);
 
     if (!parseResult.success) {
-      throw new ZikuError("Invalid .ziku.json format", parseResult.error.message);
+      throw new ZikuError("Invalid .ziku/config.json format", parseResult.error.message);
     }
 
     const config: DevEnvConfig = parseResult.data;

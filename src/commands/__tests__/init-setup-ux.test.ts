@@ -190,7 +190,7 @@ describe("init: セットアップ UX", () => {
     mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
     mockWriteFileWithStrategy.mockResolvedValue({
       action: "created",
-      path: ".ziku.json",
+      path: ".ziku/config.json",
     });
     mockCopyFile.mockResolvedValue({
       action: "skipped",

@@ -141,7 +141,7 @@ describe("diffCommand", () => {
   });
 
   describe("run", () => {
-    it(".ziku.json が存在しない場合は ZikuError をスロー", async () => {
+    it(".ziku/config.json が存在しない場合は ZikuError をスロー", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -155,9 +155,9 @@ describe("diffCommand", () => {
       ).rejects.toThrow(ZikuError);
     });
 
-    it("無効な .ziku.json 形式の場合は ZikuError をスロー", async () => {
+    it("無効な .ziku/config.json 形式の場合は ZikuError をスロー", async () => {
       vol.fromJSON({
-        "/test/.ziku.json": JSON.stringify({ invalid: "format" }),
+        "/test/.ziku/config.json": JSON.stringify({ invalid: "format" }),
       });
 
       await expect(
@@ -171,7 +171,7 @@ describe("diffCommand", () => {
 
     it("patterns が空の場合は警告", async () => {
       vol.fromJSON({
-        "/test/.ziku.json": JSON.stringify(validConfig),
+        "/test/.ziku/config.json": JSON.stringify(validConfig),
       });
 
       mockLoadPatternsFile.mockResolvedValueOnce({
@@ -191,7 +191,7 @@ describe("diffCommand", () => {
 
     it("差分がない場合は outro で完了メッセージ", async () => {
       vol.fromJSON({
-        "/test/.ziku.json": JSON.stringify(validConfig),
+        "/test/.ziku/config.json": JSON.stringify(validConfig),
       });
 
       mockDetectDiff.mockResolvedValueOnce(emptyDiff);
@@ -208,7 +208,7 @@ describe("diffCommand", () => {
 
     it("差分がある場合は logDiffSummary を呼ぶ", async () => {
       vol.fromJSON({
-        "/test/.ziku.json": JSON.stringify(validConfig),
+        "/test/.ziku/config.json": JSON.stringify(validConfig),
       });
 
       const diffWithChanges = {
@@ -237,7 +237,7 @@ describe("diffCommand", () => {
 
     it("一時ディレクトリを削除", async () => {
       vol.fromJSON({
-        "/test/.ziku.json": JSON.stringify(validConfig),
+        "/test/.ziku/config.json": JSON.stringify(validConfig),
         "/test/.ziku-temp": null,
       });
 
@@ -261,7 +261,7 @@ describe("diffCommand", () => {
       };
 
       vol.fromJSON({
-        "/test/.ziku.json": JSON.stringify(customConfig),
+        "/test/.ziku/config.json": JSON.stringify(customConfig),
       });
 
       mockDetectDiff.mockResolvedValueOnce(emptyDiff);
@@ -281,7 +281,7 @@ describe("diffCommand", () => {
 
     it("エラー時も一時ディレクトリを削除", async () => {
       vol.fromJSON({
-        "/test/.ziku.json": JSON.stringify(validConfig),
+        "/test/.ziku/config.json": JSON.stringify(validConfig),
         "/test/.ziku-temp": null,
       });
 
@@ -298,7 +298,7 @@ describe("diffCommand", () => {
 
     it("--verbose のとき renderFileDiff を各変更ファイルに対して呼ぶ", async () => {
       vol.fromJSON({
-        "/test/.ziku.json": JSON.stringify(validConfig),
+        "/test/.ziku/config.json": JSON.stringify(validConfig),
       });
 
       const diffWithChanges = {
@@ -326,7 +326,7 @@ describe("diffCommand", () => {
 
     it("--verbose なしのとき renderFileDiff を呼ばない", async () => {
       vol.fromJSON({
-        "/test/.ziku.json": JSON.stringify(validConfig),
+        "/test/.ziku/config.json": JSON.stringify(validConfig),
       });
 
       const diffWithChanges = {
@@ -354,7 +354,7 @@ describe("diffCommand", () => {
 
     it("--verbose のとき変更ファイルのみ renderFileDiff を呼び、unchanged ファイルはスキップ", async () => {
       vol.fromJSON({
-        "/test/.ziku.json": JSON.stringify(validConfig),
+        "/test/.ziku/config.json": JSON.stringify(validConfig),
       });
 
       const unchangedFile = {

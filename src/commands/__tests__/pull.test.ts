@@ -21,6 +21,7 @@ vi.mock("../../utils/template", () => ({
 }));
 
 vi.mock("../../utils/config", () => ({
+  CONFIG_FILE: ".ziku/config.json",
   loadConfig: vi.fn(),
   saveConfig: vi.fn(),
 }));

@@ -37,6 +37,7 @@ import {
   resolveLatestCommitSha,
   scaffoldTemplateRepo,
 } from "../utils/github";
+import { CONFIG_FILE } from "../utils/config";
 import { hashFiles } from "../utils/hash";
 import {
   buildTemplateSource,
@@ -155,7 +156,7 @@ export const initCommand = defineCommand({
         args.force as boolean,
         args["overwrite-strategy"] as string | undefined,
         args.yes as boolean,
-        existsSync(resolve(targetDir, ".ziku.json")),
+        existsSync(resolve(targetDir, CONFIG_FILE)),
       );
 
       // Step 2: ファイルをコピー
@@ -253,7 +254,7 @@ async function createEnvExample(
 }
 
 /**
- * 設定ファイル (.ziku.json) を生成する。常に上書き。
+ * 設定ファイル (.ziku/config.json) を生成する。常に上書き。
  */
 async function createDevEnvConfig(
   targetDir: string,
@@ -278,12 +279,12 @@ async function createDevEnvConfig(
     config.baseHashes = source.baseHashes;
   }
 
-  // .ziku.json は常に上書き（設定管理ファイルなので）
+  // .ziku/config.json は常に上書き（設定管理ファイルなので）
   return writeFileWithStrategy({
-    destPath: resolve(targetDir, ".ziku.json"),
+    destPath: resolve(targetDir, CONFIG_FILE),
     content: JSON.stringify(config, null, 2),
     strategy: "overwrite",
-    relativePath: ".ziku.json",
+    relativePath: CONFIG_FILE,
   });
 }
 

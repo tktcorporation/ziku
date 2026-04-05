@@ -122,6 +122,7 @@ vi.mock("../../modules/index", async (importOriginal) => {
 });
 
 vi.mock("../../utils/config", () => ({
+  CONFIG_FILE: ".ziku/config.json",
   loadConfig: vi.fn(),
   saveConfig: vi.fn(),
 }));
@@ -224,7 +225,7 @@ describe("E2E: multi-scenario tests", () => {
       cleanup: vi.fn(),
     });
     mockFetchTemplates.mockResolvedValue([]);
-    mockWriteFileWithStrategy.mockResolvedValue({ action: "created", path: ".ziku.json" });
+    mockWriteFileWithStrategy.mockResolvedValue({ action: "created", path: ".ziku/config.json" });
     mockHashFiles.mockResolvedValue({});
     mockModulesFileExists.mockReturnValue(true);
     mockCheckRepoExists.mockResolvedValue(true);
@@ -453,10 +454,10 @@ describe("E2E: multi-scenario tests", () => {
   // ─────────────────────────────────────────────────────────────
 
   describe("diff: エラーケース", () => {
-    it(".ziku.json が存在しない → ZikuError", async () => {
+    it(".ziku/config.json が存在しない → ZikuError", async () => {
       vol.fromJSON({
         "/project/.ziku/modules.jsonc": flatModulesJsonc([".mcp.json"]),
-        // .ziku.json なし
+        // .ziku/config.json なし
       });
 
       await expect(
@@ -471,7 +472,7 @@ describe("E2E: multi-scenario tests", () => {
     it("modules.jsonc が存在しない → ZikuError", async () => {
       mockModulesFileExists.mockReturnValueOnce(false);
       vol.fromJSON({
-        "/project/.ziku.json": JSON.stringify(baseConfig),
+        "/project/.ziku/config.json": JSON.stringify(baseConfig),
       });
 
       await expect(
@@ -588,7 +589,7 @@ describe("E2E: multi-scenario tests", () => {
   // ─────────────────────────────────────────────────────────────
 
   describe("pull: エラーケース", () => {
-    it(".ziku.json がない → ZikuError", async () => {
+    it(".ziku/config.json がない → ZikuError", async () => {
       vol.fromJSON({
         "/project/.ziku/modules.jsonc": flatModulesJsonc([".mcp.json"]),
       });
@@ -634,7 +635,7 @@ describe("E2E: multi-scenario tests", () => {
       // Step 2: track でパターン追加
       vol.fromJSON({
         "/project/.ziku/modules.jsonc": initContent,
-        "/project/.ziku.json": JSON.stringify(baseConfig),
+        "/project/.ziku/config.json": JSON.stringify(baseConfig),
       });
 
       const originalArgv = process.argv;

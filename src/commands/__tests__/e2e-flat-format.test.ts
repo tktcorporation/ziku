@@ -149,6 +149,7 @@ vi.mock("../../modules/index", async (importOriginal) => {
 });
 
 vi.mock("../../utils/config", () => ({
+  CONFIG_FILE: ".ziku/config.json",
   loadConfig: vi.fn(),
   saveConfig: vi.fn(),
 }));
@@ -238,7 +239,7 @@ describe("E2E: flat modules.jsonc format", () => {
     mockFetchTemplates.mockResolvedValue([]);
     mockWriteFileWithStrategy.mockResolvedValue({
       action: "created",
-      path: ".ziku.json",
+      path: ".ziku/config.json",
     });
     mockCopyFile.mockResolvedValue({
       action: "skipped",
@@ -459,7 +460,7 @@ describe("E2E: flat modules.jsonc format", () => {
       const modulesContent = createFlatModulesJsonc([".mcp.json", ".devcontainer/**"], ["*.local"]);
       vol.fromJSON({
         "/project/.ziku/modules.jsonc": modulesContent,
-        "/project/.ziku.json": JSON.stringify(baseConfig),
+        "/project/.ziku/config.json": JSON.stringify(baseConfig),
         "/project/.mcp.json": "{}",
       });
 
@@ -482,7 +483,7 @@ describe("E2E: flat modules.jsonc format", () => {
     it("フラットパターンのみで pull が完走する（モジュール概念なし）", async () => {
       vol.fromJSON({
         "/project/.ziku/modules.jsonc": createFlatModulesJsonc([".mcp.json"]),
-        "/project/.ziku.json": JSON.stringify(baseConfig),
+        "/project/.ziku/config.json": JSON.stringify(baseConfig),
       });
 
       mockLoadConfig.mockResolvedValue(baseConfig as any);
@@ -505,7 +506,7 @@ describe("E2E: flat modules.jsonc format", () => {
     it("loadPatternsFile からフラットパターンを取得して detectDiff に渡す", async () => {
       vol.fromJSON({
         "/project/.ziku/modules.jsonc": createFlatModulesJsonc([".mcp.json", ".github/**"]),
-        "/project/.ziku.json": JSON.stringify(baseConfig),
+        "/project/.ziku/config.json": JSON.stringify(baseConfig),
       });
 
       await (diffCommand.run as any)({
@@ -566,7 +567,7 @@ describe("E2E: flat modules.jsonc format", () => {
       // Step 3: track 後のファイルを memfs に配置して pull が読める
       vol.fromJSON({
         "/test/.ziku/modules.jsonc": tracked,
-        "/test/.ziku.json": JSON.stringify(baseConfig),
+        "/test/.ziku/config.json": JSON.stringify(baseConfig),
       });
 
       mockLoadConfig.mockResolvedValue(baseConfig as any);

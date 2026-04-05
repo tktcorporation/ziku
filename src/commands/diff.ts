@@ -9,6 +9,7 @@ import { loadPatternsFile, modulesFileExists } from "../modules";
 import { configSchema } from "../modules/schemas";
 import { renderFileDiff } from "../ui/diff-view";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
+import { CONFIG_FILE } from "../utils/config";
 import { detectDiff, hasDiff } from "../utils/diff";
 import { buildTemplateSource } from "../utils/template";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked";
@@ -35,10 +36,10 @@ export const diffCommand = defineCommand({
     intro("diff");
 
     const targetDir = resolve(args.dir);
-    const configPath = join(targetDir, ".ziku.json");
+    const configPath = join(targetDir, CONFIG_FILE);
 
     if (!existsSync(configPath)) {
-      throw new ZikuError(".ziku.json not found.", "Run 'ziku init' first.");
+      throw new ZikuError(".ziku/config.json not found.", "Run 'ziku init' first.");
     }
 
     const configContent = await readFile(configPath, "utf-8");
@@ -46,7 +47,7 @@ export const diffCommand = defineCommand({
     const parseResult = configSchema.safeParse(configData);
 
     if (!parseResult.success) {
-      throw new ZikuError("Invalid .ziku.json format", parseResult.error.message);
+      throw new ZikuError("Invalid .ziku/config.json format", parseResult.error.message);
     }
 
     const config = parseResult.data;

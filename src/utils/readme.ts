@@ -93,7 +93,7 @@ function generateFilesSection(patterns: string[]): string {
 
   lines.push("");
   lines.push("### 設定ファイル\n");
-  lines.push("- `.ziku.json` - このツールの設定（同期状態）\n");
+  lines.push("- `.ziku/config.json` - このツールの設定（同期状態）\n");
 
   return lines.join("\n");
 }
