@@ -39,3 +39,6 @@ jobs:
 
           echo "Changeset found:"
           echo "$CHANGESET_FILES"
+
+      - name: Validate changeset package names
+        run: bash scripts/validate-changesets.sh

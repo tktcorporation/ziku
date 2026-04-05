@@ -23,6 +23,7 @@
     "build": "tsdown",
     "dev": "tsdown --watch",
     "lint": "oxlint . && ast-grep scan",
+    "lint:changesets": "bash scripts/validate-changesets.sh",
     "lint:fix": "oxlint --fix .",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
