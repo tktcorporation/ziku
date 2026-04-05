@@ -1,15 +1,19 @@
 <p align="center">
 <br>
-<h1 align="center">ziku</h1>
-<p align="center">
-A bi-directional dev environment template that evolves with you.
-</p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/logo-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset=".github/assets/logo-light.svg">
+  <img src=".github/assets/logo-light.svg" alt="ziku" width="360">
+</picture>
 <br>
-<p align="center">
+<br>
+<em>A bi-directional dev environment template that evolves with you.</em>
+<br>
+<br>
 <a href="https://www.npmjs.com/package/ziku"><img src="https://img.shields.io/npm/v/ziku?color=a1b858&label=" alt="npm version"></a>
 <a href="https://www.npmjs.com/package/ziku"><img src="https://img.shields.io/npm/dm/ziku?color=50a36f&label=" alt="npm downloads"></a>
 <a href="https://github.com/tktcorporation/.github/blob/main/LICENSE"><img src="https://img.shields.io/github/license/tktcorporation/.github?color=blue&label=" alt="license"></a>
-</p>
+<br>
 <br>
 </p>
 
