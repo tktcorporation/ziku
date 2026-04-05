@@ -7,13 +7,14 @@
  *   pnpm run docs:check  # Check only (for CI)
  *
  * Generated sections:
- *   - Getting Started (from init command constants)
- *   - Usage (static content)
+ *   - Getting Started (from init command constants + DEFAULT_TEMPLATE_REPOS)
+ *   - Modules/Features (from .ziku/modules.jsonc)
  *   - Commands (from citty renderUsage)
+ *   - What You Get / Files (from ZIKU_CONFIG_FILE, LOCK_FILE constants)
  *
  * Non-generated sections (manually maintained):
- *   - Features/Modules
- *   - What You Get / Files
+ *   - Why (conceptual intro)
+ *   - Contributing / License
  */
 
 // Prevent environment-dependent renderUsage output differences
@@ -27,6 +28,7 @@ import { resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import type { ArgsDef, CommandDef } from "citty";
 import { renderUsage } from "citty";
+import { parse as parseJsonc } from "jsonc-parser";
 import { z } from "zod";
 import { diffCommand } from "../src/commands/diff";
 import { generateFlatPatternsJsonc, initCommand } from "../src/commands/init";
@@ -34,10 +36,15 @@ import { pullCommand } from "../src/commands/pull";
 import { pushCommand } from "../src/commands/push";
 import { trackCommand } from "../src/commands/track";
 import { modulesFileSchema } from "../src/modules/loader";
-import { DEFAULT_TEMPLATE_REPO } from "../src/utils/git-remote";
+import { zikuConfigSchema } from "../src/modules/schemas";
+import { DEFAULT_TEMPLATE_REPOS } from "../src/utils/git-remote";
+import { LOCK_FILE } from "../src/utils/lock";
+import { ZIKU_CONFIG_FILE } from "../src/utils/ziku-config";
 
 const README_PATH = resolve(import.meta.dirname, "../README.md");
-const SCHEMA_PATH = resolve(import.meta.dirname, "../schema/modules.json");
+const MODULES_SCHEMA_PATH = resolve(import.meta.dirname, "../schema/modules.json");
+const ZIKU_SCHEMA_PATH = resolve(import.meta.dirname, "../schema/ziku.json");
+const MODULES_JSONC_PATH = resolve(import.meta.dirname, "../.ziku/modules.jsonc");
 
 // Marker definitions
 const MARKERS = {
@@ -45,18 +52,26 @@ const MARKERS = {
     start: "<!-- GETTING_STARTED:START -->",
     end: "<!-- GETTING_STARTED:END -->",
   },
-  usage: {
-    start: "<!-- USAGE:START -->",
-    end: "<!-- USAGE:END -->",
+  features: {
+    start: "<!-- FEATURES:START -->",
+    end: "<!-- FEATURES:END -->",
   },
   commands: {
     start: "<!-- COMMANDS:START -->",
     end: "<!-- COMMANDS:END -->",
   },
+  files: {
+    start: "<!-- FILES:START -->",
+    end: "<!-- FILES:END -->",
+  },
 } as const;
 
 /**
  * Generate Getting Started section from source code constants
+ *
+ * DEFAULT_TEMPLATE_REPOS からテンプレート検索順を生成し、
+ * generateFlatPatternsJsonc で example modules.jsonc を生成する。
+ * コード側の定数変更に README が自動追従する。
  */
 function generateGettingStartedSection(): string {
   // Generate example modules.jsonc from the same function used at runtime
@@ -65,10 +80,13 @@ function generateGettingStartedSection(): string {
     exclude: [],
   });
 
+  // テンプレートリポジトリの検索順をコード定数から生成
+  const repoList = DEFAULT_TEMPLATE_REPOS.map((r) => `\`{your-org}/${r}\``).join(", then ");
+
   const lines: string[] = [
     "## Getting Started\n",
     "### 1. Set up your template repository\n",
-    `ziku uses a GitHub repository as the template source. By default, it looks for \`{your-org}/${DEFAULT_TEMPLATE_REPO}\` based on your git remote.\n`,
+    `ziku uses a GitHub repository as the template source. By default, it looks for ${repoList} based on your git remote.\n`,
     "If the repository doesn't exist yet, `npx ziku` will offer to create it for you interactively. You can also create it manually or specify a different source:\n",
     "```bash",
     "# Auto-detect from git remote (recommended)",
@@ -86,8 +104,11 @@ function generateGettingStartedSection(): string {
     "### 3. Apply the template to your project\n",
     "```bash",
     "npx ziku",
+    "",
+    "# Or apply to a specific directory",
+    "npx ziku ./my-project",
     "```\n",
-    "ziku copies the matching files into your project. A `.ziku/ziku.jsonc` (config) and `.ziku/lock.json` (sync state) are created locally to track what was installed.\n",
+    `ziku copies the matching files into your project. \`${ZIKU_CONFIG_FILE}\` (config) and \`${LOCK_FILE}\` (sync state) are created locally to track what was installed.\n`,
     "### 4. Keep it in sync\n",
     "```bash",
     "# Push local improvements back to the template",
@@ -98,6 +119,9 @@ function generateGettingStartedSection(): string {
     "",
     "# Check what's different",
     "npx ziku diff",
+    "",
+    "# Add file patterns to track",
+    "npx ziku track '.eslintrc.*'",
     "```\n",
   ];
 
@@ -105,24 +129,36 @@ function generateGettingStartedSection(): string {
 }
 
 /**
- * Generate Usage section
+ * Generate Modules/Features section from .ziku/modules.jsonc
+ *
+ * テンプレートの modules.jsonc を読み込み、各モジュールの name と description から
+ * README の Modules セクションを生成する。モジュール追加・変更時に README が自動追従する。
  */
-function generateUsageSection(): string {
+async function generateFeaturesSection(): Promise<string> {
+  const raw = await readFile(MODULES_JSONC_PATH, "utf-8");
+  const parsed = parseJsonc(raw) as { modules: { name: string; description: string }[] };
+
+  const lines: string[] = ["## Modules\n", "Pick what you need:\n"];
+  for (const mod of parsed.modules) {
+    lines.push(`- **${mod.name}** - ${mod.description}`);
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+/**
+ * Generate "What You Get" section from code constants
+ *
+ * init 後に生成されるファイルのパスをソースコード上の定数から取得し、
+ * 説明テキストを生成する。定数の変更に README が自動追従する。
+ */
+function generateFilesSection(): string {
   const lines: string[] = [
-    "## Usage\n",
-    "```bash",
-    "# Apply template to current directory",
-    "npx ziku",
-    "",
-    "# Apply to a specific directory",
-    "npx ziku ./my-project",
-    "",
-    "# Push your improvements back",
-    'npx ziku push -m "Add new workflow"',
-    "",
-    "# Check what's different",
-    "npx ziku diff",
-    "```\n",
+    "## What You Get\n",
+    `The files you get depend on the patterns configured in your template's \`.ziku/modules.jsonc\`. After running \`ziku init\`, your selected patterns are saved in \`${ZIKU_CONFIG_FILE}\` — you can customize them anytime with \`ziku track\`.\n`,
+    "ziku also creates:\n",
+    `- \`${ZIKU_CONFIG_FILE}\` — Your sync configuration (which template, which patterns)`,
+    `- \`${LOCK_FILE}\` — Sync state (hashes, base refs) for change detection\n`,
   ];
   return lines.join("\n");
 }
@@ -207,23 +243,27 @@ async function main(): Promise<void> {
 
   console.log("📝 Generating documentation...\n");
 
-  // Generate JSON Schema from Zod schema
-  const jsonSchema = JSON.stringify(z.toJSONSchema(modulesFileSchema), null, 2);
+  // Generate JSON Schemas from Zod schemas
+  const modulesJsonSchema = JSON.stringify(z.toJSONSchema(modulesFileSchema), null, 2);
+  const zikuJsonSchema = JSON.stringify(z.toJSONSchema(zikuConfigSchema), null, 2);
 
   // Generate sections
   const gettingStartedSection = generateGettingStartedSection();
-  const usageSection = generateUsageSection();
+  const featuresSection = await generateFeaturesSection();
   const commandsSection = await generateCommandsSection();
+  const filesSection = generateFilesSection();
 
   // Read originals
   let readme = await readFile(README_PATH, "utf-8");
   const originalReadme = readme;
 
-  let originalSchema = "";
-  try {
-    originalSchema = await readFile(SCHEMA_PATH, "utf-8");
-  } catch {
-    // file doesn't exist yet
+  const originalSchemas: Record<string, string> = {};
+  for (const path of [MODULES_SCHEMA_PATH, ZIKU_SCHEMA_PATH]) {
+    try {
+      originalSchemas[path] = await readFile(path, "utf-8");
+    } catch {
+      originalSchemas[path] = "";
+    }
   }
 
   readme = updateSection(
@@ -232,28 +272,42 @@ async function main(): Promise<void> {
     MARKERS.gettingStarted.end,
     gettingStartedSection,
   );
-  readme = updateSection(readme, MARKERS.usage.start, MARKERS.usage.end, usageSection);
+  readme = updateSection(readme, MARKERS.features.start, MARKERS.features.end, featuresSection);
   readme = updateSection(readme, MARKERS.commands.start, MARKERS.commands.end, commandsSection);
+  readme = updateSection(readme, MARKERS.files.start, MARKERS.files.end, filesSection);
 
   const readmeUpdated = readme !== originalReadme;
 
-  // Generate formatted JSON Schema (write, run formatter, read back canonical form)
-  await writeFile(SCHEMA_PATH, `${jsonSchema}\n`);
-  execFileSync("npx", ["oxfmt", "--write", SCHEMA_PATH], { stdio: "ignore" });
-  const formattedSchema = await readFile(SCHEMA_PATH, "utf-8");
-  const schemaUpdated = originalSchema !== formattedSchema;
+  // Generate formatted JSON Schemas (write, run formatter, read back canonical form)
+  const schemaEntries: [string, string][] = [
+    [MODULES_SCHEMA_PATH, modulesJsonSchema],
+    [ZIKU_SCHEMA_PATH, zikuJsonSchema],
+  ];
+  const schemaUpdates: string[] = [];
+  for (const [path, content] of schemaEntries) {
+    await writeFile(path, `${content}\n`);
+    execFileSync("npx", ["oxfmt", "--write", path], { stdio: "ignore" });
+    const formatted = await readFile(path, "utf-8");
+    if (originalSchemas[path] !== formatted) {
+      schemaUpdates.push(path.split("/").pop()!);
+    }
+  }
 
-  const updated = readmeUpdated || schemaUpdated;
+  const updated = readmeUpdated || schemaUpdates.length > 0;
 
   if (isCheck) {
-    // Restore original schema if it was overwritten for formatting
-    if (originalSchema) {
-      await writeFile(SCHEMA_PATH, originalSchema);
+    // Restore original schemas if they were overwritten for formatting
+    for (const [path, original] of Object.entries(originalSchemas)) {
+      if (original) {
+        await writeFile(path, original);
+      }
     }
 
     if (updated) {
       if (readmeUpdated) console.error("  - README.md is out of date");
-      if (schemaUpdated) console.error("  - schema/modules.json is out of date");
+      for (const name of schemaUpdates) {
+        console.error(`  - schema/${name} is out of date`);
+      }
       console.error("\n❌ Documentation is out of date.");
       console.error("   Run `pnpm run docs` to update.\n");
       process.exit(1);
@@ -262,13 +316,13 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Schema file is already written and formatted above
+  // Schema files are already written and formatted above
   if (readmeUpdated) {
     await writeFile(README_PATH, readme);
     console.log("  ✅ README.md updated.");
   }
-  if (schemaUpdated) {
-    console.log("  ✅ schema/modules.json updated.");
+  for (const name of schemaUpdates) {
+    console.log(`  ✅ schema/${name} updated.`);
   }
   if (updated) {
     console.log("");
