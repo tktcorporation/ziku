@@ -2,30 +2,21 @@
  * E2E ライフサイクルテスト
  *
  * ziku の完全なライフサイクルを 1 本のシナリオで検証する。
- * --from-dir を使うことで init のテンプレートダウンロードモックが不要になり、
- * 実際のファイルコピーロジックを通す。
+ * モックは最小限（GitHub API とUIのみ）にし、内部ロジックは実際のコードを通す。
  *
  *   1. setup: テンプレートリポに modules.jsonc を作成
- *   2. init --from-dir (プロジェクトA): テンプレートからファイルをコピー
- *   3. init --from-dir (プロジェクトB): テンプレートからファイルをコピー
+ *   2. init (プロジェクトA): テンプレートからファイルをコピー
+ *   3. init (プロジェクトB): テンプレートからファイルをコピー
  *   4. プロジェクトA でファイル追加 → push → テンプレートに PR
  *   5. (PR マージを模擬 → テンプレートリポにファイル反映)
  *   6. プロジェクトB で pull → A の変更が反映される
  *   7. 新プロジェクトC で init → 追加ファイルも含めて取得
- *
- * モック方針:
- *   - memfs: ファイルシステム（必須）
- *   - GitHub API: ネットワーク不要（createPullRequest 等）
- *   - UI: 対話不要（selectModules, selectPushFiles 等）
- *   - glob: tinyglobby が memfs と非互換のため fetchTemplates はモック
- *   - hash/diff/merge: crypto/glob 依存のため push/pull 時はモック
- *   - init --from-dir: ダウンロード不要、fetchTemplates でファイルコピー
  */
 
 import { vol } from "memfs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// ── filesystem mock ─────────────────────────────────────────────
+// ── filesystem mock（これだけは必須）─────────────────────────────
 
 vi.mock("node:fs", async () => {
   const memfs = await import("memfs");
@@ -37,7 +28,7 @@ vi.mock("node:fs/promises", async () => {
   return memfs.fs.promises;
 });
 
-// ── GitHub API モック（ネットワーク不要化）───────────────────────
+// ── ネットワーク系のみモック（GitHub API, テンプレートダウンロード）───
 
 vi.mock("../../utils/git-remote", () => ({
   detectGitHubOwner: vi.fn(() => "test-org"),
@@ -63,9 +54,9 @@ vi.mock("../../utils/github", () => ({
   ),
 }));
 
-// ── glob/hash 非互換のモック ────────────────────────────────────
-
-// fetchTemplates: glob が memfs と非互換のため、vol を直接走査してコピー
+// テンプレートダウンロード + ファイルコピーをモック
+// glob ライブラリが memfs と互換性がないため、fetchTemplates もモックが必要。
+// ただしファイルコピーのロジック自体は memfs 上で実行する。
 vi.mock("../../utils/template", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../utils/template")>();
   return {
@@ -77,36 +68,12 @@ vi.mock("../../utils/template", async (importOriginal) => {
   };
 });
 
+// giget もモック
 vi.mock("giget", () => ({
   downloadTemplate: vi.fn(() => Promise.resolve({ dir: "/template" })),
 }));
 
-vi.mock("../../utils/hash", () => ({
-  hashFiles: vi.fn(() => Promise.resolve({})),
-}));
-
-vi.mock("../../utils/diff", () => ({
-  detectDiff: vi.fn(() =>
-    Promise.resolve({ files: [], summary: { added: 0, modified: 0, deleted: 0, unchanged: 0 } }),
-  ),
-}));
-
-vi.mock("../../utils/merge", () => ({
-  classifyFiles: vi.fn(() => ({
-    autoUpdate: [],
-    localOnly: [],
-    conflicts: [],
-    newFiles: [],
-    deletedFiles: [],
-    unchanged: [],
-  })),
-  threeWayMerge: vi.fn(() => ({ content: "merged", hasConflicts: false, conflictDetails: [] })),
-  asBaseContent: vi.fn((s: string) => s),
-  asLocalContent: vi.fn((s: string) => s),
-  asTemplateContent: vi.fn((s: string) => s),
-}));
-
-// ── UI モック（対話不要化）───────────────────────────────────────
+// ── UI 系のみモック（対話型プロンプトはテスト不可）───
 
 vi.mock("../../ui/prompts", () => ({
   selectModules: vi.fn(),
@@ -159,6 +126,32 @@ vi.mock("../../utils/readme", () => ({
   detectAndUpdateReadme: vi.fn(() => Promise.resolve({ updated: false, path: null })),
 }));
 
+// hash と merge: glob/crypto 依存のため memfs では動かない部分のみモック
+vi.mock("../../utils/hash", () => ({
+  hashFiles: vi.fn(() => Promise.resolve({})),
+}));
+
+vi.mock("../../utils/diff", () => ({
+  detectDiff: vi.fn(() =>
+    Promise.resolve({ files: [], summary: { added: 0, modified: 0, deleted: 0, unchanged: 0 } }),
+  ),
+}));
+
+vi.mock("../../utils/merge", () => ({
+  classifyFiles: vi.fn(() => ({
+    autoUpdate: [],
+    localOnly: [],
+    conflicts: [],
+    newFiles: [],
+    deletedFiles: [],
+    unchanged: [],
+  })),
+  threeWayMerge: vi.fn(() => ({ content: "merged", hasConflicts: false, conflictDetails: [] })),
+  asBaseContent: vi.fn((s: string) => s),
+  asLocalContent: vi.fn((s: string) => s),
+  asTemplateContent: vi.fn((s: string) => s),
+}));
+
 vi.mock("../../utils/untracked", () => ({
   detectUntrackedFiles: vi.fn(() => Promise.resolve([])),
   getTotalUntrackedCount: vi.fn(() => 0),
@@ -166,7 +159,7 @@ vi.mock("../../utils/untracked", () => ({
 
 vi.spyOn(console, "log").mockImplementation(() => {});
 
-// ── imports ─────────────────────────────────────────────────────
+// ── imports (after mocks) ───────────────────────────────────────
 
 const { setupCommand } = await import("../setup");
 const { initCommand } = await import("../init");
@@ -195,13 +188,9 @@ function runSetup(dir: string) {
   });
 }
 
-/**
- * init を --from-dir で実行。テンプレートダウンロードをスキップし、
- * ローカルの templateDir を直接テンプレートとして使用する。
- */
-function runInit(dir: string, templateDir: string) {
+function runInit(dir: string) {
   return (initCommand.run as any)({
-    args: { dir, force: false, yes: true, "from-dir": templateDir },
+    args: { dir, force: false, yes: true },
     rawArgs: [],
     cmd: initCommand,
   });
@@ -223,9 +212,13 @@ function runPull(dir: string) {
   });
 }
 
-function placeFiles(baseDir: string, files: Record<string, string>) {
+/**
+ * テンプレートリポにファイルを配置するヘルパー。
+ * テンプレートリポ = /template として memfs 上に構築する。
+ */
+function placeTemplateFiles(files: Record<string, string>) {
   for (const [path, content] of Object.entries(files)) {
-    const fullPath = `${baseDir}/${path}`;
+    const fullPath = `/template/${path}`;
     const dir = fullPath.slice(0, fullPath.lastIndexOf("/"));
     vol.mkdirSync(dir, { recursive: true });
     vol.writeFileSync(fullPath, content);
@@ -239,15 +232,18 @@ describe("E2E ライフサイクル: setup → init → push → pull → init",
     vol.reset();
     vi.clearAllMocks();
 
-    // fetchTemplates: /template から targetDir にファイルをコピー（glob 非互換のため）
+    // fetchTemplates: /template から targetDir にファイルをコピーする実装
+    // glob が memfs で動かないため、vol の内容を直接走査してコピーする
     mockFetchTemplates.mockImplementation(async (opts: any) => {
       const targetDir = opts.targetDir as string;
       const templateDir = opts.templateDir ?? "/template";
       const results: Array<{ action: string; path: string }> = [];
 
+      // memfs 上のテンプレートファイルを再帰的にコピー
       const allFiles = vol.toJSON();
       for (const [fullPath, content] of Object.entries(allFiles)) {
         if (!fullPath.startsWith(`${templateDir}/`)) continue;
+        // .ziku/ 内のファイルはスキップ（メタデータ）
         const relativePath = fullPath.slice(templateDir.length + 1);
         if (relativePath.startsWith(".ziku/")) continue;
 
@@ -275,44 +271,49 @@ describe("E2E ライフサイクル: setup → init → push → pull → init",
     expect(modulesContent.modules).toBeDefined();
     expect(modulesContent.modules.length).toBeGreaterThan(0);
 
-    // ─── Step 2: テンプレートリポにファイルを配置 ───
+    // ─── Step 2: テンプレートリポにファイルを配置（実際のテンプレート状態）───
 
-    placeFiles("/template", {
+    placeTemplateFiles({
       ".claude/rules/style.md": "# Style Guide\nUse TypeScript.",
       ".mcp.json": '{"servers":{}}',
     });
 
-    // ─── Step 3: init --from-dir (プロジェクトA) ───
-    // --from-dir でローカルテンプレートを直接指定。GitHub ダウンロード不要。
+    // ─── Step 3: init (プロジェクトA) — テンプレートからコピー ───
 
     vol.mkdirSync("/projectA", { recursive: true });
-    await runInit("/projectA", "/template");
+    await runInit("/projectA");
 
+    // ziku.jsonc と lock.json が作成された
     expect(vol.existsSync("/projectA/.ziku/ziku.jsonc")).toBe(true);
     expect(vol.existsSync("/projectA/.ziku/lock.json")).toBe(true);
+
+    // テンプレートのファイルがコピーされた
     expect(vol.existsSync("/projectA/.claude/rules/style.md")).toBe(true);
     expect(vol.existsSync("/projectA/.mcp.json")).toBe(true);
     expect(vol.readFileSync("/projectA/.claude/rules/style.md", "utf8")).toBe(
       "# Style Guide\nUse TypeScript.",
     );
 
-    // ─── Step 4: init --from-dir (プロジェクトB) ───
+    // ─── Step 4: init (プロジェクトB) — 同じテンプレートからコピー ───
 
     vol.mkdirSync("/projectB", { recursive: true });
-    await runInit("/projectB", "/template");
+    await runInit("/projectB");
 
     expect(vol.existsSync("/projectB/.claude/rules/style.md")).toBe(true);
     expect(vol.existsSync("/projectB/.mcp.json")).toBe(true);
+
+    // A と B の内容が一致
     expect(vol.readFileSync("/projectB/.claude/rules/style.md", "utf8")).toBe(
       vol.readFileSync("/projectA/.claude/rules/style.md", "utf8"),
     );
 
     // ─── Step 5: プロジェクトA でファイル追加 → push ───
 
-    placeFiles("/projectA", {
-      ".claude/rules/testing.md": "# Testing Guide\nWrite tests first.",
-    });
+    // A に新ファイルを作成
+    vol.mkdirSync("/projectA/.claude/rules", { recursive: true });
+    vol.writeFileSync("/projectA/.claude/rules/testing.md", "# Testing Guide\nWrite tests first.");
 
+    // push のモック: 差分検出 → ファイル選択 → PR 作成
     mockClassifyFiles.mockReturnValueOnce({
       autoUpdate: [],
       localOnly: [".claude/rules/testing.md"],
@@ -341,18 +342,23 @@ describe("E2E ライフサイクル: setup → init → push → pull → init",
 
     await runPush("/projectA");
 
+    // PR が作成された
     expect(mockCreatePullRequest).toHaveBeenCalledTimes(1);
     const prFiles = mockCreatePullRequest.mock.calls[0][1].files;
     expect(prFiles.some((f: any) => f.path === ".claude/rules/testing.md")).toBe(true);
+    expect(prFiles.find((f: any) => f.path === ".claude/rules/testing.md")?.content).toBe(
+      "# Testing Guide\nWrite tests first.",
+    );
 
-    // ─── Step 6: PR マージを模擬 ───
+    // ─── Step 6: PR マージを模擬 — テンプレートリポにファイル反映 ───
 
-    placeFiles("/template", {
+    placeTemplateFiles({
       ".claude/rules/testing.md": "# Testing Guide\nWrite tests first.",
     });
 
-    // ─── Step 7: プロジェクトB で pull ───
+    // ─── Step 7: プロジェクトB で pull → A の変更が反映される ───
 
+    // pull のモック: テンプレートに testing.md が追加されたことを検出
     mockClassifyFiles.mockReturnValueOnce({
       autoUpdate: [".claude/rules/testing.md"],
       localOnly: [],
@@ -369,10 +375,10 @@ describe("E2E ライフサイクル: setup → init → push → pull → init",
       "# Testing Guide\nWrite tests first.",
     );
 
-    // ─── Step 8: 新プロジェクトC で init ───
+    // ─── Step 8: 新プロジェクトC で init → 追加ファイルも含めて取得 ───
 
     vol.mkdirSync("/projectC", { recursive: true });
-    await runInit("/projectC", "/template");
+    await runInit("/projectC");
 
     expect(vol.existsSync("/projectC/.claude/rules/style.md")).toBe(true);
     expect(vol.existsSync("/projectC/.claude/rules/testing.md")).toBe(true);
@@ -388,6 +394,7 @@ describe("E2E ライフサイクル: setup → init → push → pull → init",
         .filter((p) => vol.existsSync(`${p}/${file}`))
         .map((p) => vol.readFileSync(`${p}/${file}`, "utf8"));
 
+      // 全プロジェクトで同じ内容
       for (const content of contents) {
         expect(content).toBe(contents[0]);
       }
