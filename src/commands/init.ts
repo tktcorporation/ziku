@@ -79,6 +79,10 @@ export const initUserLifecycle: CommandLifecycle = {
       note: "テンプレートからパターンに一致するファイルをコピー",
     },
   ],
+  notes: [
+    "`ziku.jsonc` はテンプレートとユーザープロジェクトの両方に存在する。同一フォーマット（include/exclude パターンのみ）で、source 情報は含まない。",
+    "テンプレートの取得元（owner/repo またはローカルパス）は `lock.json` に保存される。これにより `ziku.jsonc` はテンプレート・ユーザー間で完全に同一フォーマットになる。",
+  ],
 };
 
 export const initCommand = defineCommand({

@@ -33,6 +33,13 @@ export interface CommandLifecycle {
   readonly description: string;
   /** ファイル操作のリスト */
   readonly ops: readonly FileOp[];
+  /**
+   * ドキュメントの「補足」セクションに出力される注記。
+   *
+   * コマンド実装の近くに置くことで、動作変更時に更新漏れを防ぐ。
+   * 各要素は Markdown テキストとして出力される。
+   */
+  readonly notes?: readonly string[];
 }
 
 /**

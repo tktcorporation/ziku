@@ -66,6 +66,10 @@ export const pullLifecycle: CommandLifecycle = {
       note: "新しい baseHashes, baseRef で上書き",
     },
   ],
+  notes: [
+    "テンプレートの `ziku.jsonc` に新しいパターンが追加された場合、pull 時にユーザーの `ziku.jsonc` へ自動マージされる。既存パターンはそのまま維持される。",
+    "テンプレートで削除されたファイルは `--force` で自動削除、またはユーザーが選択的に削除できる。",
+  ],
 };
 
 export const pullCommand = defineCommand({

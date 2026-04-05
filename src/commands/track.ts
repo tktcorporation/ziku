@@ -32,6 +32,9 @@ export const trackLifecycle: CommandLifecycle = {
       note: "新しいパターンを include に追加",
     },
   ],
+  notes: [
+    "`ziku track` で追加したパターンはローカルの `ziku.jsonc` にのみ反映される。テンプレートに反映するには `ziku push` でテンプレートの `ziku.jsonc` を更新する。",
+  ],
 };
 
 export const trackCommand = defineCommand({
