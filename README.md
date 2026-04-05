@@ -98,7 +98,7 @@ npx ziku track '.eslintrc.*'
 
 ## Modules
 
-ziku lets you organize synced files into **modules** — named groups of file patterns defined in `.ziku/modules.jsonc`. During `ziku init`, users pick which modules to apply.
+ziku lets you organize synced files into **modules** — named groups of file patterns. Template authors define modules in `.ziku/modules.jsonc`; users pick which ones to apply during `ziku init`.
 
 You can define any modules that match your team's stack. For example:
 
@@ -110,8 +110,12 @@ You can define any modules that match your team's stack. For example:
 | **AI Tooling** | `.claude/`, `.cursor/rules/`, `.mcp.json` |
 | **IaC** | `terraform/modules/**`, `docker-compose.yml` |
 
+### Template side: `modules.jsonc`
+
+Template authors define available modules in their template repository:
+
 ```jsonc
-// .ziku/modules.jsonc — define as many modules as you need
+// .ziku/modules.jsonc (in the template repo)
 {
   "modules": [
     {
@@ -127,6 +131,20 @@ You can define any modules that match your team's stack. For example:
   ]
 }
 ```
+
+### User side: `ziku.jsonc`
+
+After running `ziku init` and selecting modules, a flat config is generated in your project:
+
+```jsonc
+// .ziku/ziku.jsonc (in your project — auto-generated, customizable)
+{
+  "source": { "owner": "my-org", "repo": ".ziku" },
+  "include": [".eslintrc.*", ".prettierrc", ".github/workflows/**"]
+}
+```
+
+You can further customize tracked patterns anytime with `ziku track`.
 
 <!-- FEATURES:END -->
 
