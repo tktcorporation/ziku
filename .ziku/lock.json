@@ -1,11 +1,6 @@
 {
   "version": "0.1.0",
   "installedAt": "2026-03-31T01:15:48.232Z",
-  "modules": [".", ".devcontainer", ".github", ".claude"],
-  "source": {
-    "owner": "tktcorporation",
-    "repo": ".github"
-  },
   "baseRef": "e25329193a1e11afbdd42d2aa3eb4c8fedc91267",
   "baseHashes": {
     ".mcp.json": "bf80bacd0dd7ac8444872085a06e05e99ba3578666f7e457ea97ca6873bdba39",

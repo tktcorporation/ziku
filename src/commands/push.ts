@@ -181,9 +181,9 @@ export const pushCommand = defineCommand({
               `Detected ${newPatterns.length} new pattern(s) from local: ${newPatterns.join(", ")}`,
             );
             // テンプレートの modules.jsonc に新パターンを追加
-            const { loadPatternsFile: loadRaw } = await import("../modules/loader");
+            const { loadPatternsFile: loadRaw, addIncludePattern: addModulePattern } =
+              await import("../modules/loader");
             const templateRaw = await loadRaw(templateDir);
-            const { addIncludePattern: addModulePattern } = await import("../modules/loader");
             updatedModulesContent = addModulePattern(templateRaw.rawContent, newPatterns);
           }
 

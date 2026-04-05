@@ -62,7 +62,7 @@ vi.spyOn(process, "exit").mockImplementation(() => {
 
 // モック後にインポート
 const { loadPatternsFile, saveModulesFile, modulesFileExists } = await import("../../modules");
-const { addIncludePattern } = await import("../../modules/loader");
+const { addIncludePattern } = await import("../../utils/ziku-config");
 
 describe("track command - core logic", () => {
   beforeEach(() => {

@@ -298,10 +298,11 @@ async function writeLockFile(
       : {}),
   };
 
+  const isNew = !existsSync(join(targetDir, LOCK_FILE));
   await saveLock(targetDir, lock);
 
   return {
-    action: "overwritten",
+    action: isNew ? "created" : "overwritten",
     path: LOCK_FILE,
   };
 }
