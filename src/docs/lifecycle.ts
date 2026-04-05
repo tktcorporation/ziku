@@ -12,7 +12,6 @@
  * 検証: `npm run docs:check` で CI 検証される。
  */
 
-import { MODULES_FILE } from "../modules/loader";
 import { LOCK_FILE } from "../utils/lock";
 import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
 
@@ -65,7 +64,7 @@ function generateComponentDiagram(): string {
     "graph LR",
     "",
     '  subgraph Template["テンプレートリポジトリ"]',
-    `    MODULES["${MODULES_FILE}"]`,
+    `    ZIKU_TPL["${ZIKU_CONFIG_FILE}"]`,
     '    T_FILES["synced files"]',
     "  end",
     "",
@@ -75,8 +74,8 @@ function generateComponentDiagram(): string {
     '    U_FILES["synced files"]',
     "  end",
     "",
-    "  setup -->|create| MODULES",
-    "  init -->|read| MODULES",
+    "  setup -->|create| ZIKU_TPL",
+    "  init -->|read| ZIKU_TPL",
     "  init -->|create| ZIKU",
     "  init -->|create| LOCK",
     "  init -->|create| U_FILES",
@@ -86,9 +85,9 @@ function generateComponentDiagram(): string {
     "  pull -->|update| LOCK",
     "  push -->|read| ZIKU",
     "  push -->|read| LOCK",
-    "  push -->|read| MODULES",
     "  push -->|PR| T_FILES",
     "  diff -->|read| ZIKU",
+    "  diff -->|read| LOCK",
     "  diff -->|read| U_FILES",
     "  track -->|update| ZIKU",
     "",
@@ -102,24 +101,24 @@ function generateComponentDiagram(): string {
 function generateFileLifecycleTable(): string {
   const files = [
     {
-      file: MODULES_FILE,
-      location: "テンプレートリポジトリ",
-      description: "モジュール定義（Claude Code ルール、MCP 設定などのグループ）",
-      lifecycle: [
-        { phase: "生成", detail: "`ziku setup` でデフォルトモジュールを含む初期ファイルを作成" },
-        { phase: "読み取り", detail: "`ziku init` でモジュール選択 UI のデータとして使用" },
-        { phase: "読み取り", detail: "`ziku push` でテンプレートのパターンとローカルの差分を検出" },
-      ],
-    },
-    {
       file: ZIKU_CONFIG_FILE,
-      location: "ユーザープロジェクト",
-      description: "同期設定（source + 選択済み include/exclude パターン）",
+      location: "両方（テンプレート + ユーザー）",
+      description:
+        "同期対象パターン定義（include/exclude）。テンプレートとユーザーで同一フォーマット",
       lifecycle: [
-        { phase: "生成", detail: "`ziku init` でモジュール選択結果をフラット化して保存" },
+        {
+          phase: "生成",
+          detail: "`ziku setup` でデフォルトパターンを含む初期ファイルをテンプレートに作成",
+        },
         {
           phase: "読み取り",
-          detail: "`pull` / `push` / `diff` でパターンとテンプレート情報を取得",
+          detail:
+            "`ziku init` でテンプレートのパターンを読み、ディレクトリ選択 UI のデータとして使用",
+        },
+        { phase: "生成", detail: "`ziku init` で選択結果をユーザープロジェクトに保存" },
+        {
+          phase: "読み取り",
+          detail: "`pull` / `push` / `diff` でパターンを取得",
         },
         { phase: "更新", detail: "`ziku track` で新しいパターンを追加" },
       ],
@@ -127,10 +126,16 @@ function generateFileLifecycleTable(): string {
     {
       file: LOCK_FILE,
       location: "ユーザープロジェクト",
-      description: "同期状態（baseRef, baseHashes, pendingMerge）",
+      description: "同期状態 + ソース情報（source, baseRef, baseHashes, pendingMerge）",
       lifecycle: [
-        { phase: "生成", detail: "`ziku init` でテンプレートのコミット SHA とハッシュを記録" },
-        { phase: "読み取り", detail: "`pull` / `push` で前回同期状態との差分検出に使用" },
+        {
+          phase: "生成",
+          detail: "`ziku init` でソース情報 + テンプレートのコミット SHA とハッシュを記録",
+        },
+        {
+          phase: "読み取り",
+          detail: "`pull` / `push` / `diff` でソースと前回同期状態との差分検出に使用",
+        },
         { phase: "更新", detail: "`ziku pull` で最新のベースに更新" },
       ],
     },
@@ -198,17 +203,18 @@ export function generateLifecycleDocument(): string {
     "## コマンドごとのファイル操作\n",
     generateCommandTables(),
     "## 補足\n",
-    "### modules.jsonc と ziku.jsonc の関係\n",
-    `\`${MODULES_FILE}\` はテンプレートリポジトリにのみ存在する「メニュー表」。`,
-    `\`${ZIKU_CONFIG_FILE}\` はユーザープロジェクトにのみ存在する「選択結果」。\n`,
-    `\`ziku setup\` → テンプレートリポに \`${MODULES_FILE}\` を作成`,
-    `\`ziku init\` → \`${MODULES_FILE}\` を読み、モジュール選択 → 結果を \`${ZIKU_CONFIG_FILE}\` に保存\n`,
-    `\`${MODULES_FILE}\` 自体はユーザーのプロジェクトにはコピーされない。`,
-    `init 後、\`${ZIKU_CONFIG_FILE}\` は \`${MODULES_FILE}\` から独立して管理される。\n`,
+    "### ziku.jsonc の役割\n",
+    `\`${ZIKU_CONFIG_FILE}\` はテンプレートとユーザープロジェクトの両方に存在する。`,
+    "同一フォーマット（include/exclude パターンのみ）で、source 情報は含まない。\n",
+    `\`ziku setup\` → テンプレートリポに \`${ZIKU_CONFIG_FILE}\` を作成`,
+    `\`ziku init\` → テンプレートの \`${ZIKU_CONFIG_FILE}\` を読み、ディレクトリ選択 → 結果をユーザーの \`${ZIKU_CONFIG_FILE}\` に保存\n`,
+    "### source 情報の分離\n",
+    `テンプレートの取得元（owner/repo またはローカルパス）は \`${LOCK_FILE}\` に保存される。`,
+    `これにより \`${ZIKU_CONFIG_FILE}\` はテンプレート・ユーザー間で完全に同一フォーマットになる。\n`,
     "### init 後の独立性\n",
     `ユーザーが \`ziku track\` で追加したパターンは \`${ZIKU_CONFIG_FILE}\` にのみ反映される。`,
-    `テンプレート側で \`${MODULES_FILE}\` にモジュールを追加しても、既存ユーザーの \`${ZIKU_CONFIG_FILE}\` には自動反映されない。`,
-    `最新のモジュールを取り込むには \`ziku init\` を再実行する。\n`,
+    `テンプレート側で \`${ZIKU_CONFIG_FILE}\` にパターンを追加しても、既存ユーザーの \`${ZIKU_CONFIG_FILE}\` には自動反映されない。`,
+    `最新のパターンを取り込むには \`ziku init\` を再実行する。\n`,
   ];
 
   return sections.join("\n");

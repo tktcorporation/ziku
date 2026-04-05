@@ -3,7 +3,7 @@
  *
  * 既存の e2e-flat-format.test.ts はフォーマット変換の正確性に焦点。
  * このファイルはユーザーが実際に遭遇するシナリオ全体をカバーする:
- *   - init: フラットテンプレート、--from、--overwrite-strategy、エラーケース
+ *   - init: テンプレート、--from、--overwrite-strategy、エラーケース
  *   - diff: config 不在、verbose、untracked 検出
  *   - track: パターン追加の完全フロー、エラーケース
  *   - push/pull: config 不在エラー
@@ -11,6 +11,7 @@
  */
 
 import { vol } from "memfs";
+import { Effect } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZikuError } from "../../errors";
 
@@ -26,7 +27,7 @@ vi.mock("node:fs/promises", async () => {
   return memfs.fs.promises;
 });
 
-// ── external dependency mocks ───────────────────────────────────
+// ── external dependency mocks ─────────���─────────────────────────
 
 vi.mock("../../utils/git-remote", () => ({
   detectGitHubOwner: vi.fn(() => "test-org"),
@@ -56,21 +57,17 @@ vi.mock("../../utils/github", () => ({
   getGitHubToken: vi.fn(() => "ghp_test"),
   getAuthenticatedUserLogin: vi.fn(() => Promise.resolve()),
   scaffoldTemplateRepo: vi.fn(() => Promise.resolve({ url: "https://github.com/test/repo" })),
-  createDevenvScaffoldPR: vi.fn(() =>
-    Promise.resolve({ url: "https://github.com/test/repo/pull/1", number: 1, branch: "ziku" }),
-  ),
   createPullRequest: vi.fn(() =>
     Promise.resolve({ url: "https://github.com/test/repo/pull/2", number: 2, branch: "sync" }),
   ),
 }));
 
 vi.mock("../../ui/prompts", () => ({
-  selectModules: vi.fn(),
+  selectDirectories: vi.fn(),
   selectOverwriteStrategy: vi.fn(() => Promise.resolve("overwrite")),
   selectMissingTemplateAction: vi.fn(),
   selectTemplateCandidate: vi.fn(() => Promise.resolve({ owner: "test-org", repo: ".github" })),
   inputTemplateSource: vi.fn(),
-  confirmScaffoldDevenvPR: vi.fn(() => Promise.resolve(true)),
   selectDeletedFiles: vi.fn(() => Promise.resolve([])),
   selectPushFiles: vi.fn(),
   confirmAction: vi.fn(() => Promise.resolve(true)),
@@ -106,22 +103,42 @@ vi.mock("../../ui/renderer", () => ({
   logZikuError: vi.fn(),
 }));
 
-// init 用: テンプレートの modules.jsonc 読み込みモック
-vi.mock("../../modules/index", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../../modules/index")>();
-  return {
-    ...original,
-    modulesFileExists: vi.fn(() => true),
-    loadModulesFile: vi.fn(() =>
-      Promise.resolve({
-        modules: [
-          { name: "Default", description: "Default", include: [".mcp.json", ".devcontainer/**"] },
-        ],
-        rawContent: '{"modules":[]}',
-      }),
-    ),
-  };
-});
+// init 用: テンプレートの ziku.jsonc 読み込みモック
+vi.mock("../../utils/template-config", () => ({
+  loadTemplateConfig: vi.fn(() =>
+    Effect.succeed({
+      include: [".mcp.json", ".devcontainer/**"],
+      exclude: [],
+    }),
+  ),
+  templateConfigExists: vi.fn(() => true),
+  extractDirectoryEntries: vi.fn((patterns: string[]) => {
+    const dirMap = new Map<string, string[]>();
+    const rootFiles: string[] = [];
+    for (const p of patterns) {
+      const slashIndex = p.indexOf("/");
+      if (slashIndex === -1) {
+        rootFiles.push(p);
+      } else {
+        const dir = p.slice(0, slashIndex);
+        const existing = dirMap.get(dir);
+        if (existing) {
+          existing.push(p);
+        } else {
+          dirMap.set(dir, [p]);
+        }
+      }
+    }
+    const entries: Array<{ label: string; patterns: string[] }> = [];
+    for (const [dir, pats] of [...dirMap.entries()].toSorted((a, b) => a[0].localeCompare(b[0]))) {
+      entries.push({ label: dir, patterns: pats });
+    }
+    if (rootFiles.length > 0) {
+      entries.push({ label: "Root files", patterns: rootFiles });
+    }
+    return entries;
+  }),
+}));
 
 vi.mock("../../utils/ziku-config", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
@@ -166,7 +183,7 @@ vi.mock("../../utils/untracked", () => ({
 
 vi.spyOn(console, "log").mockImplementation(() => {});
 
-// ── imports (after mocks) ───────────────────────────────────────
+// ��─ imports (after mocks) ────────────��──────────────────────────
 
 const { initCommand } = await import("../init");
 const { trackCommand } = await import("../track");
@@ -177,8 +194,8 @@ const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy } =
   await import("../../utils/template");
 const { hashFiles } = await import("../../utils/hash");
 const { zikuConfigExists: _zikuConfigExists } = await import("../../utils/ziku-config");
-const { modulesFileExists, loadModulesFile } = await import("../../modules");
-const { selectModules } = await import("../../ui/prompts");
+const { loadTemplateConfig } = await import("../../utils/template-config");
+const { selectDirectories } = await import("../../ui/prompts");
 const { log } = await import("../../ui/renderer");
 const { detectDiff } = await import("../../utils/diff");
 const { checkRepoExists } = await import("../../utils/github");
@@ -187,65 +204,45 @@ const mockDownloadTemplateToTemp = vi.mocked(downloadTemplateToTemp);
 const mockFetchTemplates = vi.mocked(fetchTemplates);
 const mockWriteFileWithStrategy = vi.mocked(writeFileWithStrategy);
 const mockHashFiles = vi.mocked(hashFiles);
-const mockModulesFileExists = vi.mocked(modulesFileExists);
-const mockLoadModulesFile = vi.mocked(loadModulesFile);
-const mockSelectModules = vi.mocked(selectModules);
+const mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
+const mockSelectDirectories = vi.mocked(selectDirectories);
 const mockLog = vi.mocked(log);
 const mockDetectDiff = vi.mocked(detectDiff);
 const mockCheckRepoExists = vi.mocked(checkRepoExists);
 
-// ── helpers ─────────────────────────────────────────────────────
+// ── helpers ─────��───────────────────────────────────────────────
 
 const DEFAULT_SOURCE = { owner: "test-org", repo: ".github" };
 
-function createZikuJsonc(include: string[], exclude?: string[], source = DEFAULT_SOURCE): string {
-  const content: Record<string, unknown> = { source, include };
+function createZikuJsonc(include: string[], exclude?: string[]): string {
+  const content: Record<string, unknown> = { include };
   if (exclude && exclude.length > 0) content.exclude = exclude;
   return JSON.stringify(content, null, 2);
 }
 
-/**
- * テスト用: モジュール形式の modules.jsonc を生成するヘルパー。
- * 1つの Default モジュールにまとめる。
- */
-function modulesJsonc(include: string[], exclude?: string[]): string {
-  const mod = {
-    name: "Default",
-    description: "Default",
-    include,
-    ...(exclude && exclude.length > 0 ? { exclude } : {}),
-  };
-  return JSON.stringify({ modules: [mod] }, null, 2);
-}
-
-/**
- * テスト用: mockLoadModulesFile に渡すモジュール形式のレスポンスを生成するヘルパー。
- */
-function mockModulesResponse(include: string[], exclude?: string[]) {
-  return {
-    modules: [
-      {
-        name: "Default",
-        description: "Default",
-        include,
-        ...(exclude && exclude.length > 0 ? { exclude } : {}),
-      },
-    ],
-    rawContent: modulesJsonc(include, exclude),
-  };
+function _createLockJson(source = DEFAULT_SOURCE): string {
+  return JSON.stringify(
+    {
+      version: "0.1.0",
+      installedAt: "2024-01-01T00:00:00.000Z",
+      source,
+      baseHashes: {},
+    },
+    null,
+    2,
+  );
 }
 
 const baseLock = {
   version: "0.1.0",
   installedAt: "2024-01-01T00:00:00.000Z",
+  source: DEFAULT_SOURCE,
   baseHashes: {},
 };
 
-const _baseSource = { owner: "test-org", repo: ".github" };
-
 // ═══════════════════════════════════════════════════════════════
 // E2E Scenarios
-// ═══════════════════════════════════════════════════════════════
+// ═══════════��═══════════════���══════════════════════════��════════
 
 describe("E2E: multi-scenario tests", () => {
   beforeEach(() => {
@@ -259,29 +256,30 @@ describe("E2E: multi-scenario tests", () => {
     mockFetchTemplates.mockResolvedValue([]);
     mockWriteFileWithStrategy.mockResolvedValue({ action: "created", path: ".ziku/ziku.jsonc" });
     mockHashFiles.mockResolvedValue({});
-    mockModulesFileExists.mockReturnValue(true);
     mockCheckRepoExists.mockResolvedValue(true);
+    mockLoadTemplateConfig.mockReturnValue(
+      Effect.succeed({
+        include: [".mcp.json", ".devcontainer/**"],
+        exclude: [],
+      }),
+    );
   });
 
-  // ─────────────────────────────────────────────────────────────
-  // Scenario 1: フラットテンプレートでの init
-  // テンプレート側が modules 形式でなくフラット形式の場合、
-  // モジュール選択をスキップして全パターンを使用する
-  // ─────────────────────────────────────────────────────────────
+  // ─────────��──────────────────────────��────────────────────────
+  // Scenario 1: テンプレートでの init
+  // ─────────────────���───────────────────────────────────────────
 
-  describe("init: --yes で全モジュール選択", () => {
+  describe("init: --yes で全ディレクトリ選択", () => {
     beforeEach(() => {
-      mockLoadModulesFile.mockResolvedValue({
-        modules: [
-          { name: "Root", description: "Root", include: [".mcp.json"], exclude: ["*.local"] },
-          { name: "DevContainer", description: "DC", include: [".devcontainer/**"] },
-          { name: "GitHub", description: "GH", include: [".github/**"] },
-        ],
-        rawContent: '{"modules":[]}',
-      });
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.succeed({
+          include: [".mcp.json", ".devcontainer/**", ".github/**"],
+          exclude: ["*.local"],
+        }),
+      );
     });
 
-    it("--yes で全モジュールのパターンがフラット化されて適用される", async () => {
+    it("--yes で全ディレクトリのパターンがフラット化されて適用される", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -292,10 +290,10 @@ describe("E2E: multi-scenario tests", () => {
         cmd: initCommand,
       });
 
-      // --yes なので selectModules は呼ばれない（全モジュール自動選択）
-      expect(mockSelectModules).not.toHaveBeenCalled();
+      // --yes なので selectDirectories は呼ばれない（全ディレクトリ自動選択）
+      expect(mockSelectDirectories).not.toHaveBeenCalled();
 
-      // fetchTemplates に全モジュールのフラット化パターンが渡される
+      // fetchTemplates に全ディレクトリのフラット化パタ���ンが渡される
       expect(mockFetchTemplates).toHaveBeenCalledWith(
         expect.objectContaining({
           patterns: expect.objectContaining({
@@ -307,35 +305,33 @@ describe("E2E: multi-scenario tests", () => {
     });
   });
 
-  // ─────────────────────────────────────────────────────────────
-  // Scenario 2: モジュール形式テンプレートでの init + --modules
-  // ─────────────────────────────────────────────────────────────
+  // ─────────────────────────────────────��───────────────────────
+  // Scenario 2: テンプレートでの init + --dirs
+  // ───────────────────────��─────────────────────────────────────
 
-  describe("init: モジュール形式テンプレート + --modules フラグ", () => {
+  describe("init: テンプレート + --dirs フラグ", () => {
     beforeEach(() => {
-      mockLoadModulesFile.mockResolvedValue({
-        modules: [
-          { name: "Root", description: "Root config", include: [".mcp.json"] },
-          { name: "DevContainer", description: "DC", include: [".devcontainer/**"] },
-          { name: "GitHub", description: "GH", include: [".github/**"] },
-        ],
-        rawContent: "{}",
-      });
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.succeed({
+          include: [".mcp.json", ".devcontainer/**", ".github/**"],
+          exclude: [],
+        }),
+      );
     });
 
-    it("--modules で特定モジュールだけ選択", async () => {
+    it("--dirs で特定ディレクトリだけ選択", async () => {
       vol.fromJSON({ "/test": null });
 
       await (initCommand.run as any)({
-        args: { dir: "/test", force: false, yes: false, modules: "Root,GitHub" },
+        args: { dir: "/test", force: false, yes: false, dirs: "Root files,.github" },
         rawArgs: [],
         cmd: initCommand,
       });
 
-      // selectModules は呼ばれない（--modules で非インタラクティブ）
-      expect(mockSelectModules).not.toHaveBeenCalled();
+      // selectDirectories は呼ばれない（--dirs で非インタラクティブ）
+      expect(mockSelectDirectories).not.toHaveBeenCalled();
 
-      // Root と GitHub のパターンだけ含まれる
+      // Root files と .github のパターンだけ含まれる
       expect(mockFetchTemplates).toHaveBeenCalledWith(
         expect.objectContaining({
           patterns: expect.objectContaining({
@@ -344,17 +340,17 @@ describe("E2E: multi-scenario tests", () => {
         }),
       );
 
-      // DevContainer は含まれない
+      // .devcontainer は含まれない
       const patterns = mockFetchTemplates.mock.calls[0][0].patterns;
       expect(patterns.include).not.toContain(".devcontainer/**");
     });
 
-    it("--modules に存在しないモジュール名 → ZikuError", async () => {
+    it("--dirs に存在しないディレクトリ名 → ZikuError", async () => {
       vol.fromJSON({ "/test": null });
 
       await expect(
         (initCommand.run as any)({
-          args: { dir: "/test", force: false, yes: false, modules: "NonExistent" },
+          args: { dir: "/test", force: false, yes: false, dirs: "NonExistent" },
           rawArgs: [],
           cmd: initCommand,
         }),
@@ -362,13 +358,18 @@ describe("E2E: multi-scenario tests", () => {
     });
   });
 
-  // ─────────────────────────────────────────────────────────────
+  // ─────────���────────────────────��──────────────────────────────
   // Scenario 3: --from でカスタムテンプレートソース指定
-  // ─────────────────────────────────────────────────────────────
+  // ────���──────────���─────────────────────────────���───────────────
 
   describe("init: --from オプション", () => {
     beforeEach(() => {
-      mockLoadModulesFile.mockResolvedValue(mockModulesResponse([".editorconfig"]));
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.succeed({
+          include: [".editorconfig"],
+          exclude: [],
+        }),
+      );
     });
 
     it("--from で指定したリポジトリがテンプレートソースになる", async () => {
@@ -404,13 +405,18 @@ describe("E2E: multi-scenario tests", () => {
     });
   });
 
-  // ─────────────────────────────────────────────────────────────
+  // ────���────────────────────────────────────────���───────────────
   // Scenario 4: --overwrite-strategy
-  // ─────────────────────────────────────────────────────────────
+  // ──────────���──────────────────────────────────────────────────
 
   describe("init: --overwrite-strategy", () => {
     beforeEach(() => {
-      mockLoadModulesFile.mockResolvedValue(mockModulesResponse([".mcp.json"]));
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.succeed({
+          include: [".mcp.json"],
+          exclude: [],
+        }),
+      );
     });
 
     it("--overwrite-strategy skip で skip 戦略が使われる", async () => {
@@ -456,9 +462,9 @@ describe("E2E: multi-scenario tests", () => {
     });
   });
 
-  // ─────────────────────────────────────────────────────────────
+  // ─��───────────────────────────────────────────────────────────
   // Scenario 5: diff コマンドのエラーケース
-  // ─────────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────��───────────
 
   describe("diff: エラーケース", () => {
     it(".ziku/ziku.jsonc が存在しない → ZikuError", async () => {
@@ -492,9 +498,9 @@ describe("E2E: multi-scenario tests", () => {
     });
   });
 
-  // ─────────────────────────────────────────────────────────────
-  // Scenario 6: track コマンドの完全フロー
-  // ─────────────────────────────────────────────────────────────
+  // ─��──────────────────────────────────────────��────────────────
+  // Scenario 6: track コマンドの完全フ��ー
+  // ─────────────��───────────────────────────────────────────────
 
   describe("track: パターン追加の完全フロー", () => {
     it("新規パターンを追加して ziku.jsonc に反映される", async () => {
@@ -570,7 +576,7 @@ describe("E2E: multi-scenario tests", () => {
       ).rejects.toThrow(ZikuError);
     });
 
-    it("パターン引数なし → ZikuError", async () => {
+    it("パターン引数な�� → ZikuError", async () => {
       vol.fromJSON({
         "/project/.ziku/ziku.jsonc": createZikuJsonc([".mcp.json"]),
       });
@@ -590,9 +596,9 @@ describe("E2E: multi-scenario tests", () => {
     });
   });
 
-  // ─────────────────────────────────────────────────────────────
+  // ──────��─────────────────���───────────────────────────────��────
   // Scenario 7: pull コマンドのエラーケース
-  // ─────────────────────────────────────────────────────────────
+  // ──────────��────────────────────��─────────────────────────────
 
   describe("pull: エラーケース", () => {
     it(".ziku/ziku.jsonc がない → ZikuError", async () => {
@@ -610,14 +616,19 @@ describe("E2E: multi-scenario tests", () => {
     });
   });
 
-  // ─────────────────────────────────────────────────────────────
+  // ──��───────��────────────────────────────────────���─────────────
   // Scenario 8: init → track → diff の一連のフロー
-  // ─────────────────────────────────────────────────────────────
+  // ────────────���──────────────────────────────────���─────────────
 
   describe("cross-command: init → track → diff", () => {
     it("init でセットアップ → track でパターン追加 → diff が新しいパターンで動作", async () => {
       // Step 1: init
-      mockLoadModulesFile.mockResolvedValue(mockModulesResponse([".mcp.json"]));
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.succeed({
+          include: [".mcp.json"],
+          exclude: [],
+        }),
+      );
       vol.fromJSON({
         "/project": null,
       });
@@ -640,6 +651,7 @@ describe("E2E: multi-scenario tests", () => {
       // Step 2: track でパターン追加
       vol.fromJSON({
         "/project/.ziku/ziku.jsonc": initContent,
+        "/project/.ziku/lock.json": JSON.stringify(baseLock),
       });
 
       const originalArgv = process.argv;
@@ -676,13 +688,18 @@ describe("E2E: multi-scenario tests", () => {
     });
   });
 
-  // ─────────────────────────────────────────────────────────────
+  // ────────��─────────────────────���──────────────────────────���───
   // Scenario 9: init 時に変更がない場合の挙動
-  // ─────────────────────────────────────────────────────────────
+  // ───────────��─────────────────────────────────────────────────
 
   describe("init: 変更がない場合", () => {
     it("全ファイルが skipped → 'No changes were made' メッセージ", async () => {
-      mockLoadModulesFile.mockResolvedValue(mockModulesResponse([".mcp.json"]));
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.succeed({
+          include: [".mcp.json"],
+          exclude: [],
+        }),
+      );
       vol.fromJSON({
         "/test": null,
       });
@@ -701,13 +718,18 @@ describe("E2E: multi-scenario tests", () => {
     });
   });
 
-  // ─────────────────────────────────────────────────────────────
+  // ─────────────���──────────────────────────────��────────────────
   // Scenario 10: パターンが空の場合
-  // ─────────────────────────────────────────────────────────────
+  // ─────────���───────────────────────────────────────────────────
 
   describe("init: テンプレートに include パターンがない場合", () => {
     it("include が空 → 'No patterns to apply' 警告", async () => {
-      mockLoadModulesFile.mockResolvedValue(mockModulesResponse([]));
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.succeed({
+          include: [],
+          exclude: [],
+        }),
+      );
       vol.fromJSON({
         "/test": null,
       });

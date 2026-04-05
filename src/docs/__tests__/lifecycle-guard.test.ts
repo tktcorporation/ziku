@@ -14,7 +14,6 @@
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { MODULES_FILE } from "../../modules/loader";
 import { LOCK_FILE } from "../../utils/lock";
 import { ZIKU_CONFIG_FILE } from "../../utils/ziku-config";
 import type { FileOp } from "../lifecycle-types";
@@ -37,13 +36,19 @@ import { initUserLifecycle } from "../../commands/init";
  *
  * saveLock は init では "create"、pull では "update" のため ops に両方を含める。
  */
+/**
+ * loadCommandContext は内部で ziku.jsonc + lock.json を読み込むため、
+ * これを import しているコマンドは両方の read ops を持つべき。
+ */
 const IMPORT_OP_MAP: Record<string, { file: string; ops: string[] }[]> = {
   loadZikuConfig: [{ file: ZIKU_CONFIG_FILE, ops: ["read"] }],
   loadLock: [{ file: LOCK_FILE, ops: ["read"] }],
   saveLock: [{ file: LOCK_FILE, ops: ["update", "create"] }],
   saveZikuConfig: [{ file: ZIKU_CONFIG_FILE, ops: ["update"] }],
-  loadPatternsFile: [{ file: MODULES_FILE, ops: ["read"] }],
-  loadTemplateModulesFile: [{ file: MODULES_FILE, ops: ["read"] }],
+  loadCommandContext: [
+    { file: ZIKU_CONFIG_FILE, ops: ["read"] },
+    { file: LOCK_FILE, ops: ["read"] },
+  ],
 };
 
 // ──────────────────────────────────────────────

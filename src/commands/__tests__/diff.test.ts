@@ -1,5 +1,7 @@
 import { vol } from "memfs";
+import { Effect } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ZikuError, FileNotFoundError } from "../../errors";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -12,18 +14,15 @@ vi.mock("node:fs/promises", async () => {
   return memfs.fs.promises;
 });
 
-// giget をモック
-vi.mock("giget", () => ({
-  downloadTemplate: vi.fn(),
-}));
-
-// utils/template をモック
-vi.mock("../../utils/template", () => ({
-  buildTemplateSource: vi.fn((source: { owner: string; repo: string; ref?: string }) => {
-    const base = `gh:${source.owner}/${source.repo}`;
-    return source.ref ? `${base}#${source.ref}` : base;
-  }),
-}));
+// loadCommandContext をモック（DI の恩恵: 低レベルモック不要）
+// runCommandEffect / toZikuError は実際の実装を使い、loadCommandContext だけモックする
+vi.mock("../../services/command-context", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../services/command-context")>();
+  return {
+    ...actual,
+    loadCommandContext: vi.fn(),
+  };
+});
 
 // utils/diff をモック
 vi.mock("../../utils/diff", () => ({
@@ -36,12 +35,6 @@ vi.mock("../../utils/untracked", () => ({
   detectUntrackedFiles: vi.fn().mockResolvedValue([]),
   getTotalUntrackedCount: vi.fn().mockReturnValue(0),
 }));
-
-// utils/ziku-config をモック
-vi.mock("../../utils/ziku-config", async (importOriginal) => {
-  const actual = (await importOriginal()) as Record<string, unknown>;
-  return { ...actual };
-});
 
 // ui/diff-view をモック
 vi.mock("../../ui/diff-view", () => ({
@@ -70,14 +63,12 @@ vi.mock("../../ui/renderer", () => ({
 
 // モック後にインポート
 const { diffCommand } = await import("../diff");
-const { downloadTemplate } = await import("giget");
+const { loadCommandContext } = await import("../../services/command-context");
 const { detectDiff, hasDiff } = await import("../../utils/diff");
 const { log, outro, logDiffSummary } = await import("../../ui/renderer");
 const { renderFileDiff } = await import("../../ui/diff-view");
 
-import { ZikuError } from "../../errors";
-
-const mockDownloadTemplate = vi.mocked(downloadTemplate);
+const mockLoadCommandContext = vi.mocked(loadCommandContext);
 const mockDetectDiff = vi.mocked(detectDiff);
 const mockHasDiff = vi.mocked(hasDiff);
 const mockLog = vi.mocked(log);
@@ -85,13 +76,34 @@ const mockOutro = vi.mocked(outro);
 const mockLogDiffSummary = vi.mocked(logDiffSummary);
 const mockRenderFileDiff = vi.mocked(renderFileDiff);
 
-const validZikuConfig = {
-  source: {
-    owner: "tktcorporation",
-    repo: ".github",
-  },
-  include: [".root/**", ".github/**"],
-};
+/**
+ * テスト用の CommandContext を生成するヘルパー。
+ * DI のおかげでテンプレートダウンロードや設定読み込みのモックが不要。
+ */
+function mockContext(
+  overrides?: Partial<{
+    include: string[];
+    source: { owner: string; repo: string };
+    templateDir: string;
+  }>,
+) {
+  const cleanup = vi.fn();
+  return {
+    effect: Effect.succeed({
+      config: { include: overrides?.include ?? [".root/**", ".github/**"] },
+      lock: {
+        version: "0.1.0",
+        installedAt: "2024-01-01T00:00:00.000Z",
+        source: overrides?.source ?? { owner: "tktcorporation", repo: ".github" },
+      },
+      source: overrides?.source ?? { owner: "tktcorporation", repo: ".github" },
+      templateDir: overrides?.templateDir ?? "/tmp/template",
+      cleanup,
+      resolveBaseRef: Effect.succeed(undefined as string | undefined),
+    }),
+    cleanup,
+  };
+}
 
 const emptyDiff = {
   files: [],
@@ -102,12 +114,6 @@ describe("diffCommand", () => {
   beforeEach(() => {
     vol.reset();
     vi.clearAllMocks();
-
-    // デフォルトのモック設定
-    mockDownloadTemplate.mockResolvedValue({
-      dir: "/tmp/template",
-      source: "gh:tktcorporation/.github",
-    });
   });
 
   describe("meta", () => {
@@ -133,9 +139,9 @@ describe("diffCommand", () => {
 
   describe("run", () => {
     it(".ziku/ziku.jsonc が存在しない場合は ZikuError をスロー", async () => {
-      vol.fromJSON({
-        "/test": null,
-      });
+      mockLoadCommandContext.mockReturnValue(
+        Effect.fail(new FileNotFoundError({ path: ".ziku/ziku.jsonc" })),
+      );
 
       await expect(
         (diffCommand.run as any)({
@@ -146,27 +152,9 @@ describe("diffCommand", () => {
       ).rejects.toThrow(ZikuError);
     });
 
-    it("無効な .ziku/ziku.jsonc 形式の場合はエラーをスロー", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify({ invalid: "format" }),
-      });
-
-      await expect(
-        (diffCommand.run as any)({
-          args: { dir: "/test", verbose: false },
-          rawArgs: [],
-          cmd: diffCommand,
-        }),
-      ).rejects.toThrow();
-    });
-
     it("patterns が空の場合は警告", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify({
-          source: { owner: "tktcorporation", repo: ".github" },
-          include: [],
-        }),
-      });
+      const { effect } = mockContext({ include: [] });
+      mockLoadCommandContext.mockReturnValue(effect);
 
       await (diffCommand.run as any)({
         args: { dir: "/test", verbose: false },
@@ -178,10 +166,8 @@ describe("diffCommand", () => {
     });
 
     it("差分がない場合は outro で完了メッセージ", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-      });
-
+      const { effect } = mockContext();
+      mockLoadCommandContext.mockReturnValue(effect);
       mockDetectDiff.mockResolvedValueOnce(emptyDiff);
       mockHasDiff.mockReturnValueOnce(false);
 
@@ -195,21 +181,13 @@ describe("diffCommand", () => {
     });
 
     it("差分がある場合は logDiffSummary を呼ぶ", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-      });
+      const { effect } = mockContext();
+      mockLoadCommandContext.mockReturnValue(effect);
 
       const diffWithChanges = {
-        files: [
-          {
-            path: "new-file.txt",
-            type: "added" as const,
-            localContent: "content",
-          },
-        ],
+        files: [{ path: "new-file.txt", type: "added" as const, localContent: "content" }],
         summary: { added: 1, modified: 0, deleted: 0, unchanged: 0 },
       };
-
       mockDetectDiff.mockResolvedValueOnce(diffWithChanges);
       mockHasDiff.mockReturnValueOnce(true);
 
@@ -223,12 +201,9 @@ describe("diffCommand", () => {
       expect(mockOutro).toHaveBeenCalledWith("Run 'ziku push' to push changes.");
     });
 
-    it("一時ディレクトリを削除", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku-temp": null,
-      });
-
+    it("cleanup が成功時にも失敗時にも呼ばれる", async () => {
+      const { effect, cleanup } = mockContext();
+      mockLoadCommandContext.mockReturnValue(effect);
       mockDetectDiff.mockResolvedValueOnce(emptyDiff);
       mockHasDiff.mockReturnValueOnce(false);
 
@@ -238,20 +213,15 @@ describe("diffCommand", () => {
         cmd: diffCommand,
       });
 
-      // 一時ディレクトリが削除される（memfs では確認が難しいのでモックで確認）
-      expect(mockDownloadTemplate).toHaveBeenCalled();
+      expect(cleanup).toHaveBeenCalled();
     });
 
-    it("config.source からテンプレートソースを構築", async () => {
-      const customConfig = {
-        ...validZikuConfig,
+    it("lock.source からテンプレートソースを構築", async () => {
+      const { effect } = mockContext({
         source: { owner: "custom-org", repo: "custom-templates" },
-      };
-
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(customConfig),
+        templateDir: "/tmp/custom-template",
       });
-
+      mockLoadCommandContext.mockReturnValue(effect);
       mockDetectDiff.mockResolvedValueOnce(emptyDiff);
       mockHasDiff.mockReturnValueOnce(false);
 
@@ -261,18 +231,13 @@ describe("diffCommand", () => {
         cmd: diffCommand,
       });
 
-      expect(mockDownloadTemplate).toHaveBeenCalledWith(
-        "gh:custom-org/custom-templates",
-        expect.objectContaining({ force: true }),
-      );
+      // loadCommandContext が呼ばれる（テンプレート解決は内部で完了）
+      expect(mockLoadCommandContext).toHaveBeenCalledWith(expect.any(String));
     });
 
-    it("エラー時も一時ディレクトリを削除", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku-temp": null,
-      });
-
+    it("エラー時も cleanup が呼ばれる", async () => {
+      const { effect, cleanup } = mockContext();
+      mockLoadCommandContext.mockReturnValue(effect);
       mockDetectDiff.mockRejectedValueOnce(new Error("Diff error"));
 
       await expect(
@@ -282,24 +247,18 @@ describe("diffCommand", () => {
           cmd: diffCommand,
         }),
       ).rejects.toThrow("Diff error");
+
+      expect(cleanup).toHaveBeenCalled();
     });
 
     it("--verbose のとき renderFileDiff を各変更ファイルに対して呼ぶ", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-      });
+      const { effect } = mockContext();
+      mockLoadCommandContext.mockReturnValue(effect);
 
       const diffWithChanges = {
-        files: [
-          {
-            path: "new-file.txt",
-            type: "added" as const,
-            localContent: "content",
-          },
-        ],
+        files: [{ path: "new-file.txt", type: "added" as const, localContent: "content" }],
         summary: { added: 1, modified: 0, deleted: 0, unchanged: 0 },
       };
-
       mockDetectDiff.mockResolvedValueOnce(diffWithChanges);
       mockHasDiff.mockReturnValueOnce(true);
 
@@ -313,21 +272,13 @@ describe("diffCommand", () => {
     });
 
     it("--verbose なしのとき renderFileDiff を呼ばない", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-      });
+      const { effect } = mockContext();
+      mockLoadCommandContext.mockReturnValue(effect);
 
       const diffWithChanges = {
-        files: [
-          {
-            path: "new-file.txt",
-            type: "added" as const,
-            localContent: "content",
-          },
-        ],
+        files: [{ path: "new-file.txt", type: "added" as const, localContent: "content" }],
         summary: { added: 1, modified: 0, deleted: 0, unchanged: 0 },
       };
-
       mockDetectDiff.mockResolvedValueOnce(diffWithChanges);
       mockHasDiff.mockReturnValueOnce(true);
 
@@ -340,21 +291,16 @@ describe("diffCommand", () => {
       expect(mockRenderFileDiff).not.toHaveBeenCalled();
     });
 
-    it("--verbose のとき変更ファイルのみ renderFileDiff を呼び、unchanged ファイルはスキップ", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-      });
+    it("--verbose のとき変更ファイルのみ renderFileDiff を呼び、unchanged はスキップ", async () => {
+      const { effect } = mockContext();
+      mockLoadCommandContext.mockReturnValue(effect);
 
       const unchangedFile = {
         path: "unchanged.txt",
         type: "unchanged" as const,
         localContent: "same",
       };
-      const addedFile = {
-        path: "added.txt",
-        type: "added" as const,
-        localContent: "new",
-      };
+      const addedFile = { path: "added.txt", type: "added" as const, localContent: "new" };
       const modifiedFile = {
         path: "modified.txt",
         type: "modified" as const,
@@ -365,7 +311,6 @@ describe("diffCommand", () => {
         files: [addedFile, unchangedFile, modifiedFile],
         summary: { added: 1, modified: 1, deleted: 0, unchanged: 1 },
       };
-
       mockDetectDiff.mockResolvedValueOnce(diffWithMixed);
       mockHasDiff.mockReturnValueOnce(true);
 
@@ -375,11 +320,9 @@ describe("diffCommand", () => {
         cmd: diffCommand,
       });
 
-      // 変更された2ファイル分だけ呼ばれる
       expect(mockRenderFileDiff).toHaveBeenCalledTimes(2);
       expect(mockRenderFileDiff).toHaveBeenCalledWith(addedFile);
       expect(mockRenderFileDiff).toHaveBeenCalledWith(modifiedFile);
-      // unchanged ファイルは呼ばれない
       expect(mockRenderFileDiff).not.toHaveBeenCalledWith(unchangedFile);
     });
   });

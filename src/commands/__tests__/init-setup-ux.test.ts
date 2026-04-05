@@ -8,13 +8,13 @@
  *   4. 非インタラクティブモードでテンプレートが見つからない → エラー
  *   5. テンプレートが正常に見つかる → 通常フロー
  *   6. git remote がない → ユーザーにソース入力を促す
- *   7. テンプレートに .ziku がない → スキャフォールド PR を提案 → エラー（マージ後に再実行）
- *   8. テンプレートに .ziku がない + 非インタラクティブ → エラー
- *   9. テンプレートに .ziku がない + PR 拒否 → エラー
+ *   7. テンプレートに .ziku/ziku.jsonc がない → エラー（setup への誘導）
+ *   8. テンプレートに .ziku/ziku.jsonc がない + 非インタラクティブ → エラー
  */
 import { vol } from "memfs";
+import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ZikuError } from "../../errors";
+import { TemplateNotConfiguredError } from "../../errors";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -58,36 +58,14 @@ vi.mock("../../utils/github", () => ({
   scaffoldTemplateRepo: vi.fn(() =>
     Promise.resolve({ url: "https://github.com/detected-org/.github" }),
   ),
-  createDevenvScaffoldPR: vi.fn(() =>
-    Promise.resolve({
-      url: "https://github.com/detected-org/.github/pull/1",
-      number: 1,
-      branch: "ziku-scaffold",
-    }),
-  ),
 }));
 
 vi.mock("../../ui/prompts", () => ({
-  selectModules: vi.fn(),
+  selectDirectories: vi.fn(),
   selectOverwriteStrategy: vi.fn(),
   selectMissingTemplateAction: vi.fn(),
   selectTemplateCandidate: vi.fn(),
-  selectTemplateModules: vi.fn(() =>
-    Promise.resolve([
-      {
-        name: "DevContainer",
-        description: "VS Code DevContainer setup",
-        include: [".devcontainer/**"],
-      },
-      {
-        name: "GitHub",
-        description: "GitHub Actions workflows and configuration",
-        include: [".github/**"],
-      },
-    ]),
-  ),
   inputTemplateSource: vi.fn(),
-  confirmScaffoldDevenvPR: vi.fn(() => Promise.resolve(true)),
 }));
 
 vi.mock("../../ui/renderer", () => ({
@@ -110,14 +88,41 @@ vi.mock("../../ui/renderer", () => ({
   logFileResults: vi.fn(() => ({ added: 1, updated: 0, skipped: 0 })),
 }));
 
-vi.mock("../../modules/index", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../../modules/index")>();
-  return {
-    ...original,
-    modulesFileExists: vi.fn(() => false),
-    loadModulesFile: vi.fn(),
-  };
-});
+vi.mock("../../utils/template-config", () => ({
+  loadTemplateConfig: vi.fn(() =>
+    Effect.succeed({
+      include: [".mcp.json", ".devcontainer/**", ".github/**"],
+      exclude: [],
+    }),
+  ),
+  templateConfigExists: vi.fn(() => true),
+  extractDirectoryEntries: vi.fn((patterns: string[]) => {
+    const dirMap = new Map<string, string[]>();
+    const rootFiles: string[] = [];
+    for (const p of patterns) {
+      const slashIndex = p.indexOf("/");
+      if (slashIndex === -1) {
+        rootFiles.push(p);
+      } else {
+        const dir = p.slice(0, slashIndex);
+        const existing = dirMap.get(dir);
+        if (existing) {
+          existing.push(p);
+        } else {
+          dirMap.set(dir, [p]);
+        }
+      }
+    }
+    const entries: Array<{ label: string; patterns: string[] }> = [];
+    for (const [dir, pats] of [...dirMap.entries()].toSorted((a, b) => a[0].localeCompare(b[0]))) {
+      entries.push({ label: dir, patterns: pats });
+    }
+    if (rootFiles.length > 0) {
+      entries.push({ label: "Root files", patterns: rootFiles });
+    }
+    return entries;
+  }),
+}));
 
 // モック後にインポート
 const { initCommand } = await import("../init");
@@ -125,12 +130,11 @@ const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy, copyFile 
   await import("../../utils/template");
 const { detectGitHubOwner } = await import("../../utils/git-remote");
 const {
-  selectModules,
+  selectDirectories,
   selectOverwriteStrategy,
   selectMissingTemplateAction,
   selectTemplateCandidate,
   inputTemplateSource,
-  confirmScaffoldDevenvPR,
 } = await import("../../ui/prompts");
 const { log } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
@@ -140,21 +144,19 @@ const {
   getAuthenticatedUserLogin,
   getGitHubToken,
   scaffoldTemplateRepo,
-  createDevenvScaffoldPR,
 } = await import("../../utils/github");
-const { modulesFileExists } = await import("../../modules/index");
+const { loadTemplateConfig } = await import("../../utils/template-config");
 
 const mockDownloadTemplateToTemp = vi.mocked(downloadTemplateToTemp);
 const mockFetchTemplates = vi.mocked(fetchTemplates);
 const mockWriteFileWithStrategy = vi.mocked(writeFileWithStrategy);
 const mockCopyFile = vi.mocked(copyFile);
 const mockDetectGitHubOwner = vi.mocked(detectGitHubOwner);
-const mockSelectModules = vi.mocked(selectModules);
+const mockSelectDirectories = vi.mocked(selectDirectories);
 const mockSelectOverwriteStrategy = vi.mocked(selectOverwriteStrategy);
 const mockSelectMissingTemplateAction = vi.mocked(selectMissingTemplateAction);
 const mockSelectTemplateCandidate = vi.mocked(selectTemplateCandidate);
 const mockInputTemplateSource = vi.mocked(inputTemplateSource);
-const mockConfirmScaffoldDevenvPR = vi.mocked(confirmScaffoldDevenvPR);
 const _mockLog = vi.mocked(log);
 const mockHashFiles = vi.mocked(hashFiles);
 const mockCheckRepoExists = vi.mocked(checkRepoExists);
@@ -162,8 +164,7 @@ const mockCheckRepoSetup = vi.mocked(checkRepoSetup);
 const mockGetAuthenticatedUserLogin = vi.mocked(getAuthenticatedUserLogin);
 const mockGetGitHubToken = vi.mocked(getGitHubToken);
 const mockScaffoldTemplateRepo = vi.mocked(scaffoldTemplateRepo);
-const _mockCreateDevenvScaffoldPR = vi.mocked(createDevenvScaffoldPR);
-const mockModulesFileExists = vi.mocked(modulesFileExists);
+const mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
 
 // コマンド実行ヘルパー
 async function runInit(args: Record<string, unknown>) {
@@ -203,8 +204,12 @@ describe("init: セットアップ UX", () => {
     mockCheckRepoSetup.mockResolvedValue(true);
     mockGetGitHubToken.mockReturnValue(undefined);
     mockSelectTemplateCandidate.mockResolvedValue({ owner: "detected-org", repo: ".github" });
-    mockModulesFileExists.mockReturnValue(false);
-    mockConfirmScaffoldDevenvPR.mockResolvedValue(true);
+    mockLoadTemplateConfig.mockReturnValue(
+      Effect.succeed({
+        include: [".mcp.json", ".devcontainer/**", ".github/**"],
+        exclude: [],
+      }),
+    );
   });
 
   afterEach(() => {
@@ -228,20 +233,21 @@ describe("init: セットアップ UX", () => {
       mockScaffoldTemplateRepo.mockResolvedValueOnce({
         url: "https://github.com/detected-org/.ziku",
       });
-      mockSelectModules.mockResolvedValueOnce([
-        { name: "Root", description: "Root", include: [".mcp.json"] },
-      ]);
+      mockSelectDirectories.mockResolvedValueOnce([".mcp.json"]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
-      // リポ作成後、modules.jsonc がないのでエラーになる（ziku setup への誘導）
-      mockModulesFileExists.mockReturnValue(false);
+      // リポ作成後、ziku.jsonc がないのでエラーになる（ziku setup への誘導）
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.fail(new TemplateNotConfiguredError({ templateDir: "/tmp/template" })),
+      );
 
       const promise = runInit({}).catch((e: unknown) => e);
       await vi.advanceTimersByTimeAsync(6000);
       const error = await promise;
 
-      expect(error).toBeInstanceOf(ZikuError);
-      expect((error as ZikuError).message).toContain("has no .ziku/modules.jsonc");
+      // Effect.runPromise wraps errors in FiberFailure, so check message content
+      expect(error).toBeDefined();
+      expect(String(error)).toContain("has no .ziku/ziku.jsonc");
 
       expect(mockScaffoldTemplateRepo).toHaveBeenCalledWith(
         "ghp_test_token",
@@ -263,22 +269,14 @@ describe("init: セットアップ UX", () => {
       mockSelectMissingTemplateAction.mockResolvedValueOnce("specify-source");
       mockInputTemplateSource.mockResolvedValueOnce("custom-org/templates");
       mockCheckRepoExists.mockResolvedValueOnce(true);
-      // Template has modules.jsonc
-      mockModulesFileExists.mockReturnValue(true);
-      const { loadModulesFile } = await import("../../modules/index");
-      vi.mocked(loadModulesFile).mockResolvedValue({
-        modules: [
-          {
-            name: "Root",
-            description: "Root",
-            include: [".mcp.json"],
-          },
-        ],
-        rawContent: '{"modules":[]}',
-      });
-      mockSelectModules.mockResolvedValueOnce([
-        { name: "Root", description: "Root", include: [".mcp.json"] },
-      ]);
+      // Template has ziku.jsonc
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.succeed({
+          include: [".mcp.json"],
+          exclude: [],
+        }),
+      );
+      mockSelectDirectories.mockResolvedValueOnce([".mcp.json"]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
       await runInit({});
@@ -302,16 +300,18 @@ describe("init: セットアップ UX", () => {
       mockScaffoldTemplateRepo.mockResolvedValueOnce({
         url: "https://github.com/nonexistent-org/repo",
       });
-      // After creating repo, handleMissingDevenv throws
-      mockModulesFileExists.mockReturnValue(false);
-      mockConfirmScaffoldDevenvPR.mockResolvedValueOnce(true);
+      // After creating repo, template has no ziku.jsonc
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.fail(new TemplateNotConfiguredError({ templateDir: "/tmp/template" })),
+      );
 
       const promise = runInit({}).catch((e: unknown) => e);
       await vi.advanceTimersByTimeAsync(6000);
       const error = await promise;
 
-      // handleMissingDevenv always throws
-      expect(error).toBeInstanceOf(ZikuError);
+      // Effect.runPromise wraps errors in FiberFailure
+      expect(error).toBeDefined();
+      expect(String(error)).toContain("has no .ziku/ziku.jsonc");
 
       // 2回リカバリが呼ばれる
       expect(mockSelectMissingTemplateAction).toHaveBeenCalledTimes(2);
@@ -342,22 +342,14 @@ describe("init: セットアップ UX", () => {
       mockDetectGitHubOwner.mockReturnValueOnce(null);
       mockInputTemplateSource.mockResolvedValueOnce("my-org/templates");
       mockCheckRepoExists.mockResolvedValueOnce(true);
-      // Template has modules.jsonc
-      mockModulesFileExists.mockReturnValue(true);
-      const { loadModulesFile } = await import("../../modules/index");
-      vi.mocked(loadModulesFile).mockResolvedValue({
-        modules: [
-          {
-            name: "Root",
-            description: "Root",
-            include: [".mcp.json"],
-          },
-        ],
-        rawContent: '{"modules":[]}',
-      });
-      mockSelectModules.mockResolvedValueOnce([
-        { name: "Root", description: "Root", include: [".mcp.json"] },
-      ]);
+      // Template has ziku.jsonc
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.succeed({
+          include: [".mcp.json"],
+          exclude: [],
+        }),
+      );
+      mockSelectDirectories.mockResolvedValueOnce([".mcp.json"]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
       await runInit({});
@@ -372,7 +364,7 @@ describe("init: セットアップ UX", () => {
 
   // ─── セットアップ状態チェック ───
 
-  describe("セットアップ状態（.ziku/modules.jsonc 存在）チェック", () => {
+  describe("セットアップ状態（.ziku/ziku.jsonc 存在）チェック", () => {
     it("非インタラクティブで .github のみセットアップ済みなら .github を選択", async () => {
       // .ziku と .github 両方存在
       mockCheckRepoExists.mockResolvedValue(true);
@@ -381,12 +373,12 @@ describe("init: セットアップ UX", () => {
         .mockResolvedValueOnce(false) // detected-org/.ziku
         .mockResolvedValueOnce(true); // detected-org/.github
 
-      mockModulesFileExists.mockReturnValue(true);
-      const { loadModulesFile } = await import("../../modules/index");
-      vi.mocked(loadModulesFile).mockResolvedValue({
-        modules: [{ name: "Root", description: "Root", include: [".mcp.json"] }],
-        rawContent: '{"modules":[]}',
-      });
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.succeed({
+          include: [".mcp.json"],
+          exclude: [],
+        }),
+      );
 
       await runInit({ yes: true });
 
@@ -404,12 +396,12 @@ describe("init: セットアップ UX", () => {
         .mockResolvedValueOnce(true) // detected-org/.ziku
         .mockResolvedValueOnce(false); // detected-org/.github
 
-      mockModulesFileExists.mockReturnValue(true);
-      const { loadModulesFile } = await import("../../modules/index");
-      vi.mocked(loadModulesFile).mockResolvedValue({
-        modules: [{ name: "Root", description: "Root", include: [".mcp.json"] }],
-        rawContent: '{"modules":[]}',
-      });
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.succeed({
+          include: [".mcp.json"],
+          exclude: [],
+        }),
+      );
 
       await runInit({ yes: true });
 
@@ -424,12 +416,12 @@ describe("init: セットアップ UX", () => {
       // 両方セットアップ済み
       mockCheckRepoSetup.mockResolvedValue(true);
 
-      mockModulesFileExists.mockReturnValue(true);
-      const { loadModulesFile } = await import("../../modules/index");
-      vi.mocked(loadModulesFile).mockResolvedValue({
-        modules: [{ name: "Root", description: "Root", include: [".mcp.json"] }],
-        rawContent: '{"modules":[]}',
-      });
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.succeed({
+          include: [".mcp.json"],
+          exclude: [],
+        }),
+      );
 
       await runInit({ yes: true });
 
@@ -444,11 +436,12 @@ describe("init: セットアップ UX", () => {
       mockCheckRepoExists.mockResolvedValue(true);
       mockCheckRepoSetup.mockResolvedValue(false);
 
-      mockModulesFileExists.mockReturnValue(false);
-      mockConfirmScaffoldDevenvPR.mockResolvedValueOnce(true);
-      mockGetGitHubToken.mockReturnValue("ghp_test_token");
+      // Template has no ziku.jsonc → error
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.fail(new TemplateNotConfiguredError({ templateDir: "/tmp/template" })),
+      );
 
-      await expect(runInit({ yes: true })).rejects.toThrow("has no .ziku/modules.jsonc");
+      await expect(runInit({ yes: true })).rejects.toThrow("has no .ziku/ziku.jsonc");
     });
 
     it("インタラクティブモードで候補に ready 状態が表示される", async () => {
@@ -461,15 +454,13 @@ describe("init: セットアップ UX", () => {
         owner: "detected-org",
         repo: ".ziku",
       });
-      mockModulesFileExists.mockReturnValue(true);
-      const { loadModulesFile } = await import("../../modules/index");
-      vi.mocked(loadModulesFile).mockResolvedValue({
-        modules: [{ name: "Root", description: "Root", include: [".mcp.json"] }],
-        rawContent: '{"modules":[]}',
-      });
-      mockSelectModules.mockResolvedValueOnce([
-        { name: "Root", description: "Root", include: [".mcp.json"] },
-      ]);
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.succeed({
+          include: [".mcp.json"],
+          exclude: [],
+        }),
+      );
+      mockSelectDirectories.mockResolvedValueOnce([".mcp.json"]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
       await runInit({});
@@ -489,22 +480,14 @@ describe("init: セットアップ UX", () => {
   describe("テンプレートが正常に見つかる場合", () => {
     it("存在チェックを通過して通常フローが実行される", async () => {
       mockCheckRepoExists.mockResolvedValueOnce(true);
-      // Template has modules.jsonc
-      mockModulesFileExists.mockReturnValue(true);
-      const { loadModulesFile } = await import("../../modules/index");
-      vi.mocked(loadModulesFile).mockResolvedValue({
-        modules: [
-          {
-            name: "Root",
-            description: "Root",
-            include: [".mcp.json"],
-          },
-        ],
-        rawContent: '{"modules":[]}',
-      });
-      mockSelectModules.mockResolvedValueOnce([
-        { name: "Root", description: "Root", include: [".mcp.json"] },
-      ]);
+      // Template has ziku.jsonc
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.succeed({
+          include: [".mcp.json"],
+          exclude: [],
+        }),
+      );
+      mockSelectDirectories.mockResolvedValueOnce([".mcp.json"]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
       await runInit({});
@@ -517,21 +500,23 @@ describe("init: セットアップ UX", () => {
     });
   });
 
-  // ─── .ziku/modules.jsonc がテンプレートにない場合 ───
+  // ─── .ziku/ziku.jsonc がテンプレートにない場合 ───
 
-  describe("テンプレートに .ziku/modules.jsonc がない場合", () => {
+  describe("テンプレートに .ziku/ziku.jsonc がない場合", () => {
     it("ziku setup への誘導エラーを投げる", async () => {
       mockCheckRepoExists.mockResolvedValueOnce(true);
-      mockModulesFileExists.mockReturnValue(false);
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.fail(new TemplateNotConfiguredError({ templateDir: "/tmp/template" })),
+      );
 
-      await expect(runInit({})).rejects.toThrow("has no .ziku/modules.jsonc");
+      await expect(runInit({})).rejects.toThrow("has no .ziku/ziku.jsonc");
     });
   });
 
-  // ─── E2E: テンプレートなし → 作成 → .ziku スキャフォールド PR → エラー ───
+  // ─── E2E: テンプレートなし → 作成 → ziku.jsonc なし → setup 誘導 ───
 
-  describe("E2E: テンプレートなし → 作成 → modules.jsonc なし → setup 誘導", () => {
-    it("リポ作成後に modules.jsonc がなければ setup への誘導エラー", async () => {
+  describe("E2E: テンプレートなし → 作成 → ziku.jsonc なし → setup 誘導", () => {
+    it("リポ作成後に ziku.jsonc がなければ setup への誘導エラー", async () => {
       // 1. テンプレートリポが存在しない（.ziku, .github 両方）
       mockCheckRepoExists.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
       // 2. ユーザーがリポジトリ作成を選択
@@ -540,15 +525,18 @@ describe("init: セットアップ UX", () => {
       mockScaffoldTemplateRepo.mockResolvedValueOnce({
         url: "https://github.com/detected-org/.ziku",
       });
-      // 3. テンプレートに .ziku/modules.jsonc がない → setup 誘導エラー
-      mockModulesFileExists.mockReturnValue(false);
+      // 3. テンプレートに .ziku/ziku.jsonc がない → setup 誘導エラー
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.fail(new TemplateNotConfiguredError({ templateDir: "/tmp/template" })),
+      );
 
       const promise = runInit({}).catch((e: unknown) => e);
       await vi.advanceTimersByTimeAsync(6000);
       const error = await promise;
 
-      expect(error).toBeInstanceOf(ZikuError);
-      expect((error as ZikuError).message).toContain("has no .ziku/modules.jsonc");
+      // Effect.runPromise wraps errors in FiberFailure
+      expect(error).toBeDefined();
+      expect(String(error)).toContain("has no .ziku/ziku.jsonc");
 
       expect(mockScaffoldTemplateRepo).toHaveBeenCalledWith(
         "ghp_test_token",
@@ -558,19 +546,21 @@ describe("init: セットアップ UX", () => {
     });
   });
 
-  // ─── E2E: カスタムソース → .ziku なし → PR → マージ待ちエラー ───
+  // ─── E2E: カスタムソース → .ziku なし → setup 誘導 ───
 
   describe("E2E: カスタムソース → .ziku なし → setup 誘導", () => {
-    it("modules.jsonc がなければ setup への誘導エラー", async () => {
+    it("ziku.jsonc がなければ setup への誘導エラー", async () => {
       // 2候補とも存在しない
       mockCheckRepoExists.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
       mockSelectMissingTemplateAction.mockResolvedValueOnce("specify-source");
       mockInputTemplateSource.mockResolvedValueOnce("my-org/my-templates");
       mockCheckRepoExists.mockResolvedValueOnce(true);
       // .ziku がない → setup 誘導エラー
-      mockModulesFileExists.mockReturnValue(false);
+      mockLoadTemplateConfig.mockReturnValue(
+        Effect.fail(new TemplateNotConfiguredError({ templateDir: "/tmp/template" })),
+      );
 
-      await expect(runInit({})).rejects.toThrow("has no .ziku/modules.jsonc");
+      await expect(runInit({})).rejects.toThrow("has no .ziku/ziku.jsonc");
 
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),

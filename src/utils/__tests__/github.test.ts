@@ -334,18 +334,18 @@ describe("checkRepoSetup", () => {
     globalThis.fetch = originalFetch;
   });
 
-  it(".ziku/modules.jsonc が存在する場合は true を返す", async () => {
+  it(".ziku/ziku.jsonc が存在する場合は true を返す", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({ ok: true });
 
     const result = await checkRepoSetup("owner", "repo");
     expect(result).toBe(true);
     expect(globalThis.fetch).toHaveBeenCalledWith(
-      "https://api.github.com/repos/owner/repo/contents/.ziku/modules.jsonc",
+      "https://api.github.com/repos/owner/repo/contents/.ziku/ziku.jsonc",
       expect.objectContaining({ method: "HEAD" }),
     );
   });
 
-  it(".ziku/modules.jsonc が存在しない場合は false を返す", async () => {
+  it(".ziku/ziku.jsonc が存在しない場合は false を返す", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 404 });
 
     const result = await checkRepoSetup("owner", "repo");

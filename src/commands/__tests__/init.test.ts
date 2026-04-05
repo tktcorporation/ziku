@@ -1,4 +1,5 @@
 import { vol } from "memfs";
+import { Effect } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZikuError } from "../../errors";
 
@@ -42,22 +43,14 @@ vi.mock("../../utils/github", () => ({
   getGitHubToken: vi.fn(() => {}),
   getAuthenticatedUserLogin: vi.fn(() => Promise.resolve()),
   scaffoldTemplateRepo: vi.fn(() => Promise.resolve({ url: "https://github.com/test/repo" })),
-  createDevenvScaffoldPR: vi.fn(() =>
-    Promise.resolve({
-      url: "https://github.com/test/repo/pull/1",
-      number: 1,
-      branch: "ziku",
-    }),
-  ),
 }));
 
 vi.mock("../../ui/prompts", () => ({
-  selectModules: vi.fn(),
+  selectDirectories: vi.fn(),
   selectOverwriteStrategy: vi.fn(),
   selectMissingTemplateAction: vi.fn(),
   selectTemplateCandidate: vi.fn(() => Promise.resolve({ owner: "test-org", repo: ".github" })),
   inputTemplateSource: vi.fn(),
-  confirmScaffoldDevenvPR: vi.fn(() => Promise.resolve(true)),
 }));
 
 vi.mock("../../ui/renderer", () => ({
@@ -80,52 +73,54 @@ vi.mock("../../ui/renderer", () => ({
   logFileResults: vi.fn(() => ({ added: 1, updated: 0, skipped: 0 })),
 }));
 
-vi.mock("../../modules/index", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../../modules/index")>();
-  return {
-    ...original,
-    modulesFileExists: vi.fn(() => true),
-    loadModulesFile: vi.fn(() =>
-      Promise.resolve({
-        modules: [
-          {
-            name: "Root Config",
-            description: "Root config",
-            include: [".mcp.json", ".mise.toml"],
-          },
-          {
-            name: "DevContainer",
-            description: "DevContainer",
-            include: [".devcontainer/**"],
-          },
-          {
-            name: "GitHub",
-            description: "GitHub",
-            include: [".github/**"],
-          },
-          {
-            name: "Claude",
-            description: "Claude",
-            include: [".claude/**"],
-          },
-        ],
-        rawContent: '{"modules":[]}',
-      }),
-    ),
-  };
-});
+vi.mock("../../utils/template-config", () => ({
+  loadTemplateConfig: vi.fn(() =>
+    Effect.succeed({
+      include: [".mcp.json", ".mise.toml", ".devcontainer/**", ".github/**", ".claude/**"],
+      exclude: [],
+    }),
+  ),
+  templateConfigExists: vi.fn(() => true),
+  extractDirectoryEntries: vi.fn((patterns: string[]) => {
+    // パターンからディレクトリエントリを生成するシンプルなモック
+    const dirMap = new Map<string, string[]>();
+    const rootFiles: string[] = [];
+    for (const p of patterns) {
+      const slashIndex = p.indexOf("/");
+      if (slashIndex === -1) {
+        rootFiles.push(p);
+      } else {
+        const dir = p.slice(0, slashIndex);
+        const existing = dirMap.get(dir);
+        if (existing) {
+          existing.push(p);
+        } else {
+          dirMap.set(dir, [p]);
+        }
+      }
+    }
+    const entries: Array<{ label: string; patterns: string[] }> = [];
+    for (const [dir, pats] of [...dirMap.entries()].toSorted((a, b) => a[0].localeCompare(b[0]))) {
+      entries.push({ label: dir, patterns: pats });
+    }
+    if (rootFiles.length > 0) {
+      entries.push({ label: "Root files", patterns: rootFiles });
+    }
+    return entries;
+  }),
+}));
 
 // モック後にインポート
 const { initCommand } = await import("../init");
-const { generateDefaultModulesJsonc } = await import("../setup");
+const { generateZikuJsonc } = await import("../../utils/ziku-config");
 const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy, copyFile } =
   await import("../../utils/template");
 const { detectGitHubOwner, detectGitHubRepo } = await import("../../utils/git-remote");
-const { selectModules, selectOverwriteStrategy, selectTemplateCandidate } =
+const { selectDirectories, selectOverwriteStrategy, selectTemplateCandidate } =
   await import("../../ui/prompts");
 const { log } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
-const { modulesFileExists } = await import("../../modules/index");
+const { loadTemplateConfig } = await import("../../utils/template-config");
 const { checkRepoExists, checkRepoSetup } = await import("../../utils/github");
 
 const mockDownloadTemplateToTemp = vi.mocked(downloadTemplateToTemp);
@@ -134,11 +129,11 @@ const mockWriteFileWithStrategy = vi.mocked(writeFileWithStrategy);
 const mockCopyFile = vi.mocked(copyFile);
 const mockDetectGitHubOwner = vi.mocked(detectGitHubOwner);
 const _mockDetectGitHubRepo = vi.mocked(detectGitHubRepo);
-const mockSelectModules = vi.mocked(selectModules);
+const mockSelectDirectories = vi.mocked(selectDirectories);
 const mockSelectOverwriteStrategy = vi.mocked(selectOverwriteStrategy);
 const mockLog = vi.mocked(log);
 const mockHashFiles = vi.mocked(hashFiles);
-const _mockModulesFileExists = vi.mocked(modulesFileExists);
+const _mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
 const mockCheckRepoExists = vi.mocked(checkRepoExists);
 const mockCheckRepoSetup = vi.mocked(checkRepoSetup);
 
@@ -191,13 +186,13 @@ describe("initCommand", () => {
   });
 
   describe("run", () => {
-    it("モジュールが選択されない場合は警告を表示", async () => {
+    it("ディレクトリが選択されない場合は警告を表示", async () => {
       vol.fromJSON({
         "/test": null,
       });
 
-      // selectModules が空配列 → include が空 → "No patterns to apply"
-      mockSelectModules.mockResolvedValueOnce([]);
+      // selectDirectories が空配列 → include が空 → "No patterns to apply"
+      mockSelectDirectories.mockResolvedValueOnce([]);
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: false },
@@ -208,7 +203,7 @@ describe("initCommand", () => {
       expect(mockLog.warn).toHaveBeenCalledWith("No patterns to apply");
     });
 
-    it("--yes オプションで全モジュールを自動選択", async () => {
+    it("--yes オプションで全ディレクトリを自動選択", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -221,8 +216,8 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
-      // selectModules は呼ばれない
-      expect(mockSelectModules).not.toHaveBeenCalled();
+      // selectDirectories は呼ばれない
+      expect(mockSelectDirectories).not.toHaveBeenCalled();
       // fetchTemplates は呼ばれる
       expect(mockFetchTemplates).toHaveBeenCalled();
     });
@@ -230,9 +225,7 @@ describe("initCommand", () => {
     it("ターゲットディレクトリが存在しない場合は作成", async () => {
       vol.fromJSON({});
 
-      mockSelectModules.mockResolvedValueOnce([
-        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
-      ]);
+      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
@@ -246,14 +239,12 @@ describe("initCommand", () => {
       expect(vol.existsSync("/new-dir")).toBe(true);
     });
 
-    it("devcontainer モジュール選択時に env.example を作成", async () => {
+    it("devcontainer ディレクトリ選択時に env.example を作成", async () => {
       vol.fromJSON({
         "/test": null,
       });
 
-      mockSelectModules.mockResolvedValueOnce([
-        { name: "DevContainer", description: "DevContainer", include: [".devcontainer/**"] },
-      ]);
+      mockSelectDirectories.mockResolvedValueOnce([".devcontainer/**"]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -277,9 +268,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectModules.mockResolvedValueOnce([
-        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
-      ]);
+      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -309,9 +298,7 @@ describe("initCommand", () => {
         cleanup: mockCleanup,
       });
 
-      mockSelectModules.mockResolvedValueOnce([
-        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
-      ]);
+      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -325,14 +312,12 @@ describe("initCommand", () => {
       expect(mockCleanup).toHaveBeenCalled();
     });
 
-    it("選択されたモジュールで ziku.jsonc を生成する", async () => {
+    it("選択されたパターンで ziku.jsonc を生成する", async () => {
       vol.fromJSON({
         "/test": null,
       });
 
-      mockSelectModules.mockResolvedValueOnce([
-        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
-      ]);
+      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -362,7 +347,7 @@ describe("initCommand", () => {
         cleanup: mockCleanup,
       });
 
-      mockSelectModules.mockRejectedValueOnce(new Error("User cancelled"));
+      mockSelectDirectories.mockRejectedValueOnce(new Error("User cancelled"));
 
       await expect(
         (initCommand.run as any)({
@@ -375,7 +360,7 @@ describe("initCommand", () => {
       expect(mockCleanup).toHaveBeenCalled();
     });
 
-    it("--modules オプションで指定モジュールのみ選択", async () => {
+    it("--dirs オプションで指定ディレクトリのみ選択", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -387,15 +372,15 @@ describe("initCommand", () => {
           dir: "/test",
           force: false,
           yes: false,
-          modules: "Root Config",
+          dirs: "Root files",
         },
         rawArgs: [],
         cmd: initCommand,
       });
 
-      // selectModules は呼ばれない（非インタラクティブ）
-      expect(mockSelectModules).not.toHaveBeenCalled();
-      // fetchTemplates は指定モジュールで呼ばれる
+      // selectDirectories は呼ばれない（非インタラクティブ）
+      expect(mockSelectDirectories).not.toHaveBeenCalled();
+      // fetchTemplates は指定ディレクトリのパターンで呼ばれる
       expect(mockFetchTemplates).toHaveBeenCalledWith(
         expect.objectContaining({
           patterns: expect.objectContaining({
@@ -405,7 +390,7 @@ describe("initCommand", () => {
       );
     });
 
-    it("--modules で複数モジュールをカンマ区切りで指定", async () => {
+    it("--dirs で複数ディレクトリをカンマ区切りで指定", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -417,13 +402,13 @@ describe("initCommand", () => {
           dir: "/test",
           force: false,
           yes: false,
-          modules: "Root Config,GitHub",
+          dirs: "Root files,.github",
         },
         rawArgs: [],
         cmd: initCommand,
       });
 
-      expect(mockSelectModules).not.toHaveBeenCalled();
+      expect(mockSelectDirectories).not.toHaveBeenCalled();
       expect(mockFetchTemplates).toHaveBeenCalledWith(
         expect.objectContaining({
           patterns: expect.objectContaining({
@@ -433,7 +418,7 @@ describe("initCommand", () => {
       );
     });
 
-    it("--modules で無効なモジュール名を指定するとエラー", async () => {
+    it("--dirs で無効なディレクトリ名を指定するとエラー", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -444,7 +429,7 @@ describe("initCommand", () => {
             dir: "/test",
             force: false,
             yes: false,
-            modules: "invalid-module",
+            dirs: "invalid-dir",
           },
           rawArgs: [],
           cmd: initCommand,
@@ -479,7 +464,7 @@ describe("initCommand", () => {
       );
     });
 
-    it("--modules と --overwrite-strategy の組み合わせ", async () => {
+    it("--dirs と --overwrite-strategy の組み合わせ", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -491,14 +476,14 @@ describe("initCommand", () => {
           dir: "/test",
           force: false,
           yes: false,
-          modules: "Root Config",
+          dirs: "Root files",
           "overwrite-strategy": "skip",
         },
         rawArgs: [],
         cmd: initCommand,
       });
 
-      expect(mockSelectModules).not.toHaveBeenCalled();
+      expect(mockSelectDirectories).not.toHaveBeenCalled();
       expect(mockFetchTemplates).toHaveBeenCalledWith(
         expect.objectContaining({
           patterns: expect.objectContaining({
@@ -530,14 +515,12 @@ describe("initCommand", () => {
       expect(mockFetchTemplates).not.toHaveBeenCalled();
     });
 
-    it("--overwrite-strategy のみ指定時はモジュール選択はインタラクティブ", async () => {
+    it("--overwrite-strategy のみ指定時はディレクトリ選択はインタラクティブ", async () => {
       vol.fromJSON({
         "/test": null,
       });
 
-      mockSelectModules.mockResolvedValueOnce([
-        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
-      ]);
+      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
 
       mockFetchTemplates.mockResolvedValue([]);
 
@@ -552,8 +535,8 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
-      // モジュール選択はインタラクティブ
-      expect(mockSelectModules).toHaveBeenCalled();
+      // ディレクトリ選択はインタラクティブ
+      expect(mockSelectDirectories).toHaveBeenCalled();
       // 戦略は --overwrite-strategy で上書き
       expect(mockFetchTemplates).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -567,7 +550,7 @@ describe("initCommand", () => {
         ".": null,
       });
 
-      mockSelectModules.mockResolvedValueOnce([]);
+      mockSelectDirectories.mockResolvedValueOnce([]);
 
       await (initCommand.run as any)({
         args: { dir: "init", force: false, yes: false },
@@ -584,9 +567,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectModules.mockResolvedValueOnce([
-        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
-      ]);
+      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -614,9 +595,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectModules.mockResolvedValueOnce([
-        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
-      ]);
+      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -650,9 +629,7 @@ describe("initCommand", () => {
         .mockResolvedValueOnce(false) // .ziku
         .mockResolvedValueOnce(true); // .github
 
-      mockSelectModules.mockResolvedValueOnce([
-        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
-      ]);
+      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
       mockFetchTemplates.mockResolvedValue([]);
 
@@ -680,9 +657,7 @@ describe("initCommand", () => {
         .mockResolvedValueOnce(false); // .github
       mockCheckRepoSetup.mockResolvedValueOnce(false); // .ziku はセットアップ未完了
 
-      mockSelectModules.mockResolvedValueOnce([
-        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
-      ]);
+      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
       mockFetchTemplates.mockResolvedValue([]);
 
@@ -709,9 +684,7 @@ describe("initCommand", () => {
         repo: ".github",
       });
 
-      mockSelectModules.mockResolvedValueOnce([
-        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
-      ]);
+      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -741,9 +714,7 @@ describe("initCommand", () => {
       // ユーザーが custom-org/templates を入力
       mockInputTemplateSource.mockResolvedValueOnce("custom-org/templates");
       mockCheckRepoExists.mockResolvedValueOnce(true);
-      mockSelectModules.mockResolvedValueOnce([
-        { name: "Root Config", description: "Root config", include: [".mcp.json", ".mise.toml"] },
-      ]);
+      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -780,7 +751,7 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
-      // hashFiles がテンプレートディレクトリとモジュールパターンで呼ばれる
+      // hashFiles がテンプレートディレクトリとパターンで呼ばれる
       expect(mockHashFiles).toHaveBeenCalledWith(
         "/tmp/template",
         expect.any(Array),
@@ -818,23 +789,20 @@ describe("initCommand", () => {
   });
 });
 
-describe("generateDefaultModulesJsonc", () => {
-  it("modules 形式と $schema を含む JSON を生成する", () => {
-    const content = generateDefaultModulesJsonc();
+describe("generateZikuJsonc", () => {
+  it("include と $schema を含む JSON を生成する", () => {
+    const content = generateZikuJsonc({ include: [".mcp.json", ".devcontainer/**"], exclude: [] });
     const parsed = JSON.parse(content);
     expect(parsed.$schema).toBeDefined();
-    expect(parsed.modules).toBeDefined();
-    expect(Array.isArray(parsed.modules)).toBe(true);
-    expect(parsed.modules.length).toBeGreaterThan(0);
+    expect(parsed.include).toBeDefined();
+    expect(Array.isArray(parsed.include)).toBe(true);
+    expect(parsed.include.length).toBeGreaterThan(0);
   });
 
-  it("デフォルトモジュールに name と description と include がある", () => {
-    const content = generateDefaultModulesJsonc();
+  it("デフォルト生成に include パターンがある", () => {
+    const content = generateZikuJsonc({ include: [".mcp.json"], exclude: [] });
     const parsed = JSON.parse(content);
-    const mod = parsed.modules[0];
-    expect(mod.name).toBeDefined();
-    expect(mod.description).toBeDefined();
-    expect(Array.isArray(mod.include)).toBe(true);
-    expect(mod.include.length).toBeGreaterThan(0);
+    expect(Array.isArray(parsed.include)).toBe(true);
+    expect(parsed.include.length).toBeGreaterThan(0);
   });
 });

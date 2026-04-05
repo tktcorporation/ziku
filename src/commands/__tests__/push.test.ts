@@ -1,5 +1,7 @@
 import { vol } from "memfs";
+import { Effect } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { FileNotFoundError } from "../../errors";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -12,21 +14,15 @@ vi.mock("node:fs/promises", async () => {
   return memfs.fs.promises;
 });
 
-// giget をモック
-vi.mock("giget", () => ({
-  downloadTemplate: vi.fn(),
-}));
-
-// utils/template をモック
-vi.mock("../../utils/template", () => ({
-  buildTemplateSource: vi.fn((source: { owner: string; repo: string; ref?: string }) => {
-    const base = `gh:${source.owner}/${source.repo}`;
-    return source.ref ? `${base}#${source.ref}` : base;
-  }),
-  downloadTemplateToTemp: vi.fn(() =>
-    Promise.resolve({ templateDir: "/tmp/base-template", cleanup: vi.fn() }),
-  ),
-}));
+// loadCommandContext をモック（DI の恩恵: 低レベルモック不要）
+// runCommandEffect / toZikuError は実際の実装を使い、loadCommandContext だけモックする
+vi.mock("../../services/command-context", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../services/command-context")>();
+  return {
+    ...actual,
+    loadCommandContext: vi.fn(),
+  };
+});
 
 // utils/diff をモック
 vi.mock("../../utils/diff", () => ({
@@ -77,7 +73,16 @@ vi.mock("../../utils/merge", () => ({
   asTemplateContent: vi.fn((s: string) => s),
 }));
 
-// utils/patterns mock removed (no longer used)
+// utils/template をモック（push 内部で base ダウンロード時に直接 import される）
+vi.mock("../../utils/template", () => ({
+  downloadTemplateToTemp: vi.fn(() =>
+    Promise.resolve({ templateDir: "/tmp/base-template", cleanup: vi.fn() }),
+  ),
+  buildTemplateSource: vi.fn((source: { owner: string; repo: string; ref?: string }) => {
+    const base = `gh:${source.owner}/${source.repo}`;
+    return source.ref ? `${base}#${source.ref}` : base;
+  }),
+}));
 
 // ui/prompts をモック
 vi.mock("../../ui/prompts", () => ({
@@ -88,40 +93,6 @@ vi.mock("../../ui/prompts", () => ({
   inputPrTitle: vi.fn(),
   inputPrBody: vi.fn(),
   selectPushFiles: vi.fn(),
-}));
-
-// utils/ziku-config をモック
-vi.mock("../../utils/ziku-config", async (importOriginal) => {
-  const actual = (await importOriginal()) as Record<string, unknown>;
-  return { ...actual };
-});
-
-// utils/lock をモック
-vi.mock("../../utils/lock", async (importOriginal) => {
-  const actual = (await importOriginal()) as Record<string, unknown>;
-  return { ...actual };
-});
-
-// modules をモック
-vi.mock("../../modules", () => ({
-  MODULES_FILE: ".ziku/modules.jsonc",
-  modulesFileExists: vi.fn(() => true),
-  loadModulesFile: vi.fn(() =>
-    Promise.resolve({
-      modules: [
-        { name: "Root", description: "Root", include: [".root/**"] },
-        { name: "GitHub", description: "GitHub", include: [".github/**"] },
-      ],
-      rawContent: '{"modules":[]}',
-    }),
-  ),
-  flattenModules: vi.fn(() => ({
-    include: [".root/**", ".github/**"],
-    exclude: [],
-  })),
-  isFileMatchedByModules: vi.fn(() => true),
-  suggestModuleAdditions: vi.fn(() => []),
-  addModulesToJsonc: vi.fn((raw: string) => raw),
 }));
 
 // ui/renderer をモック
@@ -150,7 +121,7 @@ vi.mock("../../ui/renderer", () => ({
 
 // モック後にインポート
 const { pushCommand } = await import("../push");
-const { downloadTemplate } = await import("giget");
+const { loadCommandContext } = await import("../../services/command-context");
 const { detectDiff, getPushableFiles } = await import("../../utils/diff");
 const { getGitHubToken, createPullRequest } = await import("../../utils/github");
 const { confirmAction, inputGitHubToken, inputPrTitle, inputPrBody, selectPushFiles } =
@@ -158,7 +129,7 @@ const { confirmAction, inputGitHubToken, inputPrTitle, inputPrBody, selectPushFi
 const { log } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
 const { classifyFiles, threeWayMerge } = await import("../../utils/merge");
-const mockDownloadTemplate = vi.mocked(downloadTemplate);
+const mockLoadCommandContext = vi.mocked(loadCommandContext);
 const mockDetectDiff = vi.mocked(detectDiff);
 const mockGetPushableFiles = vi.mocked(getPushableFiles);
 const mockGetGitHubToken = vi.mocked(getGitHubToken);
@@ -174,10 +145,6 @@ const mockClassifyFiles = vi.mocked(classifyFiles);
 const mockThreeWayMerge = vi.mocked(threeWayMerge);
 
 const validZikuConfig = {
-  source: {
-    owner: "tktcorporation",
-    repo: ".github",
-  },
   include: [".github/**"],
   exclude: [],
 };
@@ -185,12 +152,41 @@ const validZikuConfig = {
 const validLock = {
   version: "0.1.0",
   installedAt: "2024-01-01T00:00:00.000Z",
+  source: {
+    owner: "tktcorporation",
+    repo: ".github",
+  },
 };
 
 const emptyDiff = {
   files: [],
   summary: { added: 0, modified: 0, deleted: 0, unchanged: 0 },
 };
+
+/**
+ * テスト用の CommandContext を生成するヘルパー。
+ * DI のおかげでテンプレートダウンロードや設定読み込みのモックが不要。
+ */
+function mockContext(overrides?: {
+  config?: typeof validZikuConfig;
+  lock?: typeof validLock & Record<string, unknown>;
+  source?: { owner: string; repo: string } | { path: string };
+  templateDir?: string;
+}) {
+  const cleanup = vi.fn();
+  const source = overrides?.source ?? { owner: "tktcorporation", repo: ".github" };
+  return {
+    effect: Effect.succeed({
+      config: overrides?.config ?? validZikuConfig,
+      lock: overrides?.lock ?? validLock,
+      source,
+      templateDir: overrides?.templateDir ?? "/tmp/template",
+      cleanup,
+      resolveBaseRef: Effect.succeed(undefined as string | undefined),
+    }),
+    cleanup,
+  };
+}
 
 /**
  * classification と detectDiff を同時にセットアップするヘルパー。
@@ -237,11 +233,10 @@ describe("pushCommand", () => {
     vol.reset();
     vi.clearAllMocks();
 
-    // デフォルトのモック設定
-    mockDownloadTemplate.mockResolvedValue({
-      dir: "/tmp/template",
-      source: "gh:tktcorporation/.github",
-    });
+    // デフォルトのモック設定: 正常な CommandContext を返す
+    const { effect } = mockContext();
+    mockLoadCommandContext.mockReturnValue(effect);
+
     mockDetectDiff.mockResolvedValue(emptyDiff);
     mockGetPushableFiles.mockReturnValue([]);
   });
@@ -250,7 +245,7 @@ describe("pushCommand", () => {
     it("コマンドメタデータが正しい", () => {
       expect((pushCommand.meta as { name: string }).name).toBe("push");
       expect((pushCommand.meta as { description: string }).description).toBe(
-        "Push local changes to the template repository as a PR",
+        "Push local changes to the template (PR for GitHub, direct copy for local)",
       );
     });
   });
@@ -279,9 +274,9 @@ describe("pushCommand", () => {
 
   describe("run", () => {
     it(".ziku/ziku.jsonc が存在しない場合はエラー", async () => {
-      vol.fromJSON({
-        "/test": null,
-      });
+      mockLoadCommandContext.mockReturnValue(
+        Effect.fail(new FileNotFoundError({ path: ".ziku/ziku.jsonc" })),
+      );
 
       await expect(
         (pushCommand.run as any)({
@@ -293,9 +288,9 @@ describe("pushCommand", () => {
     });
 
     it(".ziku/lock.json が存在しない場合はエラー", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-      });
+      mockLoadCommandContext.mockReturnValue(
+        Effect.fail(new FileNotFoundError({ path: ".ziku/lock.json" })),
+      );
 
       await expect(
         (pushCommand.run as any)({
@@ -307,10 +302,11 @@ describe("pushCommand", () => {
     });
 
     it("無効な .ziku/lock.json 形式の場合はエラー", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku/lock.json": JSON.stringify({ invalid: "format" }),
-      });
+      // ParseError は toZikuError で "Failed to parse configuration" に変換される
+      const { ParseError } = await import("../../errors");
+      mockLoadCommandContext.mockReturnValue(
+        Effect.fail(new ParseError({ path: ".ziku/lock.json", cause: "invalid format" })),
+      );
 
       await expect(
         (pushCommand.run as any)({
@@ -318,19 +314,14 @@ describe("pushCommand", () => {
           rawArgs: [],
           cmd: pushCommand,
         }),
-      ).rejects.toThrow("Invalid .ziku/lock.json format");
+      ).rejects.toThrow("Failed to parse configuration");
     });
 
     it("patterns が空の場合は警告", async () => {
-      const emptyPatternsConfig = {
-        ...validZikuConfig,
-        include: [],
-      };
-
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(emptyPatternsConfig),
-        "/test/.ziku/lock.json": JSON.stringify(validLock),
+      const { effect } = mockContext({
+        config: { include: [], exclude: [] },
       });
+      mockLoadCommandContext.mockReturnValue(effect);
 
       await (pushCommand.run as any)({
         args: { dir: "/test", dryRun: false, yes: false, edit: false },
@@ -342,11 +333,6 @@ describe("pushCommand", () => {
     });
 
     it("push 対象ファイルがない場合は情報メッセージ", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku/lock.json": JSON.stringify(validLock),
-      });
-
       mockGetPushableFiles.mockReturnValue([]);
 
       await (pushCommand.run as any)({
@@ -359,11 +345,6 @@ describe("pushCommand", () => {
     });
 
     it("--dry-run オプションで PR を作成しない", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku/lock.json": JSON.stringify(validLock),
-      });
-
       setupPushableFiles([{ path: "file.txt", type: "added", localContent: "content" }]);
 
       await (pushCommand.run as any)({
@@ -373,16 +354,11 @@ describe("pushCommand", () => {
       });
 
       expect(mockLog.info).toHaveBeenCalledWith("Dry run mode");
-      expect(mockLog.info).toHaveBeenCalledWith("No PR was created (dry run)");
+      // dry-run ではファイルリストを表示して終了
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
     it("ファイル選択をキャンセルすると PR を作成しない", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku/lock.json": JSON.stringify(validLock),
-      });
-
       setupPushableFiles([{ path: "file.txt", type: "added", localContent: "content" }]);
 
       mockSelectPushFiles.mockResolvedValueOnce([]);
@@ -398,11 +374,6 @@ describe("pushCommand", () => {
     });
 
     it("PR 作成前の確認でキャンセル", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku/lock.json": JSON.stringify(validLock),
-      });
-
       const pushableFile = {
         path: "file.txt",
         type: "added" as const,
@@ -420,18 +391,11 @@ describe("pushCommand", () => {
         cmd: pushCommand,
       });
 
-      expect(mockLog.info).toHaveBeenCalledWith(
-        "Cancelled. Use --edit to customize title/body, or --files to specify files.",
-      );
+      expect(mockLog.info).toHaveBeenCalledWith("Cancelled.");
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
     it("PR 作成成功（タイトル・本文は自動生成）", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku/lock.json": JSON.stringify(validLock),
-      });
-
       const pushableFile = {
         path: "file.txt",
         type: "added" as const,
@@ -472,11 +436,6 @@ describe("pushCommand", () => {
     });
 
     it("GitHub トークンがない場合はプロンプト", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku/lock.json": JSON.stringify(validLock),
-      });
-
       const pushableFile = {
         path: "file.txt",
         type: "added" as const,
@@ -505,11 +464,6 @@ describe("pushCommand", () => {
     });
 
     it("--message オプションで PR タイトルを指定", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku/lock.json": JSON.stringify(validLock),
-      });
-
       const pushableFile = {
         path: "file.txt",
         type: "added" as const,
@@ -549,11 +503,6 @@ describe("pushCommand", () => {
     });
 
     it("--files オプションで指定ファイルのみ PR に含める", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku/lock.json": JSON.stringify(validLock),
-      });
-
       const file1 = {
         path: ".claude/statusline.sh",
         type: "added" as const,
@@ -612,11 +561,6 @@ describe("pushCommand", () => {
     });
 
     it("--files に存在しないファイルを指定すると警告", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku/lock.json": JSON.stringify(validLock),
-      });
-
       const file1 = {
         path: "file.txt",
         type: "added" as const,
@@ -644,18 +588,11 @@ describe("pushCommand", () => {
         cmd: pushCommand,
       });
 
-      expect(mockLog.warn).toHaveBeenCalledWith(
-        "Files not found in pushable changes: nonexistent.txt",
-      );
+      expect(mockLog.warn).toHaveBeenCalledWith("Files not found: nonexistent.txt");
       expect(mockCreatePullRequest).toHaveBeenCalled();
     });
 
     it("--files に一致するファイルがない場合はキャンセル", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku/lock.json": JSON.stringify(validLock),
-      });
-
       setupPushableFiles([{ path: "file.txt", type: "added", localContent: "content" }]);
 
       await (pushCommand.run as any)({
@@ -670,16 +607,11 @@ describe("pushCommand", () => {
         cmd: pushCommand,
       });
 
-      expect(mockLog.info).toHaveBeenCalledWith("No matching files found. Cancelled.");
+      expect(mockLog.info).toHaveBeenCalledWith("No matching files. Cancelled.");
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
     it("--yes オプションで確認をスキップ", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku/lock.json": JSON.stringify(validLock),
-      });
-
       const pushableFile = {
         path: "file.txt",
         type: "added" as const,
@@ -709,17 +641,60 @@ describe("pushCommand", () => {
       expect(mockCreatePullRequest).toHaveBeenCalled();
     });
 
-    it("baseHashes が存在しコンフリクトがある場合は警告して確認を求める（baseRef なし）", async () => {
-      const lockWithBaseHashes = {
-        ...validLock,
-        baseHashes: {
-          "file.txt": "abc123",
+    it("pendingMerge がある場合はエラー", async () => {
+      const { effect } = mockContext({
+        lock: {
+          ...validLock,
+          pendingMerge: {
+            conflicts: [".mcp.json"],
+            templateHashes: {},
+          },
         },
-      };
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      await expect(
+        (pushCommand.run as any)({
+          args: { dir: "/test", dryRun: false, yes: false, edit: false },
+          rawArgs: [],
+          cmd: pushCommand,
+        }),
+      ).rejects.toThrow("Unresolved merge conflicts");
+    });
+
+    it("ローカルソースの場合はファイルを直接テンプレートにコピー", async () => {
+      const { effect } = mockContext({
+        source: { path: "/local/template" },
+        lock: {
+          ...validLock,
+          source: { path: "/local/template" } as any,
+        },
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      // ローカル push はエラーにならず正常終了する
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: true, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      // PR は作成されない
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
+    it("baseHashes が存在しコンフリクトがある場合は警告して確認を求める（baseRef なし）", async () => {
+      const { effect } = mockContext({
+        lock: {
+          ...validLock,
+          baseHashes: {
+            "file.txt": "abc123",
+          },
+        },
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
 
       vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku/lock.json": JSON.stringify(lockWithBaseHashes),
         "/test/file.txt": "local content",
         "/tmp/template/file.txt": "template content",
       });
@@ -752,16 +727,17 @@ describe("pushCommand", () => {
     });
 
     it("コンフリクトがあっても確認で続行を選べばPRを作成", async () => {
-      const lockWithBaseHashes = {
-        ...validLock,
-        baseHashes: {
-          "file.txt": "abc123",
+      const { effect } = mockContext({
+        lock: {
+          ...validLock,
+          baseHashes: {
+            "file.txt": "abc123",
+          },
         },
-      };
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
 
       vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku/lock.json": JSON.stringify(lockWithBaseHashes),
         "/test/file.txt": "local content",
         "/tmp/template/file.txt": "template content",
       });
@@ -812,17 +788,18 @@ describe("pushCommand", () => {
     });
 
     it("baseRef + baseHashes がある場合に 3-way マージで自動解決", async () => {
-      const lockWithBaseRef = {
-        ...validLock,
-        baseRef: "abc123def456",
-        baseHashes: {
-          "file.txt": "abc123",
+      const { effect } = mockContext({
+        lock: {
+          ...validLock,
+          baseRef: "abc123def456",
+          baseHashes: {
+            "file.txt": "abc123",
+          },
         },
-      };
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
 
       vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku/lock.json": JSON.stringify(lockWithBaseRef),
         "/test/file.txt": "local content",
         "/tmp/template/file.txt": "template content",
         // base テンプレートのファイル（downloadTemplateToTemp が /tmp/base-template を返す）
@@ -899,11 +876,6 @@ describe("pushCommand", () => {
     });
 
     it("baseHashes がない場合でもコンフリクト検出を実行（空の baseHashes で分類）", async () => {
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku/lock.json": JSON.stringify(validLock),
-      });
-
       mockGetPushableFiles.mockReturnValue([]);
 
       await (pushCommand.run as any)({
@@ -922,17 +894,18 @@ describe("pushCommand", () => {
     });
 
     it("autoUpdate ファイル（テンプレートのみ変更）は classification により push 対象外", async () => {
-      const lockWithBaseHashes = {
-        ...validLock,
-        baseHashes: {
-          "file.txt": "abc123",
-          "template-only.txt": "def456",
+      const { effect } = mockContext({
+        lock: {
+          ...validLock,
+          baseHashes: {
+            "file.txt": "abc123",
+            "template-only.txt": "def456",
+          },
         },
-      };
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
 
       vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku/lock.json": JSON.stringify(lockWithBaseHashes),
         "/test/file.txt": "local content",
         "/test/template-only.txt": "old template content",
         "/tmp/template/file.txt": "local content",
@@ -978,17 +951,15 @@ describe("pushCommand", () => {
     });
 
     it("baseHashes が存在しコンフリクトがない場合は正常に続行", async () => {
-      const lockWithBaseHashes = {
-        ...validLock,
-        baseHashes: {
-          "file.txt": "abc123",
+      const { effect } = mockContext({
+        lock: {
+          ...validLock,
+          baseHashes: {
+            "file.txt": "abc123",
+          },
         },
-      };
-
-      vol.fromJSON({
-        "/test/.ziku/ziku.jsonc": JSON.stringify(validZikuConfig),
-        "/test/.ziku/lock.json": JSON.stringify(lockWithBaseHashes),
       });
+      mockLoadCommandContext.mockReturnValue(effect);
 
       // コンフリクトなし
       mockClassifyFiles.mockReturnValueOnce({

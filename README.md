@@ -51,39 +51,21 @@ npx ziku
 npx ziku --from my-org/my-templates
 ```
 
-### 2. Add `.ziku/modules.jsonc` to your template
+### 2. Add `.ziku/ziku.jsonc` to your template
 
-The template repository needs a `.ziku/modules.jsonc` file that defines which file patterns ziku manages. Group Claude Code rules, MCP configs, DevContainer settings, and other AI agent configurations into modules — each appears as a selectable option during `ziku init`. If this file is missing, ziku will offer to create a PR that adds one with a default configuration.
+The template repository needs a `.ziku/ziku.jsonc` file that defines which file patterns ziku manages. During `ziku init`, users select which directories to sync based on these patterns. You can create this file with `ziku setup`.
 
-Example `modules.jsonc`:
+Example `ziku.jsonc`:
 
 ```jsonc
 {
-  "$schema": "https://raw.githubusercontent.com/tktcorporation/ziku/main/schema/modules.json",
-  "modules": [
-    {
-      "name": "Claude",
-      "description": "Claude Code rules, skills, and hooks",
-      "include": [
-        ".claude/settings.json",
-        ".claude/rules/*.md",
-        ".claude/skills/**"
-      ]
-    },
-    {
-      "name": "MCP",
-      "description": "MCP server configuration",
-      "include": [
-        ".mcp.json"
-      ]
-    },
-    {
-      "name": "DevContainer",
-      "description": "VS Code DevContainer setup",
-      "include": [
-        ".devcontainer/**"
-      ]
-    }
+  "$schema": "https://raw.githubusercontent.com/tktcorporation/ziku/main/schema/ziku.json",
+  "include": [
+    ".claude/settings.json",
+    ".claude/rules/*.md",
+    ".claude/skills/**",
+    ".mcp.json",
+    ".devcontainer/**"
   ]
 }
 ```
@@ -97,7 +79,7 @@ npx ziku
 npx ziku ./my-project
 ```
 
-ziku copies the matching files into your project. `.ziku/ziku.jsonc` (config) and `.ziku/lock.json` (sync state) are created locally to track what was installed.
+ziku copies the matching files into your project. `.ziku/ziku.jsonc` (patterns) and `.ziku/lock.json` (sync state + source) are created locally to track what was installed.
 
 ### 4. Keep it in sync
 
@@ -131,42 +113,36 @@ A template might offer modules like:
 | **AI Tooling** | `.claude/`, `.cursor/rules/`, `.mcp.json` |
 | **IaC** | `terraform/modules/**`, `docker-compose.yml` |
 
-After init, your project gets a flat config that drives `pull`, `push`, and `diff`:
+After init, your project gets a config that drives `pull`, `push`, and `diff`:
 
 ```jsonc
 // .ziku/ziku.jsonc (in your project — auto-generated, customizable)
 {
-  "source": { "owner": "my-org", "repo": ".ziku" },
   "include": [".eslintrc.*", ".prettierrc", ".github/workflows/**"]
 }
 ```
 
-You can add or remove patterns anytime with `ziku track`.
+Template source info is stored separately in `.ziku/lock.json`. You can add or remove patterns anytime with `ziku track`.
 
 <details>
-<summary>Defining modules in your template</summary>
+<summary>Defining patterns in your template</summary>
 
-Template authors define modules in `.ziku/modules.jsonc` inside the template repository:
+Template authors define sync patterns in `.ziku/ziku.jsonc` inside the template repository. Both the template and user project use the same format:
 
 ```jsonc
-// .ziku/modules.jsonc (in the template repo)
+// .ziku/ziku.jsonc (in the template repo)
 {
-  "modules": [
-    {
-      "name": "Linter",
-      "description": "Shared linter and formatter settings",
-      "include": [".eslintrc.*", ".prettierrc"]
-    },
-    {
-      "name": "CI",
-      "description": "GitHub Actions workflow templates",
-      "include": [".github/workflows/**"]
-    }
+  "include": [
+    ".claude/settings.json",
+    ".claude/rules/*.md",
+    ".mcp.json",
+    ".devcontainer/**",
+    ".github/**"
   ]
 }
 ```
 
-Module names and descriptions appear in the selection UI during `ziku init`. You can create any number of modules with any file patterns.
+During `ziku init`, users select which directories to sync based on these patterns. You can create the initial file with `ziku setup`.
 
 </details>
 
@@ -176,10 +152,10 @@ Module names and descriptions appear in the selection UI during `ziku init`. You
 
 ### `setup`
 
-Initialize a template repository with .ziku/modules.jsonc
+Initialize a template repository with .ziku/ziku.jsonc
 
 ```
-Initialize a template repository with .ziku/modules.jsonc (setup vdev)
+Initialize a template repository with .ziku/ziku.jsonc (setup vdev)
 
 USAGE `setup [OPTIONS] [DIR]`
 
@@ -210,17 +186,18 @@ OPTIONS
 
                    `--force`    Overwrite existing files
                  `-y, --yes`    Non-interactive mode (accept all defaults)
-             `-m, --modules`    Comma-separated module names to apply (non-interactive)
+                `-d, --dirs`    Comma-separated directory names to apply (non-interactive)
   `-s, --overwrite-strategy`    Overwrite strategy: overwrite, skip, or prompt
                     `--from`    Template source as owner/repo (e.g., my-org/my-templates)
+                `--from-dir`    Local directory to use as template source (skips GitHub download)
 ```
 
 ### `push`
 
-Push local changes to the template repository as a PR
+Push local changes to the template (PR for GitHub, direct copy for local)
 
 ```
-Push local changes to the template repository as a PR (push)
+Push local changes to the template (PR for GitHub, direct copy for local) (push)
 
 USAGE `push [OPTIONS] [DIR]`
 
@@ -230,11 +207,11 @@ ARGUMENTS
 
 OPTIONS
 
-   `-n, --dryRun`    Preview only, don't create PR
-  `-m, --message`    PR title
+   `-n, --dryRun`    Preview only, don't push
+  `-m, --message`    PR title (GitHub only)
   `-y, -f, --yes`    Skip confirmation prompts
-         `--edit`    Edit PR title and description before creating
-        `--files`    Comma-separated file paths to include in PR (skips file selection prompt)
+         `--edit`    Edit PR title and description before creating (GitHub only)
+        `--files`    Comma-separated file paths to include (skips file selection prompt)
 ```
 
 ### `pull`
@@ -300,12 +277,12 @@ OPTIONS
 
 ## What You Get
 
-The files you get depend on the patterns configured in your template's `.ziku/modules.jsonc`. After running `ziku init`, your selected patterns are saved in `.ziku/ziku.jsonc` — you can customize them anytime with `ziku track`.
+The files you get depend on the patterns configured in your template's `.ziku/ziku.jsonc`. After running `ziku init`, your selected patterns are saved in your own `.ziku/ziku.jsonc` — you can customize them anytime with `ziku track`.
 
 ziku also creates:
 
-- `.ziku/ziku.jsonc` — Your sync configuration (which template, which patterns)
-- `.ziku/lock.json` — Sync state (hashes, base refs) for change detection
+- `.ziku/ziku.jsonc` — Your sync patterns (which files to include/exclude)
+- `.ziku/lock.json` — Sync state + template source (hashes, base refs, source info)
 
 <!-- FILES:END -->
 

@@ -1,14 +1,12 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { defineCommand } from "citty";
 import { join, resolve } from "pathe";
-import { MODULES_FILE, getModulesFilePath, modulesFileExists } from "../modules/index";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
-import { MODULES_SCHEMA_URL } from "../modules/loader";
-import type { TemplateModule } from "../modules/schemas";
 import { ZikuError } from "../errors";
-import { confirmScaffoldDevenvPR } from "../ui/prompts";
-import { checkRepoExists, createDevenvScaffoldPR, getGitHubToken } from "../utils/github";
+import { checkRepoExists, getGitHubToken, createPullRequest } from "../utils/github";
 import { detectGitHubOwner, DEFAULT_TEMPLATE_REPO } from "../utils/git-remote";
+import { ZIKU_CONFIG_FILE, generateZikuJsonc } from "../utils/ziku-config";
+import { confirmAction } from "../ui/prompts";
 import { intro, log, outro, pc } from "../ui/renderer";
 
 // ビルド時に置換される定数
@@ -17,73 +15,40 @@ const version = typeof __VERSION__ !== "undefined" ? __VERSION__ : "dev";
 
 /**
  * setup コマンドのファイル操作メタデータ。
- * テンプレートリポジトリに .ziku/modules.jsonc を作成する。
+ * テンプレートリポジトリに .ziku/ziku.jsonc を作成する。
  */
 export const setupLifecycle: CommandLifecycle = {
   name: "setup",
   description: "テンプレートリポジトリの初期化",
   ops: [
     {
-      file: MODULES_FILE,
+      file: ZIKU_CONFIG_FILE,
       location: "template",
       op: "create",
-      note: "デフォルトモジュールで生成（既存ならスキップ）",
+      note: "デフォルト include パターンで生成（既存ならスキップ）",
     },
   ],
 };
 
 /**
- * AI agent の設定共有を主な用途として想定したデフォルトモジュール構成。
- * Claude Code のルール・スキル・フックと、MCP 設定、開発環境設定をグループ化する。
+ * AI agent の設定共有を主な用途として想定したデフォルト include パターン。
+ * Claude Code のルール・スキル・フック、MCP 設定、開発環境設定をカバーする。
  */
-const DEFAULT_SCAFFOLD_MODULES: TemplateModule[] = [
-  {
-    name: "Claude",
-    description: "Claude Code rules, skills, and hooks",
-    include: [
-      ".claude/settings.json",
-      ".claude/rules/*.md",
-      ".claude/skills/**",
-      ".claude/hooks/**",
-    ],
-  },
-  {
-    name: "MCP",
-    description: "MCP server configuration",
-    include: [".mcp.json"],
-  },
-  {
-    name: "DevContainer",
-    description: "VS Code DevContainer setup",
-    include: [".devcontainer/**"],
-  },
-  {
-    name: "GitHub",
-    description: "GitHub Actions workflows",
-    include: [".github/**"],
-  },
+const DEFAULT_INCLUDE_PATTERNS: string[] = [
+  ".claude/settings.json",
+  ".claude/rules/*.md",
+  ".claude/skills/**",
+  ".claude/hooks/**",
+  ".mcp.json",
+  ".devcontainer/**",
+  ".github/**",
 ];
-
-/**
- * モジュール形式の modules.jsonc コンテンツを生成する。
- * テンプレートリポジトリの scaffold 用。
- */
-export function generateDefaultModulesJsonc(): string {
-  return JSON.stringify(
-    {
-      $schema: MODULES_SCHEMA_URL,
-      modules: DEFAULT_SCAFFOLD_MODULES,
-    },
-    null,
-    2,
-  );
-}
 
 export const setupCommand = defineCommand({
   meta: {
     name: "setup",
     version,
-    description: "Initialize a template repository with .ziku/modules.jsonc",
+    description: "Initialize a template repository with .ziku/ziku.jsonc",
   },
   args: {
     dir: {
@@ -115,38 +80,41 @@ export const setupCommand = defineCommand({
 });
 
 /**
- * ローカルのテンプレートリポジトリに .ziku/modules.jsonc を作成する。
+ * ローカルのテンプレートリポジトリに .ziku/ziku.jsonc を作成する。
  *
  * テンプレートリポジトリのルートで `ziku setup` を実行した場合の処理。
- * modules.jsonc が既にあればスキップ。
+ * ziku.jsonc が既にあればスキップ。
  */
 function handleLocalSetup(targetDir: string): void {
   log.info(`Target: ${pc.cyan(targetDir)}`);
 
-  if (modulesFileExists(targetDir)) {
-    log.success(".ziku/modules.jsonc already exists");
+  const configPath = join(targetDir, ZIKU_CONFIG_FILE);
+  if (existsSync(configPath)) {
+    log.success(".ziku/ziku.jsonc already exists");
     outro("Template repository is already configured.");
     return;
   }
 
-  log.step("Generating .ziku/modules.jsonc...");
+  log.step("Generating .ziku/ziku.jsonc...");
 
-  const modulesContent = generateDefaultModulesJsonc();
-  const modulesDir = join(targetDir, ".ziku");
-  if (!existsSync(modulesDir)) {
-    mkdirSync(modulesDir, { recursive: true });
+  const content = generateZikuJsonc({
+    include: DEFAULT_INCLUDE_PATTERNS,
+    exclude: [],
+  });
+  const zikuDir = join(targetDir, ".ziku");
+  if (!existsSync(zikuDir)) {
+    mkdirSync(zikuDir, { recursive: true });
   }
-  const modulesPath = getModulesFilePath(targetDir);
-  writeFileSync(modulesPath, modulesContent);
+  writeFileSync(configPath, content);
 
-  log.success("Created .ziku/modules.jsonc");
+  log.success("Created .ziku/ziku.jsonc");
 
   outro(
     [
       "Template initialized!",
       "",
       pc.bold("Next steps:"),
-      `  ${pc.cyan("1.")} Review and customize ${pc.dim(".ziku/modules.jsonc")}`,
+      `  ${pc.cyan("1.")} Review and customize ${pc.dim(".ziku/ziku.jsonc")}`,
       `  ${pc.cyan("2.")} ${pc.cyan("git add .ziku/ && git commit -m 'chore: add ziku config'")}`,
       `  ${pc.dim("Then other projects can use this template with")} ${pc.cyan("npx ziku init")}`,
     ].join("\n"),
@@ -154,10 +122,7 @@ function handleLocalSetup(targetDir: string): void {
 }
 
 /**
- * リモートのテンプレートリポジトリに scaffold PR を作成する。
- *
- * テンプレートリポジトリに modules.jsonc がない場合に、
- * GitHub API 経由で PR を作成して追加する。
+ * リモートのテンプレートリポジトリに ziku.jsonc を追加する PR を作成する。
  */
 async function handleRemoteSetup(from: string | undefined): Promise<void> {
   const { owner, repo } = resolveRemoteTarget(from);
@@ -172,7 +137,10 @@ async function handleRemoteSetup(from: string | undefined): Promise<void> {
     );
   }
 
-  const confirmed = await confirmScaffoldDevenvPR(owner, repo);
+  const confirmed = await confirmAction(
+    `Create a PR to add .ziku/ziku.jsonc to ${owner}/${repo}?`,
+    { initialValue: true },
+  );
   if (!confirmed) {
     log.info("Cancelled.");
     return;
@@ -186,9 +154,19 @@ async function handleRemoteSetup(from: string | undefined): Promise<void> {
     );
   }
 
-  const modulesContent = generateDefaultModulesJsonc();
-  log.step(`Creating PR to add .ziku/modules.jsonc to ${pc.cyan(`${owner}/${repo}`)}...`);
-  const result = await createDevenvScaffoldPR(token, owner, repo, modulesContent);
+  const content = generateZikuJsonc({
+    include: DEFAULT_INCLUDE_PATTERNS,
+    exclude: [],
+  });
+
+  log.step(`Creating PR to add .ziku/ziku.jsonc to ${pc.cyan(`${owner}/${repo}`)}...`);
+  const result = await createPullRequest(token, {
+    owner,
+    repo,
+    files: [{ path: ZIKU_CONFIG_FILE, content }],
+    title: "chore: add .ziku/ziku.jsonc for ziku",
+    body: `## Summary\n\nAdd \`.ziku/ziku.jsonc\` to enable ziku template management.\n\nThis file defines the include/exclude patterns that ziku tracks for\nbi-directional synchronization between this template and downstream projects.\n\n---\nGenerated by [ziku](https://github.com/tktcorporation/ziku)\n`,
+  });
   log.success(`Created PR: ${pc.cyan(result.url)}`);
 
   outro(

@@ -8,7 +8,6 @@
  *
  * Generated sections:
  *   - Getting Started (from init command constants + DEFAULT_TEMPLATE_REPOS)
- *   - Modules/Features (from .ziku/modules.jsonc)
  *   - Commands (from citty renderUsage)
  *   - What You Get / Files (from ZIKU_CONFIG_FILE, LOCK_FILE constants)
  *
@@ -35,16 +34,14 @@ import { pullCommand } from "../src/commands/pull";
 import { pushCommand } from "../src/commands/push";
 import { setupCommand } from "../src/commands/setup";
 import { trackCommand } from "../src/commands/track";
-import { MODULES_SCHEMA_URL, modulesFileSchema } from "../src/modules/loader";
 import { zikuConfigSchema } from "../src/modules/schemas";
 import { generateLifecycleDocument } from "../src/docs/lifecycle";
 import { DEFAULT_TEMPLATE_REPOS } from "../src/utils/git-remote";
 import { LOCK_FILE } from "../src/utils/lock";
-import { ZIKU_CONFIG_FILE } from "../src/utils/ziku-config";
+import { ZIKU_CONFIG_FILE, ZIKU_CONFIG_SCHEMA_URL } from "../src/utils/ziku-config";
 
 const README_PATH = resolve(import.meta.dirname, "../README.md");
 const LIFECYCLE_DOC_PATH = resolve(import.meta.dirname, "../docs/architecture/file-lifecycle.md");
-const MODULES_SCHEMA_PATH = resolve(import.meta.dirname, "../schema/modules.json");
 const ZIKU_SCHEMA_PATH = resolve(import.meta.dirname, "../schema/ziku.json");
 
 // Marker definitions
@@ -72,30 +69,20 @@ const MARKERS = {
  * Generate Getting Started section from source code constants
  *
  * DEFAULT_TEMPLATE_REPOS からテンプレート検索順を生成し、
- * モジュール形式の example modules.jsonc を生成する。
+ * ziku.jsonc の例を生成する。
  * コード側の定数変更に README が自動追従する。
  */
 function generateGettingStartedSection(): string {
-  // モジュール形式の例を生成（AI agent 設定の共有が主な用途）
-  const exampleModulesJson = JSON.stringify(
+  // ziku.jsonc の例を生成（テンプレート側のパターン定義）
+  const exampleZikuJsonc = JSON.stringify(
     {
-      $schema: MODULES_SCHEMA_URL,
-      modules: [
-        {
-          name: "Claude",
-          description: "Claude Code rules, skills, and hooks",
-          include: [".claude/settings.json", ".claude/rules/*.md", ".claude/skills/**"],
-        },
-        {
-          name: "MCP",
-          description: "MCP server configuration",
-          include: [".mcp.json"],
-        },
-        {
-          name: "DevContainer",
-          description: "VS Code DevContainer setup",
-          include: [".devcontainer/**"],
-        },
+      $schema: ZIKU_CONFIG_SCHEMA_URL,
+      include: [
+        ".claude/settings.json",
+        ".claude/rules/*.md",
+        ".claude/skills/**",
+        ".mcp.json",
+        ".devcontainer/**",
       ],
     },
     null,
@@ -117,11 +104,11 @@ function generateGettingStartedSection(): string {
     "# Use a specific template repository",
     "npx ziku --from my-org/my-templates",
     "```\n",
-    "### 2. Add `.ziku/modules.jsonc` to your template\n",
-    "The template repository needs a `.ziku/modules.jsonc` file that defines which file patterns ziku manages. Group Claude Code rules, MCP configs, DevContainer settings, and other AI agent configurations into modules — each appears as a selectable option during `ziku init`. If this file is missing, ziku will offer to create a PR that adds one with a default configuration.\n",
-    "Example `modules.jsonc`:\n",
+    "### 2. Add `.ziku/ziku.jsonc` to your template\n",
+    "The template repository needs a `.ziku/ziku.jsonc` file that defines which file patterns ziku manages. During `ziku init`, users select which directories to sync based on these patterns. You can create this file with `ziku setup`.\n",
+    "Example `ziku.jsonc`:\n",
     "```jsonc",
-    exampleModulesJson,
+    exampleZikuJsonc,
     "```\n",
     "### 3. Apply the template to your project\n",
     "```bash",
@@ -130,7 +117,7 @@ function generateGettingStartedSection(): string {
     "# Or apply to a specific directory",
     "npx ziku ./my-project",
     "```\n",
-    `ziku copies the matching files into your project. \`${ZIKU_CONFIG_FILE}\` (config) and \`${LOCK_FILE}\` (sync state) are created locally to track what was installed.\n`,
+    `ziku copies the matching files into your project. \`${ZIKU_CONFIG_FILE}\` (patterns) and \`${LOCK_FILE}\` (sync state + source) are created locally to track what was installed.\n`,
     "### 4. Keep it in sync\n",
     "```bash",
     "# Push local improvements back to the template",
@@ -152,17 +139,14 @@ function generateGettingStartedSection(): string {
 
 /**
  * Generate "What You Get" section from code constants
- *
- * init 後に生成されるファイルのパスをソースコード上の定数から取得し、
- * 説明テキストを生成する。定数の変更に README が自動追従する。
  */
 function generateFilesSection(): string {
   const lines: string[] = [
     "## What You Get\n",
-    `The files you get depend on the patterns configured in your template's \`.ziku/modules.jsonc\`. After running \`ziku init\`, your selected patterns are saved in \`${ZIKU_CONFIG_FILE}\` — you can customize them anytime with \`ziku track\`.\n`,
+    `The files you get depend on the patterns configured in your template's \`${ZIKU_CONFIG_FILE}\`. After running \`ziku init\`, your selected patterns are saved in your own \`${ZIKU_CONFIG_FILE}\` — you can customize them anytime with \`ziku track\`.\n`,
     "ziku also creates:\n",
-    `- \`${ZIKU_CONFIG_FILE}\` — Your sync configuration (which template, which patterns)`,
-    `- \`${LOCK_FILE}\` — Sync state (hashes, base refs) for change detection\n`,
+    `- \`${ZIKU_CONFIG_FILE}\` — Your sync patterns (which files to include/exclude)`,
+    `- \`${LOCK_FILE}\` — Sync state + template source (hashes, base refs, source info)\n`,
   ];
   return lines.join("\n");
 }
@@ -182,10 +166,6 @@ function getCommandDescription(meta: unknown): string {
  * Generate Commands section
  */
 async function generateCommandsSection(): Promise<string> {
-  /**
-   * 各コマンドのヘルプをセクションとして生成するヘルパー。
-   * 配列リテラルに直接含めることで no-immediate-mutation を回避。
-   */
   const commandSection = async <T extends ArgsDef>(name: string, cmd: CommandDef<T>) => [
     `### \`${name}\`\n`,
     `${getCommandDescription(cmd.meta)}\n`,
@@ -249,8 +229,7 @@ async function main(): Promise<void> {
 
   console.log("📝 Generating documentation...\n");
 
-  // Generate JSON Schemas from Zod schemas
-  const modulesJsonSchema = JSON.stringify(z.toJSONSchema(modulesFileSchema), null, 2);
+  // Generate JSON Schema from Zod schema
   const zikuJsonSchema = JSON.stringify(z.toJSONSchema(zikuConfigSchema), null, 2);
 
   // Generate sections
@@ -267,7 +246,7 @@ async function main(): Promise<void> {
   const originalLifecycleDoc = lifecycleDoc;
 
   const originalSchemas: Record<string, string> = {};
-  for (const path of [MODULES_SCHEMA_PATH, ZIKU_SCHEMA_PATH]) {
+  for (const path of [ZIKU_SCHEMA_PATH]) {
     try {
       originalSchemas[path] = await readFile(path, "utf-8");
     } catch {
@@ -287,7 +266,7 @@ async function main(): Promise<void> {
 
   const readmeUpdated = readme !== originalReadme;
 
-  // Update lifecycle doc (write → format → read back canonical form, same as schemas)
+  // Update lifecycle doc (write → format → read back canonical form)
   {
     const tempLifecycleDoc = updateSection(
       lifecycleDoc,
@@ -301,11 +280,8 @@ async function main(): Promise<void> {
   }
   const lifecycleDocUpdated = lifecycleDoc !== originalLifecycleDoc;
 
-  // Generate formatted JSON Schemas (write, run formatter, read back canonical form)
-  const schemaEntries: [string, string][] = [
-    [MODULES_SCHEMA_PATH, modulesJsonSchema],
-    [ZIKU_SCHEMA_PATH, zikuJsonSchema],
-  ];
+  // Generate formatted JSON Schema (write, run formatter, read back canonical form)
+  const schemaEntries: [string, string][] = [[ZIKU_SCHEMA_PATH, zikuJsonSchema]];
   const schemaUpdates: string[] = [];
   for (const [path, content] of schemaEntries) {
     await writeFile(path, `${content}\n`);

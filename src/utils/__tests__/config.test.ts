@@ -35,7 +35,6 @@ describe("loadZikuConfig", () => {
 
   it("正常な .ziku/ziku.jsonc を読み込める", async () => {
     const config = {
-      source: { owner: "tktcorporation", repo: ".github", ref: "main" },
       include: [".github/**"],
     };
 
@@ -51,7 +50,6 @@ describe("loadZikuConfig", () => {
   it("$schema と exclude を含む設定を読み込める", async () => {
     const config = {
       $schema: "https://example.com/schema.json",
-      source: { owner: "tktcorporation", repo: ".github" },
       include: [".github/**"],
       exclude: ["*.secret"],
     };
@@ -67,8 +65,7 @@ describe("loadZikuConfig", () => {
 
   it("JSONC (コメント付き) を読み込める", async () => {
     const jsonc = `{
-  // source repository
-  "source": { "owner": "tktcorporation", "repo": ".github" },
+  // include patterns
   "include": [".github/**"]
 }`;
 
@@ -77,7 +74,7 @@ describe("loadZikuConfig", () => {
     });
 
     const result = await loadZikuConfig("/project");
-    expect(result.config.source.owner).toBe("tktcorporation");
+    expect(result.config.include).toEqual([".github/**"]);
     expect(result.rawContent).toBe(jsonc);
   });
 
@@ -93,19 +90,10 @@ describe("loadZikuConfig", () => {
     await expect(loadZikuConfig("/project")).rejects.toThrow();
   });
 
-  it("スキーマに合わない場合はエラー (source が欠けている)", async () => {
-    vol.fromJSON({
-      "/project/.ziku/ziku.jsonc": JSON.stringify({
-        include: [".github/**"],
-      }),
-    });
-    await expect(loadZikuConfig("/project")).rejects.toThrow();
-  });
-
   it("スキーマに合わない場合はエラー (include が欠けている)", async () => {
     vol.fromJSON({
       "/project/.ziku/ziku.jsonc": JSON.stringify({
-        source: { owner: "test", repo: "test" },
+        exclude: ["*.secret"],
       }),
     });
     await expect(loadZikuConfig("/project")).rejects.toThrow();
@@ -158,23 +146,22 @@ describe("zikuConfigExists", () => {
 });
 
 describe("generateZikuJsonc", () => {
-  it("source と include のみの設定を生成できる", () => {
+  it("include のみの設定を生成できる", () => {
     const result = generateZikuJsonc({
-      source: { owner: "tktcorporation", repo: ".github" },
       include: [".github/**"],
       exclude: [],
     });
 
     const parsed = JSON.parse(result);
-    expect(parsed.source).toEqual({ owner: "tktcorporation", repo: ".github" });
     expect(parsed.include).toEqual([".github/**"]);
     expect(parsed.exclude).toBeUndefined();
     expect(parsed.$schema).toBeDefined();
+    // source は含まれない（lock.json に移動済み）
+    expect(parsed.source).toBeUndefined();
   });
 
   it("exclude が指定されている場合は含まれる", () => {
     const result = generateZikuJsonc({
-      source: { owner: "tktcorporation", repo: ".github" },
       include: [".github/**"],
       exclude: ["*.secret"],
     });
@@ -185,7 +172,6 @@ describe("generateZikuJsonc", () => {
 
   it("整形された JSON を生成する（2スペースインデント + 末尾改行）", () => {
     const result = generateZikuJsonc({
-      source: { owner: "a", repo: "b" },
       include: [],
       exclude: [],
     });
@@ -235,6 +221,7 @@ describe("loadLock", () => {
     const lock = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
+      source: { owner: "tktcorporation", repo: ".github" },
     };
 
     vol.fromJSON({
@@ -249,6 +236,7 @@ describe("loadLock", () => {
     const lock = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
+      source: { owner: "tktcorporation", repo: ".github" },
       baseRef: "abc123def",
       baseHashes: { "file.txt": "sha256hash" },
     };
@@ -266,6 +254,7 @@ describe("loadLock", () => {
     const lock = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
+      source: { owner: "tktcorporation", repo: ".github" },
       pendingMerge: {
         conflicts: ["file1.txt"],
         templateHashes: { "file1.txt": "hash1" },
@@ -325,6 +314,7 @@ describe("saveLock", () => {
     const lock = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
+      source: { owner: "test", repo: ".ziku" },
     };
 
     await saveLock("/project", lock);
@@ -339,6 +329,7 @@ describe("saveLock", () => {
     const lock = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
+      source: { owner: "test", repo: ".ziku" },
     };
 
     await saveLock("/project", lock);
@@ -360,6 +351,7 @@ describe("saveLock", () => {
     const newLock = {
       version: "2.0.0",
       installedAt: "2024-06-01T00:00:00+09:00",
+      source: { owner: "test", repo: ".ziku" },
       baseRef: "newref",
     };
 
@@ -375,6 +367,7 @@ describe("saveLock", () => {
     const lock = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
+      source: { owner: "test", repo: ".ziku" },
     };
 
     await saveLock("/project", lock);

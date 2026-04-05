@@ -1,6 +1,7 @@
 import { vol } from "memfs";
+import { Effect } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ZikuError } from "../../errors";
+import { ZikuError, FileNotFoundError } from "../../errors";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -13,6 +14,16 @@ vi.mock("node:fs/promises", async () => {
   return memfs.fs.promises;
 });
 
+// loadCommandContext をモック（DI の恩恵: 低レベルモック不要）
+// runCommandEffect / toZikuError は実際の実装を使い、loadCommandContext だけモックする
+vi.mock("../../services/command-context", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../services/command-context")>();
+  return {
+    ...actual,
+    loadCommandContext: vi.fn(),
+  };
+});
+
 vi.mock("../../utils/template", () => ({
   downloadTemplateToTemp: vi.fn(),
   buildTemplateSource: vi.fn(
@@ -20,10 +31,13 @@ vi.mock("../../utils/template", () => ({
   ),
 }));
 
+// --continue モードで直接使われるため、モックが引き続き必要
 vi.mock("../../utils/ziku-config", () => ({
   ZIKU_CONFIG_FILE: ".ziku/ziku.jsonc",
   loadZikuConfig: vi.fn(),
   zikuConfigExists: vi.fn(),
+  saveZikuConfig: vi.fn(),
+  generateZikuJsonc: vi.fn((c: any) => JSON.stringify(c)),
 }));
 
 vi.mock("../../utils/lock", () => ({
@@ -52,7 +66,12 @@ vi.mock("../../utils/github", () => ({
   resolveLatestCommitSha: vi.fn(() => Promise.resolve("latest123")),
 }));
 
-// utils/patterns mock removed (no longer used)
+vi.mock("../../utils/template-config", async () => {
+  const effectMod = await import("effect");
+  return {
+    loadTemplateConfig: vi.fn(() => effectMod.Effect.succeed(null)),
+  };
+});
 
 vi.mock("../../ui/prompts", () => ({
   selectDeletedFiles: vi.fn(),
@@ -80,35 +99,21 @@ vi.mock("../../ui/renderer", () => ({
   withSpinner: vi.fn(async (_text: string, fn: () => Promise<unknown>) => fn()),
 }));
 
-vi.mock("../../modules/index", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../../modules/index")>();
-  return {
-    ...original,
-    modulesFileExists: vi.fn(() => true),
-    loadPatternsFile: vi.fn(() =>
-      Promise.resolve({
-        include: [".mcp.json", ".mise.toml"],
-        exclude: [],
-        rawContent: '{"include":[".mcp.json",".mise.toml"],"exclude":[]}',
-      }),
-    ),
-  };
-});
-
 // モック後にインポート
 const { pullCommand } = await import("../pull");
+const { loadCommandContext } = await import("../../services/command-context");
 const { selectDeletedFiles } = await import("../../ui/prompts");
 const mockSelectDeletedFiles = vi.mocked(selectDeletedFiles);
 const { downloadTemplateToTemp } = await import("../../utils/template");
-const { loadZikuConfig, zikuConfigExists } = await import("../../utils/ziku-config");
+const { zikuConfigExists } = await import("../../utils/ziku-config");
 const { loadLock, saveLock } = await import("../../utils/lock");
 const { hashFiles } = await import("../../utils/hash");
 const { classifyFiles, threeWayMerge } = await import("../../utils/merge");
 const { log } = await import("../../ui/renderer");
 
+const mockLoadCommandContext = vi.mocked(loadCommandContext);
 const mockDownloadTemplateToTemp = vi.mocked(downloadTemplateToTemp);
 const mockZikuConfigExists = vi.mocked(zikuConfigExists);
-const mockLoadZikuConfig = vi.mocked(loadZikuConfig);
 const mockLoadLock = vi.mocked(loadLock);
 const mockSaveLock = vi.mocked(saveLock);
 const mockHashFiles = vi.mocked(hashFiles);
@@ -117,7 +122,6 @@ const mockThreeWayMerge = vi.mocked(threeWayMerge);
 const mockLog = vi.mocked(log);
 
 const baseZikuConfig = {
-  source: { owner: "tktcorporation", repo: ".github" },
   include: [".mcp.json", ".mise.toml"],
   exclude: [],
 };
@@ -125,24 +129,53 @@ const baseZikuConfig = {
 const baseLock = {
   version: "0.1.0",
   installedAt: "2024-01-01T00:00:00.000Z",
+  source: { owner: "tktcorporation", repo: ".github" },
   baseHashes: { ".mcp.json": "abc123" },
 };
+
+/**
+ * テスト用の CommandContext を生成するヘルパー。
+ * 通常モード（--continue 以外）で loadCommandContext の戻り値として使う。
+ */
+function mockContext(overrides?: {
+  config?: { include: string[]; exclude?: string[] };
+  lock?: typeof baseLock & Record<string, unknown>;
+  source?: { owner: string; repo: string };
+  templateDir?: string;
+}) {
+  const cleanup = vi.fn();
+  const source = overrides?.source ?? { owner: "tktcorporation", repo: ".github" };
+  return {
+    effect: Effect.succeed({
+      config: overrides?.config ?? baseZikuConfig,
+      lock: overrides?.lock ?? baseLock,
+      source,
+      templateDir: overrides?.templateDir ?? "/tmp/template",
+      cleanup,
+      /** テスト用: GitHub API 呼び出しをスキップし undefined を返す */
+      resolveBaseRef: Effect.succeed(undefined as string | undefined),
+    }),
+    cleanup,
+  };
+}
 
 describe("pullCommand", () => {
   beforeEach(() => {
     vol.reset();
     vi.clearAllMocks();
 
+    // 通常モードのデフォルト: 正常な CommandContext を返す
+    const { effect } = mockContext();
+    mockLoadCommandContext.mockReturnValue(effect);
+
+    // --continue モード用のデフォルト
+    mockZikuConfigExists.mockReturnValue(true);
+    mockLoadLock.mockResolvedValue(baseLock as any);
+
     mockDownloadTemplateToTemp.mockResolvedValue({
       templateDir: "/tmp/template",
       cleanup: vi.fn(),
     });
-    mockZikuConfigExists.mockReturnValue(true);
-    mockLoadZikuConfig.mockResolvedValue({
-      config: baseZikuConfig as any,
-      rawContent: JSON.stringify(baseZikuConfig),
-    });
-    mockLoadLock.mockResolvedValue(baseLock as any);
     mockHashFiles.mockResolvedValue({});
     mockSaveLock.mockResolvedValue();
   });
@@ -158,7 +191,9 @@ describe("pullCommand", () => {
 
   describe("run", () => {
     it("初期化されていない場合はエラー", async () => {
-      mockZikuConfigExists.mockReturnValueOnce(false);
+      mockLoadCommandContext.mockReturnValue(
+        Effect.fail(new FileNotFoundError({ path: ".ziku/ziku.jsonc" })),
+      );
 
       await expect(
         (pullCommand.run as any)({
@@ -250,10 +285,13 @@ describe("pullCommand", () => {
       });
 
       // baseHashes にエントリがないケース（readBaseContent が undefined を返す）
-      mockLoadLock.mockResolvedValueOnce({
-        ...baseLock,
-        baseHashes: {},
+      const { effect } = mockContext({
+        lock: {
+          ...baseLock,
+          baseHashes: {} as any,
+        },
       });
+      mockLoadCommandContext.mockReturnValue(effect);
 
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
@@ -429,11 +467,8 @@ describe("pullCommand", () => {
     it("cleanup が必ず呼ばれる", async () => {
       vol.fromJSON({ "/test": null });
 
-      const mockCleanup = vi.fn();
-      mockDownloadTemplateToTemp.mockResolvedValue({
-        templateDir: "/tmp/template",
-        cleanup: mockCleanup,
-      });
+      const { effect, cleanup: mockCleanup } = mockContext();
+      mockLoadCommandContext.mockReturnValue(effect);
 
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
@@ -578,11 +613,14 @@ describe("pullCommand", () => {
         "/tmp/base/settings.json": '{"base": true}',
       });
 
-      mockLoadLock.mockResolvedValueOnce({
-        ...baseLock,
-        baseRef: "abc123",
-        baseHashes: { "settings.json": "old-hash" },
+      const { effect } = mockContext({
+        lock: {
+          ...baseLock,
+          baseRef: "abc123",
+          baseHashes: { "settings.json": "old-hash" } as any,
+        },
       });
+      mockLoadCommandContext.mockReturnValue(effect);
 
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
@@ -593,16 +631,12 @@ describe("pullCommand", () => {
         unchanged: [],
       });
 
-      // template 用と base 用で異なるディレクトリが返される
-      mockDownloadTemplateToTemp
-        .mockResolvedValueOnce({
-          templateDir: "/tmp/template",
-          cleanup: vi.fn(),
-        })
-        .mockResolvedValueOnce({
-          templateDir: "/tmp/base",
-          cleanup: vi.fn(),
-        });
+      // base ダウンロード用（loadCommandContext が template を解決済みなので、
+      // downloadTemplateToTemp は base 用の1回のみ呼ばれる）
+      mockDownloadTemplateToTemp.mockResolvedValueOnce({
+        templateDir: "/tmp/base",
+        cleanup: vi.fn(),
+      });
 
       mockThreeWayMerge.mockReturnValueOnce({
         content: '{"merged": true}',
@@ -626,9 +660,9 @@ describe("pullCommand", () => {
       });
 
       // base ダウンロード時に "base" ラベルが使用されることを確認
-      expect(mockDownloadTemplateToTemp).toHaveBeenCalledTimes(2);
-      expect(mockDownloadTemplateToTemp).toHaveBeenNthCalledWith(
-        2,
+      // loadCommandContext が template を解決するため、downloadTemplateToTemp は base 用の1回のみ
+      expect(mockDownloadTemplateToTemp).toHaveBeenCalledTimes(1);
+      expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         "/test",
         expect.stringContaining("#abc123"),
         "base",
@@ -636,11 +670,8 @@ describe("pullCommand", () => {
     });
 
     it("エラー時も cleanup が呼ばれる", async () => {
-      const mockCleanup = vi.fn();
-      mockDownloadTemplateToTemp.mockResolvedValue({
-        templateDir: "/tmp/template",
-        cleanup: mockCleanup,
-      });
+      const { effect, cleanup: mockCleanup } = mockContext();
+      mockLoadCommandContext.mockReturnValue(effect);
 
       // hashFiles でエラーを起こす
       mockHashFiles.mockRejectedValueOnce(new Error("Hash error"));
