@@ -98,7 +98,9 @@ npx ziku track '.eslintrc.*'
 
 ## Modules
 
-Pick what you need:
+Modules are groups of file patterns defined in your template's `.ziku/modules.jsonc`. You can freely create any modules that fit your workflow — there are no fixed categories.
+
+As an example, this repository's template includes the following modules:
 
 - **Root** - MCP, mise, and other root-level config files
 - **DevContainer** - VS Code DevContainer with Docker-in-Docker
