@@ -124,14 +124,15 @@ graph LR
 
 ローカルの変更をテンプレートリポジトリに PR として送信
 
-| 操作     | ファイル              | 場所     | 詳細                                                 |
-| -------- | --------------------- | -------- | ---------------------------------------------------- |
-| 読み取り | `.ziku/ziku.jsonc`    | local    | source と patterns を取得                            |
-| 読み取り | `.ziku/lock.json`     | local    | baseRef, baseHashes を取得                           |
-| 読み取り | synced files          | local    | ローカルの変更を検出                                 |
-| 読み取り | `.ziku/modules.jsonc` | template | テンプレートのパターンと比較し、ローカル追加分を検出 |
-| 読み取り | synced files          | template | テンプレートをダウンロードして差分検出・3-way マージ |
-| 更新     | synced files          | template | 変更ファイルを含む PR を作成                         |
+| 操作     | ファイル              | 場所     | 詳細                                                             |
+| -------- | --------------------- | -------- | ---------------------------------------------------------------- |
+| 読み取り | `.ziku/ziku.jsonc`    | local    | source と patterns を取得                                        |
+| 読み取り | `.ziku/lock.json`     | local    | baseRef, baseHashes を取得                                       |
+| 読み取り | synced files          | local    | ローカルの変更を検出                                             |
+| 読み取り | `.ziku/modules.jsonc` | template | テンプレートのパターンと比較し、ローカル追加分を検出             |
+| 読み取り | synced files          | template | テンプレートをダウンロードして差分検出・3-way マージ             |
+| 更新     | synced files          | template | 変更ファイルを含む PR を作成                                     |
+| 更新     | `.ziku/modules.jsonc` | template | カバーされないファイルがあれば新モジュールを追加して PR に含める |
 
 ### `diff`
 

@@ -6,8 +6,16 @@ import { downloadTemplate } from "giget";
 import { join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
-import { MODULES_FILE, flattenModules, loadModulesFile, modulesFileExists } from "../modules";
-import type { FileDiff } from "../modules/schemas";
+import {
+  MODULES_FILE,
+  addModulesToJsonc,
+  flattenModules,
+  isFileMatchedByModules,
+  loadModulesFile,
+  modulesFileExists,
+  suggestModuleAdditions,
+} from "../modules";
+import type { FileDiff, TemplateModule } from "../modules/schemas";
 import { LOCK_FILE, loadLock } from "../utils/lock";
 import { ZIKU_CONFIG_FILE, loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
@@ -58,6 +66,12 @@ export const pushLifecycle: CommandLifecycle = {
       op: "update",
       note: "変更ファイルを含む PR を作成",
     },
+    {
+      file: MODULES_FILE,
+      location: "template",
+      op: "update",
+      note: "カバーされないファイルがあれば新モジュールを追加して PR に含める",
+    },
   ],
 };
 
@@ -89,15 +103,6 @@ function registerSyncCleanup(tempDir: string): () => void {
 }
 
 const README_PATH = "README.md";
-
-/**
- * ローカルの include パターンとテンプレートのフラット化パターンを比較し、
- * ローカルにのみ存在するパターンを検出する。
- */
-function detectLocalPatternAdditions(localInclude: string[], templateInclude: string[]): string[] {
-  const templateSet = new Set(templateInclude);
-  return localInclude.filter((p) => !templateSet.has(p));
-}
 
 export const pushCommand = defineCommand({
   meta: {
@@ -198,29 +203,15 @@ export const pushCommand = defineCommand({
           }),
         );
 
-        // テンプレート側のパターンを読み込み、ローカル追加を検出
+        // テンプレート側のパターンを読み込み、パターン結合
         let effectiveInclude = localPatterns.include;
         let effectiveExclude = localPatterns.exclude;
+        let templateModulesInfo: { modules: TemplateModule[]; rawContent: string } | undefined;
 
         if (modulesFileExists(templateDir)) {
-          const { modules } = await loadModulesFile(templateDir);
-          const templatePatterns = flattenModules(modules);
-          const newPatterns = detectLocalPatternAdditions(
-            localPatterns.include,
-            templatePatterns.include,
-          );
-
-          if (newPatterns.length > 0) {
-            // modules.jsonc はモジュール形式のため、どのモジュールに追加すべきか
-            // 自動判定できない。ユーザーに手動追加を案内する。
-            log.info(
-              `Detected ${newPatterns.length} new pattern(s) from local: ${newPatterns.join(", ")}`,
-            );
-            log.warn(`Add these patterns manually to ${MODULES_FILE}:`);
-            for (const p of newPatterns) {
-              log.message(`  ${pc.dim("+")} ${p}`);
-            }
-          }
+          const loaded = await loadModulesFile(templateDir);
+          templateModulesInfo = loaded;
+          const templatePatterns = flattenModules(loaded.modules);
 
           // マージされたパターンを使用
           const allInclude = new Set([...templatePatterns.include, ...localPatterns.include]);
@@ -470,6 +461,27 @@ export const pushCommand = defineCommand({
           path: f.path,
           content: mergedContents.get(f.path) ?? f.localContent ?? "",
         }));
+
+        // push 対象ファイルが modules.jsonc のパターンでカバーされているかチェック。
+        // カバーされていないファイルがあれば modules.jsonc を自動更新して PR に含める。
+        // これにより他プロジェクトが init した際にも新ファイルが取得される。
+        if (templateModulesInfo) {
+          const { modules: tplModules, rawContent: tplRawContent } = templateModulesInfo;
+          const uncoveredFiles = files
+            .map((f) => f.path)
+            .filter((path) => path !== MODULES_FILE && !isFileMatchedByModules(path, tplModules));
+
+          if (uncoveredFiles.length > 0) {
+            const newModules = suggestModuleAdditions(uncoveredFiles, tplModules);
+            const updatedContent = addModulesToJsonc(tplRawContent, newModules);
+            files.push({ path: MODULES_FILE, content: updatedContent });
+
+            log.info(`Auto-adding ${uncoveredFiles.length} uncovered file(s) to ${MODULES_FILE}:`);
+            for (const mod of newModules) {
+              log.message(`  ${pc.green("+")} module "${mod.name}": ${mod.include.join(", ")}`);
+            }
+          }
+        }
 
         if (readmeResult?.updated) {
           files.push({
