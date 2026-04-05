@@ -53,7 +53,7 @@ npx ziku --from my-org/my-templates
 
 ### 2. Add `.ziku/modules.jsonc` to your template
 
-The template repository needs a `.ziku/modules.jsonc` file that defines which file patterns ziku manages. Each module groups related files and appears as a selectable option during `ziku init`. If this file is missing, ziku will offer to create a PR that adds one with a default configuration.
+The template repository needs a `.ziku/modules.jsonc` file that defines which file patterns ziku manages. Group Claude Code rules, MCP configs, DevContainer settings, and other AI agent configurations into modules — each appears as a selectable option during `ziku init`. If this file is missing, ziku will offer to create a PR that adds one with a default configuration.
 
 Example `modules.jsonc`:
 
@@ -62,19 +62,26 @@ Example `modules.jsonc`:
   "$schema": "https://raw.githubusercontent.com/tktcorporation/ziku/main/schema/modules.json",
   "modules": [
     {
-      "name": "Editor",
-      "description": "Editor and tooling configuration",
+      "name": "Claude",
+      "description": "Claude Code rules, skills, and hooks",
       "include": [
-        ".editorconfig",
-        ".mcp.json",
-        ".mise.toml"
+        ".claude/settings.json",
+        ".claude/rules/*.md",
+        ".claude/skills/**"
       ]
     },
     {
-      "name": "CI",
-      "description": "GitHub Actions workflows",
+      "name": "MCP",
+      "description": "MCP server configuration",
       "include": [
-        ".github/workflows/**"
+        ".mcp.json"
+      ]
+    },
+    {
+      "name": "DevContainer",
+      "description": "VS Code DevContainer setup",
+      "include": [
+        ".devcontainer/**"
       ]
     }
   ]

@@ -2,11 +2,16 @@
   "$schema": "./modules.schema.json",
   "modules": [
     {
-      // Root-level config files shared across projects
-      "name": "Root",
-      "description": "Editor and tooling configuration",
-      "setupDescription": "Common config files will be applied",
-      "include": [".mcp.json", ".mise.toml"],
+      "name": "Claude",
+      "description": "Claude Code rules, skills, and hooks",
+      "setupDescription": "Claude Code settings and rules will be applied",
+      "include": [".claude/settings.json", ".claude/rules/*.md"],
+    },
+    {
+      "name": "MCP",
+      "description": "MCP server configuration",
+      "setupDescription": "MCP config will be applied",
+      "include": [".mcp.json"],
     },
     {
       "name": "DevContainer",
@@ -26,10 +31,11 @@
       ],
     },
     {
-      "name": "Claude",
-      "description": "Claude Code rules and settings",
-      "setupDescription": "Claude Code settings and rules will be applied",
-      "include": [".claude/settings.json", ".claude/rules/*.md"],
+      // mise: dev tool version manager
+      "name": "Tooling",
+      "description": "Dev tool version management",
+      "setupDescription": "Tool configs will be applied",
+      "include": [".mise.toml"],
     },
   ],
 }

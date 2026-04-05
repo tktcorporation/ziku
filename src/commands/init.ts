@@ -681,19 +681,35 @@ async function handleMissingDevenv(
  * テンプレートリポジトリ scaffold 時のデフォルトモジュール定義。
  * テンプレートに modules.jsonc がない場合に提案する初期構成。
  */
+/**
+ * AI agent の設定共有を主な用途として想定したデフォルトモジュール構成。
+ * Claude Code のルール・スキル・フックと、MCP 設定、開発環境設定をグループ化する。
+ */
 const DEFAULT_SCAFFOLD_MODULES: TemplateModule[] = [
   {
-    name: "Default",
-    description: "Common dev environment files",
+    name: "Claude",
+    description: "Claude Code rules, skills, and hooks",
     include: [
-      ".devcontainer/**",
-      ".github/**",
-      ".vscode/**",
-      ".claude/**",
-      ".editorconfig",
-      ".mcp.json",
-      ".mise.toml",
+      ".claude/settings.json",
+      ".claude/rules/*.md",
+      ".claude/skills/**",
+      ".claude/hooks/**",
     ],
+  },
+  {
+    name: "MCP",
+    description: "MCP server configuration",
+    include: [".mcp.json"],
+  },
+  {
+    name: "DevContainer",
+    description: "VS Code DevContainer setup",
+    include: [".devcontainer/**"],
+  },
+  {
+    name: "GitHub",
+    description: "GitHub Actions workflows",
+    include: [".github/**"],
   },
 ];
 

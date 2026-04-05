@@ -75,20 +75,25 @@ const MARKERS = {
  * コード側の定数変更に README が自動追従する。
  */
 function generateGettingStartedSection(): string {
-  // モジュール形式の例を生成（テンプレート管理者が手動で書く標準形式）
+  // モジュール形式の例を生成（AI agent 設定の共有が主な用途）
   const exampleModulesJson = JSON.stringify(
     {
       $schema: MODULES_SCHEMA_URL,
       modules: [
         {
-          name: "Editor",
-          description: "Editor and tooling configuration",
-          include: [".editorconfig", ".mcp.json", ".mise.toml"],
+          name: "Claude",
+          description: "Claude Code rules, skills, and hooks",
+          include: [".claude/settings.json", ".claude/rules/*.md", ".claude/skills/**"],
         },
         {
-          name: "CI",
-          description: "GitHub Actions workflows",
-          include: [".github/workflows/**"],
+          name: "MCP",
+          description: "MCP server configuration",
+          include: [".mcp.json"],
+        },
+        {
+          name: "DevContainer",
+          description: "VS Code DevContainer setup",
+          include: [".devcontainer/**"],
         },
       ],
     },
@@ -112,7 +117,7 @@ function generateGettingStartedSection(): string {
     "npx ziku --from my-org/my-templates",
     "```\n",
     "### 2. Add `.ziku/modules.jsonc` to your template\n",
-    "The template repository needs a `.ziku/modules.jsonc` file that defines which file patterns ziku manages. Each module groups related files and appears as a selectable option during `ziku init`. If this file is missing, ziku will offer to create a PR that adds one with a default configuration.\n",
+    "The template repository needs a `.ziku/modules.jsonc` file that defines which file patterns ziku manages. Group Claude Code rules, MCP configs, DevContainer settings, and other AI agent configurations into modules — each appears as a selectable option during `ziku init`. If this file is missing, ziku will offer to create a PR that adds one with a default configuration.\n",
     "Example `modules.jsonc`:\n",
     "```jsonc",
     exampleModulesJson,
