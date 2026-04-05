@@ -1,5 +1,13 @@
 # @tktco/ziku
 
+## 0.26.2
+
+### Patch Changes
+
+- [#25](https://github.com/tktcorporation/ziku/pull/25) [`3a3de80`](https://github.com/tktcorporation/ziku/commit/3a3de80d9ed3f1d56db08a52ddf87e86baf86c5b) Thanks [@tktcorporation](https://github.com/tktcorporation)! - MODULES_FILE 定数を export してモジュール間で共有、push.ts の重複定数を解消
+
+- [#21](https://github.com/tktcorporation/ziku/pull/21) [`62f346c`](https://github.com/tktcorporation/ziku/commit/62f346c7f98f99c0c085f3b692bd945f136ab64c) Thanks [@tktcorporation](https://github.com/tktcorporation)! - refactor: oxlint 設定をカテゴリベースに再構築し、コード品質警告を修正
+
 ## 0.26.1
 
 ### Patch Changes
