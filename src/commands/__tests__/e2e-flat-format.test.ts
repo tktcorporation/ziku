@@ -122,7 +122,7 @@ vi.mock("../../modules/index", async (importOriginal) => {
   return {
     ...original,
     modulesFileExists: vi.fn(() => true),
-    loadTemplateModulesFile: vi.fn(() =>
+    loadModulesFile: vi.fn(() =>
       Promise.resolve({
         modules: [
           {
@@ -198,7 +198,8 @@ const { hashFiles } = await import("../../utils/hash");
 const { loadZikuConfig: _loadZikuConfig, zikuConfigExists: _zikuConfigExists } =
   await import("../../utils/ziku-config");
 const { loadLock: _loadLock, saveLock: _saveLock } = await import("../../utils/lock");
-const { loadPatternsFile, addIncludePattern, modulesFileExists } = await import("../../modules");
+const { modulesFileExists } = await import("../../modules");
+const { addIncludePattern } = await import("../../utils/ziku-config");
 const { detectDiff } = await import("../../utils/diff");
 
 const mockDownloadTemplateToTemp = vi.mocked(downloadTemplateToTemp);
@@ -214,14 +215,6 @@ const DEFAULT_SOURCE = { owner: "test-org", repo: ".github" };
 
 function createZikuJsonc(include: string[], exclude?: string[], source = DEFAULT_SOURCE): string {
   const content: Record<string, unknown> = { source, include };
-  if (exclude && exclude.length > 0) {
-    content.exclude = exclude;
-  }
-  return JSON.stringify(content, null, 2);
-}
-
-function createFlatModulesJsonc(include: string[], exclude?: string[]): string {
-  const content: Record<string, unknown> = { include };
   if (exclude && exclude.length > 0) {
     content.exclude = exclude;
   }
@@ -420,30 +413,17 @@ describe("E2E: flat modules.jsonc format", () => {
       expect(parsed.exclude).toContain("*.local");
     });
 
-    it("loadPatternsFile → addIncludePattern → 書き戻しの一連の流れ", async () => {
-      const initial = createFlatModulesJsonc([".mcp.json", ".devcontainer/**"]);
-      vol.fromJSON({
-        "/project/.ziku/modules.jsonc": initial,
-      });
-
-      // 読み込み
-      const { rawContent, include, exclude } = await loadPatternsFile("/project");
-      expect(include).toContain(".mcp.json");
-      expect(include).toContain(".devcontainer/**");
-      expect(exclude).toEqual([]);
+    it("ziku.jsonc の addIncludePattern でパターンを追加できる", () => {
+      const initial = createZikuJsonc([".mcp.json", ".devcontainer/**"]);
 
       // 追加
-      const updated = addIncludePattern(rawContent, [".cloud/rules/*.md"]);
+      const updated = addIncludePattern(initial, [".cloud/rules/*.md"]);
+      const parsed = JSON.parse(updated);
 
-      // 保存（実際の push では PR 経由で更新するが、ここでは直接書き込みで検証）
-      vol.writeFileSync("/project/.ziku/modules.jsonc", updated);
-
-      // 再読み込みで確認
-      const after = await loadPatternsFile("/project");
-      expect(after.include).toContain(".mcp.json");
-      expect(after.include).toContain(".devcontainer/**");
-      expect(after.include).toContain(".cloud/rules/*.md");
-      expect(after.include).toHaveLength(3);
+      expect(parsed.include).toContain(".mcp.json");
+      expect(parsed.include).toContain(".devcontainer/**");
+      expect(parsed.include).toContain(".cloud/rules/*.md");
+      expect(parsed.include).toHaveLength(3);
     });
 
     it("trackCommand --list がフラット形式の内容を表示する", async () => {
@@ -627,35 +607,15 @@ describe("E2E: flat modules.jsonc format", () => {
       expect(templateFormat).not.toHaveProperty("include");
     });
 
-    it("loadPatternsFile がフラット形式を正しくパースする", async () => {
-      vol.fromJSON({
-        "/project/.ziku/modules.jsonc": createFlatModulesJsonc(
-          [".mcp.json", ".github/**", ".devcontainer/**"],
-          ["*.local", "*.tmp"],
-        ),
-      });
+    it("flattenModules がモジュール配列をフラット化する", async () => {
+      const { flattenModules } = await import("../../modules");
+      const modules = [
+        { name: "Root", description: "Root config", include: [".mcp.json"] },
+        { name: "GitHub", description: "GH", include: [".github/**"], exclude: ["*.local"] },
+      ];
 
-      const result = await loadPatternsFile("/project");
+      const result = flattenModules(modules);
 
-      expect(result.include).toEqual([".mcp.json", ".github/**", ".devcontainer/**"]);
-      expect(result.exclude).toEqual(["*.local", "*.tmp"]);
-    });
-
-    it("loadPatternsFile がテンプレート形式をフラット化して返す", async () => {
-      // テンプレート形式のファイルでも loadPatternsFile は動作する（自動判定）
-      const templateContent = JSON.stringify({
-        modules: [
-          { name: "Root", description: "Root config", include: [".mcp.json"] },
-          { name: "GitHub", description: "GH", include: [".github/**"], exclude: ["*.local"] },
-        ],
-      });
-      vol.fromJSON({
-        "/project/.ziku/modules.jsonc": templateContent,
-      });
-
-      const result = await loadPatternsFile("/project");
-
-      // フラット化されていること
       expect(result.include).toContain(".mcp.json");
       expect(result.include).toContain(".github/**");
       expect(result.exclude).toContain("*.local");

@@ -1,13 +1,11 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { defineCommand } from "citty";
-import { Effect } from "effect";
 import { join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import {
   MODULES_FILE,
   getModulesFilePath,
-  loadPatternsFile,
-  loadTemplateModulesFile,
+  loadModulesFile,
   modulesFileExists,
 } from "../modules/index";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
@@ -360,37 +358,20 @@ async function writeLockFile(
 /**
  * テンプレートの modules.jsonc からパターンを解決する。
  *
- * - モジュール形式: モジュール選択 UI を表示し、選択されたモジュールをフラット化
- * - フラット形式: そのまま使用（モジュール選択なし）
+ * modules.jsonc は常にモジュール形式。モジュール選択 UI を表示し、
+ * 選択されたモジュールの include/exclude をフラット化して返す。
  */
 async function resolveTemplatePatterns(
   templateDir: string,
   nonInteractive: boolean,
   modulesArg: string | undefined,
 ): Promise<FlatPatterns> {
-  // まずモジュール形式として読み込みを試行（失敗時はフラット形式にフォールバック）
-  const templateModules = await Effect.runPromise(
-    Effect.tryPromise(() => loadTemplateModulesFile(templateDir).then((r) => r.modules)).pipe(
-      Effect.orElseSucceed(() => null),
-    ),
-  );
-
-  if (templateModules) {
-    // モジュール形式: モジュール選択
-    const selectedModules = await selectModulesFromTemplate(
-      templateModules,
-      nonInteractive,
-      modulesArg,
-    );
-    return {
-      include: selectedModules.flatMap((m) => m.include),
-      exclude: selectedModules.flatMap((m) => m.exclude ?? []),
-    };
-  }
-
-  // フラット形式: そのまま使用
-  const loaded = await loadPatternsFile(templateDir);
-  return { include: loaded.include, exclude: loaded.exclude };
+  const { modules } = await loadModulesFile(templateDir);
+  const selectedModules = await selectModulesFromTemplate(modules, nonInteractive, modulesArg);
+  return {
+    include: selectedModules.flatMap((m) => m.include),
+    exclude: selectedModules.flatMap((m) => m.exclude ?? []),
+  };
 }
 
 /**
@@ -687,8 +668,8 @@ async function handleMissingDevenv(
     );
   }
 
-  // デフォルトのフラットパターンで scaffold PR を作成
-  const modulesContent = generateFlatPatternsJsonc(DEFAULT_SCAFFOLD_PATTERNS);
+  // デフォルトモジュールで scaffold PR を作成
+  const modulesContent = generateDefaultModulesJsonc();
   log.step(`Creating PR to add .ziku/modules.jsonc to ${pc.cyan(`${owner}/${repo}`)}...`);
   const result = await createDevenvScaffoldPR(token, owner, repo, modulesContent);
   log.success(`Created PR: ${pc.cyan(result.url)}`);
@@ -697,35 +678,54 @@ async function handleMissingDevenv(
 }
 
 /**
- * テンプレートリポジトリ scaffold 時のデフォルトパターン。
- * テンプレートに modules.jsonc がない場合に提案する初期パターン。
+ * テンプレートリポジトリ scaffold 時のデフォルトモジュール定義。
+ * テンプレートに modules.jsonc がない場合に提案する初期構成。
  */
-const DEFAULT_SCAFFOLD_PATTERNS: FlatPatterns = {
-  include: [
-    ".devcontainer/**",
-    ".github/**",
-    ".vscode/**",
-    ".claude/**",
-    ".editorconfig",
-    ".mcp.json",
-    ".mise.toml",
-  ],
-  exclude: [],
-};
+/**
+ * AI agent の設定共有を主な用途として想定したデフォルトモジュール構成。
+ * Claude Code のルール・スキル・フックと、MCP 設定、開発環境設定をグループ化する。
+ */
+const DEFAULT_SCAFFOLD_MODULES: TemplateModule[] = [
+  {
+    name: "Claude",
+    description: "Claude Code rules, skills, and hooks",
+    include: [
+      ".claude/settings.json",
+      ".claude/rules/*.md",
+      ".claude/skills/**",
+      ".claude/hooks/**",
+    ],
+  },
+  {
+    name: "MCP",
+    description: "MCP server configuration",
+    include: [".mcp.json"],
+  },
+  {
+    name: "DevContainer",
+    description: "VS Code DevContainer setup",
+    include: [".devcontainer/**"],
+  },
+  {
+    name: "GitHub",
+    description: "GitHub Actions workflows",
+    include: [".github/**"],
+  },
+];
 
 /**
- * フラット形式の modules.jsonc コンテンツを生成する。
- * テンプレートリポジトリの scaffold 用（modules.jsonc は upstream テンプレート専用）
+ * モジュール形式の modules.jsonc コンテンツを生成する。
+ * テンプレートリポジトリの scaffold 用。
  */
-export function generateFlatPatternsJsonc(patterns: FlatPatterns): string {
-  const content: Record<string, unknown> = {
-    $schema: MODULES_SCHEMA_URL,
-    include: patterns.include,
-  };
-  if (patterns.exclude.length > 0) {
-    content.exclude = patterns.exclude;
-  }
-  return JSON.stringify(content, null, 2);
+export function generateDefaultModulesJsonc(): string {
+  return JSON.stringify(
+    {
+      $schema: MODULES_SCHEMA_URL,
+      modules: DEFAULT_SCAFFOLD_MODULES,
+    },
+    null,
+    2,
+  );
 }
 
 /**
@@ -759,7 +759,7 @@ function handleTemplateRepoInit(targetDir: string, _nonInteractive: boolean): vo
 
   log.step("Generating .ziku/modules.jsonc...");
 
-  const modulesContent = generateFlatPatternsJsonc(DEFAULT_SCAFFOLD_PATTERNS);
+  const modulesContent = generateDefaultModulesJsonc();
   const modulesDir = join(targetDir, ".ziku");
   if (!existsSync(modulesDir)) {
     mkdirSync(modulesDir, { recursive: true });

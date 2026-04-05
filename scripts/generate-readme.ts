@@ -30,11 +30,11 @@ import type { ArgsDef, CommandDef } from "citty";
 import { renderUsage } from "citty";
 import { z } from "zod";
 import { diffCommand } from "../src/commands/diff";
-import { generateFlatPatternsJsonc, initCommand } from "../src/commands/init";
+import { initCommand } from "../src/commands/init";
 import { pullCommand } from "../src/commands/pull";
 import { pushCommand } from "../src/commands/push";
 import { trackCommand } from "../src/commands/track";
-import { modulesFileSchema } from "../src/modules/loader";
+import { MODULES_SCHEMA_URL, modulesFileSchema } from "../src/modules/loader";
 import { zikuConfigSchema } from "../src/modules/schemas";
 import { generateLifecycleDocument } from "../src/docs/lifecycle";
 import { DEFAULT_TEMPLATE_REPOS } from "../src/utils/git-remote";
@@ -71,15 +71,35 @@ const MARKERS = {
  * Generate Getting Started section from source code constants
  *
  * DEFAULT_TEMPLATE_REPOS からテンプレート検索順を生成し、
- * generateFlatPatternsJsonc で example modules.jsonc を生成する。
+ * モジュール形式の example modules.jsonc を生成する。
  * コード側の定数変更に README が自動追従する。
  */
 function generateGettingStartedSection(): string {
-  // Generate example modules.jsonc from the same function used at runtime
-  const exampleJson = generateFlatPatternsJsonc({
-    include: [".editorconfig", ".mcp.json", ".mise.toml", ".github/**"],
-    exclude: [],
-  });
+  // モジュール形式の例を生成（AI agent 設定の共有が主な用途）
+  const exampleModulesJson = JSON.stringify(
+    {
+      $schema: MODULES_SCHEMA_URL,
+      modules: [
+        {
+          name: "Claude",
+          description: "Claude Code rules, skills, and hooks",
+          include: [".claude/settings.json", ".claude/rules/*.md", ".claude/skills/**"],
+        },
+        {
+          name: "MCP",
+          description: "MCP server configuration",
+          include: [".mcp.json"],
+        },
+        {
+          name: "DevContainer",
+          description: "VS Code DevContainer setup",
+          include: [".devcontainer/**"],
+        },
+      ],
+    },
+    null,
+    2,
+  );
 
   // テンプレートリポジトリの検索順をコード定数から生成
   const repoList = DEFAULT_TEMPLATE_REPOS.map((r) => `\`{your-org}/${r}\``).join(", then ");
@@ -97,10 +117,10 @@ function generateGettingStartedSection(): string {
     "npx ziku --from my-org/my-templates",
     "```\n",
     "### 2. Add `.ziku/modules.jsonc` to your template\n",
-    "The template repository needs a `.ziku/modules.jsonc` file that defines which file patterns ziku manages. If this file is missing, ziku will offer to create a PR that adds one with a default configuration.\n",
+    "The template repository needs a `.ziku/modules.jsonc` file that defines which file patterns ziku manages. Group Claude Code rules, MCP configs, DevContainer settings, and other AI agent configurations into modules — each appears as a selectable option during `ziku init`. If this file is missing, ziku will offer to create a PR that adds one with a default configuration.\n",
     "Example `modules.jsonc`:\n",
     "```jsonc",
-    exampleJson,
+    exampleModulesJson,
     "```\n",
     "### 3. Apply the template to your project\n",
     "```bash",
