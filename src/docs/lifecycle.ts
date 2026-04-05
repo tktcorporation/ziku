@@ -123,6 +123,18 @@ export const lifecycle: CommandLifecycle[] = [
       { file: LOCK_FILE, location: "local", op: "read", note: "baseRef, baseHashes を取得" },
       { file: SYNCED_FILES, location: "local", op: "read", note: "ローカルの変更を検出" },
       {
+        file: MODULES_FILE,
+        location: "template",
+        op: "read",
+        note: "テンプレートのパターンと比較し、ローカル追加分を検出",
+      },
+      {
+        file: SYNCED_FILES,
+        location: "template",
+        op: "read",
+        note: "テンプレートをダウンロードして差分検出・3-way マージ",
+      },
+      {
         file: SYNCED_FILES,
         location: "template",
         op: "update",
@@ -132,7 +144,7 @@ export const lifecycle: CommandLifecycle[] = [
         file: MODULES_FILE,
         location: "template",
         op: "update",
-        note: "ローカルで追加されたパターンがあれば更新",
+        note: "ローカルで追加されたパターンがあれば PR に含めて更新",
       },
     ],
   },
@@ -141,6 +153,12 @@ export const lifecycle: CommandLifecycle[] = [
     description: "ローカルとテンプレートの差分を表示",
     ops: [
       { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "patterns を取得" },
+      {
+        file: SYNCED_FILES,
+        location: "local",
+        op: "read",
+        note: "ローカルファイルを読み取り",
+      },
       {
         file: SYNCED_FILES,
         location: "template",
@@ -179,17 +197,17 @@ function generateFileSummaryTable(): string {
     {
       file: MODULES_FILE,
       location: "テンプレートリポジトリのみ",
-      role: "モジュール定義（名前・説明・パターン）。init 時の選択 UI に使われる",
+      role: "同期対象の glob パターンを定義する「メニュー表」。init 時にユーザーが選ぶモジュール一覧の元データ。push 時にローカル追加パターンが書き戻される",
     },
     {
       file: ZIKU_CONFIG_FILE,
       location: "ユーザーのプロジェクトのみ",
-      role: "同期設定。テンプレートの source と、選択済みの include/exclude パターンを保持",
+      role: "同期設定。テンプレートの source（owner/repo）と、選択済みの include/exclude パターンを保持。track コマンドで追加可能",
     },
     {
       file: LOCK_FILE,
       location: "ユーザーのプロジェクトのみ",
-      role: "同期状態。ベースコミット SHA、ファイルハッシュ、未解決マージ情報を保持",
+      role: "同期状態。前回同期時のコミット SHA（baseRef）、ファイルごとの SHA-256 ハッシュ（baseHashes）、未解決マージ情報（pendingMerge）を保持。pull/push の差分検出に使用",
     },
   ];
 
@@ -285,14 +303,17 @@ export function generateLifecycleDocument(): string {
     "## コマンドごとのファイル操作\n",
     generateCommandTables(),
     "## 補足\n",
-    "### modules.jsonc はユーザーのプロジェクトに存在しない\n",
-    `\`ziku init\` でユーザーのプロジェクトに作られるのは \`${ZIKU_CONFIG_FILE}\` と \`${LOCK_FILE}\` だけ。`,
-    `\`${MODULES_FILE}\` はテンプレートリポジトリ専用のファイルであり、init 時にモジュール選択 UI を表示するためだけに使われる。`,
-    `選択結果はフラット化されて \`${ZIKU_CONFIG_FILE}\` の \`include\` に保存される。\n`,
-    "### ziku.jsonc と modules.jsonc は独立\n",
-    `init 後、\`${ZIKU_CONFIG_FILE}\` のパターンはテンプレートの \`${MODULES_FILE}\` から独立している。`,
-    "ユーザーが `ziku track` で追加したパターンは、テンプレートのどのモジュールにも属さない。",
-    `テンプレートが \`${MODULES_FILE}\` にモジュールを追加しても、既存ユーザーの \`${ZIKU_CONFIG_FILE}\` には自動反映されない。\n`,
+    "### modules.jsonc の役割\n",
+    `\`${MODULES_FILE}\` はテンプレートリポジトリにのみ存在する「メニュー表」。`,
+    "同期対象のファイルパターンを、モジュール（名前・説明付きのグループ）として定義する。\n",
+    "**init 時**: ユーザーがどのモジュールを使うか選ぶ際の選択肢になる。選択結果はフラット化（モジュール構造を外して glob パターンだけにする）され、",
+    `ユーザーのプロジェクトには \`${ZIKU_CONFIG_FILE}\` として保存される。つまり \`${MODULES_FILE}\` 自体はユーザーのプロジェクトにはコピーされない。\n`,
+    `**push 時**: ユーザーが \`ziku track\` で追加した新しいパターンがあれば、\`${MODULES_FILE}\` に書き戻される（PR 経由）。`,
+    "これにより、他のプロジェクトが init する際にも新パターンが選択肢に含まれるようになる。\n",
+    "### ziku.jsonc と modules.jsonc は init 後に独立\n",
+    `init が完了すると、\`${ZIKU_CONFIG_FILE}\` のパターンはテンプレートの \`${MODULES_FILE}\` から独立して管理される。`,
+    `ユーザーが \`ziku track\` で追加したパターンは \`${ZIKU_CONFIG_FILE}\` にのみ反映され、テンプレートのどのモジュールにも属さない（push するまで）。`,
+    `逆に、テンプレート側で \`${MODULES_FILE}\` にモジュールを追加しても、既存ユーザーの \`${ZIKU_CONFIG_FILE}\` には自動反映されない。\n`,
   ];
 
   return sections.join("\n");
