@@ -98,11 +98,11 @@ npx ziku track '.eslintrc.*'
 
 ## Modules
 
-ziku lets you organize synced files into **modules** — named groups of file patterns. Template authors define modules in `.ziku/modules.jsonc`; users pick which ones to apply during `ziku init`.
+Templates can organize files into **modules** — named groups of file patterns. During `ziku init`, you pick which modules to apply, and the selected patterns are saved to `.ziku/ziku.jsonc` in your project.
 
-You can define any modules that match your team's stack. For example:
+A template might offer modules like:
 
-| Module | What you might include |
+| Module | What it might include |
 |---|---|
 | **Linter / Formatter** | `.eslintrc.*`, `.prettierrc`, `biome.json` |
 | **CI / CD** | `.github/workflows/**`, `.gitlab-ci.yml` |
@@ -110,31 +110,7 @@ You can define any modules that match your team's stack. For example:
 | **AI Tooling** | `.claude/`, `.cursor/rules/`, `.mcp.json` |
 | **IaC** | `terraform/modules/**`, `docker-compose.yml` |
 
-### Template side: `modules.jsonc`
-
-Template authors define available modules in their template repository:
-
-```jsonc
-// .ziku/modules.jsonc (in the template repo)
-{
-  "modules": [
-    {
-      "name": "Linter",
-      "description": "Shared linter and formatter settings",
-      "patterns": [".eslintrc.*", ".prettierrc"]
-    },
-    {
-      "name": "CI",
-      "description": "GitHub Actions workflow templates",
-      "patterns": [".github/workflows/**"]
-    }
-  ]
-}
-```
-
-### User side: `ziku.jsonc`
-
-After running `ziku init` and selecting modules, a flat config is generated in your project:
+After init, your project gets a flat config that drives `pull`, `push`, and `diff`:
 
 ```jsonc
 // .ziku/ziku.jsonc (in your project — auto-generated, customizable)
@@ -144,7 +120,34 @@ After running `ziku init` and selecting modules, a flat config is generated in y
 }
 ```
 
-You can further customize tracked patterns anytime with `ziku track`.
+You can add or remove patterns anytime with `ziku track`.
+
+<details>
+<summary>Defining modules in your template</summary>
+
+Template authors define modules in `.ziku/modules.jsonc` inside the template repository:
+
+```jsonc
+// .ziku/modules.jsonc (in the template repo)
+{
+  "modules": [
+    {
+      "name": "Linter",
+      "description": "Shared linter and formatter settings",
+      "include": [".eslintrc.*", ".prettierrc"]
+    },
+    {
+      "name": "CI",
+      "description": "GitHub Actions workflow templates",
+      "include": [".github/workflows/**"]
+    }
+  ]
+}
+```
+
+Module names and descriptions appear in the selection UI during `ziku init`. You can create any number of modules with any file patterns.
+
+</details>
 
 <!-- FEATURES:END -->
 
