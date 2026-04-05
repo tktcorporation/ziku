@@ -216,7 +216,7 @@ export const initCommand = defineCommand({
         [
           "Setup complete!",
           "",
-          `${pc.bold("Next steps:")}`,
+          pc.bold("Next steps:"),
           `  ${pc.cyan("git add . && git commit -m 'chore: add ziku config'")}`,
           `  ${pc.dim("Commit the changes")}`,
           `  ${pc.cyan("npx ziku diff")}`,
@@ -720,7 +720,7 @@ async function handleTemplateRepoInit(targetDir: string, _nonInteractive: boolea
     [
       "Template initialized!",
       "",
-      `${pc.bold("Next steps:")}`,
+      pc.bold("Next steps:"),
       `  ${pc.cyan("1.")} Review and customize ${pc.dim(".ziku/modules.jsonc")}`,
       `  ${pc.cyan("2.")} ${pc.cyan("git add .ziku/ && git commit -m 'chore: add ziku config'")}`,
       `  ${pc.dim("Then other projects can use this template with")} ${pc.cyan("npx ziku init")}`,

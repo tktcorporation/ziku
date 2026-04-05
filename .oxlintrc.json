@@ -23,6 +23,7 @@
 
     "typescript/no-explicit-any": "error",
     "typescript/no-non-null-assertion": "warn",
+    "typescript/no-unsafe-type-assertion": "warn",
     "typescript/consistent-type-imports": "error",
     "typescript/no-unnecessary-type-assertion": "off",
     "typescript/ban-ts-comment": "warn",
