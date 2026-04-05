@@ -103,6 +103,7 @@ export const diffLifecycle: CommandLifecycle = {
 ```
 
 他のコマンドも同様のパターン。init.ts のみ 2 つの lifecycle を export:
+
 - `initTemplateLifecycle` — "init (template repo)"
 - `initUserLifecycle` — "init (user project)"
 
@@ -229,6 +230,7 @@ describe("lifecycle guard", () => {
 ```
 
 **テストの特徴:**
+
 - `IMPORT_OP_MAP` はシンプルに「関数名 → 期待される ops」のみを管理
 - `saveLock` は init で `create`、pull で `update` のため variant 対応
 - `import type` も含めて抽出（ただし type-only import は関数呼び出しではないので、

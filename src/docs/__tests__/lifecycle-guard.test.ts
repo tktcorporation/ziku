@@ -22,7 +22,7 @@ import { diffLifecycle } from "../../commands/diff";
 import { trackLifecycle } from "../../commands/track";
 import { pullLifecycle } from "../../commands/pull";
 import { pushLifecycle } from "../../commands/push";
-import { initTemplateLifecycle, initUserLifecycle } from "../../commands/init";
+import { initUserLifecycle } from "../../commands/init";
 
 // ──────────────────────────────────────────────
 // ポリシー定義: import 名 → 期待される ops
