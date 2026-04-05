@@ -1,15 +1,16 @@
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { defineCommand } from "citty";
 import { Effect } from "effect";
-import { join, resolve } from "pathe";
+import { dirname, join, resolve } from "pathe";
+import { P, match } from "ts-pattern";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
-import type { FileDiff } from "../modules/schemas";
-import { isLocalSource } from "../modules/schemas";
-import { LOCK_FILE } from "../utils/lock";
+import type { FileDiff, TemplateSource } from "../modules/schemas";
+import { LOCK_FILE, saveLock } from "../utils/lock";
 import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
 import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
+import type { CommandContextShape } from "../services/command-context";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 import {
@@ -25,16 +26,13 @@ import { calculateDiffStats, formatStats } from "../ui/diff-view";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
 import { detectDiff } from "../utils/diff";
 import { createPullRequest, getGitHubToken } from "../utils/github";
+import { hashFiles } from "../utils/hash";
 import { detectAndUpdateReadme } from "../utils/readme";
 import { detectUntrackedFiles } from "../utils/untracked";
 
-/**
- * push コマンドのファイル操作メタデータ。
- * ドキュメント自動生成（npm run docs）の SSOT として使われる。
- */
 export const pushLifecycle: CommandLifecycle = {
   name: "push",
-  description: "ローカルの変更をテンプレートリポジトリに PR として送信",
+  description: "ローカルの変更をテンプレートに反映（GitHub: PR / ローカル: 直接コピー）",
   ops: [
     { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "patterns を取得" },
     { file: LOCK_FILE, location: "local", op: "read", note: "source, baseRef, baseHashes を取得" },
@@ -43,16 +41,209 @@ export const pushLifecycle: CommandLifecycle = {
       file: SYNCED_FILES,
       location: "template",
       op: "read",
-      note: "テンプレートをダウンロードして差分検出・3-way マージ",
+      note: "テンプレートと差分検出・3-way マージ",
     },
     {
       file: SYNCED_FILES,
       location: "template",
       op: "update",
-      note: "変更ファイルを含む PR を作成",
+      note: "GitHub: PR を作成 / ローカル: ファイルを直接コピー",
     },
+    { file: LOCK_FILE, location: "local", op: "update", note: "baseHashes を更新" },
   ],
 };
+
+// ─── Push 戦略: GitHub / Local を Effect で分離 ───
+
+interface PushTarget {
+  readonly files: Array<{ path: string; content: string }>;
+  readonly pushableFiles: FileDiff[];
+}
+
+/**
+ * GitHub へ push: PR を作成する。
+ *
+ * トークン取得 → タイトル/本文 → サマリー表示 → 確認 → PR 作成
+ */
+function pushToGitHub(
+  ghSource: { owner: string; repo: string; ref?: string },
+  target: PushTarget,
+  ctx: CommandContextShape,
+  args: { message?: string; edit?: boolean; yes?: boolean },
+): Effect.Effect<void, ZikuError> {
+  return Effect.tryPromise({
+    try: async () => {
+      let token = getGitHubToken();
+      if (!token) {
+        token = await inputGitHubToken();
+      }
+
+      const suggestedTitle = generatePrTitle(target.pushableFiles);
+      const suggestedBody = generatePrBody(target.pushableFiles);
+
+      const { title, body } = await match(args)
+        .with({ message: P.string }, ({ message }) => ({
+          title: message,
+          body: suggestedBody,
+        }))
+        .with({ edit: true }, async () => ({
+          title: await inputPrTitle(suggestedTitle),
+          body: await inputPrBody(suggestedBody),
+        }))
+        .otherwise(() => ({ title: suggestedTitle, body: suggestedBody }));
+
+      const readmeResult = await detectAndUpdateReadme(ctx.templateDir, ctx.templateDir);
+      const files = [...target.files];
+      if (readmeResult?.updated) {
+        files.push({ path: "README.md", content: readmeResult.content });
+      }
+
+      // サマリー表示
+      const baseBranch = ghSource.ref || "main";
+      const baseHashStr = ctx.lock.baseRef
+        ? `  ${pc.dim(`since ${ctx.lock.baseRef.slice(0, 7)}`)}`
+        : "";
+      logPushSummary(
+        `${ghSource.owner}/${ghSource.repo}`,
+        `→ ${baseBranch}`,
+        baseHashStr,
+        title,
+        target.pushableFiles,
+        files,
+      );
+
+      if (!args.yes) {
+        const confirmed = await confirmAction("Create PR?", { initialValue: true });
+        if (!confirmed) {
+          log.info("Cancelled.");
+          return;
+        }
+      }
+
+      log.step("Creating pull request...");
+      const result = await withSpinner("Creating PR on GitHub...", () =>
+        createPullRequest(token, {
+          owner: ghSource.owner,
+          repo: ghSource.repo,
+          files,
+          title,
+          body,
+          baseBranch,
+        }),
+      );
+
+      log.success("Pull request created!");
+      log.message(
+        [
+          `${pc.dim("To")} ${pc.bold(`${ghSource.owner}/${ghSource.repo}`)}`,
+          `  ${ctx.lock.baseRef ? `${pc.dim(ctx.lock.baseRef.slice(0, 7))}..` : ""}${pc.green(result.branch)}  ${pc.dim(`(${files.length} file${files.length === 1 ? "" : "s"} changed)`)}`,
+          "",
+          `  ${pc.bold(`PR #${result.number}`)}  ${pc.cyan(result.url)}`,
+        ].join("\n"),
+      );
+      outro(`Review and merge at ${pc.cyan(result.url)}`);
+    },
+    catch: (e) => (e instanceof ZikuError ? e : new ZikuError("Push failed", String(e))),
+  });
+}
+
+/**
+ * ローカルテンプレートへ push: ファイルを直接コピーする。
+ *
+ * PR の代わりにテンプレートディレクトリにファイルを書き込み、
+ * lock.json の baseHashes を更新する。
+ */
+function pushToLocal(
+  localSource: { path: string },
+  target: PushTarget,
+  ctx: CommandContextShape,
+  projectDir: string,
+  args: { yes?: boolean },
+): Effect.Effect<void, ZikuError> {
+  return Effect.tryPromise({
+    try: async () => {
+      logPushSummary(
+        localSource.path,
+        "(local)",
+        "",
+        `push ${target.files.length} file(s)`,
+        target.pushableFiles,
+        target.files,
+      );
+
+      if (!args.yes) {
+        const confirmed = await confirmAction("Push to local template?", { initialValue: true });
+        if (!confirmed) {
+          log.info("Cancelled.");
+          return;
+        }
+      }
+
+      log.step("Pushing to local template...");
+
+      for (const file of target.files) {
+        const destPath = join(localSource.path, file.path);
+        const destDir = dirname(destPath);
+        if (!existsSync(destDir)) {
+          await mkdir(destDir, { recursive: true });
+        }
+        await writeFile(destPath, file.content, "utf-8");
+        log.message(`  ${pc.green("+")} ${file.path}`);
+      }
+
+      // lock.json の baseHashes を更新（テンプレート側のハッシュを再計算）
+      const patterns = {
+        include: ctx.config.include,
+        exclude: ctx.config.exclude ?? [],
+      };
+      const baseHashes = await hashFiles(localSource.path, patterns.include, patterns.exclude);
+      await saveLock(projectDir, { ...ctx.lock, baseHashes });
+
+      log.success(`Pushed ${target.files.length} file(s) to ${pc.cyan(localSource.path)}`);
+      outro("Push complete");
+    },
+    catch: (e) => (e instanceof ZikuError ? e : new ZikuError("Push failed", String(e))),
+  });
+}
+
+// ─── サマリー表示 ───
+
+function logPushSummary(
+  destination: string,
+  branchInfo: string,
+  baseHashStr: string,
+  title: string,
+  pushableFiles: FileDiff[],
+  files: Array<{ path: string; content: string }>,
+): void {
+  const fileLines: string[] = [];
+  for (const pf of pushableFiles) {
+    if (!files.some((f) => f.path === pf.path)) continue;
+    const stat = formatFileStat(pf);
+    const icon =
+      pf.type === "added"
+        ? pc.green("+")
+        : pf.type === "modified"
+          ? pc.yellow("~")
+          : pc.red("-");
+    fileLines.push(`  ${icon} ${pf.path.padEnd(50)} ${stat}`);
+  }
+  for (const f of files) {
+    if (!pushableFiles.some((pf) => pf.path === f.path)) {
+      fileLines.push(`  ${pc.green("+")} ${f.path.padEnd(50)} ${pc.dim("(auto-updated)")}`);
+    }
+  }
+
+  log.message(
+    [
+      `${pc.dim("To")} ${pc.bold(destination)}  ${pc.dim(branchInfo)}${baseHashStr}`,
+      pc.dim("─".repeat(62)),
+      ...fileLines,
+      pc.dim("─".repeat(62)),
+      `  ${pc.dim("Push:")} ${title}`,
+    ].join("\n"),
+  );
+}
 
 function formatFileStat(file: {
   path: string;
@@ -64,12 +255,12 @@ function formatFileStat(file: {
   return formatStats(stats);
 }
 
-const README_PATH = "README.md";
+// ─── メインコマンド ───
 
 export const pushCommand = defineCommand({
   meta: {
     name: "push",
-    description: "Push local changes to the template repository as a PR",
+    description: "Push local changes to the template (PR for GitHub, direct copy for local)",
   },
   args: {
     dir: {
@@ -80,13 +271,13 @@ export const pushCommand = defineCommand({
     dryRun: {
       type: "boolean",
       alias: "n",
-      description: "Preview only, don't create PR",
+      description: "Preview only, don't push",
       default: false,
     },
     message: {
       type: "string",
       alias: "m",
-      description: "PR title",
+      description: "PR title (GitHub only)",
     },
     yes: {
       type: "boolean",
@@ -96,12 +287,12 @@ export const pushCommand = defineCommand({
     },
     edit: {
       type: "boolean",
-      description: "Edit PR title and description before creating",
+      description: "Edit PR title and description before creating (GitHub only)",
       default: false,
     },
     files: {
       type: "string",
-      description: "Comma-separated file paths to include in PR (skips file selection prompt)",
+      description: "Comma-separated file paths to include (skips file selection prompt)",
     },
   },
   async run({ args }) {
@@ -109,7 +300,6 @@ export const pushCommand = defineCommand({
 
     const targetDir = resolve(args.dir);
 
-    // loadCommandContext + runCommandEffect で DRY 化
     const ctx = await runCommandEffect(
       loadCommandContext(targetDir).pipe(Effect.mapError(toZikuError)),
     );
@@ -121,14 +311,6 @@ export const pushCommand = defineCommand({
         "Unresolved merge conflicts from `ziku pull`",
         "Resolve conflicts in these files, then run `ziku pull --continue`:\n" +
           lock.pendingMerge.conflicts.map((f) => `  • ${f}`).join("\n"),
-      );
-    }
-
-    if (isLocalSource(source)) {
-      cleanup();
-      throw new ZikuError(
-        "Push is not supported for local template sources",
-        "Push is only available for GitHub-hosted templates",
       );
     }
 
@@ -145,13 +327,12 @@ export const pushCommand = defineCommand({
 
     await withFinally(
       async () => {
-        // 3-way マージ結果を保持
+        // ─── 共通: 差分検出 + ファイル選択 ───
+
         const mergedContents = new Map<string, string>();
         const pushableFilePaths: Set<string> = new Set();
 
-        // ファイル分類
         {
-          const { hashFiles } = await import("../utils/hash");
           const { classifyFiles } = await import("../utils/merge");
 
           const templateHashes = await hashFiles(templateDir, patterns.include, patterns.exclude);
@@ -163,12 +344,8 @@ export const pushCommand = defineCommand({
             templateHashes,
           });
 
-          for (const file of classification.localOnly) {
-            pushableFilePaths.add(file);
-          }
-          for (const file of classification.conflicts) {
-            pushableFilePaths.add(file);
-          }
+          for (const file of classification.localOnly) pushableFilePaths.add(file);
+          for (const file of classification.conflicts) pushableFilePaths.add(file);
 
           if (classification.autoUpdate.length > 0) {
             log.info(
@@ -180,132 +357,29 @@ export const pushCommand = defineCommand({
           }
 
           if (classification.conflicts.length > 0) {
-            const { threeWayMerge, asBaseContent, asLocalContent, asTemplateContent } =
-              await import("../utils/merge");
-
-            const baseInfo = lock.baseRef
-              ? `since ${pc.bold(lock.baseRef?.slice(0, 7))} (your last sync)`
-              : "since your last pull/init";
-            log.warn(
-              `Template updated ${baseInfo} — ${classification.conflicts.length} conflict(s) detected, attempting auto-merge...`,
-            );
-
-            let baseTemplateDir: string | undefined;
-            let baseCleanup: (() => void) | undefined;
-
-            if (lock.baseRef) {
-              const baseResult = await Effect.runPromise(
-                Effect.tryPromise(async () => {
-                  log.info(
-                    `Downloading base version (${lock.baseRef?.slice(0, 7)}...) for merge...`,
-                  );
-                  const { downloadTemplateToTemp: downloadBase } =
-                    await import("../utils/template");
-                  const baseSource = `gh:${source.owner}/${source.repo}#${lock.baseRef}`;
-                  return downloadBase(targetDir, baseSource);
-                }).pipe(
-                  Effect.orElseSucceed(() => {
-                    log.warn(
-                      "Could not download base version. Falling back to local content for conflicts.",
-                    );
-                    return null;
-                  }),
-                ),
-              );
-              if (baseResult) {
-                baseTemplateDir = baseResult.templateDir;
-                baseCleanup = baseResult.cleanup;
-              }
-            }
-
-            await withFinally(
-              async () => {
-                const autoMerged: string[] = [];
-                const unresolved: string[] = [];
-
-                for (const file of classification.conflicts) {
-                  const localContent = await readFile(join(targetDir, file), "utf-8");
-                  const templateContent = await readFile(join(templateDir, file), "utf-8");
-
-                  let baseContent: string | undefined;
-                  if (baseTemplateDir && existsSync(join(baseTemplateDir, file))) {
-                    baseContent = await readFile(join(baseTemplateDir, file), "utf-8");
-                  }
-
-                  if (baseContent) {
-                    const result = threeWayMerge({
-                      base: asBaseContent(baseContent),
-                      local: asLocalContent(localContent),
-                      template: asTemplateContent(templateContent),
-                      filePath: file,
-                    });
-                    if (!result.hasConflicts) {
-                      mergedContents.set(file, result.content);
-                      autoMerged.push(file);
-                      continue;
-                    }
-                  }
-                  unresolved.push(file);
-                }
-
-                if (autoMerged.length > 0) {
-                  log.success(`Auto-merged ${autoMerged.length} file(s):`);
-                  for (const file of autoMerged) {
-                    log.message(`  ${pc.green("✓")} ${file}`);
-                  }
-                }
-
-                if (unresolved.length > 0) {
-                  log.warn(`${unresolved.length} file(s) could not be auto-merged:`);
-                  for (const file of unresolved) {
-                    log.message(`  ${pc.yellow("!")} ${file}`);
-                  }
-                  log.message(
-                    [
-                      pc.dim("Your local changes will be included in the PR."),
-                      pc.dim(
-                        `hint: Run ${pc.cyan("ziku pull")} to sync changes first, then push again.`,
-                      ),
-                    ].join("\n"),
-                  );
-
-                  if (!args.yes) {
-                    const proceed = await confirmAction("Continue with unresolved conflicts?", {
-                      initialValue: true,
-                    });
-                    if (!proceed) {
-                      log.info("Run `ziku pull` first to sync template changes, then push again.");
-                    }
-                  }
-                }
-              },
-              () => baseCleanup?.(),
-            );
+            await resolveConflicts(classification.conflicts, {
+              targetDir,
+              templateDir,
+              source,
+              lock,
+              mergedContents,
+              args: { yes: args.yes as boolean },
+            });
           }
         }
 
-        // ホワイトリスト外ファイルの検出
         if (!args.yes) {
-          const untrackedByFolder = await detectUntrackedFiles({
-            targetDir,
-            patterns,
-          });
-
+          const untrackedByFolder = await detectUntrackedFiles({ targetDir, patterns });
           if (untrackedByFolder.length > 0) {
             const untrackedCount = untrackedByFolder.reduce((sum, f) => sum + f.files.length, 0);
             log.info(`${untrackedCount} untracked file(s) detected (not included in push)`);
           }
         }
 
-        // 差分を検出
         log.step("Detecting changes...");
 
         const diff = await withSpinner("Analyzing differences...", () =>
-          detectDiff({
-            targetDir,
-            templateDir,
-            patterns,
-          }),
+          detectDiff({ targetDir, templateDir, patterns }),
         );
 
         let pushableFiles = diff.files.filter(
@@ -319,146 +393,154 @@ export const pushCommand = defineCommand({
           return;
         }
 
-        // ドライラン
         if (args.dryRun) {
           log.info("Dry run mode");
-          log.step("Files that would be included in PR:");
+          log.step("Files that would be pushed:");
           logDiffSummary(diff.files);
-          log.info("No PR was created (dry run)");
           return;
         }
 
         // ファイル選択
         if (args.files) {
-          const requestedPaths = args.files
-            .split(",")
-            .map((p) => p.trim())
-            .filter(Boolean);
+          const requestedPaths = (args.files as string).split(",").map((p) => p.trim()).filter(Boolean);
           const availablePaths = new Set(pushableFiles.map((f) => f.path));
           const notFound = requestedPaths.filter((p) => !availablePaths.has(p));
-          if (notFound.length > 0) {
-            log.warn(`Files not found in pushable changes: ${notFound.join(", ")}`);
-          }
+          if (notFound.length > 0) log.warn(`Files not found: ${notFound.join(", ")}`);
           const requestedSet = new Set(requestedPaths);
           pushableFiles = pushableFiles.filter((f) => requestedSet.has(f.path));
-          if (pushableFiles.length === 0) {
-            log.info("No matching files found. Cancelled.");
-            return;
-          }
+          if (pushableFiles.length === 0) { log.info("No matching files. Cancelled."); return; }
           log.info(`${pushableFiles.length} file(s) selected via --files`);
         } else {
           log.step("Selecting files...");
           pushableFiles = await selectPushFiles(pushableFiles);
-          if (pushableFiles.length === 0) {
-            log.info("No files selected. Cancelled.");
-            return;
-          }
+          if (pushableFiles.length === 0) { log.info("No files selected. Cancelled."); return; }
         }
-
-        // GitHub トークン取得
-        let token = getGitHubToken();
-        if (!token) {
-          token = await inputGitHubToken();
-        }
-
-        const suggestedTitle = generatePrTitle(pushableFiles);
-        const suggestedBody = generatePrBody(pushableFiles);
-
-        let title: string;
-        let body: string | undefined;
-
-        if (args.message) {
-          title = args.message;
-          body = suggestedBody;
-        } else if (args.edit) {
-          title = await inputPrTitle(suggestedTitle);
-          body = await inputPrBody(suggestedBody);
-        } else {
-          title = suggestedTitle;
-          body = suggestedBody;
-        }
-
-        const readmeResult = await detectAndUpdateReadme(targetDir, templateDir);
 
         const files = pushableFiles.map((f) => ({
           path: f.path,
           content: mergedContents.get(f.path) ?? f.localContent ?? "",
         }));
 
-        if (readmeResult?.updated) {
-          files.push({
-            path: README_PATH,
-            content: readmeResult.content,
-          });
-        }
+        // ─── 分岐: ソース���別に応じた push 戦略 (ts-pattern + Effect) ───
 
-        // サマリー表示 + 確認
-        const destination = `${source.owner}/${source.repo}`;
-        const baseBranch = source.ref || "main";
-        const baseHashStr = lock.baseRef ? `  ${pc.dim(`since ${lock.baseRef.slice(0, 7)}`)}` : "";
-
-        const fileLines: string[] = [];
-        for (const pf of pushableFiles) {
-          if (!files.some((f) => f.path === pf.path)) continue;
-          const stat = formatFileStat(pf);
-          const icon =
-            pf.type === "added"
-              ? pc.green("+")
-              : pf.type === "modified"
-                ? pc.yellow("~")
-                : pc.red("-");
-          fileLines.push(`  ${icon} ${pf.path.padEnd(50)} ${stat}`);
-        }
-        for (const f of files) {
-          if (!pushableFiles.some((pf) => pf.path === f.path)) {
-            fileLines.push(`  ${pc.green("+")} ${f.path.padEnd(50)} ${pc.dim("(auto-updated)")}`);
-          }
-        }
-
-        log.message(
-          [
-            `${pc.dim("To")} ${pc.bold(destination)}  ${pc.dim(`→ ${baseBranch}`)}${baseHashStr}`,
-            pc.dim("─".repeat(62)),
-            ...fileLines,
-            pc.dim("─".repeat(62)),
-            `  ${pc.dim("PR:")} ${title}`,
-          ].join("\n"),
+        await runCommandEffect(
+          match(source)
+            .with({ owner: P.string, repo: P.string }, (ghSource) =>
+              pushToGitHub(ghSource, { files, pushableFiles }, ctx, {
+                message: args.message as string | undefined,
+                edit: args.edit as boolean,
+                yes: args.yes as boolean,
+              }),
+            )
+            .with({ path: P.string }, (localSource) =>
+              pushToLocal(localSource, { files, pushableFiles }, ctx, targetDir, {
+                yes: args.yes as boolean,
+              }),
+            )
+            .exhaustive(),
         );
-
-        if (!args.yes) {
-          const confirmed = await confirmAction("Create PR?", { initialValue: true });
-          if (!confirmed) {
-            log.info("Cancelled. Use --edit to customize title/body, or --files to specify files.");
-            return;
-          }
-        }
-
-        // PR を作成
-        log.step("Creating pull request...");
-
-        const result = await withSpinner("Creating PR on GitHub...", () =>
-          createPullRequest(token, {
-            owner: source.owner,
-            repo: source.repo,
-            files,
-            title,
-            body,
-            baseBranch: source.ref || "main",
-          }),
-        );
-
-        log.success("Pull request created!");
-        log.message(
-          [
-            `${pc.dim("To")} ${pc.bold(`${source.owner}/${source.repo}`)}`,
-            `  ${lock.baseRef ? `${pc.dim(lock.baseRef.slice(0, 7))}..` : ""}${pc.green(result.branch)}  ${pc.dim(`(${files.length} file${files.length === 1 ? "" : "s"} changed)`)}`,
-            "",
-            `  ${pc.bold(`PR #${result.number}`)}  ${pc.cyan(result.url)}`,
-          ].join("\n"),
-        );
-        outro(`Review and merge at ${pc.cyan(result.url)}`);
       },
       cleanup,
     );
   },
 });
+
+// ─── コンフリクト解決 ───
+
+async function resolveConflicts(
+  conflicts: string[],
+  ctx: {
+    targetDir: string;
+    templateDir: string;
+    source: TemplateSource;
+    lock: { baseRef?: string };
+    mergedContents: Map<string, string>;
+    args: { yes: boolean };
+  },
+): Promise<void> {
+  const { threeWayMerge, asBaseContent, asLocalContent, asTemplateContent } =
+    await import("../utils/merge");
+
+  const baseInfo = ctx.lock.baseRef
+    ? `since ${pc.bold(ctx.lock.baseRef.slice(0, 7))} (your last sync)`
+    : "since your last pull/init";
+  log.warn(
+    `Template updated ${baseInfo} — ${conflicts.length} conflict(s) detected, attempting auto-merge...`,
+  );
+
+  // ベースバージョンのダウンロード（GitHub ソースの場合のみ）
+  const baseResult = await match(ctx.source)
+    .with({ owner: P.string, repo: P.string }, async (ghSource) => {
+      if (!ctx.lock.baseRef) return null;
+      return Effect.runPromise(
+        Effect.tryPromise(async () => {
+          log.info(`Downloading base version (${ctx.lock.baseRef?.slice(0, 7)}...) for merge...`);
+          const { downloadTemplateToTemp } = await import("../utils/template");
+          return downloadTemplateToTemp(
+            ctx.targetDir,
+            `gh:${ghSource.owner}/${ghSource.repo}#${ctx.lock.baseRef}`,
+          );
+        }).pipe(
+          Effect.orElseSucceed(() => {
+            log.warn("Could not download base version. Falling back to local content.");
+            return null;
+          }),
+        ),
+      );
+    })
+    .with({ path: P.string }, () => Promise.resolve(null))
+    .exhaustive();
+
+  const baseTemplateDir = baseResult?.templateDir;
+
+  await withFinally(
+    async () => {
+      const autoMerged: string[] = [];
+      const unresolved: string[] = [];
+
+      for (const file of conflicts) {
+        const localContent = await readFile(join(ctx.targetDir, file), "utf-8");
+        const templateContent = await readFile(join(ctx.templateDir, file), "utf-8");
+
+        let baseContent: string | undefined;
+        if (baseTemplateDir && existsSync(join(baseTemplateDir, file))) {
+          baseContent = await readFile(join(baseTemplateDir, file), "utf-8");
+        }
+
+        if (baseContent) {
+          const result = threeWayMerge({
+            base: asBaseContent(baseContent),
+            local: asLocalContent(localContent),
+            template: asTemplateContent(templateContent),
+            filePath: file,
+          });
+          if (!result.hasConflicts) {
+            ctx.mergedContents.set(file, result.content);
+            autoMerged.push(file);
+            continue;
+          }
+        }
+        unresolved.push(file);
+      }
+
+      if (autoMerged.length > 0) {
+        log.success(`Auto-merged ${autoMerged.length} file(s):`);
+        for (const f of autoMerged) log.message(`  ${pc.green("✓")} ${f}`);
+      }
+
+      if (unresolved.length > 0) {
+        log.warn(`${unresolved.length} file(s) could not be auto-merged:`);
+        for (const f of unresolved) log.message(`  ${pc.yellow("!")} ${f}`);
+        if (!ctx.args.yes) {
+          const proceed = await confirmAction("Continue with unresolved conflicts?", {
+            initialValue: true,
+          });
+          if (!proceed) {
+            log.info("Run `ziku pull` first to sync template changes, then push again.");
+          }
+        }
+      }
+    },
+    () => baseResult?.cleanup?.(),
+  );
+}

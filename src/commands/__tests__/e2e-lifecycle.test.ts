@@ -209,6 +209,7 @@ const { initCommand } = await import("../init");
 const { pushCommand } = await import("../push");
 const { pullCommand } = await import("../pull");
 const { trackCommand } = await import("../track");
+const { diffCommand } = await import("../diff");
 
 const { fetchTemplates } = await import("../../utils/template");
 const { selectPushFiles } = await import("../../ui/prompts");
@@ -255,6 +256,22 @@ function runPull(dir: string) {
     args: { dir, force: false, yes: true },
     rawArgs: [],
     cmd: pullCommand,
+  });
+}
+
+function runInitFromDir(dir: string, fromDir: string) {
+  return (initCommand.run as any)({
+    args: { dir, force: false, yes: true, "from-dir": fromDir },
+    rawArgs: [],
+    cmd: initCommand,
+  });
+}
+
+function runDiff(dir: string) {
+  return (diffCommand.run as any)({
+    args: { dir, verbose: false },
+    rawArgs: [],
+    cmd: diffCommand,
   });
 }
 
@@ -614,6 +631,251 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
       );
       expect(lock.source).toBeDefined();
       expect(lock.version).toBeDefined();
+    }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// ローカルシナリオ: --from-dir でのライフサイクル
+// GitHub API を使わず、ローカルディレクトリをテンプレートとして使用
+// ═══════════════════════════════════════════════════════════════
+
+describe("E2E ライフサイクル (ローカル): setup → init --from-dir → track → push → diff → pull → init", () => {
+  beforeEach(() => {
+    vol.reset();
+    vi.clearAllMocks();
+
+    // fetchTemplates: テンプレートからプロジェクトにコピー
+    mockFetchTemplates.mockImplementation(async (opts: any) => {
+      const targetDir = opts.targetDir as string;
+      const templateDir = opts.templateDir ?? "/template";
+      const results: Array<{ action: string; path: string }> = [];
+
+      const allFiles = vol.toJSON();
+      for (const [fullPath, content] of Object.entries(allFiles)) {
+        if (!fullPath.startsWith(`${templateDir}/`)) continue;
+        const relativePath = fullPath.slice(templateDir.length + 1);
+        if (relativePath.startsWith(".ziku/")) continue;
+
+        const destPath = `${targetDir}/${relativePath}`;
+        const destDir = destPath.slice(0, destPath.lastIndexOf("/"));
+        if (!vol.existsSync(destDir)) {
+          vol.mkdirSync(destDir, { recursive: true });
+        }
+        vol.writeFileSync(destPath, content as string);
+        results.push({ action: "copied", path: relativePath });
+      }
+      return results;
+    });
+  });
+
+  it("ローカルテンプレートでの完全なライフサイクルが動作する", async () => {
+    // ─── Step 1: setup — テンプレートリポに .ziku/ziku.jsonc を作成 ───
+
+    await runSetup("/template");
+    expect(vol.existsSync("/template/.ziku/ziku.jsonc")).toBe(true);
+
+    // ─── Step 2: テンプレートにファイルを配置 ───
+
+    placeTemplateFiles({
+      ".claude/rules/style.md": "# Style Guide\nUse TypeScript.",
+      ".mcp.json": '{"servers":{}}',
+    });
+
+    // loadTemplateConfig: テンプレートの ziku.jsonc を直接読む
+    // --from-dir の場合、loadTemplateConfig は実際のファイルシステムから読む
+    // ここでは memfs 上の /template/.ziku/ziku.jsonc をモックが返す
+    const templateZikuJsonc = JSON.parse(
+      vol.readFileSync("/template/.ziku/ziku.jsonc", "utf8") as string,
+    );
+    mockLoadTemplateConfig.mockReturnValue(
+      Effect.succeed({
+        include: templateZikuJsonc.include,
+        exclude: [],
+      }),
+    );
+
+    // ─── Step 3: init --from-dir (プロジェクトA) ───
+
+    vol.mkdirSync("/projectA", { recursive: true });
+    await runInitFromDir("/projectA", "/template");
+
+    expect(vol.existsSync("/projectA/.ziku/ziku.jsonc")).toBe(true);
+    expect(vol.existsSync("/projectA/.ziku/lock.json")).toBe(true);
+
+    // lock.json の source がローカルパス
+    const lockA = JSON.parse(
+      vol.readFileSync("/projectA/.ziku/lock.json", "utf8") as string,
+    );
+    expect(lockA.source.path).toBe("/template");
+
+    // ファイルがコピーされた
+    expect(vol.existsSync("/projectA/.claude/rules/style.md")).toBe(true);
+    expect(vol.existsSync("/projectA/.mcp.json")).toBe(true);
+
+    // ─── Step 4: init --from-dir (プロジェクトB) ───
+
+    vol.mkdirSync("/projectB", { recursive: true });
+    await runInitFromDir("/projectB", "/template");
+
+    expect(vol.readFileSync("/projectB/.claude/rules/style.md", "utf8")).toBe(
+      vol.readFileSync("/projectA/.claude/rules/style.md", "utf8"),
+    );
+
+    // ─── Step 5: プロジェクトA でファイル追加 → push（ローカル直接コピー）───
+
+    vol.mkdirSync("/projectA/.claude/rules", { recursive: true });
+    vol.writeFileSync(
+      "/projectA/.claude/rules/testing.md",
+      "# Testing Guide\nWrite tests first.",
+    );
+
+    mockClassifyFiles.mockReturnValueOnce({
+      autoUpdate: [],
+      localOnly: [".claude/rules/testing.md"],
+      conflicts: [],
+      newFiles: [],
+      deletedFiles: [],
+      unchanged: [".claude/rules/style.md", ".mcp.json"],
+    });
+    mockDetectDiff.mockResolvedValueOnce({
+      files: [
+        {
+          path: ".claude/rules/testing.md",
+          type: "added",
+          localContent: "# Testing Guide\nWrite tests first.",
+        },
+      ],
+      summary: { added: 1, modified: 0, deleted: 0, unchanged: 2 },
+    } as any);
+    mockSelectPushFiles.mockResolvedValueOnce([
+      {
+        path: ".claude/rules/testing.md",
+        type: "added",
+        localContent: "# Testing Guide\nWrite tests first.",
+      },
+    ] as any);
+
+    await runPush("/projectA");
+
+    // ローカル push: PR は作成されず、テンプレートに直接コピーされる
+    expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    expect(vol.existsSync("/template/.claude/rules/testing.md")).toBe(true);
+    expect(vol.readFileSync("/template/.claude/rules/testing.md", "utf8")).toBe(
+      "# Testing Guide\nWrite tests first.",
+    );
+
+    // ─── Step 6: プロジェクトA で track → 新パターン追加 → push ───
+
+    vol.writeFileSync("/projectA/.eslintrc.json", '{"extends": ["next"]}');
+    await runTrack("/projectA", [".eslintrc.json"]);
+
+    const updatedConfig = JSON.parse(
+      vol.readFileSync("/projectA/.ziku/ziku.jsonc", "utf8") as string,
+    );
+    expect(updatedConfig.include).toContain(".eslintrc.json");
+
+    mockClassifyFiles.mockReturnValueOnce({
+      autoUpdate: [],
+      localOnly: [".eslintrc.json"],
+      conflicts: [],
+      newFiles: [],
+      deletedFiles: [],
+      unchanged: [".claude/rules/style.md", ".claude/rules/testing.md", ".mcp.json"],
+    });
+    mockDetectDiff.mockResolvedValueOnce({
+      files: [
+        { path: ".eslintrc.json", type: "added", localContent: '{"extends": ["next"]}' },
+      ],
+      summary: { added: 1, modified: 0, deleted: 0, unchanged: 3 },
+    } as any);
+    mockSelectPushFiles.mockResolvedValueOnce([
+      { path: ".eslintrc.json", type: "added", localContent: '{"extends": ["next"]}' },
+    ] as any);
+
+    await runPush("/projectA");
+
+    // テンプレートに .eslintrc.json が直接コピーされた
+    expect(vol.existsSync("/template/.eslintrc.json")).toBe(true);
+
+    // ─── Step 7: テンプレートの ziku.jsonc を更新（新パターン反映）───
+
+    const tplConfig = JSON.parse(
+      vol.readFileSync("/template/.ziku/ziku.jsonc", "utf8") as string,
+    );
+    tplConfig.include.push(".eslintrc.json");
+    vol.writeFileSync("/template/.ziku/ziku.jsonc", JSON.stringify(tplConfig, null, 2));
+
+    mockLoadTemplateConfig.mockReturnValue(
+      Effect.succeed({ include: [...tplConfig.include], exclude: [] }),
+    );
+
+    // ─── Step 8: プロジェクトB で pull → A の変更が反映される ───
+
+    mockClassifyFiles.mockReturnValueOnce({
+      autoUpdate: [".claude/rules/testing.md", ".eslintrc.json"],
+      localOnly: [],
+      conflicts: [],
+      newFiles: [],
+      deletedFiles: [],
+      unchanged: [".claude/rules/style.md", ".mcp.json"],
+    });
+
+    await runPull("/projectB");
+
+    expect(vol.existsSync("/projectB/.claude/rules/testing.md")).toBe(true);
+    expect(vol.existsSync("/projectB/.eslintrc.json")).toBe(true);
+
+    // B の ziku.jsonc にも .eslintrc.json パターンがマージされた
+    const projectBConfig = JSON.parse(
+      vol.readFileSync("/projectB/.ziku/ziku.jsonc", "utf8") as string,
+    );
+    expect(projectBConfig.include).toContain(".eslintrc.json");
+
+    // ─── Step 9: 新プロジェクトC で init --from-dir ───
+
+    vol.mkdirSync("/projectC", { recursive: true });
+    await runInitFromDir("/projectC", "/template");
+
+    expect(vol.existsSync("/projectC/.claude/rules/style.md")).toBe(true);
+    expect(vol.existsSync("/projectC/.claude/rules/testing.md")).toBe(true);
+    expect(vol.existsSync("/projectC/.eslintrc.json")).toBe(true);
+
+    // ─── Step 10: 全プロジェクトの同期ファイルが同一 ───
+
+    const projects = ["/projectA", "/projectB", "/projectC"];
+    const syncedFiles = [
+      ".claude/rules/style.md",
+      ".claude/rules/testing.md",
+      ".mcp.json",
+      ".eslintrc.json",
+    ];
+
+    for (const file of syncedFiles) {
+      const contents = projects
+        .filter((p) => vol.existsSync(`${p}/${file}`))
+        .map((p) => vol.readFileSync(`${p}/${file}`, "utf8"));
+
+      expect(contents).toHaveLength(projects.length);
+      for (const content of contents) {
+        expect(content).toBe(contents[0]);
+      }
+    }
+
+    // ─── 最終検証: ローカルソースの設定構造 ───
+
+    for (const project of projects) {
+      const config = JSON.parse(
+        vol.readFileSync(`${project}/.ziku/ziku.jsonc`, "utf8") as string,
+      );
+      expect(config.include).toBeDefined();
+      expect(config.source).toBeUndefined();
+
+      const lock = JSON.parse(
+        vol.readFileSync(`${project}/.ziku/lock.json`, "utf8") as string,
+      );
+      // ローカルソース: path フィールドを持つ
+      expect(lock.source.path).toBe("/template");
     }
   });
 });

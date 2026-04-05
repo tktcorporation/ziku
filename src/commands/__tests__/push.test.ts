@@ -244,7 +244,7 @@ describe("pushCommand", () => {
     it("コマンドメタデータが正しい", () => {
       expect((pushCommand.meta as { name: string }).name).toBe("push");
       expect((pushCommand.meta as { description: string }).description).toBe(
-        "Push local changes to the template repository as a PR",
+        "Push local changes to the template (PR for GitHub, direct copy for local)",
       );
     });
   });
@@ -353,7 +353,7 @@ describe("pushCommand", () => {
       });
 
       expect(mockLog.info).toHaveBeenCalledWith("Dry run mode");
-      expect(mockLog.info).toHaveBeenCalledWith("No PR was created (dry run)");
+      // dry-run ではファイルリストを表示して終了
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
@@ -391,7 +391,7 @@ describe("pushCommand", () => {
       });
 
       expect(mockLog.info).toHaveBeenCalledWith(
-        "Cancelled. Use --edit to customize title/body, or --files to specify files.",
+        "Cancelled.",
       );
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
@@ -590,7 +590,7 @@ describe("pushCommand", () => {
       });
 
       expect(mockLog.warn).toHaveBeenCalledWith(
-        "Files not found in pushable changes: nonexistent.txt",
+        "Files not found: nonexistent.txt",
       );
       expect(mockCreatePullRequest).toHaveBeenCalled();
     });
@@ -610,7 +610,7 @@ describe("pushCommand", () => {
         cmd: pushCommand,
       });
 
-      expect(mockLog.info).toHaveBeenCalledWith("No matching files found. Cancelled.");
+      expect(mockLog.info).toHaveBeenCalledWith("No matching files. Cancelled.");
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
@@ -665,7 +665,7 @@ describe("pushCommand", () => {
       ).rejects.toThrow("Unresolved merge conflicts");
     });
 
-    it("ローカルソースの場合はエラー", async () => {
+    it("ローカルソースの場合はファイルを直接テンプレートにコピー", async () => {
       const { effect } = mockContext({
         source: { path: "/local/template" },
         lock: {
@@ -675,13 +675,15 @@ describe("pushCommand", () => {
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
-      await expect(
-        (pushCommand.run as any)({
-          args: { dir: "/test", dryRun: false, yes: false, edit: false },
-          rawArgs: [],
-          cmd: pushCommand,
-        }),
-      ).rejects.toThrow("Push is not supported for local template sources");
+      // ローカル push はエラーにならず正常終了する
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: true, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      // PR は作成されない
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
     it("baseHashes が存在しコンフリクトがある場合は警告して確認を求める（baseRef なし）", async () => {
