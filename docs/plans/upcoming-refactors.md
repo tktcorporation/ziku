@@ -1,24 +1,9 @@
 # 今後のリファクタ計画
 
-## 1. modules.jsonc 廃止（次のPR）
+## 1. ~~modules.jsonc 廃止~~ ✅ 完了
 
-**目的:** パターン管理の複雑さを解消。テンプレートリポのファイル = 同期対象。
-
-**変更内容:**
-- modules.jsonc を削除。テンプレートリポにはファイルだけが存在する
-- init 時の選択はディレクトリ単位（トップレベルディレクトリを選択 UI に表示）
-- ziku.jsonc は source + 選択ディレクトリ（or 全部）を持つ
-- track コマンド不要に（テンプレートに追加するだけ）
-- setup コマンドの modules.jsonc 生成も不要に
-
-**削除対象:**
-- `src/modules/loader.ts` のほぼ全関数
-- `src/commands/setup.ts` の modules.jsonc 生成部分
-- `src/commands/track.ts`（コマンド自体）
-- `src/modules/schemas.ts` の moduleSchema, TemplateModule
-- テスト: loader.test.ts, setup 関連, track 関連
-
-**影響範囲:** init, push, pull, diff, schemas, lifecycle docs, README
+ziku.jsonc に統一。source は lock.json に分離。init はディレクトリ単位選択。
+pull 時にテンプレートの ziku.jsonc から新パターンを自動マージ。
 
 ## 2. E2E テスト駆動ライフサイクルドキュメント
 
