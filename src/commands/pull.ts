@@ -1,17 +1,18 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { defineCommand } from "citty";
-import { Effect } from "effect";
+import { Cause, Effect, Exit, Option } from "effect";
 import { dirname, join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
 import type { LockState } from "../modules/schemas";
-import { isLocalSource, isGitHubSource } from "../modules/schemas";
-import { loadTemplateConfig } from "../utils/template-config";
+import { isGitHubSource } from "../modules/schemas";
 import { selectDeletedFiles } from "../ui/prompts";
-import { intro, log, outro, pc, withSpinner } from "../ui/renderer";
+import { intro, log, outro, pc } from "../ui/renderer";
 import { LOCK_FILE, loadLock, saveLock } from "../utils/lock";
-import { ZIKU_CONFIG_FILE, loadZikuConfig, saveZikuConfig, generateZikuJsonc, zikuConfigExists } from "../utils/ziku-config";
+import { ZIKU_CONFIG_FILE, saveZikuConfig, generateZikuJsonc, zikuConfigExists } from "../utils/ziku-config";
+import { loadCommandContext } from "../services/command-context";
+import { loadTemplateConfig } from "../utils/template-config";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 import { resolveLatestCommitSha } from "../utils/github";
@@ -63,9 +64,6 @@ export const pullLifecycle: CommandLifecycle = {
   ],
 };
 
-/**
- * テンプレートの最新更新をローカルに反映するコマンド。
- */
 export const pullCommand = defineCommand({
   meta: {
     name: "pull",
@@ -94,61 +92,50 @@ export const pullCommand = defineCommand({
 
     const targetDir = resolve(args.dir);
 
-    // Step 1: 設定読み込み（失敗時は ZikuError に変換して throw）
-    if (!zikuConfigExists(targetDir)) {
-      throw new ZikuError("Not initialized", "Run `ziku init` first");
-    }
-
-    const { config: zikuConfig } = await loadZikuConfig(targetDir);
-    const lock = await Effect.runPromise(
-      Effect.tryPromise(() => loadLock(targetDir)).pipe(Effect.orElseSucceed(() => null)),
-    );
-    if (!lock) {
-      throw new ZikuError("No .ziku/lock.json found", "Run `ziku init` first");
-    }
-
-    // --continue モード
+    // --continue モードは lock.json のみ必要（テンプレート不要）
     if (args.continue) {
+      if (!zikuConfigExists(targetDir)) {
+        throw new ZikuError("Not initialized", "Run `ziku init` first");
+      }
+      const lock = await Effect.runPromise(
+        Effect.tryPromise(() => loadLock(targetDir)).pipe(Effect.orElseSucceed(() => null)),
+      );
+      if (!lock) {
+        throw new ZikuError("No .ziku/lock.json found", "Run `ziku init` first");
+      }
       await runContinue(targetDir, lock);
       return;
     }
 
-    const { include, exclude } = {
-      include: zikuConfig.include,
-      exclude: zikuConfig.exclude ?? [],
-    };
+    // loadCommandContext で設定読み込み + テンプレート解決を DRY 化
+    const exit = await Effect.runPromiseExit(
+      loadCommandContext(targetDir).pipe(
+        Effect.mapError((err) =>
+          err._tag === "FileNotFoundError"
+            ? new ZikuError(`${err.path} not found.`, "Run 'ziku init' first.")
+            : new ZikuError("Failed to load configuration", String(err)),
+        ),
+      ),
+    );
+    if (Exit.isFailure(exit)) {
+      const error = Cause.failureOption(exit.cause);
+      throw Option.isSome(error) ? error.value : Cause.squash(exit.cause);
+    }
+    const { config, lock, source, templateDir, cleanup } = exit.value;
+
+    log.info(`Template: ${pc.cyan(templateDir)}${"path" in source ? " (local)" : ""}`);
+
+    const include = config.include;
+    const exclude = config.exclude ?? [];
 
     if (include.length === 0) {
       log.warn("No patterns configured");
+      cleanup();
       return;
     }
 
-    // source は lock.json から取得
-    const source = lock.source;
-
-    // Step 2: テンプレートを取得
-    let templateDir: string;
-    let cleanup: () => void;
-
-    if (isLocalSource(source)) {
-      templateDir = resolve(source.path);
-      cleanup = () => {};
-      log.info(`Template: ${pc.cyan(templateDir)} (local)`);
-    } else {
-      log.step("Fetching template...");
-      const downloaded = await withSpinner("Downloading template from GitHub...", () =>
-        downloadTemplateToTemp(
-          targetDir,
-          `gh:${source.owner}/${source.repo}`,
-        ),
-      );
-      templateDir = downloaded.templateDir;
-      cleanup = downloaded.cleanup;
-    }
-
     await withFinally(async () => {
-      // Step 2.5: テンプレートの ziku.jsonc を読み、ユーザーのパターンとマージ
-      // テンプレートで追加された新パターンがユーザーにも反映される
+      // テンプレートの ziku.jsonc から新パターンをマージ
       const templateConfig = await Effect.runPromise(
         loadTemplateConfig(templateDir).pipe(
           Effect.orElseSucceed(() => null),
@@ -177,7 +164,7 @@ export const pullCommand = defineCommand({
         }
       }
 
-      // Step 3: ハッシュ計算（マージ後のパターンで実行）
+      // ハッシュ計算（マージ後のパターンで実行）
       log.step("Analyzing changes...");
 
       const [templateHashes, localHashes] = await Promise.all([
@@ -186,10 +173,8 @@ export const pullCommand = defineCommand({
       ]);
       const baseHashes = lock.baseHashes ?? {};
 
-      // Step 4: ファイル分類
       const classification = classifyFiles({ baseHashes, localHashes, templateHashes });
 
-      // Step 5: サマリー表示
       const totalChanges =
         classification.autoUpdate.length +
         classification.newFiles.length +
@@ -204,7 +189,7 @@ export const pullCommand = defineCommand({
 
       logPullSummary(classification);
 
-      // Step 6: 自動更新ファイルを適用
+      // 自動更新ファイルを適用
       for (const file of classification.autoUpdate) {
         const content = await readFile(join(templateDir, file), "utf-8");
         const destPath = join(targetDir, file);
@@ -218,7 +203,7 @@ export const pullCommand = defineCommand({
         log.success(`Updated ${classification.autoUpdate.length} file(s)`);
       }
 
-      // Step 7: 新規ファイルを追加
+      // 新規ファイルを追加
       for (const file of classification.newFiles) {
         const content = await readFile(join(templateDir, file), "utf-8");
         const destPath = join(targetDir, file);
@@ -232,13 +217,12 @@ export const pullCommand = defineCommand({
         log.success(`Added ${classification.newFiles.length} new file(s)`);
       }
 
-      // Step 8: コンフリクト解決
+      // コンフリクト解決
       const unresolvedConflicts: string[] = [];
       if (classification.conflicts.length > 0) {
         let baseTemplateDir: string | undefined;
         let baseCleanup: (() => void) | undefined;
 
-        // ベースバージョンのダウンロード（失敗時は 2-way フォールバック）
         if (lock.baseRef && isGitHubSource(source)) {
           const baseResult = await Effect.runPromise(
             Effect.tryPromise(() => {
@@ -280,7 +264,7 @@ export const pullCommand = defineCommand({
               await writeFile(join(targetDir, file), result.content, "utf-8");
               if (result.hasConflicts) {
                 unresolvedConflicts.push(file);
-                logMergeConflict(file);
+                log.warn(`Conflict in ${pc.cyan(file)} — manual resolution needed`);
               } else {
                 log.success(`Auto-merged: ${pc.cyan(file)}`);
               }
@@ -310,7 +294,7 @@ export const pullCommand = defineCommand({
         }
       }
 
-      // Step 9: 削除されたファイルを処理
+      // 削除されたファイルを処理
       if (classification.deletedFiles.length > 0) {
         let filesToDelete: string[];
 
@@ -322,7 +306,6 @@ export const pullCommand = defineCommand({
         }
 
         for (const file of filesToDelete) {
-          // ベストエフォート削除（失敗時は警告のみ）
           await Effect.runPromise(
             Effect.tryPromise(async () => {
               await rm(join(targetDir, file), { force: true });
@@ -336,11 +319,6 @@ export const pullCommand = defineCommand({
         }
       }
 
-      // Step 10: 設定を更新
-      const latestRef = isGitHubSource(source)
-        ? await resolveLatestCommitSha(source.owner, source.repo)
-        : undefined;
-
       // パターンが更新された場合、ユーザーの ziku.jsonc を上書き
       if (patternsUpdated) {
         const updatedContent = generateZikuJsonc({
@@ -351,12 +329,15 @@ export const pullCommand = defineCommand({
         log.success(`Updated ${ZIKU_CONFIG_FILE} with new patterns from template`);
       }
 
-      const updatedLock = {
+      const latestRef = isGitHubSource(source)
+        ? await resolveLatestCommitSha(source.owner, source.repo)
+        : undefined;
+
+      await saveLock(targetDir, {
         ...lock,
         baseHashes: templateHashes,
         ...(latestRef ? { baseRef: latestRef } : {}),
-      };
-      await saveLock(targetDir, updatedLock);
+      });
 
       outro("Pull complete");
     }, cleanup);
@@ -372,7 +353,6 @@ async function runContinue(targetDir: string, lock: LockState): Promise<void> {
 
   const stillConflicted: string[] = [];
   for (const file of conflicts) {
-    // ファイルが存在しない場合は解決済みとみなす
     await Effect.runPromise(
       Effect.tryPromise(async () => {
         const content = await readFile(join(targetDir, file), "utf-8");
@@ -393,20 +373,15 @@ async function runContinue(targetDir: string, lock: LockState): Promise<void> {
     );
   }
 
-  const updatedLock = {
+  await saveLock(targetDir, {
     ...lock,
     baseHashes: templateHashes,
     ...(latestRef ? { baseRef: latestRef } : {}),
     pendingMerge: undefined,
-  };
-  await saveLock(targetDir, updatedLock);
+  });
 
   log.success("All conflicts resolved");
   outro("Pull complete");
-}
-
-function logMergeConflict(file: string): void {
-  log.warn(`Conflict in ${pc.cyan(file)} — manual resolution needed`);
 }
 
 function logPullSummary(classification: {

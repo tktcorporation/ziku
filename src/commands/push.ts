@@ -1,15 +1,15 @@
-import { existsSync, rmSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { defineCommand } from "citty";
-import { Effect } from "effect";
-import { downloadTemplate } from "giget";
+import { Cause, Effect, Exit, Option } from "effect";
 import { join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
 import type { FileDiff } from "../modules/schemas";
 import { isLocalSource } from "../modules/schemas";
-import { LOCK_FILE, loadLock } from "../utils/lock";
-import { ZIKU_CONFIG_FILE, loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
+import { LOCK_FILE } from "../utils/lock";
+import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
+import { loadCommandContext } from "../services/command-context";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 import {
@@ -26,7 +26,6 @@ import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/render
 import { detectDiff } from "../utils/diff";
 import { createPullRequest, getGitHubToken } from "../utils/github";
 import { detectAndUpdateReadme } from "../utils/readme";
-import { buildTemplateSource } from "../utils/template";
 import { detectUntrackedFiles } from "../utils/untracked";
 
 /**
@@ -63,23 +62,6 @@ function formatFileStat(file: {
 }): string {
   const stats = calculateDiffStats(file as FileDiff);
   return formatStats(stats);
-}
-
-function registerSyncCleanup(tempDir: string): () => void {
-  const cleanup = () => {
-    // ベストエフォート: プロセス終了時の一時ディレクトリ削除
-    Effect.runSync(
-      Effect.try(() => {
-        if (existsSync(tempDir)) {
-          rmSync(tempDir, { recursive: true, force: true });
-        }
-      }).pipe(Effect.orElseSucceed(() => {})),
-    );
-  };
-  process.on("exit", cleanup);
-  return () => {
-    process.removeListener("exit", cleanup);
-  };
 }
 
 const README_PATH = "README.md";
@@ -127,27 +109,24 @@ export const pushCommand = defineCommand({
 
     const targetDir = resolve(args.dir);
 
-    if (!zikuConfigExists(targetDir)) {
-      throw new ZikuError(".ziku/ziku.jsonc not found.", "Run 'ziku init' first.");
-    }
-
-    const { config: zikuConfig } = await loadZikuConfig(targetDir);
-
-    // lock.json を読み込み（source + 同期状態）
-    const lock = await Effect.runPromise(
-      Effect.tryPromise({
-        try: () => loadLock(targetDir),
-        catch: (error) =>
-          error instanceof Error && error.message.includes("ENOENT")
-            ? new ZikuError(".ziku/lock.json not found.", "Run 'ziku init' first.")
-            : new ZikuError(
-                "Invalid .ziku/lock.json format",
-                error instanceof Error ? error.message : String(error),
-              ),
-      }).pipe(Effect.mapError((e) => e)),
+    // loadCommandContext で設定読み込み + テンプレート解決を DRY 化
+    const exit = await Effect.runPromiseExit(
+      loadCommandContext(targetDir).pipe(
+        Effect.mapError((err) =>
+          err._tag === "FileNotFoundError"
+            ? new ZikuError(`${err.path} not found.`, "Run 'ziku init' first.")
+            : new ZikuError("Failed to load configuration", String(err)),
+        ),
+      ),
     );
+    if (Exit.isFailure(exit)) {
+      const error = Cause.failureOption(exit.cause);
+      throw Option.isSome(error) ? error.value : Cause.squash(exit.cause);
+    }
+    const { config, lock, source, templateDir, cleanup } = exit.value;
 
     if (lock.pendingMerge) {
+      cleanup();
       throw new ZikuError(
         "Unresolved merge conflicts from `ziku pull`",
         "Resolve conflicts in these files, then run `ziku pull --continue`:\n" +
@@ -155,8 +134,8 @@ export const pushCommand = defineCommand({
       );
     }
 
-    // source は lock.json から取得
-    if (isLocalSource(lock.source)) {
+    if (isLocalSource(source)) {
+      cleanup();
       throw new ZikuError(
         "Push is not supported for local template sources",
         "Push is only available for GitHub-hosted templates",
@@ -164,27 +143,15 @@ export const pushCommand = defineCommand({
     }
 
     const patterns = {
-      include: zikuConfig.include,
-      exclude: zikuConfig.exclude ?? [],
+      include: config.include,
+      exclude: config.exclude ?? [],
     };
 
     if (patterns.include.length === 0) {
       log.warn("No patterns configured");
+      cleanup();
       return;
     }
-
-    // Step 1: テンプレートを取得
-    log.step("Fetching template...");
-    const templateSource = buildTemplateSource(lock.source);
-    const tempDir = join(targetDir, ".ziku-temp");
-    const unregisterCleanup = registerSyncCleanup(tempDir);
-    const { dir } = await withSpinner("Downloading template from GitHub...", () =>
-      downloadTemplate(templateSource, {
-        dir: tempDir,
-        force: true,
-      }),
-    );
-    const templateDir = dir;
 
     await withFinally(
       async () => {
@@ -236,7 +203,6 @@ export const pushCommand = defineCommand({
             let baseTemplateDir: string | undefined;
             let baseCleanup: (() => void) | undefined;
 
-            // ベースバージョンのダウンロード（失敗時はフォールバック）
             if (lock.baseRef) {
               const baseResult = await Effect.runPromise(
                 Effect.tryPromise(async () => {
@@ -245,7 +211,7 @@ export const pushCommand = defineCommand({
                   );
                   const { downloadTemplateToTemp: downloadBase } =
                     await import("../utils/template");
-                  const baseSource = `gh:${lock.source.owner}/${lock.source.repo}#${lock.baseRef}`;
+                  const baseSource = `gh:${source.owner}/${source.repo}#${lock.baseRef}`;
                   return downloadBase(targetDir, baseSource);
                 }).pipe(
                   Effect.orElseSucceed(() => {
@@ -341,7 +307,7 @@ export const pushCommand = defineCommand({
           }
         }
 
-        // Step 2: 差分を検出
+        // 差分を検出
         log.step("Detecting changes...");
 
         const diff = await withSpinner("Analyzing differences...", () =>
@@ -372,7 +338,7 @@ export const pushCommand = defineCommand({
           return;
         }
 
-        // Step 3: ファイル選択
+        // ファイル選択
         if (args.files) {
           const requestedPaths = args.files
             .split(",")
@@ -436,9 +402,9 @@ export const pushCommand = defineCommand({
           });
         }
 
-        // Step 4: サマリー表示 + 確認
-        const destination = `${lock.source.owner}/${lock.source.repo}`;
-        const baseBranch = lock.source.ref || "main";
+        // サマリー表示 + 確認
+        const destination = `${source.owner}/${source.repo}`;
+        const baseBranch = source.ref || "main";
         const baseHashStr = lock.baseRef ? `  ${pc.dim(`since ${lock.baseRef.slice(0, 7)}`)}` : "";
 
         const fileLines: string[] = [];
@@ -477,24 +443,24 @@ export const pushCommand = defineCommand({
           }
         }
 
-        // Step 5: PR を作成
+        // PR を作成
         log.step("Creating pull request...");
 
         const result = await withSpinner("Creating PR on GitHub...", () =>
           createPullRequest(token, {
-            owner: lock.source.owner,
-            repo: lock.source.repo,
+            owner: source.owner,
+            repo: source.repo,
             files,
             title,
             body,
-            baseBranch: lock.source.ref || "main",
+            baseBranch: source.ref || "main",
           }),
         );
 
         log.success("Pull request created!");
         log.message(
           [
-            `${pc.dim("To")} ${pc.bold(`${lock.source.owner}/${lock.source.repo}`)}`,
+            `${pc.dim("To")} ${pc.bold(`${source.owner}/${source.repo}`)}`,
             `  ${lock.baseRef ? `${pc.dim(lock.baseRef.slice(0, 7))}..` : ""}${pc.green(result.branch)}  ${pc.dim(`(${files.length} file${files.length === 1 ? "" : "s"} changed)`)}`,
             "",
             `  ${pc.bold(`PR #${result.number}`)}  ${pc.cyan(result.url)}`,
@@ -502,12 +468,7 @@ export const pushCommand = defineCommand({
         );
         outro(`Review and merge at ${pc.cyan(result.url)}`);
       },
-      async () => {
-        unregisterCleanup?.();
-        if (tempDir && existsSync(tempDir)) {
-          await rm(tempDir, { recursive: true, force: true });
-        }
-      },
+      cleanup,
     );
   },
 });
