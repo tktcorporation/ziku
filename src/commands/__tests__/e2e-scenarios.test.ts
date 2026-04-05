@@ -209,8 +209,12 @@ function createZikuJsonc(include: string[], exclude?: string[], source = DEFAULT
  * 1つの Default モジュールにまとめる。
  */
 function modulesJsonc(include: string[], exclude?: string[]): string {
-  const mod: Record<string, unknown> = { name: "Default", description: "Default", include };
-  if (exclude && exclude.length > 0) mod.exclude = exclude;
+  const mod = {
+    name: "Default",
+    description: "Default",
+    include,
+    ...(exclude && exclude.length > 0 ? { exclude } : {}),
+  };
   return JSON.stringify({ modules: [mod] }, null, 2);
 }
 
@@ -218,10 +222,15 @@ function modulesJsonc(include: string[], exclude?: string[]): string {
  * テスト用: mockLoadModulesFile に渡すモジュール形式のレスポンスを生成するヘルパー。
  */
 function mockModulesResponse(include: string[], exclude?: string[]) {
-  const mod: Record<string, unknown> = { name: "Default", description: "Default", include };
-  if (exclude && exclude.length > 0) mod.exclude = exclude;
   return {
-    modules: [mod],
+    modules: [
+      {
+        name: "Default",
+        description: "Default",
+        include,
+        ...(exclude && exclude.length > 0 ? { exclude } : {}),
+      },
+    ],
     rawContent: modulesJsonc(include, exclude),
   };
 }
