@@ -1,6 +1,6 @@
 {
   "name": "ziku",
-  "version": "0.26.2",
+  "version": "1.0.0",
   "description": "Interactive CLI to scaffold development environment templates",
   "repository": {
     "type": "git",

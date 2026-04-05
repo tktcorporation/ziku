@@ -1,5 +1,21 @@
 # @tktco/ziku
 
+## 1.0.0
+
+### Major Changes
+
+- [#33](https://github.com/tktcorporation/ziku/pull/33) [`f65d09e`](https://github.com/tktcorporation/ziku/commit/f65d09eb89716df7eec787372793ac2541ecd903) Thanks [@tktcorporation](https://github.com/tktcorporation)! - modules.jsonc を廃止し ziku.jsonc に統一。source を lock.json に分離。EffectTS DI パターン導入。ローカル push 対応。
+
+### Minor Changes
+
+- [#31](https://github.com/tktcorporation/ziku/pull/31) [`d964e0e`](https://github.com/tktcorporation/ziku/commit/d964e0e7f922b82110df7b5ee2cd90a2386bc4f0) Thanks [@tktcorporation](https://github.com/tktcorporation)! - modules.jsonc を常にモジュール形式に統一し、フラット形式を廃止
+
+- [#32](https://github.com/tktcorporation/ziku/pull/32) [`c1ffce2`](https://github.com/tktcorporation/ziku/commit/c1ffce2767f1bfc8a9d6bb58c765015bd3cbd7f7) Thanks [@tktcorporation](https://github.com/tktcorporation)! - init コマンドからテンプレートリポジトリ初期化を分離し、setup コマンドとして独立
+
+### Patch Changes
+
+- [#29](https://github.com/tktcorporation/ziku/pull/29) [`7249bb0`](https://github.com/tktcorporation/ziku/commit/7249bb0606df06164c2517d71ddd9be36ddec285) Thanks [@tktcorporation](https://github.com/tktcorporation)! - modules/loader をテンプレート専用に純化し、push でモジュール形式テンプレートにパターン追加するとファイルが壊れるバグを修正
+
 ## 0.26.2
 
 ### Patch Changes
