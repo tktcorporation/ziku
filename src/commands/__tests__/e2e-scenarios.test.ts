@@ -179,7 +179,6 @@ const {
   modulesFileExists,
   loadPatternsFile: _loadPatternsFile,
   addIncludePattern: _addIncludePattern,
-  saveModulesFile: _saveModulesFile,
   loadTemplateModulesFile,
 } = await import("../../modules");
 const { selectModules } = await import("../../ui/prompts");

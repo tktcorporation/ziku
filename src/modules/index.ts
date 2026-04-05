@@ -3,9 +3,8 @@ export {
   MODULES_FILE,
   addIncludePattern,
   getModulesFilePath,
-  loadLocalPatternsFile,
+  isFlatFormat,
   loadPatternsFile,
   loadTemplateModulesFile,
   modulesFileExists,
-  saveModulesFile,
 } from "./loader";

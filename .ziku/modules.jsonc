@@ -3,25 +3,22 @@
   "modules": [
     {
       // Root-level config files shared across projects
-      "id": ".",
       "name": "Root",
       "description": "Editor and tooling configuration",
       "setupDescription": "Common config files will be applied",
-      "patterns": [".mcp.json", ".mise.toml"],
+      "include": [".mcp.json", ".mise.toml"],
     },
     {
-      "id": ".devcontainer",
       "name": "DevContainer",
       "description": "VS Code DevContainer configuration",
       "setupDescription": "DevContainer settings will be applied",
-      "patterns": [".devcontainer/devcontainer.json", ".devcontainer/.gitignore"],
+      "include": [".devcontainer/devcontainer.json", ".devcontainer/.gitignore"],
     },
     {
-      "id": ".github",
       "name": "GitHub",
       "description": "GitHub Actions workflows and repository settings",
       "setupDescription": "Workflow templates and repo config will be applied",
-      "patterns": [
+      "include": [
         ".github/workflows/issue-link.yml",
         ".github/workflows/label.yml",
         ".github/labeler.yml",
@@ -29,11 +26,10 @@
       ],
     },
     {
-      "id": ".claude",
       "name": "Claude",
       "description": "Claude Code rules and settings",
       "setupDescription": "Claude Code settings and rules will be applied",
-      "patterns": [".claude/settings.json", ".claude/rules/*.md"],
+      "include": [".claude/settings.json", ".claude/rules/*.md"],
     },
   ],
 }

@@ -15,10 +15,9 @@ vi.mock("node:fs/promises", async () => {
 // モック後にインポート
 const {
   loadTemplateModulesFile,
-  loadLocalPatternsFile,
   loadPatternsFile,
   addIncludePattern,
-  saveModulesFile,
+  isFlatFormat,
   getModulesFilePath,
   modulesFileExists,
 } = await import("../loader");
@@ -145,95 +144,6 @@ describe("loadTemplateModulesFile", () => {
     const result = await loadTemplateModulesFile("/project");
 
     expect(result.modules[0].setupDescription).toBe("VS Code で開くとセットアップされます");
-  });
-});
-
-describe("loadLocalPatternsFile", () => {
-  beforeEach(() => {
-    vol.reset();
-  });
-
-  it("フラット形式の modules.jsonc を読み込める", async () => {
-    const content = JSON.stringify({
-      include: [".devcontainer/**", ".github/**"],
-      exclude: ["*.local"],
-    });
-
-    vol.fromJSON({
-      "/project/.ziku/modules.jsonc": content,
-    });
-
-    const result = await loadLocalPatternsFile("/project");
-
-    expect(result.include).toEqual([".devcontainer/**", ".github/**"]);
-    expect(result.exclude).toEqual(["*.local"]);
-    expect(result.rawContent).toBe(content);
-  });
-
-  it("exclude が省略された場合は空配列を返す", async () => {
-    const content = JSON.stringify({
-      include: ["src/**"],
-    });
-
-    vol.fromJSON({
-      "/project/.ziku/modules.jsonc": content,
-    });
-
-    const result = await loadLocalPatternsFile("/project");
-
-    expect(result.include).toEqual(["src/**"]);
-    expect(result.exclude).toEqual([]);
-  });
-
-  it("JSONC コメント付きフラット形式を読み込める", async () => {
-    const content = `{
-      // include patterns
-      "include": ["src/**"],
-      /* exclude patterns */
-      "exclude": ["*.test.ts"]
-    }`;
-
-    vol.fromJSON({
-      "/project/.ziku/modules.jsonc": content,
-    });
-
-    const result = await loadLocalPatternsFile("/project");
-
-    expect(result.include).toEqual(["src/**"]);
-    expect(result.exclude).toEqual(["*.test.ts"]);
-  });
-
-  it("$schema フィールドを無視して読み込める", async () => {
-    const content = JSON.stringify({
-      $schema: "https://example.com/schema.json",
-      include: [".mcp.json"],
-    });
-
-    vol.fromJSON({
-      "/project/.ziku/modules.jsonc": content,
-    });
-
-    const result = await loadLocalPatternsFile("/project");
-
-    expect(result.include).toEqual([".mcp.json"]);
-  });
-
-  it("ファイルが存在しない場合はエラー", async () => {
-    vol.fromJSON({});
-
-    await expect(loadLocalPatternsFile("/project")).rejects.toThrow(
-      ".ziku/modules.jsonc が見つかりません",
-    );
-  });
-
-  it("スキーマに合わない場合はエラー", async () => {
-    vol.fromJSON({
-      "/project/.ziku/modules.jsonc": JSON.stringify({
-        modules: [{ name: "A", description: "A", include: [] }],
-      }),
-    });
-
-    await expect(loadLocalPatternsFile("/project")).rejects.toThrow();
   });
 });
 
@@ -365,33 +275,27 @@ describe("addIncludePattern", () => {
   });
 });
 
-describe("saveModulesFile", () => {
-  beforeEach(() => {
-    vol.reset();
+describe("isFlatFormat", () => {
+  it("フラット形式を正しく判定する", () => {
+    const flat = JSON.stringify({ include: [".mcp.json"], exclude: [] });
+    expect(isFlatFormat(flat)).toBe(true);
   });
 
-  it("モジュールファイルを保存できる", async () => {
-    vol.fromJSON({
-      "/project/.ziku": null, // ディレクトリを作成
-    });
-
-    const content = JSON.stringify({ include: [], exclude: [] });
-    await saveModulesFile("/project", content);
-
-    const saved = vol.readFileSync("/project/.ziku/modules.jsonc", "utf8");
-    expect(saved).toBe(content);
+  it("exclude 省略のフラット形式を正しく判定する", () => {
+    const flat = JSON.stringify({ include: [".mcp.json"] });
+    expect(isFlatFormat(flat)).toBe(true);
   });
 
-  it("既存ファイルを上書きできる", async () => {
-    vol.fromJSON({
-      "/project/.ziku/modules.jsonc": "old content",
+  it("モジュール形式を false と判定する", () => {
+    const modules = JSON.stringify({
+      modules: [{ name: "A", description: "A", include: ["a.txt"] }],
     });
+    expect(isFlatFormat(modules)).toBe(false);
+  });
 
-    const newContent = JSON.stringify({ include: ["new-pattern.txt"], exclude: [] });
-    await saveModulesFile("/project", newContent);
-
-    const saved = vol.readFileSync("/project/.ziku/modules.jsonc", "utf8");
-    expect(saved).toBe(newContent);
+  it("不正な形式を false と判定する", () => {
+    const invalid = JSON.stringify({ invalid: true });
+    expect(isFlatFormat(invalid)).toBe(false);
   });
 });
 

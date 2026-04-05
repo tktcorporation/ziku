@@ -5,7 +5,6 @@ import {
   loadPatternsFile,
   loadTemplateModulesFile,
   modulesFileExists,
-  saveModulesFile,
 } from "../index";
 
 // Re-export が正しく動作していることを確認するスモークテスト
@@ -16,6 +15,5 @@ describe("modules/index re-exports", () => {
     expect(typeof loadPatternsFile).toBe("function");
     expect(typeof loadTemplateModulesFile).toBe("function");
     expect(typeof modulesFileExists).toBe("function");
-    expect(typeof saveModulesFile).toBe("function");
   });
 });
