@@ -69,7 +69,7 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
         Effect.map(({ data }) =>
           !Array.isArray(data) && data.type === "file" ? data.sha : undefined,
         ),
-        Effect.orElseSucceed(() => {}),
+        Effect.orElseSucceed(() => undefined),
       ),
     );
 
@@ -159,9 +159,9 @@ export function getGhCliToken(): string | undefined {
         token &&
         (token.startsWith("ghp_") || token.startsWith("gho_") || token.startsWith("github_pat_"))
           ? Effect.succeed(token)
-          : Effect.succeed(),
+          : Effect.succeed(undefined as string | undefined),
       ),
-      Effect.orElseSucceed(() => {}),
+      Effect.orElseSucceed((): string | undefined => undefined),
     ),
   );
 }
@@ -181,10 +181,10 @@ export async function getAuthenticatedUserLogin(): Promise<string | undefined> {
       const res = await fetch("https://api.github.com/user", {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (!res.ok) return;
+      if (!res.ok) return undefined;
       const data = (await res.json()) as { login?: string };
       return data.login;
-    }).pipe(Effect.orElseSucceed(() => {})),
+    }).pipe(Effect.orElseSucceed((): string | undefined => undefined)),
   );
 }
 
@@ -324,9 +324,9 @@ export function resolveLatestCommitSha(
       const res = await fetch(url, {
         headers: { Accept: "application/vnd.github.sha" },
       });
-      if (!res.ok) return;
+      if (!res.ok) return undefined;
       return (await res.text()).trim();
-    }).pipe(Effect.orElseSucceed(() => {})),
+    }).pipe(Effect.orElseSucceed((): string | undefined => undefined)),
   );
 }
 

@@ -468,9 +468,9 @@ export const pushCommand = defineCommand({
           const icon =
             pf.type === "added"
               ? pc.green("+")
-              : (pf.type === "modified"
+              : pf.type === "modified"
                 ? pc.yellow("~")
-                : pc.red("-"));
+                : pc.red("-");
           fileLines.push(`  ${icon} ${pf.path.padEnd(50)} ${stat}`);
         }
         for (const f of files) {

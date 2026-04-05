@@ -479,7 +479,7 @@ describe("pushCommand", () => {
 
       setupPushableFiles([pushableFile]);
       mockSelectPushFiles.mockResolvedValueOnce([pushableFile]);
-      mockGetGitHubToken.mockReturnValue();
+      mockGetGitHubToken.mockReturnValue(undefined);
       mockInputGitHubToken.mockResolvedValueOnce("ghp_prompted_token");
       mockConfirmAction.mockResolvedValueOnce(true);
       mockCreatePullRequest.mockResolvedValueOnce({

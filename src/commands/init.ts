@@ -120,7 +120,7 @@ export const initCommand = defineCommand({
 
     // テンプレートリポジトリ自体で実行されているか判定
     if (isCurrentRepoTemplate(targetDir, sourceOwner, sourceRepo)) {
-      await handleTemplateRepoInit(targetDir, args.yes as boolean);
+      handleTemplateRepoInit(targetDir, args.yes as boolean);
       return;
     }
 

@@ -342,8 +342,14 @@ function setAtPath(obj: Record<string, unknown>, path: (string | number)[], valu
     }
     current = record[key];
   }
-  if (current !== null && current !== undefined && typeof current === "object") {
-    (current as Record<string | number, unknown>)[path.at(-1)] = value;
+  const lastKey = path.at(-1);
+  if (
+    lastKey !== undefined &&
+    current !== null &&
+    current !== undefined &&
+    typeof current === "object"
+  ) {
+    (current as Record<string | number, unknown>)[lastKey] = value;
   }
 }
 
@@ -355,7 +361,13 @@ function deleteAtPath(obj: Record<string, unknown>, path: (string | number)[]): 
     if (current === null || current === undefined || typeof current !== "object") return;
     current = (current as Record<string | number, unknown>)[key];
   }
-  if (current !== null && current !== undefined && typeof current === "object") {
-    delete (current as Record<string | number, unknown>)[path.at(-1)];
+  const lastKey = path.at(-1);
+  if (
+    lastKey !== undefined &&
+    current !== null &&
+    current !== undefined &&
+    typeof current === "object"
+  ) {
+    delete (current as Record<string | number, unknown>)[lastKey];
   }
 }

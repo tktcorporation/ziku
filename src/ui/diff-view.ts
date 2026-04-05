@@ -77,9 +77,9 @@ export function renderFileDiff(file: FileDiff): void {
   const typeLabel =
     file.type === "added"
       ? pc.green("added")
-      : (file.type === "modified"
+      : file.type === "modified"
         ? pc.yellow("modified")
-        : pc.red("deleted"));
+        : pc.red("deleted");
 
   p.log.step(`${pc.bold(file.path)} ${pc.dim("—")} ${typeLabel} ${formatStats(stats)}`);
 
@@ -164,6 +164,6 @@ function applyWordDiffAndColorize(lines: string[]): string[] {
 export function getFileLabel(file: FileDiff): string {
   const stats = calculateDiffStats(file);
   const icon =
-    file.type === "added" ? pc.green("+") : (file.type === "modified" ? pc.yellow("~") : pc.red("-"));
+    file.type === "added" ? pc.green("+") : file.type === "modified" ? pc.yellow("~") : pc.red("-");
   return `${icon} ${file.path} ${formatStats(stats)}`;
 }

@@ -198,10 +198,10 @@ describe("init: セットアップ UX", () => {
     });
     mockHashFiles.mockResolvedValue({});
     mockDetectGitHubOwner.mockReturnValue("detected-org");
-    mockGetAuthenticatedUserLogin.mockResolvedValue();
+    mockGetAuthenticatedUserLogin.mockResolvedValue(undefined);
     mockCheckRepoExists.mockResolvedValue(true);
     mockCheckRepoSetup.mockResolvedValue(true);
-    mockGetGitHubToken.mockReturnValue();
+    mockGetGitHubToken.mockReturnValue(undefined);
     mockSelectTemplateCandidate.mockResolvedValue({ owner: "detected-org", repo: ".github" });
     mockModulesFileExists.mockReturnValue(false);
     mockConfirmScaffoldDevenvPR.mockResolvedValue(true);
@@ -259,7 +259,7 @@ describe("init: セットアップ UX", () => {
     it("リポジトリ作成時に GitHub トークンがなければエラー", async () => {
       mockCheckRepoExists.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
       mockSelectMissingTemplateAction.mockResolvedValueOnce("create-repo");
-      mockGetGitHubToken.mockReturnValue();
+      mockGetGitHubToken.mockReturnValue(undefined);
 
       await expect(runInit({})).rejects.toThrow("GitHub token required");
     });
@@ -561,7 +561,7 @@ describe("init: セットアップ UX", () => {
       mockCheckRepoExists.mockResolvedValueOnce(true);
       mockModulesFileExists.mockReturnValue(false);
       mockConfirmScaffoldDevenvPR.mockResolvedValueOnce(true);
-      mockGetGitHubToken.mockReturnValue();
+      mockGetGitHubToken.mockReturnValue(undefined);
 
       await expect(runInit({})).rejects.toThrow("GitHub token required");
     });

@@ -213,11 +213,7 @@ const mockModulesFileExists = vi.mocked(modulesFileExists);
 
 const DEFAULT_SOURCE = { owner: "test-org", repo: ".github" };
 
-function createZikuJsonc(
-  include: string[],
-  exclude?: string[],
-  source = DEFAULT_SOURCE,
-): string {
+function createZikuJsonc(include: string[], exclude?: string[], source = DEFAULT_SOURCE): string {
   const content: Record<string, unknown> = { source, include };
   if (exclude && exclude.length > 0) {
     content.exclude = exclude;
