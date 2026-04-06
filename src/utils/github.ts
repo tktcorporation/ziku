@@ -54,26 +54,31 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
     sha: baseSha,
   });
 
-  // 6. ファイルを更新
-  for (const file of files) {
-    // 既存ファイルの SHA を取得（存在する場合、なければ新規作成）
-    const existingSha = await Effect.runPromise(
-      Effect.tryPromise(() =>
-        octokit.repos.getContent({
-          owner: forkOwner,
-          repo: forkRepo,
-          path: file.path,
-          ref: branchName,
-        }),
-      ).pipe(
-        Effect.map(({ data }) =>
-          !Array.isArray(data) && data.type === "file" ? data.sha : undefined,
-        ),
-        Effect.orElseSucceed((): string | undefined => undefined),
-      ),
+  // 6. 既存ファイルの SHA を一括取得
+  //    getContent を個別に呼ぶと、未存在ファイルで 404 レスポンスが
+  //    @octokit/plugin-request-log によりコンソールに出力されるため、
+  //    getTree で一括取得して Map で引く。
+  const { data: treeData } = await octokit.git.getTree({
+    owner: forkOwner,
+    repo: forkRepo,
+    tree_sha: branchName,
+    recursive: "true",
+  });
+  if (treeData.truncated) {
+    throw new Error(
+      `Repository tree is too large to fetch entirely. ` +
+        `Consider reducing the number of files in ${forkOwner}/${forkRepo}.`,
     );
+  }
+  const shaMap = new Map<string, string>();
+  for (const item of treeData.tree) {
+    if (item.type === "blob" && item.sha !== undefined && item.sha !== null && item.path) {
+      shaMap.set(item.path, item.sha);
+    }
+  }
 
-    // ファイルを作成または更新
+  // 7. ファイルを作成または更新
+  for (const file of files) {
     await octokit.repos.createOrUpdateFileContents({
       owner: forkOwner,
       repo: forkRepo,
@@ -81,11 +86,11 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
       message: `Update ${file.path}`,
       content: Buffer.from(file.content).toString("base64"),
       branch: branchName,
-      sha: existingSha,
+      sha: shaMap.get(file.path),
     });
   }
 
-  // 7. PR を作成
+  // 8. PR を作成
   const { data: pr } = await octokit.pulls.create({
     owner,
     repo,
