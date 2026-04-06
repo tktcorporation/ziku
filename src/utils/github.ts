@@ -2,6 +2,18 @@ import { Octokit } from "@octokit/rest";
 import { Effect } from "effect";
 import type { PrResult } from "../modules/schemas";
 
+/**
+ * Octokit の request-log プラグインが全 HTTP リクエストを console に出力するのを抑制する。
+ * 404（新規ファイル作成時の getContent 等）も info レベルで表示されてしまい、
+ * ユーザーにエラーと誤解されるため、ログを無効化する。
+ */
+const silentLogger = {
+  debug: () => {},
+  info: () => {},
+  warn: console.warn,
+  error: console.error,
+};
+
 export interface PushOptions {
   owner: string;
   repo: string;
@@ -15,7 +27,7 @@ export interface PushOptions {
  * GitHub API を使って PR を作成
  */
 export async function createPullRequest(token: string, options: PushOptions): Promise<PrResult> {
-  const octokit = new Octokit({ auth: token });
+  const octokit = new Octokit({ auth: token, log: silentLogger });
   const { owner, repo, files, title, body, baseBranch = "main" } = options;
 
   // 1. 認証ユーザー情報を取得
@@ -247,7 +259,7 @@ export async function scaffoldTemplateRepo(
   targetRepo: string,
 ): Promise<{ url: string }> {
   const { Octokit: OctokitClient } = await import("@octokit/rest");
-  const octokit = new OctokitClient({ auth: token });
+  const octokit = new OctokitClient({ auth: token, log: silentLogger });
 
   // org か personal かを判定
   const isOrg = await Effect.runPromise(
