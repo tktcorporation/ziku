@@ -1,5 +1,16 @@
 # @tktco/ziku
 
+## 1.0.2
+
+### Patch Changes
+
+- [#37](https://github.com/tktcorporation/ziku/pull/37) [`be08661`](https://github.com/tktcorporation/ziku/commit/be086611c9b7fe15e11bd89ecc2ba72c44a3d3de) Thanks [@tktcorporation](https://github.com/tktcorporation)! - docs: 補足セクションをコマンドファイルにコロケーションして自動生成に変更
+
+- [#39](https://github.com/tktcorporation/ziku/pull/39) [`e526e90`](https://github.com/tktcorporation/ziku/commit/e526e906aa8dc4e64eb010c80d95f55e480da8f1) Thanks [@tktcorporation](https://github.com/tktcorporation)! - fix: ziku push 時の GitHub API 404 ログノイズを解消
+
+  getContent による個別ファイル存在確認を getTree による一括取得に置き換え、
+  @octokit/plugin-request-log が 404 レスポンスをコンソール出力する問題を根本的に解消。
+
 ## 1.0.1
 
 ### Patch Changes
