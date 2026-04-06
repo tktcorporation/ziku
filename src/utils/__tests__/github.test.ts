@@ -7,8 +7,8 @@ const mockReposGet = vi.fn();
 const mockReposCreateFork = vi.fn();
 const mockReposGetBranch = vi.fn();
 const mockGitCreateRef = vi.fn();
-const mockReposGetContent = vi.fn();
 const mockReposCreateOrUpdateFileContents = vi.fn();
+const mockGitGetTree = vi.fn();
 const mockPullsCreate = vi.fn();
 const mockOrgsGet = vi.fn();
 const mockReposCreateInOrg = vi.fn();
@@ -23,13 +23,13 @@ vi.mock("@octokit/rest", () => ({
       get: mockReposGet,
       createFork: mockReposCreateFork,
       getBranch: mockReposGetBranch,
-      getContent: mockReposGetContent,
       createOrUpdateFileContents: mockReposCreateOrUpdateFileContents,
       createInOrg: mockReposCreateInOrg,
       createForAuthenticatedUser: mockReposCreateForAuthenticatedUser,
     };
     git = {
       createRef: mockGitCreateRef,
+      getTree: mockGitGetTree,
     };
     pulls = {
       create: mockPullsCreate,
@@ -114,7 +114,9 @@ describe("createPullRequest", () => {
 
     mockGitCreateRef.mockResolvedValue({});
 
-    mockReposGetContent.mockRejectedValue(new Error("Not found"));
+    mockGitGetTree.mockResolvedValue({
+      data: { tree: [], truncated: false },
+    });
 
     mockReposCreateOrUpdateFileContents.mockResolvedValue({});
 
@@ -192,8 +194,11 @@ describe("createPullRequest", () => {
   });
 
   it("既存ファイルを更新する", async () => {
-    mockReposGetContent.mockResolvedValue({
-      data: { type: "file", sha: "existing-sha" },
+    mockGitGetTree.mockResolvedValue({
+      data: {
+        tree: [{ path: "existing.txt", type: "blob", sha: "existing-sha" }],
+        truncated: false,
+      },
     });
 
     await createPullRequest("token", {
@@ -276,6 +281,37 @@ describe("createPullRequest", () => {
         head: expect.stringMatching(/^testuser:ziku-sync-\d+$/),
       }),
     );
+  });
+
+  it("getTree で既存ファイルの SHA を一括取得する", async () => {
+    await createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [{ path: "file.txt", content: "content" }],
+      title: "Test PR",
+    });
+
+    expect(mockGitGetTree).toHaveBeenCalledWith(
+      expect.objectContaining({
+        owner: "testuser",
+        recursive: "true",
+      }),
+    );
+  });
+
+  it("truncated な tree の場合はエラーを throw する", async () => {
+    mockGitGetTree.mockResolvedValue({
+      data: { tree: [], truncated: true },
+    });
+
+    await expect(
+      createPullRequest("token", {
+        owner: "owner",
+        repo: "repo",
+        files: [{ path: "file.txt", content: "content" }],
+        title: "Test PR",
+      }),
+    ).rejects.toThrow("Repository tree is too large");
   });
 
   it("ファイル内容を Base64 エンコードする", async () => {
