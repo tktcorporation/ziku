@@ -37,7 +37,6 @@
     /** ── Unicorn: プロジェクト慣習に合わない pedantic ルールを無効化 ── */
     "unicorn/no-useless-undefined": "off",
     "unicorn/no-null": "off",
-    "unicorn/prevent-abbreviations": "off",
     "unicorn/filename-case": "off",
     "unicorn/no-process-exit": "off",
     "unicorn/prefer-top-level-await": "off",
