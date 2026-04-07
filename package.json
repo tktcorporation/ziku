@@ -1,7 +1,7 @@
 {
   "name": "ziku",
   "version": "1.0.3",
-  "description": "Interactive CLI to scaffold development environment templates",
+  "description": "A bi-directional dev environment template that evolves with you.",
   "license": "MIT",
   "repository": {
     "type": "git",
