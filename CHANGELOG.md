@@ -1,5 +1,11 @@
 # @tktco/ziku
 
+## 1.0.3
+
+### Patch Changes
+
+- [#40](https://github.com/tktcorporation/ziku/pull/40) [`1d2b944`](https://github.com/tktcorporation/ziku/commit/1d2b9441c59be114378a49fa61f22f147733a6e9) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Fix security vulnerabilities by updating vite (8.0.3 → 8.0.6) and defu (6.1.4 → 6.1.7)
+
 ## 1.0.2
 
 ### Patch Changes
