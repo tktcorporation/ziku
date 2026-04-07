@@ -2,6 +2,7 @@
   "name": "ziku",
   "version": "1.0.3",
   "description": "Interactive CLI to scaffold development environment templates",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/tktcorporation/ziku.git"
