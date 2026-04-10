@@ -2,6 +2,20 @@
   "name": "ziku",
   "version": "1.0.3",
   "description": "A bi-directional dev environment template that evolves with you.",
+  "keywords": [
+    "boilerplate",
+    "claude-code",
+    "cli",
+    "config-sync",
+    "devtools",
+    "git",
+    "github",
+    "mcp",
+    "scaffold",
+    "scaffolding",
+    "template",
+    "template-sync"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
