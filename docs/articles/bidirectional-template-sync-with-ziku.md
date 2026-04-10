@@ -22,13 +22,13 @@ This isn't a new complaint. [GitHub Community Discussion #23528](https://github.
 
 ## Existing solutions and their gaps
 
-| Approach | Template → Project | Project → Template | Limitations |
-|---|---|---|---|
-| GitHub Template Repos | Initial copy only | None | No ongoing relationship after creation |
-| Git Submodules | `git pull` | `git push` | Confined to a single subdirectory |
-| cookiecutter + cruft | `cruft update` | Manual | No built-in reverse sync; Python-only |
-| copier | `copier update` | Manual | No push command; requires tagged versions |
-| GitHub Actions (template-sync) | Auto PR | None | One-way only; CI-dependent |
+| Approach                       | Template → Project | Project → Template | Limitations                               |
+| ------------------------------ | ------------------ | ------------------ | ----------------------------------------- |
+| GitHub Template Repos          | Initial copy only  | None               | No ongoing relationship after creation    |
+| Git Submodules                 | `git pull`         | `git push`         | Confined to a single subdirectory         |
+| cookiecutter + cruft           | `cruft update`     | Manual             | No built-in reverse sync; Python-only     |
+| copier                         | `copier update`    | Manual             | No push command; requires tagged versions |
+| GitHub Actions (template-sync) | Auto PR            | None               | One-way only; CI-dependent                |
 
 The common gap: **none of them close the feedback loop.** Improvements in your project never flow back to the template automatically.
 
