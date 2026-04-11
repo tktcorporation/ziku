@@ -221,7 +221,7 @@ function generateFilesSection(): string {
  */
 function getCommandDescription(meta: unknown): string {
   if (typeof meta === "object" && meta !== null && "description" in meta) {
-    const description = String((meta as Record<string, string>).description ?? "");
+    const description = (meta as Record<string, string>).description ?? "";
     return description;
   }
   return "";
