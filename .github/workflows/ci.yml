@@ -178,9 +178,5 @@ jobs:
 
       - name: Dry-run publish
         run: |
-          # version ステップが .npmrc を再生成する場合に備えて再除去
-          for f in "$NPM_CONFIG_USERCONFIG" .npmrc "$HOME/.npmrc"; do
-            [ -f "$f" ] && sed -i '/^before=/d' "$f" || true
-          done
           pnpm run build
-          npm publish --dry-run
+          pnpm pack --dry-run
