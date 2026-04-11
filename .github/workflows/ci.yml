@@ -23,7 +23,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version-file: ".node-version"
           cache: "pnpm"
 
       - name: Install dependencies
@@ -42,7 +42,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version-file: ".node-version"
           cache: "pnpm"
 
       - name: Install dependencies
@@ -61,7 +61,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version-file: ".node-version"
           cache: "pnpm"
 
       - name: Install dependencies
@@ -80,7 +80,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version-file: ".node-version"
           cache: "pnpm"
 
       - name: Install dependencies
@@ -110,7 +110,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version-file: ".node-version"
           cache: "pnpm"
 
       - name: Install dependencies
@@ -129,7 +129,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version-file: ".node-version"
           cache: "pnpm"
 
       - name: Install dependencies
@@ -137,3 +137,46 @@ jobs:
 
       - name: Check README is up to date
         run: pnpm run docs:check
+
+  release-dry-run:
+    name: Release Dry Run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".node-version"
+          registry-url: "https://registry.npmjs.org"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # setup-node が registry-url 設定時に .npmrc へ before=null を書き込む。
+      # npm 11.x (Node 24) はこれを不正な日付値として拒否するため除去する。
+      # 環境変数・ユーザー設定・プロジェクトローカルの全箇所から除去する。
+      - name: Fix .npmrc before=null
+        run: |
+          for f in "$NPM_CONFIG_USERCONFIG" .npmrc "$HOME/.npmrc"; do
+            [ -f "$f" ] && sed -i '/^before=/d' "$f" || true
+          done
+          unset npm_config_before
+          echo "npm_config_before=" >> "$GITHUB_ENV"
+
+      - name: Dry-run version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! ls .changeset/*.md 2>/dev/null | grep -qv README.md; then
+            echo "No changesets found, skipping release dry-run"
+            exit 0
+          fi
+          pnpm run version
+
+      - name: Dry-run publish
+        run: |
+          pnpm run build
+          pnpm pack

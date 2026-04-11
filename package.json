@@ -48,8 +48,8 @@
     "test:coverage": "vitest run --coverage",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm run build && npm run test:run && npm run docs:check",
     "prepack": "npm run build",
-    "docs": "npx tsx scripts/generate-readme.ts",
-    "docs:check": "npx tsx scripts/generate-readme.ts --check",
+    "docs": "pnpm tsx scripts/generate-readme.ts",
+    "docs:check": "pnpm tsx scripts/generate-readme.ts --check",
     "version": "changeset version && npm run docs",
     "release": "changeset publish"
   },
@@ -83,6 +83,7 @@
     "oxlint": "~1.59.0",
     "oxlint-tsgolint": "latest",
     "tsdown": "^0.21.7",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.4"
   },
