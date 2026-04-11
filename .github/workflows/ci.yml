@@ -155,6 +155,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # setup-node が registry-url 設定時に .npmrc へ before=null を書き込む。
+      # npm 11.x (Node 24) はこれを不正な日付値として拒否するため除去する。
+      - name: Fix .npmrc before=null
+        run: |
+          for f in "$NPM_CONFIG_USERCONFIG" .npmrc; do
+            [ -f "$f" ] && sed -i '/^before=/d' "$f" || true
+          done
+
       - name: Dry-run version
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -168,4 +176,4 @@ jobs:
       - name: Dry-run publish
         run: |
           pnpm run build
-          pnpm publish --dry-run --no-git-checks
+          npm publish --dry-run
