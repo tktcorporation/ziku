@@ -25,17 +25,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version-file: ".node-version"
           registry-url: "https://registry.npmjs.org"
           cache: "pnpm"
-
-      # npm 11.x が OIDC trusted publishing に必要。
-      # Node.js 22 バンドルの npm 10.x では OIDC トークン交換による publish が失敗する。
-      # Node.js 22.22.2 では npm self-upgrade 時に promise-retry MODULE_NOT_FOUND が
-      # 発生する (npm/cli#9151)。npm 10.9.8 で修正予定だが、それまでは段階的に
-      # アップグレードすることで回避する。
-      - name: Upgrade npm for OIDC trusted publishing
-        run: npm install -g npm@10.9.8 && npm install -g npm@latest
 
       - name: Install Dependencies
         run: pnpm install --frozen-lockfile

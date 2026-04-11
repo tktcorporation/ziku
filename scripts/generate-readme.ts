@@ -1,4 +1,4 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env pnpm tsx
 /**
  * Auto-generate README.md sections from source code
  *
@@ -221,7 +221,7 @@ function generateFilesSection(): string {
  */
 function getCommandDescription(meta: unknown): string {
   if (typeof meta === "object" && meta !== null && "description" in meta) {
-    const description = (meta as Record<string, string>).description ?? "";
+    const description = String((meta as Record<string, string>).description ?? "");
     return description;
   }
   return "";
@@ -342,7 +342,7 @@ async function main(): Promise<void> {
       lifecycleSection,
     );
     await writeFile(LIFECYCLE_DOC_PATH, tempLifecycleDoc);
-    execFileSync("npx", ["oxfmt", "--write", LIFECYCLE_DOC_PATH], { stdio: "ignore" });
+    execFileSync("pnpm", ["oxfmt", "--write", LIFECYCLE_DOC_PATH], { stdio: "ignore" });
     lifecycleDoc = await readFile(LIFECYCLE_DOC_PATH, "utf-8");
   }
   const lifecycleDocUpdated = lifecycleDoc !== originalLifecycleDoc;
@@ -352,7 +352,7 @@ async function main(): Promise<void> {
   const schemaUpdates: string[] = [];
   for (const [path, content] of schemaEntries) {
     await writeFile(path, `${content}\n`);
-    execFileSync("npx", ["oxfmt", "--write", path], { stdio: "ignore" });
+    execFileSync("pnpm", ["oxfmt", "--write", path], { stdio: "ignore" });
     const formatted = await readFile(path, "utf-8");
     if (originalSchemas[path] !== formatted) {
       schemaUpdates.push(path.split("/").pop() ?? path);
