@@ -156,6 +156,8 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Dry-run version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if ! ls .changeset/*.md 2>/dev/null | grep -qv README.md; then
             echo "No changesets found, skipping release dry-run"
