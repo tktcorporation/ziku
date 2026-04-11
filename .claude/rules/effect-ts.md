@@ -16,13 +16,15 @@ class LockNotFoundError extends Data.TaggedError("LockNotFoundError")<{
 }> {}
 
 // 使用
-const lock = yield* Effect.tryPromise({
-  try: () => loadLock(dir),
-  catch: (e) =>
-    e instanceof Error && e.message.includes("ENOENT")
-      ? new LockNotFoundError({ path: dir })
-      : new ParseError({ message: String(e) }),
-});
+const lock =
+  yield *
+  Effect.tryPromise({
+    try: () => loadLock(dir),
+    catch: (e) =>
+      e instanceof Error && e.message.includes("ENOENT")
+        ? new LockNotFoundError({ path: dir })
+        : new ParseError({ message: String(e) }),
+  });
 ```
 
 ## コーディングスタイル

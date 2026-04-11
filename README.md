@@ -186,16 +186,16 @@ Initialize a template repository with .ziku/ziku.jsonc
 ```
 Initialize a template repository with .ziku/ziku.jsonc (setup vdev)
 
-USAGE `setup [OPTIONS] [DIR]`
+USAGE setup [OPTIONS] [DIR]
 
 ARGUMENTS
 
-  `DIR="."`    Template repository directory
+  DIR    Template repository directory (Default: .)
 
 OPTIONS
 
-  `--remote`    Create a PR to set up a remote template repository instead of local
-    `--from`    Remote template repository as owner/repo (used with --remote)
+       --remote    Create a PR to set up a remote template repository instead of local (Default: false)
+  --from=<from>    Remote template repository as owner/repo (used with --remote)
 ```
 
 ### `init`
@@ -205,20 +205,20 @@ Apply dev environment template to your project
 ```
 Apply dev environment template to your project (ziku vdev)
 
-USAGE `ziku [OPTIONS] [DIR]`
+USAGE ziku [OPTIONS] [DIR]
 
 ARGUMENTS
 
-  `DIR="."`    Target directory
+  DIR    Target directory (Default: .)
 
 OPTIONS
 
-                   `--force`    Overwrite existing files
-                 `-y, --yes`    Non-interactive mode (accept all defaults)
-                `-d, --dirs`    Comma-separated directory names to apply (non-interactive)
-  `-s, --overwrite-strategy`    Overwrite strategy: overwrite, skip, or prompt
-                    `--from`    Template source as owner/repo (e.g., my-org/my-templates)
-                `--from-dir`    Local directory to use as template source (skips GitHub download)
+                                        --force    Overwrite existing files (Default: false)
+                                      -y, --yes    Non-interactive mode (accept all defaults) (Default: false)
+                              -d, --dirs=<dirs>    Comma-separated directory names to apply (non-interactive)
+  -s, --overwrite-strategy=<overwrite_strategy>    Overwrite strategy: overwrite, skip, or prompt
+                                  --from=<from>    Template source as owner/repo (e.g., my-org/my-templates)
+                          --from-dir=<from_dir>    Local directory to use as template source (skips GitHub download)
 ```
 
 ### `push`
@@ -228,19 +228,19 @@ Push local changes to the template (PR for GitHub, direct copy for local)
 ```
 Push local changes to the template (PR for GitHub, direct copy for local) (push)
 
-USAGE `push [OPTIONS] [DIR]`
+USAGE push [OPTIONS] [DIR]
 
 ARGUMENTS
 
-  `DIR="."`    Project directory
+  DIR    Project directory (Default: .)
 
 OPTIONS
 
-   `-n, --dryRun`    Preview only, don't push
-  `-m, --message`    PR title (GitHub only)
-  `-y, -f, --yes`    Skip confirmation prompts
-         `--edit`    Edit PR title and description before creating (GitHub only)
-        `--files`    Comma-separated file paths to include (skips file selection prompt)
+             -n, --dryRun    Preview only, don't push (Default: false)
+  -m, --message=<message>    PR title (GitHub only)
+            -y, -f, --yes    Skip confirmation prompts (Default: false)
+                   --edit    Edit PR title and description before creating (GitHub only) (Default: false)
+          --files=<files>    Comma-separated file paths to include (skips file selection prompt)
 ```
 
 ### `pull`
@@ -250,16 +250,16 @@ Pull latest template updates
 ```
 Pull latest template updates (pull)
 
-USAGE `pull [OPTIONS] [DIR]`
+USAGE pull [OPTIONS] [DIR]
 
 ARGUMENTS
 
-  `DIR="."`    Project directory
+  DIR    Project directory (Default: .)
 
 OPTIONS
 
-  `-f, --force`    Skip confirmations
-   `--continue`    Continue after resolving merge conflicts
+  -f, --force    Skip confirmations (Default: false)
+   --continue    Continue after resolving merge conflicts (Default: false)
 ```
 
 ### `diff`
@@ -269,15 +269,15 @@ Show differences between local and template
 ```
 Show differences between local and template (diff)
 
-USAGE `diff [OPTIONS] [DIR]`
+USAGE diff [OPTIONS] [DIR]
 
 ARGUMENTS
 
-  `DIR="."`    Project directory
+  DIR    Project directory (Default: .)
 
 OPTIONS
 
-  `-v, --verbose`    Show detailed diff
+  -v, --verbose    Show detailed diff (Default: false)
 ```
 
 ### `track`
@@ -287,16 +287,16 @@ Add file patterns to the tracking whitelist in ziku.jsonc
 ```
 Add file patterns to the tracking whitelist in ziku.jsonc (track)
 
-USAGE `track [OPTIONS] [PATTERNS]`
+USAGE track [OPTIONS] [PATTERNS]
 
 ARGUMENTS
 
-  `PATTERNS`    File paths or glob patterns to track (e.g., .cloud/rules/*.md)
+  PATTERNS    File paths or glob patterns to track (e.g., .cloud/rules/*.md)
 
 OPTIONS
 
-  `-d, --dir="."`    Project directory (default: current directory)
-     `-l, --list`    List all currently tracked patterns
+  -d, --dir=<dir>    Project directory (default: current directory) (Default: .)
+       -l, --list    List all currently tracked patterns (Default: false)
 ```
 
 <!-- COMMANDS:END -->

@@ -54,6 +54,8 @@ function opLabel(op: Op): string {
       return "作成";
     case "update":
       return "更新";
+    default:
+      return op;
   }
 }
 

@@ -31,13 +31,14 @@ const { data: treeData } = await octokit.git.getTree({
 if (treeData.truncated) {
   throw new Error(
     `Repository tree is too large to fetch entirely. ` +
-    `Consider reducing the number of files in ${forkOwner}/${forkRepo}.`,
+      `Consider reducing the number of files in ${forkOwner}/${forkRepo}.`,
   );
 }
 const shaMap = new Map(
   treeData.tree
-    .filter((item): item is typeof item & { sha: string } =>
-      item.type === "blob" && item.sha != null)
+    .filter(
+      (item): item is typeof item & { sha: string } => item.type === "blob" && item.sha != null,
+    )
     .map((item) => [item.path!, item.sha]),
 );
 
