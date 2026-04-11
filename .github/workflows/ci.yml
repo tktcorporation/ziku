@@ -168,4 +168,4 @@ jobs:
       - name: Dry-run publish
         run: |
           pnpm run build
-          npm publish --dry-run
+          pnpm publish --dry-run --no-git-checks
