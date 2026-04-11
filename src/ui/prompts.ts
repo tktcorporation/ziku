@@ -177,6 +177,7 @@ export async function inputTemplateSource(defaultValue?: string): Promise<string
       if (slashIndex === -1 || slashIndex === 0 || slashIndex === value.length - 1) {
         return "Expected format: owner/repo";
       }
+      return undefined;
     },
   });
   handleCancel(source);
@@ -252,6 +253,7 @@ export async function inputPrTitle(defaultTitle?: string): Promise<string> {
     placeholder: defaultTitle ? undefined : "feat: update template config",
     validate: (value) => {
       if (!value?.trim()) return "Title is required";
+      return undefined;
     },
   });
   handleCancel(title);
@@ -356,6 +358,7 @@ export async function inputGitHubToken(): Promise<string> {
       ) {
         return "Invalid GitHub token format";
       }
+      return undefined;
     },
   });
   handleCancel(token);

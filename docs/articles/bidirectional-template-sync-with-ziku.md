@@ -71,8 +71,8 @@ This creates `.ziku/ziku.jsonc`. Define what to sync:
     ".claude/rules/*.md",
     ".claude/skills/**",
     ".devcontainer/**",
-    ".mcp.json"
-  ]
+    ".mcp.json",
+  ],
 }
 ```
 
@@ -169,11 +169,11 @@ Unlike git submodules (locked to one directory), ziku uses glob patterns:
 ```jsonc
 {
   "include": [
-    ".claude/rules/*.md",        // scattered in .claude/
-    ".mcp.json",                 // root level
-    ".github/workflows/**",      // deep in .github/
-    ".devcontainer/**"           // another directory entirely
-  ]
+    ".claude/rules/*.md", // scattered in .claude/
+    ".mcp.json", // root level
+    ".github/workflows/**", // deep in .github/
+    ".devcontainer/**", // another directory entirely
+  ],
 }
 ```
 

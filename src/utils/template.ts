@@ -271,5 +271,12 @@ export async function copyFile(
       copyFileSync(srcPath, destPath);
       return { action: "overwritten", path: relativePath };
     }
+
+    default: {
+      // TypeScriptの型システムでexhaustiveなswitchだが、
+      // consistent-returnルールのために明示的なデフォルトを追加
+      const _exhaustive: never = strategy;
+      throw new Error(`Unhandled strategy: ${String(_exhaustive)}`);
+    }
   }
 }
