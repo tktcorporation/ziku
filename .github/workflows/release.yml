@@ -36,9 +36,10 @@ jobs:
       # npm 11.x (Node 24) はこれを不正な日付値として拒否するため除去する。
       - name: Fix .npmrc before=null
         run: |
-          for f in "$NPM_CONFIG_USERCONFIG" .npmrc; do
+          for f in "$NPM_CONFIG_USERCONFIG" .npmrc "$HOME/.npmrc"; do
             [ -f "$f" ] && sed -i '/^before=/d' "$f" || true
           done
+          echo "npm_config_before=" >> "$GITHUB_ENV"
 
       - name: Create Release PR or Publish
         id: changesets
