@@ -179,4 +179,4 @@ jobs:
       - name: Dry-run publish
         run: |
           pnpm run build
-          pnpm pack --dry-run
+          pnpm pack
