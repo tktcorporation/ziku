@@ -52,7 +52,7 @@
     "docs:check": "pnpm tsx scripts/generate-readme.ts --check && pnpm tsx scripts/generate-site.ts --check",
     "site:generate": "pnpm tsx scripts/generate-site.ts",
     "site:dev": "pnpm run site:generate && vitepress dev docs",
-    "site:build": "pnpm run site:generate && vitepress build docs",
+    "site:build": "vitepress build docs",
     "site:preview": "vitepress preview docs",
     "version": "changeset version && npm run docs",
     "release": "changeset publish"

@@ -47,7 +47,7 @@ export default defineConfig({
           "A CLI tool that bi-directionally syncs dev environment configs between template repos and projects. Push, pull, and 3-way merge.",
       },
     ],
-    ["meta", { property: "og:url", content: "https://tktcorporation.github.io/ziku" }],
+    ["meta", { property: "og:url", content: "https://tktcorporation.github.io/ziku/" }],
     // Twitter Card
     ["meta", { name: "twitter:card", content: "summary" }],
     // JSON-LD structured data
@@ -102,10 +102,9 @@ export default defineConfig({
           { text: "Commands", link: "/guide/commands" },
         ],
       },
-      {
-        text: "Reference",
-        items: [{ text: "File Lifecycle", link: "/architecture/file-lifecycle" }],
-      },
+      // NOTE: /architecture/file-lifecycle は日本語の自動生成ドキュメント。
+      // 英語サイトとの言語不整合があるため、サイドバーから除外。
+      // 英語版を生成するようになったら復活させる。
     ],
 
     socialLinks: [

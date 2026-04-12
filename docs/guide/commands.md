@@ -116,7 +116,7 @@ USAGE track [OPTIONS] [PATTERNS]
 
 ARGUMENTS
 
-  PATTERNS    File paths or glob patterns to track (e.g., .cloud/rules/*)
+  PATTERNS    File paths or glob patterns to track (e.g., .cloud/rules/*.md)
 
 OPTIONS
 

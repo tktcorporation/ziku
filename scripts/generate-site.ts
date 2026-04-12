@@ -20,7 +20,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dirname, "..");
@@ -60,7 +60,8 @@ function promoteHeadings(content: string): string {
  * 例: docs/architecture/file-lifecycle.md → /architecture/file-lifecycle
  */
 function fixLinks(content: string): string {
-  return content.replaceAll("](docs/", "](/").replaceAll(".md)", ")");
+  // Markdown リンク構文内の .md 拡張子のみ除去する（コードブロック等の誤置換を防止）
+  return content.replaceAll("](docs/", "](/").replaceAll(/(\]\([^)]*?)\.md(\))/g, "$1$2");
 }
 
 /** VitePress の hero 付きランディングページを生成する */
@@ -295,10 +296,14 @@ async function main(): Promise<void> {
   }
 
   if (isCheck) {
-    // check モードでは元のファイルを復元する
+    // check モードでは元のファイルを復元する。
+    // writeAndFormat が書き込んだ一時ファイルを確実にクリーンアップするため、
+    // 元が空（= ファイルが存在しなかった）なら削除する。
     for (const [filePath, original] of Object.entries(originals)) {
       if (original) {
         await writeFile(filePath, original);
+      } else {
+        await rm(filePath, { force: true });
       }
     }
 
