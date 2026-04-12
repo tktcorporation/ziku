@@ -213,6 +213,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedLocally: [],
         unchanged: [".mcp.json"],
       });
 
@@ -237,6 +238,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedLocally: [],
         unchanged: [],
       });
 
@@ -264,6 +266,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [".new-file"],
         deletedFiles: [],
+        deletedLocally: [],
         unchanged: [],
       });
 
@@ -299,6 +302,7 @@ describe("pullCommand", () => {
         conflicts: [".mcp.json"],
         newFiles: [],
         deletedFiles: [],
+        deletedLocally: [],
         unchanged: [],
       });
 
@@ -341,6 +345,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [".old-file"],
+        deletedLocally: [],
         unchanged: [],
       });
 
@@ -363,6 +368,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: ["old-file.txt"],
+        deletedLocally: [],
         unchanged: [],
       });
       mockSelectDeletedFiles.mockResolvedValueOnce([]);
@@ -387,6 +393,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: ["old-file.txt"],
+        deletedLocally: [],
         unchanged: [],
       });
 
@@ -412,6 +419,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: ["a.txt", "b.txt"],
+        deletedLocally: [],
         unchanged: [],
       });
       mockSelectDeletedFiles.mockResolvedValueOnce(["a.txt"]);
@@ -440,6 +448,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedLocally: [],
         unchanged: [],
       });
 
@@ -475,6 +484,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedLocally: [],
         unchanged: [".mcp.json"],
       });
 
@@ -499,6 +509,7 @@ describe("pullCommand", () => {
         conflicts: [".mcp.json"],
         newFiles: [],
         deletedFiles: [],
+        deletedLocally: [],
         unchanged: [],
       });
 
@@ -626,6 +637,7 @@ describe("pullCommand", () => {
         conflicts: ["settings.json"],
         newFiles: [],
         deletedFiles: [],
+        deletedLocally: [],
         unchanged: [],
       });
 
@@ -696,6 +708,7 @@ describe("pullCommand", () => {
         conflicts: [".mcp.json"],
         newFiles: [],
         deletedFiles: [],
+        deletedLocally: [],
         unchanged: [],
       });
 
@@ -735,6 +748,7 @@ describe("pullCommand", () => {
         conflicts: ["a.json", "b.txt"],
         newFiles: [],
         deletedFiles: [],
+        deletedLocally: [],
         unchanged: [],
       });
 
@@ -785,6 +799,7 @@ describe("pullCommand", () => {
         conflicts: ["a.json", "b.json"],
         newFiles: [],
         deletedFiles: [],
+        deletedLocally: [],
         unchanged: [],
       });
 
@@ -833,6 +848,7 @@ describe("pullCommand", () => {
         conflicts: ["config.json"],
         newFiles: [],
         deletedFiles: [],
+        deletedLocally: [],
         unchanged: [],
       });
 
@@ -868,6 +884,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [".devcontainer/config.json"],
         deletedFiles: [],
+        deletedLocally: [],
         unchanged: [],
       });
 

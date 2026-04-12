@@ -59,6 +59,8 @@ export interface FileClassification {
   newFiles: string[];
   /** テンプレートで削除 → ユーザーに確認 */
   deletedFiles: string[];
+  /** ローカルで削除（base と template にあるがローカルにない）→ push で削除可能 */
+  deletedLocally: string[];
   /** 変更なし → スキップ */
   unchanged: string[];
 }

@@ -8,6 +8,7 @@ const mockReposCreateFork = vi.fn();
 const mockReposGetBranch = vi.fn();
 const mockGitCreateRef = vi.fn();
 const mockReposCreateOrUpdateFileContents = vi.fn();
+const mockReposDeleteFile = vi.fn();
 const mockGitGetTree = vi.fn();
 const mockPullsCreate = vi.fn();
 const mockOrgsGet = vi.fn();
@@ -24,6 +25,7 @@ vi.mock("@octokit/rest", () => ({
       createFork: mockReposCreateFork,
       getBranch: mockReposGetBranch,
       createOrUpdateFileContents: mockReposCreateOrUpdateFileContents,
+      deleteFile: mockReposDeleteFile,
       createInOrg: mockReposCreateInOrg,
       createForAuthenticatedUser: mockReposCreateForAuthenticatedUser,
     };
@@ -312,6 +314,46 @@ describe("createPullRequest", () => {
         title: "Test PR",
       }),
     ).rejects.toThrow("Repository tree is too large");
+  });
+
+  it("削除対象ファイルを deleteFile API で削除する", async () => {
+    mockGitGetTree.mockResolvedValue({
+      data: {
+        tree: [{ path: "to-delete.txt", type: "blob", sha: "delete-sha" }],
+        truncated: false,
+      },
+    });
+
+    await createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [],
+      deletions: [{ path: "to-delete.txt" }],
+      title: "Test PR with deletion",
+    });
+
+    expect(mockReposDeleteFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: "to-delete.txt",
+        sha: "delete-sha",
+      }),
+    );
+  });
+
+  it("tree に存在しない削除対象ファイルはスキップする", async () => {
+    mockGitGetTree.mockResolvedValue({
+      data: { tree: [], truncated: false },
+    });
+
+    await createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [{ path: "file.txt", content: "content" }],
+      deletions: [{ path: "nonexistent.txt" }],
+      title: "Test PR",
+    });
+
+    expect(mockReposDeleteFile).not.toHaveBeenCalled();
   });
 
   it("ファイル内容を Base64 エンコードする", async () => {

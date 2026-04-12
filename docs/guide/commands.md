@@ -66,6 +66,7 @@ OPTIONS
             -y, -f, --yes    Skip confirmation prompts (Default: false)
                    --edit    Edit PR title and description before creating (GitHub only) (Default: false)
           --files=<files>    Comma-separated file paths to include (skips file selection prompt)
+       --includeDeletions    Include locally deleted files (default: unselected in interactive mode) (Default: false)
 ```
 
 ## `pull`

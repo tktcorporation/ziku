@@ -217,7 +217,10 @@ function fileStatHint(file: FileDiff): string {
 /**
  * push 対象ファイルの選択（+N -M 統計付き）
  */
-export async function selectPushFiles(files: FileDiff[]): Promise<FileDiff[]> {
+export async function selectPushFiles(
+  files: FileDiff[],
+  options?: { preselectDeletions?: boolean },
+): Promise<FileDiff[]> {
   const typeIcon = (type: string) =>
     match(type)
       .with("added", () => pc.green("+"))
@@ -235,7 +238,10 @@ export async function selectPushFiles(files: FileDiff[]): Promise<FileDiff[]> {
         hint: hint || undefined,
       };
     }),
-    initialValues: files.map((f) => f.path),
+    // 削除ファイルはデフォルト未選択（安全側）、--include-deletions で全選択
+    initialValues: options?.preselectDeletions
+      ? files.map((f) => f.path)
+      : files.filter((f) => f.type !== "deleted").map((f) => f.path),
     required: false,
   });
   handleCancel(selected);
@@ -266,9 +272,11 @@ export async function inputPrTitle(defaultTitle?: string): Promise<string> {
 export function generatePrTitle(files: FileDiff[]): string {
   const added = files.filter((f) => f.type === "added");
   const modified = files.filter((f) => f.type === "modified");
+  const deleted = files.filter((f) => f.type === "deleted");
 
   // 変更種別に応じた prefix
-  const prefix = added.length > 0 && modified.length === 0 ? "feat" : "chore";
+  const prefix =
+    added.length > 0 && modified.length === 0 && deleted.length === 0 ? "feat" : "chore";
 
   // ファイルパスからモジュール名（トップディレクトリ）を抽出
   const moduleNames = new Set<string>();
@@ -308,6 +316,7 @@ export async function inputPrBody(defaultBody?: string): Promise<string | undefi
 export function generatePrBody(files: FileDiff[]): string {
   const added = files.filter((f) => f.type === "added");
   const modified = files.filter((f) => f.type === "modified");
+  const deleted = files.filter((f) => f.type === "deleted");
 
   const sections: string[] = ["## Changes", ""];
 
@@ -322,6 +331,14 @@ export function generatePrBody(files: FileDiff[]): string {
   if (modified.length > 0) {
     sections.push("**Modified:**");
     for (const f of modified) {
+      sections.push(`- \`${f.path}\``);
+    }
+    sections.push("");
+  }
+
+  if (deleted.length > 0) {
+    sections.push("**Deleted:**");
+    for (const f of deleted) {
       sections.push(`- \`${f.path}\``);
     }
     sections.push("");
