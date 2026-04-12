@@ -35,9 +35,7 @@
   "customizations": {
     "vscode": {
       "extensions": [
-        "GitHub.copilot",
         "mhutchie.git-graph",
-        "steoates.autoimport",
         "editorconfig.editorconfig",
         "WakaTime.vscode-wakatime",
         "nemesv.copy-file-name"
