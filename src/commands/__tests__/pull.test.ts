@@ -50,17 +50,20 @@ vi.mock("../../utils/hash", () => ({
   hashFiles: vi.fn(),
 }));
 
-vi.mock("../../utils/merge", () => ({
-  classifyFiles: vi.fn(),
-  threeWayMerge: vi.fn(),
-  hasConflictMarkers: vi.fn((content: string) => ({
-    found: content.includes("<<<<<<<"),
-    lines: [],
-  })),
-  asBaseContent: vi.fn((s: string) => s),
-  asLocalContent: vi.fn((s: string) => s),
-  asTemplateContent: vi.fn((s: string) => s),
-}));
+vi.mock("../../utils/merge", async () => {
+  const effectMod = await import("effect");
+  return {
+    classifyFiles: vi.fn(),
+    hasConflictMarkers: vi.fn((content: string) => ({
+      found: content.includes("<<<<<<<"),
+      lines: [],
+    })),
+    // conflict-io の共通ユーティリティ（pull.ts はこれらを経由して merge する）
+    mergeOneFile: vi.fn(),
+    writeFileEnsureDir: vi.fn(() => effectMod.Effect.succeed(undefined)),
+    downloadBaseForMerge: vi.fn(() => effectMod.Effect.succeed(null)),
+  };
+});
 
 vi.mock("../../utils/github", () => ({
   resolveLatestCommitSha: vi.fn(() => Promise.resolve("latest123")),
@@ -108,7 +111,12 @@ const { downloadTemplateToTemp } = await import("../../utils/template");
 const { zikuConfigExists } = await import("../../utils/ziku-config");
 const { loadLock, saveLock } = await import("../../utils/lock");
 const { hashFiles } = await import("../../utils/hash");
-const { classifyFiles, threeWayMerge } = await import("../../utils/merge");
+const {
+  classifyFiles,
+  mergeOneFile,
+  writeFileEnsureDir,
+  downloadBaseForMerge,
+} = await import("../../utils/merge");
 const { log } = await import("../../ui/renderer");
 
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
@@ -118,7 +126,9 @@ const mockLoadLock = vi.mocked(loadLock);
 const mockSaveLock = vi.mocked(saveLock);
 const mockHashFiles = vi.mocked(hashFiles);
 const mockClassifyFiles = vi.mocked(classifyFiles);
-const mockThreeWayMerge = vi.mocked(threeWayMerge);
+const mockMergeOneFile = vi.mocked(mergeOneFile);
+const mockWriteFileEnsureDir = vi.mocked(writeFileEnsureDir);
+const mockDownloadBaseForMerge = vi.mocked(downloadBaseForMerge);
 const mockLog = vi.mocked(log);
 
 const baseZikuConfig = {
@@ -157,6 +167,14 @@ function mockContext(overrides?: {
     }),
     cleanup,
   };
+}
+
+/**
+ * mergeOneFile の mock を設定するヘルパー。
+ * file 名と MergeResult を受け取り、Effect.succeed を返す。
+ */
+function mockMergeResult(file: string, content: string, hasConflicts: boolean) {
+  mockMergeOneFile.mockReturnValueOnce(Effect.succeed({ file, content, hasConflicts }));
 }
 
 describe("pullCommand", () => {
@@ -248,9 +266,11 @@ describe("pullCommand", () => {
         cmd: pullCommand,
       });
 
-      // ファイルが更新されていることを確認
-      const content = vol.readFileSync("/test/.mcp.json", "utf-8");
-      expect(content).toBe('{"new": true}');
+      // writeFileEnsureDir が呼ばれることを確認
+      expect(mockWriteFileEnsureDir).toHaveBeenCalledWith(
+        "/test/.mcp.json",
+        '{"new": true}',
+      );
       expect(mockLog.success).toHaveBeenCalledWith("Updated 1 file(s)");
     });
 
@@ -276,8 +296,10 @@ describe("pullCommand", () => {
         cmd: pullCommand,
       });
 
-      const content = vol.readFileSync("/test/.new-file", "utf-8");
-      expect(content).toBe("new content");
+      expect(mockWriteFileEnsureDir).toHaveBeenCalledWith(
+        "/test/.new-file",
+        "new content",
+      );
       expect(mockLog.success).toHaveBeenCalledWith("Added 1 new file(s)");
     });
 
@@ -287,7 +309,7 @@ describe("pullCommand", () => {
         "/tmp/template/.mcp.json": "template content",
       });
 
-      // baseHashes にエントリがないケース（readBaseContent が undefined を返す）
+      // baseHashes にエントリがないケース
       const { effect } = mockContext({
         lock: {
           ...baseLock,
@@ -306,11 +328,12 @@ describe("pullCommand", () => {
         unchanged: [],
       });
 
-      // base がない場合も threeWayMerge が呼ばれる（空文字列が base として渡される）
-      mockThreeWayMerge.mockReturnValueOnce({
-        content: "<<<<<<< LOCAL\nlocal content\n=======\ntemplate content\n>>>>>>> TEMPLATE",
-        hasConflicts: true,
-      });
+      // mergeOneFile: base なし → コンフリクトマーカー
+      mockMergeResult(
+        ".mcp.json",
+        "<<<<<<< LOCAL\nlocal content\n=======\ntemplate content\n>>>>>>> TEMPLATE",
+        true,
+      );
 
       await (pullCommand.run as any)({
         args: { dir: "/test", force: false },
@@ -318,21 +341,20 @@ describe("pullCommand", () => {
         cmd: pullCommand,
       });
 
-      const content = vol.readFileSync("/test/.mcp.json", "utf-8");
-      expect(content).toContain("<<<<<<< LOCAL");
-      expect(content).toContain("local content");
-      expect(content).toContain("=======");
-      expect(content).toContain("template content");
-      expect(content).toContain(">>>>>>> TEMPLATE");
+      // writeFileEnsureDir にコンフリクトマーカー付き内容が渡される
+      expect(mockWriteFileEnsureDir).toHaveBeenCalledWith(
+        "/test/.mcp.json",
+        expect.stringContaining("<<<<<<< LOCAL"),
+      );
       expect(mockLog.warn).toHaveBeenCalledWith(
         expect.stringContaining("manual resolution needed"),
       );
-      // threeWayMerge にファイルパスが渡される（named params）
-      expect(mockThreeWayMerge).toHaveBeenCalledWith({
-        base: "",
-        local: "local content",
-        template: "template content",
-        filePath: ".mcp.json",
+      // mergeOneFile に正しい引数が渡される
+      expect(mockMergeOneFile).toHaveBeenCalledWith({
+        file: ".mcp.json",
+        targetDir: "/test",
+        templateDir: "/tmp/template",
+        baseTemplateDir: undefined,
       });
     });
 
@@ -513,10 +535,11 @@ describe("pullCommand", () => {
         unchanged: [],
       });
 
-      mockThreeWayMerge.mockReturnValueOnce({
-        content: "<<<<<<< LOCAL\nlocal\n=======\ntemplate\n>>>>>>> TEMPLATE",
-        hasConflicts: true,
-      });
+      mockMergeResult(
+        ".mcp.json",
+        "<<<<<<< LOCAL\nlocal\n=======\ntemplate\n>>>>>>> TEMPLATE",
+        true,
+      );
 
       await (pullCommand.run as any)({
         args: { dir: "/test", force: false, continue: false },
@@ -611,15 +634,10 @@ describe("pullCommand", () => {
       expect(mockLog.success).toHaveBeenCalledWith("All conflicts resolved");
     });
 
-    it("base ダウンロードが template ディレクトリを上書きしない（一時ディレクトリ分離）", async () => {
-      // 背景: downloadTemplateToTemp が常に同じ .ziku-temp を使うため、
-      // base ダウンロード時に template を上書きし、base === template となって
-      // マージが空振り（ローカル内容そのまま）するバグがあった。
-      // ラベル引数で一時ディレクトリを分離することで解決。
+    it("downloadBaseForMerge が baseRef 付きで呼ばれる", async () => {
       vol.fromJSON({
         "/test/settings.json": '{"local": true}',
         "/tmp/template/settings.json": '{"template": true}',
-        "/tmp/base/settings.json": '{"base": true}',
       });
 
       const { effect } = mockContext({
@@ -641,17 +659,13 @@ describe("pullCommand", () => {
         unchanged: [],
       });
 
-      // base ダウンロード用（loadCommandContext が template を解決済みなので、
-      // downloadTemplateToTemp は base 用の1回のみ呼ばれる）
-      mockDownloadTemplateToTemp.mockResolvedValueOnce({
-        templateDir: "/tmp/base",
-        cleanup: vi.fn(),
-      });
+      // downloadBaseForMerge がベースを返す
+      const baseCleanup = vi.fn();
+      mockDownloadBaseForMerge.mockReturnValueOnce(
+        Effect.succeed({ templateDir: "/tmp/base", cleanup: baseCleanup }),
+      );
 
-      mockThreeWayMerge.mockReturnValueOnce({
-        content: '{"merged": true}',
-        hasConflicts: false,
-      });
+      mockMergeResult("settings.json", '{"merged": true}', false);
 
       await (pullCommand.run as any)({
         args: { dir: "/test", force: false },
@@ -659,23 +673,21 @@ describe("pullCommand", () => {
         cmd: pullCommand,
       });
 
-      // threeWayMerge に正しい引数が渡される:
-      // base は base ディレクトリから、template は template ディレクトリから読まれる
-      expect(mockThreeWayMerge).toHaveBeenCalledWith({
-        base: '{"base": true}',
-        local: '{"local": true}',
-        template: '{"template": true}',
-        filePath: "settings.json",
+      // downloadBaseForMerge に正しい引数が渡される
+      expect(mockDownloadBaseForMerge).toHaveBeenCalledWith({
+        source: { owner: "tktcorporation", repo: ".github" },
+        baseRef: "abc123",
+        targetDir: "/test",
       });
-
-      // base ダウンロード時に "base" ラベルが使用されることを確認
-      // loadCommandContext が template を解決するため、downloadTemplateToTemp は base 用の1回のみ
-      expect(mockDownloadTemplateToTemp).toHaveBeenCalledTimes(1);
-      expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
-        "/test",
-        expect.stringContaining("#abc123"),
-        "base",
-      );
+      // mergeOneFile に baseTemplateDir が渡される
+      expect(mockMergeOneFile).toHaveBeenCalledWith({
+        file: "settings.json",
+        targetDir: "/test",
+        templateDir: "/tmp/template",
+        baseTemplateDir: "/tmp/base",
+      });
+      // cleanup が呼ばれる
+      expect(baseCleanup).toHaveBeenCalled();
     });
 
     it("エラー時も cleanup が呼ばれる", async () => {
@@ -713,10 +725,7 @@ describe("pullCommand", () => {
       });
 
       // 自動マージ成功（hasConflicts: false）
-      mockThreeWayMerge.mockReturnValueOnce({
-        content: "auto-merged content",
-        hasConflicts: false,
-      });
+      mockMergeResult(".mcp.json", "auto-merged content", false);
 
       await (pullCommand.run as any)({
         args: { dir: "/test", force: false },
@@ -753,15 +762,13 @@ describe("pullCommand", () => {
       });
 
       // a.json: 自動マージ成功
-      mockThreeWayMerge.mockReturnValueOnce({
-        content: "merged a",
-        hasConflicts: false,
-      });
+      mockMergeResult("a.json", "merged a", false);
       // b.txt: コンフリクト（テキストマーカー）
-      mockThreeWayMerge.mockReturnValueOnce({
-        content: "<<<<<<< LOCAL\nlocal b\n=======\ntemplate b\n>>>>>>> TEMPLATE",
-        hasConflicts: true,
-      });
+      mockMergeResult(
+        "b.txt",
+        "<<<<<<< LOCAL\nlocal b\n=======\ntemplate b\n>>>>>>> TEMPLATE",
+        true,
+      );
 
       await (pullCommand.run as any)({
         args: { dir: "/test", force: false },
@@ -803,14 +810,8 @@ describe("pullCommand", () => {
         unchanged: [],
       });
 
-      mockThreeWayMerge.mockReturnValueOnce({
-        content: "merged a",
-        hasConflicts: false,
-      });
-      mockThreeWayMerge.mockReturnValueOnce({
-        content: "merged b",
-        hasConflicts: false,
-      });
+      mockMergeResult("a.json", "merged a", false);
+      mockMergeResult("b.json", "merged b", false);
 
       await (pullCommand.run as any)({
         args: { dir: "/test", force: false },
@@ -852,12 +853,11 @@ describe("pullCommand", () => {
         unchanged: [],
       });
 
-      // threeWayMerge は構造マージでコンフリクトがある場合、テキストマージにフォールバックし
-      // コンフリクトマーカーを挿入する
-      mockThreeWayMerge.mockReturnValueOnce({
-        content: '<<<<<<< LOCAL\n{"version": "2.0"}\n=======\n{"version": "3.0"}\n>>>>>>> TEMPLATE',
-        hasConflicts: true,
-      });
+      mockMergeResult(
+        "config.json",
+        '<<<<<<< LOCAL\n{"version": "2.0"}\n=======\n{"version": "3.0"}\n>>>>>>> TEMPLATE',
+        true,
+      );
 
       await (pullCommand.run as any)({
         args: { dir: "/test", force: false },
@@ -894,9 +894,80 @@ describe("pullCommand", () => {
         cmd: pullCommand,
       });
 
-      expect(vol.existsSync("/test/.devcontainer")).toBe(true);
-      const content = vol.readFileSync("/test/.devcontainer/config.json", "utf-8");
-      expect(content).toBe('{"key": "value"}');
+      // writeFileEnsureDir がディレクトリ作成含めて呼ばれる
+      expect(mockWriteFileEnsureDir).toHaveBeenCalledWith(
+        "/test/.devcontainer/config.json",
+        '{"key": "value"}',
+      );
+    });
+
+    it("delete/modify conflict: ローカルで削除されたファイルが conflicts にあっても ENOENT にならない", async () => {
+      // ローカルにはファイルが存在しない（削除済み）
+      // テンプレートにはファイルが存在する
+      vol.fromJSON({
+        "/test": null,
+        "/tmp/template/.claude/rules/worktree.md": "template content updated",
+      });
+
+      const { effect } = mockContext({
+        lock: {
+          ...baseLock,
+          baseRef: "abc123def456",
+          baseHashes: {
+            ".claude/rules/worktree.md": "abc123",
+          } as any,
+        },
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [".claude/rules/worktree.md"],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      const baseCleanup = vi.fn();
+      mockDownloadBaseForMerge.mockReturnValueOnce(
+        Effect.succeed({ templateDir: "/tmp/base-template", cleanup: baseCleanup }),
+      );
+
+      // mergeOneFile が delete/modify conflict を処理する
+      // （内部で readFileOrEmpty が空文字列を返す）
+      mockMergeResult(
+        ".claude/rules/worktree.md",
+        "<<<<<<< LOCAL\n=======\ntemplate content updated\n>>>>>>> TEMPLATE",
+        true,
+      );
+
+      // ENOENT で落ちずに正常終了することを検証
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // コンフリクトとして報告されること
+      expect(mockLog.warn).toHaveBeenCalledWith(
+        expect.stringContaining("manual resolution needed"),
+      );
+
+      // mergeOneFile に正しい引数が渡されること
+      expect(mockMergeOneFile).toHaveBeenCalledWith({
+        file: ".claude/rules/worktree.md",
+        targetDir: "/test",
+        templateDir: "/tmp/template",
+        baseTemplateDir: "/tmp/base-template",
+      });
+
+      // writeFileEnsureDir でファイルが書き込まれること（ディレクトリ作成含む）
+      expect(mockWriteFileEnsureDir).toHaveBeenCalledWith(
+        "/test/.claude/rules/worktree.md",
+        expect.stringContaining("<<<<<<< LOCAL"),
+      );
     });
   });
 });

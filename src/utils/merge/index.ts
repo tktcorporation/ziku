@@ -25,3 +25,10 @@ export { asBaseContent, asLocalContent, asTemplateContent } from "./types";
 export { classifyFiles } from "./classify";
 export { hasConflictMarkers } from "./text-merge";
 export { threeWayMerge } from "./three-way-merge";
+export {
+  readFileOrEmpty,
+  writeFileEnsureDir,
+  mergeOneFile,
+  downloadBaseForMerge,
+} from "./conflict-io";
+export type { MergeOneFileInput, MergeOneFileOutput } from "./conflict-io";

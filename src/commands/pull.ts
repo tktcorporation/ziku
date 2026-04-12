@@ -1,9 +1,7 @@
-import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { defineCommand } from "citty";
 import { Effect } from "effect";
-import { dirname, join, resolve } from "pathe";
-import { match, P } from "ts-pattern";
+import { join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
 import type { LockState, TemplateSource } from "../modules/schemas";
@@ -22,14 +20,12 @@ import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 import { hashFiles } from "../utils/hash";
 import {
-  asBaseContent,
-  asLocalContent,
-  asTemplateContent,
   classifyFiles,
+  downloadBaseForMerge,
   hasConflictMarkers,
-  threeWayMerge,
+  mergeOneFile,
+  writeFileEnsureDir,
 } from "../utils/merge";
-import { downloadTemplateToTemp } from "../utils/template";
 
 /**
  * pull コマンドのファイル操作メタデータ。
@@ -258,18 +254,16 @@ export const pullCommand = defineCommand({
 async function applyFiles(files: string[], templateDir: string, targetDir: string): Promise<void> {
   for (const file of files) {
     const content = await readFile(join(templateDir, file), "utf-8");
-    const destPath = join(targetDir, file);
-    const destDir = dirname(destPath);
-    if (!existsSync(destDir)) {
-      await mkdir(destDir, { recursive: true });
-    }
-    await writeFile(destPath, content, "utf-8");
+    await Effect.runPromise(writeFileEnsureDir(join(targetDir, file), content));
   }
 }
 
 /**
  * コンフリクトファイルを 3-way マージで解決する。
  * 未解決のコンフリクトパスを返す。
+ *
+ * ファイル読み込み・マージ・ベースダウンロードは conflict-io の共通ユーティリティを使い、
+ * pull 固有の処理（ローカルへの書き込み・pendingMerge 連携）だけをここで行う。
  */
 async function resolveConflicts(
   conflicts: string[],
@@ -283,56 +277,29 @@ async function resolveConflicts(
   if (conflicts.length === 0) return [];
 
   const unresolvedConflicts: string[] = [];
-  let baseTemplateDir: string | undefined;
-  let baseCleanup: (() => void) | undefined;
 
-  // ts-pattern でソース種別に応じたベースダウンロードを分岐
-  if (ctx.lock.baseRef) {
-    const downloadResult = await match(ctx.source)
-      .with({ owner: P.string, repo: P.string }, (ghSource) => {
-        return Effect.runPromise(
-          Effect.tryPromise(() => {
-            log.info(`Downloading base version (${ctx.lock.baseRef?.slice(0, 7)}...) for merge...`);
-            return downloadTemplateToTemp(
-              ctx.targetDir,
-              `gh:${ghSource.owner}/${ghSource.repo}#${ctx.lock.baseRef}`,
-              "base",
-            );
-          }).pipe(
-            Effect.orElseSucceed(() => {
-              log.warn("Could not download base version. Falling back to 2-way conflict markers.");
-              return null;
-            }),
-          ),
-        );
-      })
-      .with({ path: P.string }, () => Promise.resolve(null))
-      .exhaustive();
-
-    if (downloadResult) {
-      baseTemplateDir = downloadResult.templateDir;
-      baseCleanup = downloadResult.cleanup;
-    }
-  }
+  const baseResult = await Effect.runPromise(
+    downloadBaseForMerge({
+      source: ctx.source,
+      baseRef: ctx.lock.baseRef,
+      targetDir: ctx.targetDir,
+    }),
+  );
 
   await withFinally(
     async () => {
       for (const file of conflicts) {
-        const localContent = await readFile(join(ctx.targetDir, file), "utf-8");
-        const templateContent = await readFile(join(ctx.templateDir, file), "utf-8");
+        const result = await Effect.runPromise(
+          mergeOneFile({
+            file,
+            targetDir: ctx.targetDir,
+            templateDir: ctx.templateDir,
+            baseTemplateDir: baseResult?.templateDir,
+          }),
+        );
 
-        let baseContent = "";
-        if (baseTemplateDir && existsSync(join(baseTemplateDir, file))) {
-          baseContent = await readFile(join(baseTemplateDir, file), "utf-8");
-        }
+        await Effect.runPromise(writeFileEnsureDir(join(ctx.targetDir, file), result.content));
 
-        const result = threeWayMerge({
-          base: asBaseContent(baseContent),
-          local: asLocalContent(localContent),
-          template: asTemplateContent(templateContent),
-          filePath: file,
-        });
-        await writeFile(join(ctx.targetDir, file), result.content, "utf-8");
         if (result.hasConflicts) {
           unresolvedConflicts.push(file);
           log.warn(`Conflict in ${pc.cyan(file)} — manual resolution needed`);
@@ -345,7 +312,7 @@ async function resolveConflicts(
         log.warn("Some files have conflicts. Resolve them, then run `ziku pull --continue`");
       }
     },
-    () => baseCleanup?.(),
+    () => baseResult?.cleanup?.(),
   );
 
   return unresolvedConflicts;
