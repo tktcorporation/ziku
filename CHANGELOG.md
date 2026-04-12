@@ -1,5 +1,21 @@
 # @tktco/ziku
 
+## 1.1.0
+
+### Minor Changes
+
+- [#56](https://github.com/tktcorporation/ziku/pull/56) [`c75f675`](https://github.com/tktcorporation/ziku/commit/c75f675e3d5bc20ffc70e642ca254253ef2c2a05) Thanks [@tktcorporation](https://github.com/tktcorporation)! - feat: ziku push でファイル削除をテンプレートに同期する
+
+  ローカルで削除されたファイルを `ziku push` でテンプレートに反映できるようになりました。
+  ファイル選択 UI に削除対象が表示され（デフォルト未選択）、GitHub PR またはローカルテンプレートへの削除同期が可能です。
+  `--include-deletions` フラグで削除ファイルをデフォルト選択にできます。
+
+### Patch Changes
+
+- [#53](https://github.com/tktcorporation/ziku/pull/53) [`070d8d3`](https://github.com/tktcorporation/ziku/commit/070d8d3dc720c87b0a9c55827b612726b9720dc0) Thanks [@tktcorporation](https://github.com/tktcorporation)! - fix: 3-way merge のサイレント上書き・内容二重化を修正 ([#51](https://github.com/tktcorporation/ziku/issues/51))
+
+  `diff` ライブラリの `applyPatch` を `node-diff3` の `diff3Merge` に置換し、git merge-file と同等の conflict 検出を実現。
+
 ## 1.0.4
 
 ### Patch Changes
