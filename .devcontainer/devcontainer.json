@@ -93,13 +93,14 @@
     // 対象:
     //   .pnpm-store: pnpm のパッケージキャッシュ (named volume)
     //   ~/.local/share/mise: mise のインストール済みツール (named volume)
+    //   ~/.local/share/pnpm: pnpm のツールキャッシュ（oxfmt 等）
     //   ~/.local/state/mise: mise trust の trusted-configs 保存先
     //   ~/.cache/mise: mise のダウンロードキャッシュ
     //   ~/.claude: Claude Code データ全体 (named volume)
     "fix-volume-permissions": [
       "bash",
       "-c",
-      "set -e; sudo mkdir -p ~/.local/state/mise ~/.cache/mise && sudo chown -R $(whoami) .pnpm-store ~/.local/share/mise ~/.local/state/mise ~/.cache/mise ~/.claude"
+      "set -e; sudo mkdir -p ~/.local/state/mise ~/.cache/mise ~/.local/share/pnpm && sudo chown -R $(whoami) .pnpm-store ~/.local/share/mise ~/.local/share/pnpm ~/.local/state/mise ~/.cache/mise ~/.claude"
     ]
   },
   "updateContentCommand": {
