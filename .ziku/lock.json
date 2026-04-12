@@ -36,9 +36,7 @@
     ".github/workflows/label.yml": "cbe93885e3fcba84cff42e6607cf26727037ed2820c4f07a590ef3ccee68e694"
   },
   "pendingMerge": {
-    "conflicts": [
-      ".claude/rules/pr-workflow.md"
-    ],
+    "conflicts": [".claude/rules/pr-workflow.md"],
     "templateHashes": {
       ".mcp.json": "bf80bacd0dd7ac8444872085a06e05e99ba3578666f7e457ea97ca6873bdba39",
       ".mise.toml": "fbd353f4b62aa51d3e1c5f53ce9b7682f52dec72cb7db20441eb8f535bc037e0",
