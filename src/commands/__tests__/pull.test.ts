@@ -306,7 +306,6 @@ describe("pullCommand", () => {
       mockThreeWayMerge.mockReturnValueOnce({
         content: "<<<<<<< LOCAL\nlocal content\n=======\ntemplate content\n>>>>>>> TEMPLATE",
         hasConflicts: true,
-        conflictDetails: [],
       });
 
       await (pullCommand.run as any)({
@@ -506,7 +505,6 @@ describe("pullCommand", () => {
       mockThreeWayMerge.mockReturnValueOnce({
         content: "<<<<<<< LOCAL\nlocal\n=======\ntemplate\n>>>>>>> TEMPLATE",
         hasConflicts: true,
-        conflictDetails: [],
       });
 
       await (pullCommand.run as any)({
@@ -641,7 +639,6 @@ describe("pullCommand", () => {
       mockThreeWayMerge.mockReturnValueOnce({
         content: '{"merged": true}',
         hasConflicts: false,
-        conflictDetails: [],
       });
 
       await (pullCommand.run as any)({
@@ -706,7 +703,6 @@ describe("pullCommand", () => {
       mockThreeWayMerge.mockReturnValueOnce({
         content: "auto-merged content",
         hasConflicts: false,
-        conflictDetails: [],
       });
 
       await (pullCommand.run as any)({
@@ -746,13 +742,11 @@ describe("pullCommand", () => {
       mockThreeWayMerge.mockReturnValueOnce({
         content: "merged a",
         hasConflicts: false,
-        conflictDetails: [],
       });
       // b.txt: コンフリクト（テキストマーカー）
       mockThreeWayMerge.mockReturnValueOnce({
         content: "<<<<<<< LOCAL\nlocal b\n=======\ntemplate b\n>>>>>>> TEMPLATE",
         hasConflicts: true,
-        conflictDetails: [],
       });
 
       await (pullCommand.run as any)({
@@ -797,12 +791,10 @@ describe("pullCommand", () => {
       mockThreeWayMerge.mockReturnValueOnce({
         content: "merged a",
         hasConflicts: false,
-        conflictDetails: [],
       });
       mockThreeWayMerge.mockReturnValueOnce({
         content: "merged b",
         hasConflicts: false,
-        conflictDetails: [],
       });
 
       await (pullCommand.run as any)({
@@ -849,7 +841,6 @@ describe("pullCommand", () => {
       mockThreeWayMerge.mockReturnValueOnce({
         content: '<<<<<<< LOCAL\n{"version": "2.0"}\n=======\n{"version": "3.0"}\n>>>>>>> TEMPLATE',
         hasConflicts: true,
-        conflictDetails: [],
       });
 
       await (pullCommand.run as any)({

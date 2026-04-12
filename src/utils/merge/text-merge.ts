@@ -53,22 +53,14 @@ export function textThreeWayMerge(
   // コンフリクトとしてマークし、壊れたファイルの生成を防ぐ。
   if (!hasConflicts && filePath && !validateStructuredContent(content, filePath)) {
     return {
-      content: [
-        "<<<<<<< LOCAL",
-        local,
-        "=======",
-        template,
-        ">>>>>>> TEMPLATE",
-      ].join("\n"),
+      content: ["<<<<<<< LOCAL", local, "=======", template, ">>>>>>> TEMPLATE"].join("\n"),
       hasConflicts: true,
-      conflictDetails: [],
     };
   }
 
   return {
     content,
     hasConflicts,
-    conflictDetails: [],
   };
 }
 
