@@ -111,12 +111,8 @@ const { downloadTemplateToTemp } = await import("../../utils/template");
 const { zikuConfigExists } = await import("../../utils/ziku-config");
 const { loadLock, saveLock } = await import("../../utils/lock");
 const { hashFiles } = await import("../../utils/hash");
-const {
-  classifyFiles,
-  mergeOneFile,
-  writeFileEnsureDir,
-  downloadBaseForMerge,
-} = await import("../../utils/merge");
+const { classifyFiles, mergeOneFile, writeFileEnsureDir, downloadBaseForMerge } =
+  await import("../../utils/merge");
 const { log } = await import("../../ui/renderer");
 
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
@@ -267,10 +263,7 @@ describe("pullCommand", () => {
       });
 
       // writeFileEnsureDir が呼ばれることを確認
-      expect(mockWriteFileEnsureDir).toHaveBeenCalledWith(
-        "/test/.mcp.json",
-        '{"new": true}',
-      );
+      expect(mockWriteFileEnsureDir).toHaveBeenCalledWith("/test/.mcp.json", '{"new": true}');
       expect(mockLog.success).toHaveBeenCalledWith("Updated 1 file(s)");
     });
 
@@ -296,10 +289,7 @@ describe("pullCommand", () => {
         cmd: pullCommand,
       });
 
-      expect(mockWriteFileEnsureDir).toHaveBeenCalledWith(
-        "/test/.new-file",
-        "new content",
-      );
+      expect(mockWriteFileEnsureDir).toHaveBeenCalledWith("/test/.new-file", "new content");
       expect(mockLog.success).toHaveBeenCalledWith("Added 1 new file(s)");
     });
 

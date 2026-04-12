@@ -14,7 +14,10 @@ import { tmpdir } from "node:os";
 
 /** テストごとにユニークな一時ディレクトリを作成 */
 async function createTempDir(label: string): Promise<string> {
-  const dir = join(tmpdir(), `ziku-test-conflict-io-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const dir = join(
+    tmpdir(),
+    `ziku-test-conflict-io-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  );
   await mkdir(dir, { recursive: true });
   return dir;
 }
