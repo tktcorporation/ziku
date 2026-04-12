@@ -24,6 +24,10 @@
           {
             "type": "command",
             "command": "if echo \"$CLAUDE_TOOL_INPUT\" | grep -qE 'git\\s+checkout\\s+--\\s+\\.|git\\s+restore\\s+\\.|git\\s+reset\\s+--hard|git\\s+clean\\s+-[a-z]*f|jj\\s+restore\\s+--(from|to|changes-in)'; then echo 'BLOCKED: 全ファイル対象の revert/reset は他プロセスの変更を巻き込む。特定ファイルを指定するか、ワークスペース (jj workspace add / git worktree add) を作成して作業すること。' >&2; exit 2; fi"
+          },
+          {
+            "type": "command",
+            "command": "if echo \"$CLAUDE_TOOL_INPUT\" | grep -qE 'git\\s+worktree\\s+add'; then if ! echo \"$CLAUDE_TOOL_INPUT\" | grep -qE 'git\\s+worktree\\s+add\\s+\\.claude/worktrees/'; then echo 'BLOCKED: worktree は .claude/worktrees/ 配下に作成すること。例: git worktree add .claude/worktrees/<タスク名> -b <ブランチ名> origin/master。または EnterWorktree ツールを使うこと。' >&2; exit 2; fi; fi"
           }
         ]
       }
@@ -91,13 +95,26 @@
     "wealth-management@financial-services-plugins": true,
     "lseg@financial-services-plugins": true,
     "sp-global@financial-services-plugins": true,
-    "sentry@claude-plugins-official": true
+    "sentry@claude-plugins-official": true,
+    "intercom@claude-plugins-official": true
   },
   "extraKnownMarketplaces": {
     "anthropic-agent-skills": {
       "source": {
         "source": "github",
         "repo": "anthropics/skills"
+      }
+    },
+    "financial-services-plugins": {
+      "source": {
+        "source": "github",
+        "repo": "anthropics/financial-services-plugins"
+      }
+    },
+    "knowledge-work-plugins": {
+      "source": {
+        "source": "github",
+        "repo": "anthropics/knowledge-work-plugins"
       }
     }
   },

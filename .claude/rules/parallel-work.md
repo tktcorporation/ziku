@@ -30,23 +30,18 @@
 
 ## ワークスペースの作成方法
 
-プロジェクトルート直下の `.worktrees/` ディレクトリ内にワークスペースを作成する。
-`.worktrees/` は `.gitignore` で除外済みのため `jj status` / `git status` に表示されない。
-また devcontainer.json で VS Code のファイル監視・検索からも除外済み。
-
-### jj の場合（推奨）
+**作業対象の git リポジトリの `.claude/worktrees/` に作成する。** 詳細は `worktree.md` を参照。
 
 ```bash
-jj workspace add .worktrees/<タスク概要> --name ws-<タスク概要>
-cd .worktrees/<タスク概要>
+# 推奨: EnterWorktree ツール（事前に git fetch origin master すること）
+EnterWorktree(name: "タスク概要")
+
+# 手動の場合
+git fetch origin master
+git worktree add .claude/worktrees/<タスク概要> -b <ブランチ名> origin/master
 ```
 
-### git の場合（フォールバック）
-
-```bash
-git worktree add .worktrees/<タスク概要> -b wt/<タスク概要>
-cd .worktrees/<タスク概要>
-```
+> hook により `.claude/worktrees/` 以外へのworktree作成はブロックされる。
 
 ### 依存関係のインストール
 
@@ -79,10 +74,10 @@ cd .worktrees/<タスク概要>
 ```bash
 # jj の場合
 jj workspace forget ws-<タスク概要>
-rm -rf .worktrees/<タスク概要>
+rm -rf .claude/worktrees/<タスク概要>
 
 # git の場合
-git worktree remove .worktrees/<タスク概要>
+git worktree remove .claude/worktrees/<タスク概要>
 ```
 
 ---
