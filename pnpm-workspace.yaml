@@ -1,4 +1,5 @@
 # 公開から3日未満のパッケージバージョンはインストール対象から除外する。
 # 新バージョン公開直後のサプライチェーン攻撃（悪意ある publish）を緩和するため。
-# ref: https://docs.pnpm.io/npmrc#min-release-age
-min-release-age=3 days
+# ref: https://pnpm.io/settings#minimumreleaseage
+# 3 days = 4320 minutes
+minimumReleaseAge: 4320

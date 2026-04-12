@@ -32,15 +32,6 @@ jobs:
       - name: Install Dependencies
         run: pnpm install --frozen-lockfile
 
-      # setup-node が registry-url 設定時に .npmrc へ before=null を書き込む。
-      # npm 11.x (Node 24) はこれを不正な日付値として拒否するため除去する。
-      - name: Fix .npmrc before=null
-        run: |
-          for f in "$NPM_CONFIG_USERCONFIG" .npmrc "$HOME/.npmrc"; do
-            [ -f "$f" ] && sed -i '/^before=/d' "$f" || true
-          done
-          echo "npm_config_before=" >> "$GITHUB_ENV"
-
       - name: Create Release PR or Publish
         id: changesets
         uses: changesets/action@v1
