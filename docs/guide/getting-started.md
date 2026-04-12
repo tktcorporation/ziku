@@ -25,8 +25,8 @@ This creates `.ziku/ziku.jsonc` with default patterns. Edit it to match your nee
     ".claude/rules/*.md",
     ".claude/skills/**",
     ".mcp.json",
-    ".devcontainer/**",
-  ],
+    ".devcontainer/**"
+  ]
 }
 ```
 

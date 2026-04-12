@@ -183,6 +183,7 @@ vi.mock("../../utils/merge", () => ({
     conflicts: [],
     newFiles: [],
     deletedFiles: [],
+    deletedLocally: [],
     unchanged: [],
   })),
   threeWayMerge: vi.fn(() => ({ content: "merged", hasConflicts: false })),
@@ -830,6 +831,7 @@ describe("E2E: multi-scenario tests", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedLocally: [],
         unchanged: [".mcp.json", ".claude/rules/style.md"],
       });
       mockDetectDiff.mockResolvedValueOnce({
@@ -891,6 +893,7 @@ describe("E2E: multi-scenario tests", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [".claude/rules/testing.md"],
+        deletedLocally: [],
         unchanged: [".mcp.json", ".claude/rules/style.md"],
       });
 
@@ -962,6 +965,7 @@ describe("E2E: multi-scenario tests", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [".claude/rules/deprecated-a.md", ".claude/rules/deprecated-b.md"],
+        deletedLocally: [],
         unchanged: [".mcp.json", ".claude/rules/style.md"],
       });
 
@@ -1030,6 +1034,7 @@ describe("E2E: multi-scenario tests", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: ["config/old.json"],
+        deletedLocally: [],
         unchanged: [".mcp.json", ".claude/rules/style.md"],
       });
 

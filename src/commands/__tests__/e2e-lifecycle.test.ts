@@ -146,6 +146,7 @@ vi.mock("../../utils/merge", () => ({
     conflicts: [],
     newFiles: [],
     deletedFiles: [],
+    deletedLocally: [],
     unchanged: [],
   })),
   threeWayMerge: vi.fn(() => ({ content: "merged", hasConflicts: false })),
@@ -428,6 +429,7 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
+      deletedLocally: [],
       unchanged: [".claude/rules/style.md", ".mcp.json"],
     });
     mockDetectDiff.mockResolvedValueOnce({
@@ -480,6 +482,7 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
+      deletedLocally: [],
       unchanged: [".claude/rules/style.md", ".claude/rules/testing.md", ".mcp.json"],
     });
     mockDetectDiff.mockResolvedValueOnce({
@@ -548,6 +551,7 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
+      deletedLocally: [],
       unchanged: [".claude/rules/style.md", ".mcp.json"],
     });
 
@@ -722,6 +726,7 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
+      deletedLocally: [],
       unchanged: [".claude/rules/style.md", ".mcp.json"],
     });
     mockDetectDiff.mockResolvedValueOnce({
@@ -767,6 +772,7 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
+      deletedLocally: [],
       unchanged: [".claude/rules/style.md", ".claude/rules/testing.md", ".mcp.json"],
     });
     mockDetectDiff.mockResolvedValueOnce({
@@ -800,6 +806,7 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
+      deletedLocally: [],
       unchanged: [".claude/rules/style.md", ".mcp.json"],
     });
 
@@ -872,6 +879,7 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
       conflicts: [],
       newFiles: [],
       deletedFiles: [".eslintrc.json"],
+      deletedLocally: [],
       unchanged: [".claude/rules/style.md", ".claude/rules/testing.md", ".mcp.json"],
     });
 
@@ -904,6 +912,7 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
       conflicts: [],
       newFiles: [],
       deletedFiles: [".eslintrc.json"],
+      deletedLocally: [],
       unchanged: [".claude/rules/style.md", ".claude/rules/testing.md", ".mcp.json"],
     });
 

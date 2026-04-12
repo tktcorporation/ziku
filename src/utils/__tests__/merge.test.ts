@@ -77,6 +77,41 @@ describe("merge", () => {
       expect(result.localOnly).toContain("my-file.txt");
     });
 
+    it("ローカルで削除されたファイルを deletedLocally に分類する", () => {
+      const result = classifyFiles({
+        baseHashes: { "removed.txt": "abc" },
+        localHashes: {},
+        templateHashes: { "removed.txt": "abc" },
+      });
+
+      expect(result.deletedLocally).toContain("removed.txt");
+      // 他のカテゴリに入っていないことを確認
+      expect(result.localOnly).not.toContain("removed.txt");
+      expect(result.conflicts).not.toContain("removed.txt");
+      expect(result.deletedFiles).not.toContain("removed.txt");
+    });
+
+    it("テンプレートが更新されたがローカルで削除されたファイルも deletedLocally に分類する", () => {
+      const result = classifyFiles({
+        baseHashes: { "removed.txt": "abc" },
+        localHashes: {},
+        templateHashes: { "removed.txt": "def" },
+      });
+
+      expect(result.deletedLocally).toContain("removed.txt");
+    });
+
+    it("base とテンプレート両方で削除されたファイルは deletedFiles に分類する（deletedLocally ではない）", () => {
+      const result = classifyFiles({
+        baseHashes: { "removed.txt": "abc" },
+        localHashes: {},
+        templateHashes: {},
+      });
+
+      expect(result.deletedFiles).toContain("removed.txt");
+      expect(result.deletedLocally).not.toContain("removed.txt");
+    });
+
     it("両方が同じ内容に変更された場合は unchanged に分類する", () => {
       const result = classifyFiles({
         baseHashes: { "file.txt": "old" },

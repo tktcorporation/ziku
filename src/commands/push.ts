@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { defineCommand } from "citty";
 import { Effect } from "effect";
 import { dirname, join, resolve } from "pathe";
@@ -57,6 +57,7 @@ export const pushLifecycle: CommandLifecycle = {
 
 interface PushTarget {
   readonly files: Array<{ path: string; content: string }>;
+  readonly deletions: Array<{ path: string }>;
   readonly pushableFiles: FileDiff[];
 }
 
@@ -110,6 +111,7 @@ function pushToGitHub(
         title,
         target.pushableFiles,
         files,
+        target.deletions,
       );
 
       if (!args.yes) {
@@ -126,6 +128,7 @@ function pushToGitHub(
           owner: ghSource.owner,
           repo: ghSource.repo,
           files,
+          deletions: target.deletions,
           title,
           body,
           baseBranch,
@@ -136,7 +139,7 @@ function pushToGitHub(
       log.message(
         [
           `${pc.dim("To")} ${pc.bold(`${ghSource.owner}/${ghSource.repo}`)}`,
-          `  ${ctx.lock.baseRef ? `${pc.dim(ctx.lock.baseRef.slice(0, 7))}..` : ""}${pc.green(result.branch)}  ${pc.dim(`(${files.length} file${files.length === 1 ? "" : "s"} changed)`)}`,
+          `  ${ctx.lock.baseRef ? `${pc.dim(ctx.lock.baseRef.slice(0, 7))}..` : ""}${pc.green(result.branch)}  ${pc.dim(`(${files.length + target.deletions.length} file${files.length + target.deletions.length === 1 ? "" : "s"} changed)`)}`,
           "",
           `  ${pc.bold(`PR #${result.number}`)}  ${pc.cyan(result.url)}`,
         ].join("\n"),
@@ -166,9 +169,10 @@ function pushToLocal(
         localSource.path,
         "(local)",
         "",
-        `push ${target.files.length} file(s)`,
+        `push ${target.files.length + target.deletions.length} file(s)`,
         target.pushableFiles,
         target.files,
+        target.deletions,
       );
 
       if (!args.yes) {
@@ -191,6 +195,15 @@ function pushToLocal(
         log.message(`  ${pc.green("+")} ${file.path}`);
       }
 
+      // 削除対象ファイルを処理
+      for (const file of target.deletions) {
+        const destPath = join(localSource.path, file.path);
+        if (existsSync(destPath)) {
+          await rm(destPath, { force: true });
+          log.message(`  ${pc.red("-")} ${file.path}`);
+        }
+      }
+
       // lock.json の baseHashes を更新（テンプレート側のハッシュを再計算）
       const patterns = {
         include: ctx.config.include,
@@ -199,7 +212,8 @@ function pushToLocal(
       const baseHashes = await hashFiles(localSource.path, patterns.include, patterns.exclude);
       await saveLock(projectDir, { ...ctx.lock, baseHashes });
 
-      log.success(`Pushed ${target.files.length} file(s) to ${pc.cyan(localSource.path)}`);
+      const totalCount = target.files.length + target.deletions.length;
+      log.success(`Pushed ${totalCount} file(s) to ${pc.cyan(localSource.path)}`);
       outro("Push complete");
     },
     catch: (e) => (e instanceof ZikuError ? e : new ZikuError("Push failed", String(e))),
@@ -215,10 +229,12 @@ function logPushSummary(
   title: string,
   pushableFiles: FileDiff[],
   files: Array<{ path: string; content: string }>,
+  deletions: Array<{ path: string }> = [],
 ): void {
   const fileLines: string[] = [];
   for (const pf of pushableFiles) {
-    if (!files.some((f) => f.path === pf.path)) continue;
+    if (!files.some((f) => f.path === pf.path) && !deletions.some((d) => d.path === pf.path))
+      continue;
     const stat = formatFileStat(pf);
     const icon =
       pf.type === "added" ? pc.green("+") : pf.type === "modified" ? pc.yellow("~") : pc.red("-");
@@ -290,6 +306,11 @@ export const pushCommand = defineCommand({
       type: "string",
       description: "Comma-separated file paths to include (skips file selection prompt)",
     },
+    includeDeletions: {
+      type: "boolean",
+      description: "Include locally deleted files (default: unselected in interactive mode)",
+      default: false,
+    },
   },
   async run({ args }) {
     intro("push");
@@ -341,6 +362,7 @@ export const pushCommand = defineCommand({
 
         for (const file of classification.localOnly) pushableFilePaths.add(file);
         for (const file of classification.conflicts) pushableFilePaths.add(file);
+        for (const file of classification.deletedLocally) pushableFilePaths.add(file);
 
         if (classification.autoUpdate.length > 0) {
           log.info(
@@ -378,7 +400,9 @@ export const pushCommand = defineCommand({
       );
 
       let pushableFiles = diff.files.filter(
-        (f) => (f.type === "added" || f.type === "modified") && pushableFilePaths.has(f.path),
+        (f) =>
+          (f.type === "added" || f.type === "modified" || f.type === "deleted") &&
+          pushableFilePaths.has(f.path),
       );
 
       if (pushableFiles.length === 0) {
@@ -413,31 +437,39 @@ export const pushCommand = defineCommand({
         log.info(`${pushableFiles.length} file(s) selected via --files`);
       } else {
         log.step("Selecting files...");
-        pushableFiles = await selectPushFiles(pushableFiles);
+        pushableFiles = await selectPushFiles(pushableFiles, {
+          preselectDeletions: args.includeDeletions as boolean,
+        });
         if (pushableFiles.length === 0) {
           log.info("No files selected. Cancelled.");
           return;
         }
       }
 
-      const files = pushableFiles.map((f) => ({
-        path: f.path,
-        content: mergedContents.get(f.path) ?? f.localContent ?? "",
-      }));
+      const files = pushableFiles
+        .filter((f) => f.type !== "deleted")
+        .map((f) => ({
+          path: f.path,
+          content: mergedContents.get(f.path) ?? f.localContent ?? "",
+        }));
+
+      const deletions = pushableFiles
+        .filter((f) => f.type === "deleted")
+        .map((f) => ({ path: f.path }));
 
       // ─── 分岐: ソース���別に応じた push 戦略 (ts-pattern + Effect) ───
 
       await runCommandEffect(
         match(source)
           .with({ owner: P.string, repo: P.string }, (ghSource) =>
-            pushToGitHub(ghSource, { files, pushableFiles }, ctx, {
+            pushToGitHub(ghSource, { files, deletions, pushableFiles }, ctx, {
               message: args.message as string | undefined,
               edit: args.edit as boolean,
               yes: args.yes as boolean,
             }),
           )
           .with({ path: P.string }, (localSource) =>
-            pushToLocal(localSource, { files, pushableFiles }, ctx, targetDir, {
+            pushToLocal(localSource, { files, deletions, pushableFiles }, ctx, targetDir, {
               yes: args.yes as boolean,
             }),
           )

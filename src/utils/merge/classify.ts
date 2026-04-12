@@ -15,6 +15,7 @@ export function classifyFiles(opts: ClassifyOptions): FileClassification {
     conflicts: [],
     newFiles: [],
     deletedFiles: [],
+    deletedLocally: [],
     unchanged: [],
   };
 
@@ -35,6 +36,9 @@ export function classifyFiles(opts: ClassifyOptions): FileClassification {
     } else if (base !== undefined && template === undefined) {
       // base にはあるがテンプレートで削除された
       result.deletedFiles.push(file);
+    } else if (base !== undefined && local === undefined && template !== undefined) {
+      // base にあるがローカルで削除された（テンプレートにはまだ存在）→ push で削除可能
+      result.deletedLocally.push(file);
     } else if (base === undefined && template === undefined && local !== undefined) {
       // ローカルのみに存在（base にもテンプレートにもない）
       result.localOnly.push(file);

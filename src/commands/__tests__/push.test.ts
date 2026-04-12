@@ -61,6 +61,7 @@ vi.mock("../../utils/merge", () => ({
     conflicts: [],
     newFiles: [],
     deletedFiles: [],
+    deletedLocally: [],
     unchanged: [],
   })),
   threeWayMerge: vi.fn(() => ({
@@ -207,6 +208,7 @@ function setupPushableFiles(
     conflicts: [],
     newFiles: [],
     deletedFiles: [],
+    deletedLocally: [],
     unchanged: [],
   });
 
@@ -705,6 +707,7 @@ describe("pushCommand", () => {
         conflicts: ["file.txt"],
         newFiles: [],
         deletedFiles: [],
+        deletedLocally: [],
         unchanged: [],
       });
 
@@ -755,6 +758,7 @@ describe("pushCommand", () => {
         conflicts: ["file.txt"],
         newFiles: [],
         deletedFiles: [],
+        deletedLocally: [],
         unchanged: [],
       });
 
@@ -811,6 +815,7 @@ describe("pushCommand", () => {
         conflicts: ["file.txt"],
         newFiles: [],
         deletedFiles: [],
+        deletedLocally: [],
         unchanged: [],
       });
 
@@ -917,6 +922,7 @@ describe("pushCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedLocally: [],
         unchanged: ["file.txt"],
       });
 
@@ -966,6 +972,7 @@ describe("pushCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedLocally: [],
         unchanged: [],
       });
 

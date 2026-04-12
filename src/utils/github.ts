@@ -6,6 +6,8 @@ export interface PushOptions {
   owner: string;
   repo: string;
   files: Array<{ path: string; content: string }>;
+  /** テンプレートから削除するファイル（PR にファイル削除コミットを含める） */
+  deletions?: Array<{ path: string }>;
   title: string;
   body?: string;
   baseBranch?: string;
@@ -88,6 +90,23 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
       branch: branchName,
       sha: shaMap.get(file.path),
     });
+  }
+
+  // 7b. ファイルを削除
+  if (options.deletions) {
+    for (const file of options.deletions) {
+      const fileSha = shaMap.get(file.path);
+      if (fileSha) {
+        await octokit.repos.deleteFile({
+          owner: forkOwner,
+          repo: forkRepo,
+          path: file.path,
+          message: `Delete ${file.path}`,
+          sha: fileSha,
+          branch: branchName,
+        });
+      }
+    }
   }
 
   // 8. PR を作成
