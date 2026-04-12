@@ -63,8 +63,10 @@ export interface MergeOneFileOutput extends MergeResult {
  * 1ファイルの 3-way マージを実行する。
  *
  * local/template/base の3バージョンを読み込み、threeWayMerge に渡す。
- * ローカルやベースにファイルがない場合（delete/modify conflict）は
- * readFileOrEmpty により空文字列がフォールバックとして使われる。
+ * - local, base: ファイルがない場合は readFileOrEmpty で空文字列にフォールバック
+ *   （delete/modify conflict でローカルが削除されているケースに対応）
+ * - template: 必ず存在する前提（classifyFiles が検出済み）。不在時は orDie でクラッシュ。
+ *   テンプレートファイルがないのに conflict に分類されることは classifyFiles の不変条件違反。
  */
 export const mergeOneFile = (input: MergeOneFileInput): Effect.Effect<MergeOneFileOutput> =>
   Effect.gen(function* () {
