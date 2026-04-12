@@ -13,6 +13,7 @@ import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { match } from "ts-pattern";
 import type { FileDiff, OverwriteStrategy } from "../modules/schemas";
+import { calculateDiffStats, formatStats } from "./diff-view";
 
 /** ユーザーが Ctrl+C でキャンセルした場合の統一処理 */
 function handleCancel(value: unknown): void {
@@ -186,32 +187,11 @@ export async function inputTemplateSource(defaultValue?: string): Promise<string
 
 // ─── push ─────────────────────────────────────────────────────
 
-/**
- * ファイルの行数統計を "+N -M" 形式で返す（hint テキスト用）。
- */
+/** unified diff ベースで正確な変更行数を算出する（hint テキスト用） */
 function fileStatHint(file: FileDiff): string {
-  let additions = 0;
-  let deletions = 0;
-
-  if (file.type === "added" && file.localContent) {
-    additions = file.localContent.split("\n").length;
-  } else if (file.type === "deleted" && file.templateContent) {
-    deletions = file.templateContent.split("\n").length;
-  } else if (file.type === "modified") {
-    const local = file.localContent?.split("\n").length ?? 0;
-    const tmpl = file.templateContent?.split("\n").length ?? 0;
-    additions = Math.max(0, local - tmpl);
-    deletions = Math.max(0, tmpl - local);
-    if (additions === 0 && deletions === 0 && file.localContent !== file.templateContent) {
-      additions = 1;
-      deletions = 1;
-    }
-  }
-
-  const parts: string[] = [];
-  if (additions > 0) parts.push(pc.green(`+${additions}`));
-  if (deletions > 0) parts.push(pc.red(`-${deletions}`));
-  return parts.join(" ");
+  const stats = calculateDiffStats(file);
+  if (stats.additions === 0 && stats.deletions === 0) return "";
+  return formatStats(stats);
 }
 
 /**
