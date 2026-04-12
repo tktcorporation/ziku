@@ -1373,4 +1373,150 @@ line2`;
       expect(result.content).toContain(">>>>>>> TEMPLATE");
     });
   });
+
+  describe("3-way merge #51 回帰テスト: サイレント上書き・内容二重化の防止", () => {
+    it("settings.json: ローカルの true がテンプレートの false で上書きされない", () => {
+      // #51 の再現: base/template で false、local で true に変更
+      // テンプレートが他の部分（新キー追加等）を変更している場合でも
+      // ローカルの値変更が保持されること
+      const base = JSON.stringify(
+        {
+          enabledPlugins: {
+            "plugin-a": false,
+            "plugin-b": false,
+            "plugin-c": false,
+          },
+        },
+        null,
+        2,
+      );
+      const local = JSON.stringify(
+        {
+          enabledPlugins: {
+            "plugin-a": true,
+            "plugin-b": true,
+            "plugin-c": false,
+          },
+        },
+        null,
+        2,
+      );
+      const template = JSON.stringify(
+        {
+          enabledPlugins: {
+            "plugin-a": false,
+            "plugin-b": false,
+            "plugin-c": false,
+            "plugin-d": false,
+          },
+        },
+        null,
+        2,
+      );
+
+      const result = merge(base, local, template, "settings.json");
+
+      const parsed = JSON.parse(result.content);
+      // ローカルの true 値が保持されること（サイレント上書きされない）
+      expect(parsed.enabledPlugins["plugin-a"]).toBe(true);
+      expect(parsed.enabledPlugins["plugin-b"]).toBe(true);
+      // テンプレートの新キーが追加されること
+      expect(parsed.enabledPlugins["plugin-d"]).toBe(false);
+    });
+
+    it("テキストファイル: 3者異なる同一行はコンフリクトとして検出される", () => {
+      // base=A, local=B, template=C → 必ず conflict
+      const base = "line1\noriginal-value\nline3\n";
+      const local = "line1\nlocal-value\nline3\n";
+      const template = "line1\ntemplate-value\nline3\n";
+
+      const result = merge(base, local, template);
+
+      expect(result.hasConflicts).toBe(true);
+      expect(result.content).toContain("<<<<<<< LOCAL");
+      expect(result.content).toContain("local-value");
+      expect(result.content).toContain("template-value");
+      expect(result.content).toContain(">>>>>>> TEMPLATE");
+    });
+
+    it("空 base: ローカルとテンプレートの内容が二重化しない", () => {
+      // #51 の再現: base が空で local/template に内容がある場合、
+      // 旧実装では内容が二重に出力されていた
+      const base = "";
+      const local = "line1\nline2\nline3\n";
+      const template = "line1\nline2\nline3\nline4\n";
+
+      const result = merge(base, local, template);
+
+      // 内容の二重化チェック: line1 が2回以上出現しないこと
+      const line1Count = (result.content.match(/line1/g) ?? []).length;
+      // コンフリクトマーカー内で両側に含まれる場合は最大2回（LOCAL + TEMPLATE）
+      expect(line1Count).toBeLessThanOrEqual(2);
+
+      // 結果が base + local の単純結合（= 二重化）ではないこと
+      const duplicatedContent = local + template;
+      expect(result.content).not.toBe(duplicatedContent);
+    });
+
+    it("空 base: 両側が同一内容ならクリーンマージ", () => {
+      const base = "";
+      const local = "same content\n";
+      const template = "same content\n";
+
+      const result = merge(base, local, template);
+
+      expect(result.hasConflicts).toBe(false);
+      expect(result.content).toBe("same content\n");
+    });
+
+    it("テキストファイル: 離れた箇所の独立した変更はクリーンマージ", () => {
+      // ローカルが先頭を変更、テンプレートが末尾を変更 → conflict ではない
+      const base = "header\nline1\nline2\nline3\nline4\nline5\nfooter\n";
+      const local = "header-modified\nline1\nline2\nline3\nline4\nline5\nfooter\n";
+      const template = "header\nline1\nline2\nline3\nline4\nline5\nfooter-updated\n";
+
+      const result = merge(base, local, template);
+
+      expect(result.hasConflicts).toBe(false);
+      expect(result.content).toContain("header-modified");
+      expect(result.content).toContain("footer-updated");
+    });
+
+    it("JSON: 同じキーを異なる値に変更 → コンフリクト（テキストマージにフォールバック）", () => {
+      const base = JSON.stringify({ version: "1.0", name: "app" }, null, 2);
+      const local = JSON.stringify({ version: "2.0-local", name: "app" }, null, 2);
+      const template = JSON.stringify({ version: "2.0-template", name: "app" }, null, 2);
+
+      const result = merge(base, local, template, "package.json");
+
+      expect(result.hasConflicts).toBe(true);
+      expect(result.content).toContain("2.0-local");
+      expect(result.content).toContain("2.0-template");
+    });
+
+    it("テンプレートがファイルを大幅に再構成してもローカルの値変更が消えない", () => {
+      // テンプレートがフォーマット変更・行追加など大幅に変更し、
+      // ローカルが値のみ変更している場合、ローカルの値が消えないこと
+      const base = ["# Config", "debug = false", "verbose = false", "# End"].join("\n");
+      const local = ["# Config", "debug = true", "verbose = false", "# End"].join("\n");
+      const template = [
+        "# Config",
+        "debug = false",
+        "verbose = false",
+        "log_level = info",
+        "# End",
+      ].join("\n");
+
+      const result = merge(base, local, template);
+
+      // debug = true（ローカルの変更）が結果に含まれるか、
+      // コンフリクトマーカーの LOCAL 側に含まれること
+      if (result.hasConflicts) {
+        expect(result.content).toContain("debug = true");
+      } else {
+        expect(result.content).toContain("debug = true");
+        expect(result.content).toContain("log_level = info");
+      }
+    });
+  });
 });
