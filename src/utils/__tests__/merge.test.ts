@@ -20,7 +20,7 @@ function merge(base: string, local: string, template: string, filePath?: string)
 
 describe("merge", () => {
   describe("classifyFiles", () => {
-    it("全6カテゴリに正しく分類する", () => {
+    it("全7カテゴリに正しく分類する", () => {
       const result = classifyFiles({
         baseHashes: {
           "unchanged.txt": "aaa",
@@ -28,6 +28,7 @@ describe("merge", () => {
           "local-only.txt": "ccc",
           "conflict.txt": "ddd",
           "deleted.txt": "eee",
+          "deleted-locally.txt": "fff",
         },
         localHashes: {
           "unchanged.txt": "aaa",
@@ -41,6 +42,7 @@ describe("merge", () => {
           "local-only.txt": "ccc",
           "conflict.txt": "ddd-template",
           "new-file.txt": "fff",
+          "deleted-locally.txt": "fff", // base と同じ → クリーン削除
         },
       });
 
@@ -50,6 +52,7 @@ describe("merge", () => {
       expect(result.conflicts).toContain("conflict.txt");
       expect(result.newFiles).toContain("new-file.txt");
       expect(result.deletedFiles).toContain("deleted.txt");
+      expect(result.deletedLocally).toContain("deleted-locally.txt");
     });
 
     it("空のハッシュマップを処理する", () => {
@@ -65,6 +68,7 @@ describe("merge", () => {
       expect(result.conflicts).toEqual([]);
       expect(result.newFiles).toEqual([]);
       expect(result.deletedFiles).toEqual([]);
+      expect(result.deletedLocally).toEqual([]);
     });
 
     it("ローカルのみに存在するファイルを localOnly に分類する", () => {
@@ -91,14 +95,16 @@ describe("merge", () => {
       expect(result.deletedFiles).not.toContain("removed.txt");
     });
 
-    it("テンプレートが更新されたがローカルで削除されたファイルも deletedLocally に分類する", () => {
+    it("テンプレートも更新されローカルで削除 → delete/modify conflict（git 準拠）", () => {
       const result = classifyFiles({
         baseHashes: { "removed.txt": "abc" },
         localHashes: {},
         templateHashes: { "removed.txt": "def" },
       });
 
-      expect(result.deletedLocally).toContain("removed.txt");
+      // テンプレートが変更されている場合は conflict（delete/modify）
+      expect(result.conflicts).toContain("removed.txt");
+      expect(result.deletedLocally).not.toContain("removed.txt");
     });
 
     it("base とテンプレート両方で削除されたファイルは deletedFiles に分類する（deletedLocally ではない）", () => {
@@ -181,6 +187,16 @@ describe("merge", () => {
 
       expect(result.hasConflicts).toBe(false);
       expect(result.content).toBe("modified locally\n");
+    });
+
+    it("delete/modify conflict: ローカルが空文字列（削除）でテンプレートが変更 → conflict", () => {
+      const base = "original content\nline 2\n";
+      const local = ""; // ローカルで全削除
+      const template = "original content\nline 2 modified\n";
+
+      const result = merge(base, local, template);
+
+      expect(result.hasConflicts).toBe(true);
     });
 
     it("JSON ファイルでも行レベルの 3-way マージが適用される", () => {

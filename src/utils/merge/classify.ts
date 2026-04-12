@@ -37,8 +37,14 @@ export function classifyFiles(opts: ClassifyOptions): FileClassification {
       // base にはあるがテンプレートで削除された
       result.deletedFiles.push(file);
     } else if (base !== undefined && local === undefined && template !== undefined) {
-      // base にあるがローカルで削除された（テンプレートにはまだ存在）→ push で削除可能
-      result.deletedLocally.push(file);
+      // ローカルで削除されたファイル — git の挙動を模倣して分岐:
+      // テンプレート未変更 → クリーン削除（push で削除可能）
+      // テンプレート変更あり → delete/modify conflict（ユーザー判断が必要）
+      if (template === base) {
+        result.deletedLocally.push(file);
+      } else {
+        result.conflicts.push(file);
+      }
     } else if (base === undefined && template === undefined && local !== undefined) {
       // ローカルのみに存在（base にもテンプレートにもない）
       result.localOnly.push(file);

@@ -878,6 +878,71 @@ describe("pushCommand", () => {
       );
     });
 
+    it("delete/modify conflict: ローカルで削除されたファイルが conflicts にあっても ENOENT にならない", async () => {
+      const { effect } = mockContext({
+        lock: {
+          ...validLock,
+          baseRef: "abc123def456",
+          baseHashes: {
+            "deleted-file.txt": "abc123",
+          },
+        },
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      // ローカルにファイルが存在しない（削除済み）
+      // テンプレートと base テンプレートにはファイルが存在する
+      vol.fromJSON({
+        "/tmp/template/deleted-file.txt": "template content updated",
+        "/tmp/base-template/deleted-file.txt": "base content",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: ["deleted-file.txt"], // delete/modify conflict
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      // 3-way マージ: local が空文字列 → conflict マーカー付き
+      mockThreeWayMerge.mockReturnValueOnce({
+        content: "<<<<<<< LOCAL\n=======\ntemplate content updated\n>>>>>>> TEMPLATE",
+        hasConflicts: true,
+      });
+
+      // unresolved があるので確認ダイアログ → 続行
+      mockConfirmAction
+        .mockResolvedValueOnce(true) // "Continue with unresolved conflicts?"
+        .mockResolvedValueOnce(true); // PR 作成確認
+
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [],
+        summary: { added: 0, modified: 0, deleted: 0, unchanged: 0 },
+      });
+
+      // ENOENT で落ちずに正常終了することを検証
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: false, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      // unresolved として報告されること
+      expect(mockLog.warn).toHaveBeenCalledWith(
+        expect.stringContaining("could not be auto-merged"),
+      );
+
+      // threeWayMerge に空文字列の local が渡されること（delete/modify conflict）
+      expect(mockThreeWayMerge).toHaveBeenCalledWith(
+        expect.objectContaining({
+          local: "",
+        }),
+      );
+    });
+
     it("baseHashes がない場合でもコンフリクト検出を実行（空の baseHashes で分類）", async () => {
       mockGetPushableFiles.mockReturnValue([]);
 
