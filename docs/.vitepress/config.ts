@@ -19,6 +19,13 @@ export default defineConfig({
   // Clean URLs without .html suffix
   cleanUrls: true,
 
+  // Dev Container 環境ではコンテナ外からアクセスするために 0.0.0.0 バインドが必要
+  vite: {
+    server: {
+      host: true,
+    },
+  },
+
   // 内部計画ドキュメントと未公開記事をサイトから除外
   srcExclude: ["plan-*.md", "articles/**"],
 
