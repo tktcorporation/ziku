@@ -41,29 +41,6 @@ export interface MergeResult {
   content: string;
   /** コンフリクトマーカーが含まれるか */
   hasConflicts: boolean;
-  /**
-   * 構造マージで検出されたコンフリクトのパス情報。
-   * JSON/JSONC マージ時に、ローカル値を採用したコンフリクトキーの一覧。
-   * ユーザーがどのキーを手動確認すべきかを示す。
-   * テキストマージでは空配列。
-   */
-  conflictDetails: ConflictDetail[];
-}
-
-/**
- * 構造マージで発生した個別コンフリクトの詳細。
- *
- * 背景: JSON/JSONC の key-level マージでは、ファイルを壊さずに
- * ローカル値を優先しつつ、どのキーにテンプレート側の変更があったかを
- * ユーザーに伝えるために使用する。
- */
-export interface ConflictDetail {
-  /** コンフリクトが発生した JSON パス (例: ["mcpServers", "new-server"]) */
-  path: (string | number)[];
-  /** ローカル側の値（採用された値） */
-  localValue: unknown;
-  /** テンプレート側の値（採用されなかった値） */
-  templateValue: unknown;
 }
 
 /**
@@ -102,10 +79,10 @@ export interface ClassifyOptions {
 export interface ThreeWayMergeParams {
   /** 共通祖先（ベース）の内容 */
   base: BaseContent;
-  /** ローカル側の内容（コンフリクト時に優先される。フォーマット・コメントの起点） */
+  /** ローカル側の内容（コンフリクトマーカーの LOCAL 側に表示される） */
   local: LocalContent;
   /** テンプレート側の内容（ローカルに適用される変更の源） */
   template: TemplateContent;
-  /** ファイルパス（拡張子で JSON/テキストのマージ戦略を選択） */
+  /** ファイルパス（構造ファイルのマージ後バリデーションに使用） */
   filePath?: string;
 }

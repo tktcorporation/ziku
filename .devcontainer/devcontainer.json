@@ -30,7 +30,7 @@
     "ghcr.io/devcontainers/features/aws-cli:1": {},
     "ghcr.io/devcontainers/features/github-cli:1": {},
     "ghcr.io/devcontainers-extra/features/mise:1": {
-      "version": "latest"
+      "version": "2026.4.10"
     }
   },
   "runArgs": ["--env-file", ".devcontainer/.env.devcontainer"],

@@ -66,7 +66,6 @@ vi.mock("../../utils/merge", () => ({
   threeWayMerge: vi.fn(() => ({
     content: "merged",
     hasConflicts: false,
-    conflictDetails: [],
   })),
   asBaseContent: vi.fn((s: string) => s),
   asLocalContent: vi.fn((s: string) => s),
@@ -819,7 +818,6 @@ describe("pushCommand", () => {
       mockThreeWayMerge.mockReturnValueOnce({
         content: "merged content",
         hasConflicts: false,
-        conflictDetails: [],
       });
 
       const pushableFile = {

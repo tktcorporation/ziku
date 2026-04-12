@@ -185,7 +185,7 @@ vi.mock("../../utils/merge", () => ({
     deletedFiles: [],
     unchanged: [],
   })),
-  threeWayMerge: vi.fn(() => ({ content: "merged", hasConflicts: false, conflictDetails: [] })),
+  threeWayMerge: vi.fn(() => ({ content: "merged", hasConflicts: false })),
   asBaseContent: vi.fn((s: string) => s),
   asLocalContent: vi.fn((s: string) => s),
   asTemplateContent: vi.fn((s: string) => s),

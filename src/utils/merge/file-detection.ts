@@ -30,7 +30,7 @@ export function validateStructuredContent(content: string, filePath: string): bo
   if (isJsonFile(filePath)) {
     return Effect.runSync(
       Effect.try(() => jsoncParse(content)).pipe(
-        Effect.map((result) => result !== null && result !== undefined),
+        Effect.map(() => true),
         Effect.orElseSucceed(() => false),
       ),
     );
