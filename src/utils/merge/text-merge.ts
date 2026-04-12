@@ -1,4 +1,5 @@
 import { diff3Merge } from "node-diff3";
+import { validateStructuredContent } from "./file-detection";
 import type { MergeResult } from "./types";
 
 // ---- テキスト 3-way マージ ----
@@ -19,7 +20,7 @@ export function textThreeWayMerge(
   base: string,
   local: string,
   template: string,
-  _filePath?: string,
+  filePath?: string,
 ): MergeResult {
   const baseLines = base.split("\n");
   const localLines = local.split("\n");
@@ -44,8 +45,28 @@ export function textThreeWayMerge(
     }
   }
 
+  const content = resultLines.join("\n");
+
+  // 構造ファイル（JSON/TOML/YAML）のクリーンマージ結果をパースで検証。
+  // diff3Merge は行レベルで競合を判定するため、構造的に壊れた出力を
+  // クリーンマージとして返す可能性がある。検証失敗時はファイル全体を
+  // コンフリクトとしてマークし、壊れたファイルの生成を防ぐ。
+  if (!hasConflicts && filePath && !validateStructuredContent(content, filePath)) {
+    return {
+      content: [
+        "<<<<<<< LOCAL",
+        local,
+        "=======",
+        template,
+        ">>>>>>> TEMPLATE",
+      ].join("\n"),
+      hasConflicts: true,
+      conflictDetails: [],
+    };
+  }
+
   return {
-    content: resultLines.join("\n"),
+    content,
     hasConflicts,
     conflictDetails: [],
   };
