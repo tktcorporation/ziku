@@ -48,8 +48,12 @@
     "test:coverage": "vitest run --coverage",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm run build && npm run test:run && npm run docs:check",
     "prepack": "npm run build",
-    "docs": "pnpm tsx scripts/generate-readme.ts",
-    "docs:check": "pnpm tsx scripts/generate-readme.ts --check",
+    "docs": "pnpm tsx scripts/generate-readme.ts && pnpm tsx scripts/generate-site.ts",
+    "docs:check": "pnpm tsx scripts/generate-readme.ts --check && pnpm tsx scripts/generate-site.ts --check",
+    "site:generate": "pnpm tsx scripts/generate-site.ts",
+    "site:dev": "pnpm run site:generate && vitepress dev docs",
+    "site:build": "pnpm run site:generate && vitepress build docs",
+    "site:preview": "vitepress preview docs",
     "version": "changeset version && npm run docs",
     "release": "changeset publish"
   },
@@ -85,6 +89,7 @@
     "tsdown": "^0.21.7",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
+    "vitepress": "^1.6.4",
     "vitest": "^4.1.4"
   },
   "engines": {

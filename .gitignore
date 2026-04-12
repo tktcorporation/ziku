@@ -22,3 +22,7 @@ Thumbs.db
 # Test output
 coverage/
 .nyc_output/
+
+# VitePress build output
+docs/.vitepress/dist/
+docs/.vitepress/cache/

@@ -1,0 +1,22 @@
+# ziku
+
+> A bi-directional dev environment template that evolves with you.
+
+ziku is a CLI tool that syncs dev environment configuration files (CI workflows, linter configs, editor settings, etc.) between a template repository and multiple projects — bi-directionally.
+
+## Docs
+
+- [Getting Started](https://tktcorporation.github.io/ziku/guide/getting-started): How to set up and use ziku
+- [How it Works](https://tktcorporation.github.io/ziku/guide/how-it-works): Architecture and design
+- [Commands](https://tktcorporation.github.io/ziku/guide/commands): CLI command reference
+- [File Lifecycle](https://tktcorporation.github.io/ziku/architecture/file-lifecycle): Detailed file operations per command
+
+## Links
+
+- [GitHub](https://github.com/tktcorporation/ziku)
+- [npm](https://www.npmjs.com/package/ziku)
+- [Changelog](https://github.com/tktcorporation/ziku/blob/main/CHANGELOG.md)
+
+## Optional
+
+- [Full content](https://tktcorporation.github.io/ziku/llms-full.txt): Complete documentation for LLM context
