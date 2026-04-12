@@ -232,12 +232,24 @@ function logPushSummary(
   deletions: Array<{ path: string }> = [],
 ): void {
   const fileLines: string[] = [];
+  // files の content は mergedContent を含むため、detectDiff の localContent ではなく
+  // 実際に push される content でサマリーを計算する（PR の差分行数と一致させる）
+  const pushedContentMap = new Map(files.map((f) => [f.path, f.content]));
   for (const pf of pushableFiles) {
-    if (!files.some((f) => f.path === pf.path) && !deletions.some((d) => d.path === pf.path))
-      continue;
-    const stat = formatFileStat(pf);
-    const icon =
-      pf.type === "added" ? pc.green("+") : pf.type === "modified" ? pc.yellow("~") : pc.red("-");
+    const pushedContent = pushedContentMap.get(pf.path);
+    const isDeletion = deletions.some((d) => d.path === pf.path);
+    if (pushedContent === undefined && !isDeletion) continue;
+
+    // 実際に push される content と templateContent から正しい type と stat を算出
+    const effectiveDiff = buildEffectiveDiff(pf, pushedContent);
+    // push 内容がテンプレートと同一なら表示不要
+    if (effectiveDiff.type === "unchanged") continue;
+    const stat = formatFileStat(effectiveDiff);
+    const icon = match(effectiveDiff.type)
+      .with("added", () => pc.green("+"))
+      .with("modified", () => pc.yellow("~"))
+      .with("deleted", () => pc.red("-"))
+      .exhaustive();
     fileLines.push(`  ${icon} ${pf.path.padEnd(50)} ${stat}`);
   }
   for (const f of files) {
@@ -257,13 +269,40 @@ function logPushSummary(
   );
 }
 
-function formatFileStat(file: {
-  path: string;
-  type: string;
-  localContent?: string;
-  templateContent?: string;
-}): string {
-  const stats = calculateDiffStats(file as FileDiff);
+/**
+ * push される実際のコンテンツに基づいて FileDiff を再構築する。
+ *
+ * 背景: detectDiff の FileDiff はディスク上の localContent を持つが、
+ * auto-merge 後の push では mergedContent が使われる。PR の差分行数と
+ * 一致させるため、pushed content と templateContent で type を再判定する。
+ */
+function buildEffectiveDiff(original: FileDiff, pushedContent: string | undefined): FileDiff {
+  // 削除の場合はそのまま
+  if (pushedContent === undefined) return original;
+
+  const templateContent = original.templateContent;
+
+  // templateContent がない → テンプレートに新規追加
+  if (templateContent === undefined) {
+    return { path: original.path, type: "added", localContent: pushedContent };
+  }
+
+  // push される内容がテンプレートと同一 → 変更なし
+  if (pushedContent === templateContent) {
+    return { path: original.path, type: "unchanged" };
+  }
+
+  // テンプレートと異なる → modified として unified diff で統計計算
+  return {
+    path: original.path,
+    type: "modified",
+    localContent: pushedContent,
+    templateContent,
+  };
+}
+
+function formatFileStat(file: FileDiff): string {
+  const stats = calculateDiffStats(file);
   return formatStats(stats);
 }
 
