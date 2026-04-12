@@ -533,7 +533,9 @@ async function resolveConflicts(
       const unresolved: string[] = [];
 
       for (const file of conflicts) {
-        const localContent = await readFile(join(ctx.targetDir, file), "utf-8");
+        // ローカルで削除済みの場合は空文字列を使う（delete/modify conflict — git 準拠）
+        const localPath = join(ctx.targetDir, file);
+        const localContent = existsSync(localPath) ? await readFile(localPath, "utf-8") : "";
         const templateContent = await readFile(join(ctx.templateDir, file), "utf-8");
 
         let baseContent: string | undefined;
