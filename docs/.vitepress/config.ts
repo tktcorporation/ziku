@@ -26,8 +26,8 @@ export default defineConfig({
     },
   },
 
-  // 内部計画ドキュメントと未公開記事をサイトから除外
-  srcExclude: ["plan-*.md", "articles/**"],
+  // 内部計画ドキュメント、未公開記事、日本語のみの技術ドキュメントをサイトから除外
+  srcExclude: ["plan-*.md", "articles/**", "architecture/**"],
 
   // Sitemap for search engines
   sitemap: {

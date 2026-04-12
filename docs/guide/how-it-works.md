@@ -30,8 +30,6 @@ graph TB
 
 ```
 
-> For detailed file operations per command, see [File Lifecycle](/architecture/file-lifecycle).
-
 ## The config file
 
 Both the template and user project share the same `.ziku/ziku.jsonc` format — just `include` and `exclude` patterns:
@@ -54,5 +52,3 @@ Both the template and user project share the same `.ziku/ziku.jsonc` format — 
 | **`track`**               | Template user   | Add file patterns to the sync whitelist                          |
 
 Template source info (owner/repo or local path) is stored in `.ziku/lock.json`, separate from patterns. When you `pull`, new patterns added to the template's `.ziku/ziku.jsonc` are automatically merged into yours.
-
-> For detailed file operations per command, see [File Lifecycle](/architecture/file-lifecycle).

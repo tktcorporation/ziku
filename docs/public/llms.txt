@@ -9,7 +9,7 @@ ziku is a CLI tool that syncs dev environment configuration files (CI workflows,
 - [Getting Started](https://tktcorporation.github.io/ziku/guide/getting-started): How to set up and use ziku
 - [How it Works](https://tktcorporation.github.io/ziku/guide/how-it-works): Architecture and design
 - [Commands](https://tktcorporation.github.io/ziku/guide/commands): CLI command reference
-- [File Lifecycle](https://tktcorporation.github.io/ziku/architecture/file-lifecycle): Detailed file operations per command
+
 
 ## Links
 
