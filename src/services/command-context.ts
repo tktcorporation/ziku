@@ -104,8 +104,11 @@ export function loadCommandContext(
     const { templateDir, cleanup } = yield* resolveTemplateDir(source, targetDir);
 
     // resolveBaseRef: ソース種別の分岐を吸収
+    // resolveLatestCommitSha は内部で undefined を返す場合があるため、
+    // flatMap で undefined を失敗に変換してから Effect.option で Option<string> にする
     const resolveBaseRef = isGitHubSource(source)
       ? Effect.tryPromise(() => resolveLatestCommitSha(source.owner, source.repo)).pipe(
+          Effect.flatMap((sha) => (sha ? Effect.succeed(sha) : Effect.fail("no sha" as const))),
           Effect.option,
         )
       : Effect.succeed(Option.none<string>());
