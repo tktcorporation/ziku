@@ -108,7 +108,7 @@ export function renderFileDiff(file: FileDiff): void {
  * 隣接する deletion/addition ペアを検出し、diffWords で
  * 変更箇所を背景色でハイライトする。それ以外の行は通常の色付け。
  */
-function applyWordDiffAndColorize(lines: string[]): string[] {
+export function applyWordDiffAndColorize(lines: string[]): string[] {
   const result: string[] = [];
   let i = 0;
 
