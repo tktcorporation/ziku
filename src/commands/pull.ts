@@ -131,33 +131,11 @@ export const pullCommand = defineCommand({
     }
 
     await withFinally(async () => {
-      // テンプレートの ziku.jsonc から新パターンをマージ
-      const templateConfigOption = await Effect.runPromise(
-        loadTemplateConfig(templateDir).pipe(Effect.option),
+      const { mergedInclude, mergedExclude, patternsUpdated } = await mergeTemplatePatterns(
+        templateDir,
+        include,
+        exclude,
       );
-
-      let mergedInclude = include;
-      let mergedExclude = exclude;
-      let patternsUpdated = false;
-
-      if (Option.isSome(templateConfigOption)) {
-        const templateConfig = templateConfigOption.value;
-        const newInclude = templateConfig.include.filter((p) => !include.includes(p));
-        const newExclude = (templateConfig.exclude ?? []).filter((p) => !exclude.includes(p));
-
-        if (newInclude.length > 0 || newExclude.length > 0) {
-          mergedInclude = [...include, ...newInclude];
-          mergedExclude = [...exclude, ...newExclude];
-          patternsUpdated = true;
-
-          if (newInclude.length > 0) {
-            log.info(`Template added ${newInclude.length} new pattern(s):`);
-            for (const p of newInclude) {
-              log.message(`  ${pc.green("+")} ${p}`);
-            }
-          }
-        }
-      }
 
       log.step("Analyzing changes...");
 
@@ -246,6 +224,45 @@ export const pullCommand = defineCommand({
 });
 
 // ─── ヘルパー関数 ───
+
+/**
+ * テンプレートの ziku.jsonc からパターンを読み込み、ローカルのパターンにマージする。
+ * テンプレート側で追加されたパターンがあればログに表示する。
+ */
+async function mergeTemplatePatterns(
+  templateDir: string,
+  include: string[],
+  exclude: string[],
+): Promise<{ mergedInclude: string[]; mergedExclude: string[]; patternsUpdated: boolean }> {
+  const templateConfigOption = await Effect.runPromise(
+    loadTemplateConfig(templateDir).pipe(Effect.option),
+  );
+
+  if (Option.isNone(templateConfigOption)) {
+    return { mergedInclude: include, mergedExclude: exclude, patternsUpdated: false };
+  }
+
+  const templateConfig = templateConfigOption.value;
+  const newInclude = templateConfig.include.filter((p) => !include.includes(p));
+  const newExclude = (templateConfig.exclude ?? []).filter((p) => !exclude.includes(p));
+
+  if (newInclude.length === 0 && newExclude.length === 0) {
+    return { mergedInclude: include, mergedExclude: exclude, patternsUpdated: false };
+  }
+
+  if (newInclude.length > 0) {
+    log.info(`Template added ${newInclude.length} new pattern(s):`);
+    for (const p of newInclude) {
+      log.message(`  ${pc.green("+")} ${p}`);
+    }
+  }
+
+  return {
+    mergedInclude: [...include, ...newInclude],
+    mergedExclude: [...exclude, ...newExclude],
+    patternsUpdated: true,
+  };
+}
 
 /**
  * テンプレートからファイルをコピーする共通処理。

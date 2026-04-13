@@ -73,48 +73,12 @@ export const trackCommand = defineCommand({
       );
     }
 
-    // --list モード
     if (args.list) {
-      const {
-        config: { include, exclude: excludeRaw },
-      } = await loadZikuConfig(targetDir);
-      const exclude = excludeRaw ?? [];
-      log.info("Tracked patterns:");
-      for (const pattern of include) {
-        log.message(`  ${pc.dim("→")} ${pattern}`);
-      }
-      if (exclude.length > 0) {
-        log.info("Excluded patterns:");
-        for (const pattern of exclude) {
-          log.message(`  ${pc.dim("✕")} ${pc.dim(pattern)}`);
-        }
-      }
-      outro("Done.");
+      await listTrackedPatterns(targetDir);
       return;
     }
 
-    // パターン引数のパース
-    const rawArgs = process.argv.slice(2);
-    const trackIdx = rawArgs.indexOf("track");
-    const argsAfterTrack = trackIdx === -1 ? rawArgs : rawArgs.slice(trackIdx + 1);
-
-    const patterns: string[] = [];
-    let i = 0;
-    while (i < argsAfterTrack.length) {
-      const arg = argsAfterTrack[i];
-      if (arg === "--list" || arg === "-l" || arg === "--help" || arg === "-h") {
-        i++;
-        continue;
-      }
-      if (arg === "--dir" || arg === "-d") {
-        i += 2;
-        continue;
-      }
-      if (!arg.startsWith("-")) {
-        patterns.push(arg);
-      }
-      i++;
-    }
+    const patterns = parsePatternArgs();
 
     if (patterns.length === 0) {
       throw new ZikuError(
@@ -140,3 +104,52 @@ export const trackCommand = defineCommand({
     outro("Updated .ziku/ziku.jsonc");
   },
 });
+
+/** --list モード: 現在追跡中のパターン一覧を表示する */
+async function listTrackedPatterns(targetDir: string): Promise<void> {
+  const {
+    config: { include, exclude: excludeRaw },
+  } = await loadZikuConfig(targetDir);
+  const exclude = excludeRaw ?? [];
+  log.info("Tracked patterns:");
+  for (const pattern of include) {
+    log.message(`  ${pc.dim("→")} ${pattern}`);
+  }
+  if (exclude.length > 0) {
+    log.info("Excluded patterns:");
+    for (const pattern of exclude) {
+      log.message(`  ${pc.dim("✕")} ${pc.dim(pattern)}`);
+    }
+  }
+  outro("Done.");
+}
+
+/**
+ * process.argv から track サブコマンド以降のパターン引数を抽出する。
+ * フラグ引数（--list, --dir 等）は除外する。
+ */
+function parsePatternArgs(): string[] {
+  const rawArgs = process.argv.slice(2);
+  const trackIdx = rawArgs.indexOf("track");
+  const argsAfterTrack = trackIdx === -1 ? rawArgs : rawArgs.slice(trackIdx + 1);
+
+  const patterns: string[] = [];
+  let i = 0;
+  while (i < argsAfterTrack.length) {
+    const arg = argsAfterTrack[i];
+    if (arg === "--list" || arg === "-l" || arg === "--help" || arg === "-h") {
+      i++;
+      continue;
+    }
+    if (arg === "--dir" || arg === "-d") {
+      i += 2;
+      continue;
+    }
+    if (!arg.startsWith("-")) {
+      patterns.push(arg);
+    }
+    i++;
+  }
+
+  return patterns;
+}
