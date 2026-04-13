@@ -1,5 +1,15 @@
 # @tktco/ziku
 
+## 1.1.1
+
+### Patch Changes
+
+- [#60](https://github.com/tktcorporation/ziku/pull/60) [`123d15c`](https://github.com/tktcorporation/ziku/commit/123d15cb69a89b44bd009ba8c53589bf5f841c7f) Thanks [@tktcorporation](https://github.com/tktcorporation)! - fix: pull の delete/modify conflict で ENOENT クラッシュを修正
+
+- [#58](https://github.com/tktcorporation/ziku/pull/58) [`0e87a39`](https://github.com/tktcorporation/ziku/commit/0e87a39ee06f9434a4b85070383d0bf72aea3191) Thanks [@tktcorporation](https://github.com/tktcorporation)! - fix: push サマリーの差分行数を実際に PR に含まれる変更に基づいて計算するように修正
+
+- [#61](https://github.com/tktcorporation/ziku/pull/61) [`d329e3a`](https://github.com/tktcorporation/ziku/commit/d329e3a1a48cd83b270b359e4d4802d10ae7d3f4) Thanks [@tktcorporation](https://github.com/tktcorporation)! - feat: ast-grep ルールで Effect のエラー握りつぶし（orElseSucceed に null/undefined/void）を検出・禁止
+
 ## 1.1.0
 
 ### Minor Changes
