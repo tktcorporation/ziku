@@ -171,7 +171,7 @@ function calculateDiffCoverage(
 
   const uncoveredDetails = [...uncoveredByFile.entries()]
     .map(([file, lines]) => ({ file, lines }))
-    .toSorted((a, b) => b.lines.length - a.lines.length);
+    .sort((a, b) => b.lines.length - a.lines.length);
 
   return { coveredLines, uncoveredLines, totalRelevantLines, percentage, uncoveredDetails };
 }
@@ -202,7 +202,7 @@ function printResult(result: DiffCoverageResult): void {
 
 /** 連続する行番号をレンジ表記にまとめる（例: [1,2,3,5,7,8] → "1-3, 5, 7-8"） */
 function compactLineRanges(lines: number[]): string {
-  const sorted = [...lines].toSorted((a, b) => a - b);
+  const sorted = [...lines].sort((a, b) => a - b);
   const ranges: string[] = [];
   let start = sorted[0];
   let end = sorted[0];

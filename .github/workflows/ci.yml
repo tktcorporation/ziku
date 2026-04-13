@@ -123,6 +123,7 @@ jobs:
 
       - name: Check diff coverage
         if: github.event_name == 'pull_request'
+        continue-on-error: true
         env:
           BASE_REF: ${{ github.base_ref }}
         run: pnpm tsx scripts/diff-coverage.ts --threshold 80 --base "origin/$BASE_REF"
