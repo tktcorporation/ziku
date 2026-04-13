@@ -64,12 +64,6 @@
   },
   "overrides": [
     {
-      "files": ["scripts/**"],
-      "rules": {
-        "unicorn/no-array-sort": "off"
-      }
-    },
-    {
       "files": ["**/__tests__/**", "**/*.test.ts", "**/*.spec.ts"],
       "rules": {
         "typescript/no-explicit-any": "off",
