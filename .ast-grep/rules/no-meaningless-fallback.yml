@@ -13,6 +13,7 @@ rule:
     - pattern: "Effect.orElseSucceed((): $T => undefined)"
     - pattern: "Effect.orElseSucceed(() => undefined as $T)"
     - pattern: Effect.orElseSucceed(() => undefined)
+    - pattern: "Effect.orElseSucceed(() => {})"
 severity: error
 message: >-
   Effect.orElseSucceed に null / undefined / void を渡さないでください。

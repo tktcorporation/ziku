@@ -24,6 +24,7 @@ import {
   downloadBaseForMerge,
   hasConflictMarkers,
   mergeOneFile,
+  readFileSafe,
   writeFileEnsureDir,
 } from "../utils/merge";
 
@@ -352,14 +353,13 @@ async function runContinue(targetDir: string, lock: LockState): Promise<void> {
 
   const stillConflicted: string[] = [];
   for (const file of conflicts) {
-    await Effect.runPromise(
-      Effect.tryPromise(async () => {
-        const content = await readFile(join(targetDir, file), "utf-8");
-        if (hasConflictMarkers(content).found) {
-          stillConflicted.push(file);
-        }
-      }).pipe(Effect.orElseSucceed(() => {})),
+    // readFileSafe: ファイルが読めない場合は None → スキップ（親がハンドリング）
+    const contentOption = await Effect.runPromise(
+      readFileSafe(join(targetDir, file)).pipe(Effect.option),
     );
+    if (Option.isSome(contentOption) && hasConflictMarkers(contentOption.value).found) {
+      stillConflicted.push(file);
+    }
   }
 
   if (stillConflicted.length > 0) {

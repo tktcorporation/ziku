@@ -52,6 +52,8 @@ vi.mock("../../utils/hash", () => ({
 
 vi.mock("../../utils/merge", async () => {
   const effectMod = await import("effect");
+  const fsMod = await import("node:fs/promises");
+  const errorsMod = await import("../../errors");
   return {
     classifyFiles: vi.fn(),
     hasConflictMarkers: vi.fn((content: string) => ({
@@ -59,6 +61,13 @@ vi.mock("../../utils/merge", async () => {
       lines: [],
     })),
     // conflict-io の共通ユーティリティ（pull.ts はこれらを経由して merge する）
+    readFileSafe: vi.fn((path: string) =>
+      effectMod.Effect.tryPromise(() => fsMod.readFile(path, "utf-8")).pipe(
+        effectMod.Effect.catchAll(() =>
+          effectMod.Effect.fail(new errorsMod.FileNotFoundError({ path })),
+        ),
+      ),
+    ),
     mergeOneFile: vi.fn(),
     writeFileEnsureDir: vi.fn(() => effectMod.Effect.succeed(undefined)),
     downloadBaseForMerge: vi.fn(() => effectMod.Effect.succeed(null)),

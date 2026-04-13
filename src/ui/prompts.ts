@@ -416,11 +416,9 @@ export async function selectDeletedFiles(files: string[]): Promise<string[]> {
 export function openEditorForConflicts(filePaths: string[]): void {
   const editor = process.env.VISUAL || process.env.EDITOR || "vi";
   for (const filePath of filePaths) {
-    // エディタが見つからない場合はスキップ
+    // エディタ起動失敗は None → スキップ（呼び出し側で対処不要な fire-and-forget）
     Effect.runSync(
-      Effect.try(() => execFileSync(editor, [filePath], { stdio: "inherit" })).pipe(
-        Effect.orElseSucceed(() => {}),
-      ),
+      Effect.try(() => execFileSync(editor, [filePath], { stdio: "inherit" })).pipe(Effect.option),
     );
   }
 }
