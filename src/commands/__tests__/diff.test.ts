@@ -1,5 +1,5 @@
 import { vol } from "memfs";
-import { Effect } from "effect";
+import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZikuError, FileNotFoundError } from "../../errors";
 
@@ -99,7 +99,7 @@ function mockContext(
       source: overrides?.source ?? { owner: "tktcorporation", repo: ".github" },
       templateDir: overrides?.templateDir ?? "/tmp/template",
       cleanup,
-      resolveBaseRef: Effect.succeed(undefined as string | undefined),
+      resolveBaseRef: Effect.succeed(Option.none<string>()),
     }),
     cleanup,
   };

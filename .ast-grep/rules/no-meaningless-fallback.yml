@@ -1,0 +1,27 @@
+# Effect.orElseSucceed で意味のない値（null / undefined / void）を返すのを禁止
+#
+# 背景: orElseSucceed に null/undefined を渡すと、Effect のエラーチャネルが
+# 握りつぶされ、呼び出し側がエラーの存在を型レベルで認識できなくなる。
+# エラーは Effect のエラーチャネルに残し、何に変換するかは呼び出し側が
+# catchTag / catchAll で明示的に判断すること。
+# Effect.option を使えば Option<A> として安全にハンドリングできる。
+id: no-meaningless-fallback
+language: typescript
+rule:
+  any:
+    - pattern: Effect.orElseSucceed(() => null)
+    - pattern: "Effect.orElseSucceed((): $T => undefined)"
+    - pattern: "Effect.orElseSucceed(() => undefined as $T)"
+    - pattern: Effect.orElseSucceed(() => undefined)
+    - pattern: "Effect.orElseSucceed(() => {})"
+severity: error
+message: >-
+  Effect.orElseSucceed に null / undefined / void を渡さないでください。
+  エラーは Effect のエラーチャネルに残し、呼び出し元で catchTag / Effect.option で処理してください。
+note: >-
+  参照: .claude/rules/project/effect-ts.md — エラーは呼び出し側の責務で処理する。
+files:
+  - "src/**/*.ts"
+ignoreFiles:
+  - "src/**/__tests__/**"
+  - "src/**/*.test.ts"

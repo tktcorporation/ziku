@@ -1,5 +1,5 @@
 import { vol } from "memfs";
-import { Effect } from "effect";
+import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZikuError, FileNotFoundError } from "../../errors";
 
@@ -52,6 +52,8 @@ vi.mock("../../utils/hash", () => ({
 
 vi.mock("../../utils/merge", async () => {
   const effectMod = await import("effect");
+  const fsMod = await import("node:fs/promises");
+  const errorsMod = await import("../../errors");
   return {
     classifyFiles: vi.fn(),
     hasConflictMarkers: vi.fn((content: string) => ({
@@ -59,6 +61,13 @@ vi.mock("../../utils/merge", async () => {
       lines: [],
     })),
     // conflict-io の共通ユーティリティ（pull.ts はこれらを経由して merge する）
+    readFileSafe: vi.fn((path: string) =>
+      effectMod.Effect.tryPromise(() => fsMod.readFile(path, "utf-8")).pipe(
+        effectMod.Effect.catchAll(() =>
+          effectMod.Effect.fail(new errorsMod.FileNotFoundError({ path })),
+        ),
+      ),
+    ),
     mergeOneFile: vi.fn(),
     writeFileEnsureDir: vi.fn(() => effectMod.Effect.succeed(undefined)),
     downloadBaseForMerge: vi.fn(() => effectMod.Effect.succeed(null)),
@@ -71,8 +80,14 @@ vi.mock("../../utils/github", () => ({
 
 vi.mock("../../utils/template-config", async () => {
   const effectMod = await import("effect");
+  const errorsMod = await import("../../errors");
   return {
-    loadTemplateConfig: vi.fn(() => effectMod.Effect.succeed(null)),
+    // デフォルト: テンプレートに ziku.jsonc がない → Effect.option で None になる
+    loadTemplateConfig: vi.fn(() =>
+      effectMod.Effect.fail(
+        new errorsMod.TemplateNotConfiguredError({ templateDir: "/tmp/template" }),
+      ),
+    ),
   };
 });
 
@@ -148,6 +163,7 @@ function mockContext(overrides?: {
   lock?: typeof baseLock & Record<string, unknown>;
   source?: { owner: string; repo: string };
   templateDir?: string;
+  resolveBaseRef?: Effect.Effect<Option.Option<string>>;
 }) {
   const cleanup = vi.fn();
   const source = overrides?.source ?? { owner: "tktcorporation", repo: ".github" };
@@ -158,8 +174,7 @@ function mockContext(overrides?: {
       source,
       templateDir: overrides?.templateDir ?? "/tmp/template",
       cleanup,
-      /** テスト用: GitHub API 呼び出しをスキップし undefined を返す */
-      resolveBaseRef: Effect.succeed(undefined as string | undefined),
+      resolveBaseRef: overrides?.resolveBaseRef ?? Effect.succeed(Option.none<string>()),
     }),
     cleanup,
   };
@@ -482,6 +497,74 @@ describe("pullCommand", () => {
           baseHashes: newTemplateHashes,
         }),
       );
+    });
+
+    it("resolveBaseRef が Some のとき baseRef が更新される", async () => {
+      vol.fromJSON({
+        "/test": null,
+        "/tmp/template/.mcp.json": "updated",
+      });
+
+      const { effect } = mockContext({
+        resolveBaseRef: Effect.succeed(Option.some("newsha456")),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [".mcp.json"],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockSaveLock).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ baseRef: "newsha456" }),
+      );
+    });
+
+    it("resolveBaseRef が None のとき既存の baseRef を上書きしない", async () => {
+      vol.fromJSON({
+        "/test": null,
+        "/tmp/template/.mcp.json": "updated",
+      });
+
+      const { effect } = mockContext({
+        lock: { ...baseLock, baseRef: "existing-sha" },
+        resolveBaseRef: Effect.succeed(Option.none<string>()),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [".mcp.json"],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // baseRef: undefined でロックを上書きしないことを確認
+      const lockArg = mockSaveLock.mock.calls[0][1];
+      expect(lockArg).not.toHaveProperty("baseRef", undefined);
+      // 既存の baseRef がスプレッドで保持される
+      expect(lockArg.baseRef).toBe("existing-sha");
     });
 
     it("cleanup が必ず呼ばれる", async () => {
