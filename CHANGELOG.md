@@ -1,5 +1,11 @@
 # @tktco/ziku
 
+## 1.2.0
+
+### Minor Changes
+
+- [#63](https://github.com/tktcorporation/ziku/pull/63) [`f5a551c`](https://github.com/tktcorporation/ziku/commit/f5a551ceb0a7f9e74934bcfff26b428a62861356) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Add diff preview pane to file selection prompt during `ziku push`
+
 ## 1.1.1
 
 ### Patch Changes
