@@ -206,7 +206,10 @@ export function selectPushFiles(
   options?: { preselectDeletions?: boolean },
 ): Promise<FileDiff[]> {
   // TTY: diff プレビュー付きカスタムセレクタ
-  if (process.stdin.isTTY) {
+  // stdin と stdout の両方が TTY であることを確認する。
+  // stdout がリダイレクトされている場合（例: ziku push > out.txt）、
+  // ANSI 制御シーケンスが非対話ストリームに出力され操作不能になる。
+  if (process.stdin.isTTY && process.stdout.isTTY) {
     return selectFilesWithDiffPreview(files, {
       preselectDeletions: options?.preselectDeletions,
     });
