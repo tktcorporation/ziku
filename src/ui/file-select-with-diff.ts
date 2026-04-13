@@ -52,7 +52,7 @@ const carriageReturn = "\r";
 function cursorUp(n: number): string {
   return n > 0 ? `\u001B[${n}A` : "";
 }
-/* v8 ignore end */
+/* v8 ignore stop */
 
 // ─── Diff フォーマット ──────────────────────────────────────────
 
@@ -469,4 +469,4 @@ export function selectFilesWithDiffPreview(
     redraw();
   });
 }
-/* v8 ignore end */
+/* v8 ignore stop */

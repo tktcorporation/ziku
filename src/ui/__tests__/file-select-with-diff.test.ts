@@ -266,6 +266,25 @@ describe("file-select-with-diff", () => {
       expect(plain).toContain("deleted");
     });
 
+    it("should render unchanged file with empty type label", () => {
+      const files: FileDiff[] = [{ path: "u.ts", type: "unchanged" }];
+      const items = buildFileItems(files);
+      const state: RenderState = {
+        items,
+        selected: new Set<string>(),
+        cursorIndex: 0,
+        diffScrollOffset: 0,
+        lastRenderedLines: 0,
+      };
+      const output = render(state, { columns: 80, rows: 20 });
+      const plain = stripAnsi(output);
+      expect(plain).toContain("u.ts");
+      // unchanged は added/modified/deleted のいずれでもないので、typeLabel は空
+      expect(plain).not.toContain("added");
+      expect(plain).not.toContain("modified");
+      expect(plain).not.toContain("deleted");
+    });
+
     it("should show scroll indicator when diff exceeds preview height", () => {
       // 多くの行を持つファイルで小さなターミナルをシミュレート
       const longContent = Array.from({ length: 50 }, (_, i) => `line ${i}`).join("\n") + "\n";
