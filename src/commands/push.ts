@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { defineCommand } from "citty";
 import { Effect } from "effect";
 import { dirname, join, resolve } from "pathe";
@@ -10,6 +10,7 @@ import type { FileDiff, TemplateSource } from "../modules/schemas";
 import { LOCK_FILE, saveLock } from "../utils/lock";
 import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
 import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
+import { downloadBaseForMerge, mergeOneFile } from "../utils/merge";
 import type { CommandContextShape } from "../services/command-context";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
@@ -520,6 +521,13 @@ export const pushCommand = defineCommand({
 
 // ─── コンフリクト解決 ───
 
+/**
+ * push 時のコンフリクト解決。
+ *
+ * ファイル読み込み・マージ・ベースダウンロードは conflict-io の共通ユーティリティを使い、
+ * push 固有の処理（mergedContents への保存・ユーザー確認）だけをここで行う。
+ * pull との違い: ローカルに書き込まず、auto-merge 成功分のみ mergedContents に保存する。
+ */
 async function resolveConflicts(
   conflicts: string[],
   ctx: {
@@ -531,9 +539,6 @@ async function resolveConflicts(
     args: { yes: boolean };
   },
 ): Promise<void> {
-  const { threeWayMerge, asBaseContent, asLocalContent, asTemplateContent } =
-    await import("../utils/merge");
-
   const baseInfo = ctx.lock.baseRef
     ? `since ${pc.bold(ctx.lock.baseRef.slice(0, 7))} (your last sync)`
     : "since your last pull/init";
@@ -541,30 +546,13 @@ async function resolveConflicts(
     `Template updated ${baseInfo} — ${conflicts.length} conflict(s) detected, attempting auto-merge...`,
   );
 
-  // ベースバージョンのダウンロード（GitHub ソースの場合のみ）
-  const baseResult = await match(ctx.source)
-    .with({ owner: P.string, repo: P.string }, (ghSource) => {
-      if (!ctx.lock.baseRef) return Promise.resolve(null);
-      return Effect.runPromise(
-        Effect.tryPromise(async () => {
-          log.info(`Downloading base version (${ctx.lock.baseRef?.slice(0, 7)}...) for merge...`);
-          const { downloadTemplateToTemp } = await import("../utils/template");
-          return downloadTemplateToTemp(
-            ctx.targetDir,
-            `gh:${ghSource.owner}/${ghSource.repo}#${ctx.lock.baseRef}`,
-          );
-        }).pipe(
-          Effect.orElseSucceed(() => {
-            log.warn("Could not download base version. Falling back to local content.");
-            return null;
-          }),
-        ),
-      );
-    })
-    .with({ path: P.string }, () => Promise.resolve(null))
-    .exhaustive();
-
-  const baseTemplateDir = baseResult?.templateDir;
+  const baseResult = await Effect.runPromise(
+    downloadBaseForMerge({
+      source: ctx.source,
+      baseRef: ctx.lock.baseRef,
+      targetDir: ctx.targetDir,
+    }),
+  );
 
   await withFinally(
     async () => {
@@ -572,30 +560,31 @@ async function resolveConflicts(
       const unresolved: string[] = [];
 
       for (const file of conflicts) {
-        // ローカルで削除済みの場合は空文字列を使う（delete/modify conflict — git 準拠）
-        const localPath = join(ctx.targetDir, file);
-        const localContent = existsSync(localPath) ? await readFile(localPath, "utf-8") : "";
-        const templateContent = await readFile(join(ctx.templateDir, file), "utf-8");
-
-        let baseContent: string | undefined;
-        if (baseTemplateDir && existsSync(join(baseTemplateDir, file))) {
-          baseContent = await readFile(join(baseTemplateDir, file), "utf-8");
+        // ベースがない場合は 3-way マージ不可 → unresolved
+        // 旧実装ではファイル単位で baseContent の truthy チェックをしていたが、
+        // mergeOneFile 内で readFileSafe が空文字列を返すため、ベースに
+        // 特定ファイルがない場合は空ベースでのマージ（= conflict マーカー付き）になる。
+        // hasConflicts=true → unresolved に分類されるので PR に壊れた内容は送られない。
+        if (!baseResult) {
+          unresolved.push(file);
+          continue;
         }
 
-        if (baseContent) {
-          const result = threeWayMerge({
-            base: asBaseContent(baseContent),
-            local: asLocalContent(localContent),
-            template: asTemplateContent(templateContent),
-            filePath: file,
-          });
-          if (!result.hasConflicts) {
-            ctx.mergedContents.set(file, result.content);
-            autoMerged.push(file);
-            continue;
-          }
+        const result = await Effect.runPromise(
+          mergeOneFile({
+            file,
+            targetDir: ctx.targetDir,
+            templateDir: ctx.templateDir,
+            baseTemplateDir: baseResult.templateDir,
+          }),
+        );
+
+        if (!result.hasConflicts) {
+          ctx.mergedContents.set(file, result.content);
+          autoMerged.push(file);
+        } else {
+          unresolved.push(file);
         }
-        unresolved.push(file);
       }
 
       if (autoMerged.length > 0) {

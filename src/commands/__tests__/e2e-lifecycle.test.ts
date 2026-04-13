@@ -139,21 +139,21 @@ vi.mock("../../utils/diff", () => ({
   ),
 }));
 
-vi.mock("../../utils/merge", () => ({
-  classifyFiles: vi.fn(() => ({
-    autoUpdate: [],
-    localOnly: [],
-    conflicts: [],
-    newFiles: [],
-    deletedFiles: [],
-    deletedLocally: [],
-    unchanged: [],
-  })),
-  threeWayMerge: vi.fn(() => ({ content: "merged", hasConflicts: false })),
-  asBaseContent: vi.fn((s: string) => s),
-  asLocalContent: vi.fn((s: string) => s),
-  asTemplateContent: vi.fn((s: string) => s),
-}));
+vi.mock("../../utils/merge", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../utils/merge")>();
+  return {
+    ...actual,
+    classifyFiles: vi.fn(() => ({
+      autoUpdate: [],
+      localOnly: [],
+      conflicts: [],
+      newFiles: [],
+      deletedFiles: [],
+      deletedLocally: [],
+      unchanged: [],
+    })),
+  };
+});
 
 vi.mock("../../utils/untracked", () => ({
   detectUntrackedFiles: vi.fn(() => Promise.resolve([])),

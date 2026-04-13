@@ -54,24 +54,23 @@ vi.mock("../../utils/hash", () => ({
 }));
 
 // utils/merge をモック
-vi.mock("../../utils/merge", () => ({
-  classifyFiles: vi.fn(() => ({
-    autoUpdate: [],
-    localOnly: [],
-    conflicts: [],
-    newFiles: [],
-    deletedFiles: [],
-    deletedLocally: [],
-    unchanged: [],
-  })),
-  threeWayMerge: vi.fn(() => ({
-    content: "merged",
-    hasConflicts: false,
-  })),
-  asBaseContent: vi.fn((s: string) => s),
-  asLocalContent: vi.fn((s: string) => s),
-  asTemplateContent: vi.fn((s: string) => s),
-}));
+vi.mock("../../utils/merge", async () => {
+  const effectMod = await import("effect");
+  return {
+    classifyFiles: vi.fn(() => ({
+      autoUpdate: [],
+      localOnly: [],
+      conflicts: [],
+      newFiles: [],
+      deletedFiles: [],
+      deletedLocally: [],
+      unchanged: [],
+    })),
+    // conflict-io の共通ユーティリティ
+    mergeOneFile: vi.fn(),
+    downloadBaseForMerge: vi.fn(() => effectMod.Effect.succeed(null)),
+  };
+});
 
 // utils/template をモック（push 内部で base ダウンロード時に直接 import される）
 vi.mock("../../utils/template", () => ({
@@ -128,7 +127,7 @@ const { confirmAction, inputGitHubToken, inputPrTitle, inputPrBody, selectPushFi
   await import("../../ui/prompts");
 const { log } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
-const { classifyFiles, threeWayMerge } = await import("../../utils/merge");
+const { classifyFiles, mergeOneFile, downloadBaseForMerge } = await import("../../utils/merge");
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
 const mockDetectDiff = vi.mocked(detectDiff);
 const mockGetPushableFiles = vi.mocked(getPushableFiles);
@@ -142,7 +141,8 @@ const mockSelectPushFiles = vi.mocked(selectPushFiles);
 const mockLog = vi.mocked(log);
 const mockHashFiles = vi.mocked(hashFiles);
 const mockClassifyFiles = vi.mocked(classifyFiles);
-const mockThreeWayMerge = vi.mocked(threeWayMerge);
+const mockMergeOneFile = vi.mocked(mergeOneFile);
+const mockDownloadBaseForMerge = vi.mocked(downloadBaseForMerge);
 
 const validZikuConfig = {
   include: [".github/**"],
@@ -819,11 +819,15 @@ describe("pushCommand", () => {
         unchanged: [],
       });
 
-      // threeWayMerge のモック（自動マージ成功）
-      mockThreeWayMerge.mockReturnValueOnce({
-        content: "merged content",
-        hasConflicts: false,
-      });
+      // downloadBaseForMerge がベースを返す
+      mockDownloadBaseForMerge.mockReturnValueOnce(
+        Effect.succeed({ templateDir: "/tmp/base-template", cleanup: vi.fn() }),
+      );
+
+      // mergeOneFile のモック（自動マージ成功）
+      mockMergeOneFile.mockReturnValueOnce(
+        Effect.succeed({ file: "file.txt", content: "merged content", hasConflicts: false }),
+      );
 
       const pushableFile = {
         path: "file.txt",
@@ -856,13 +860,12 @@ describe("pushCommand", () => {
 
       expect(mockLog.success).toHaveBeenCalledWith("Auto-merged 1 file(s):");
 
-      // 引数順序の検証: local にユーザーのローカル内容、template にテンプレート内容が渡されること
-      // 背景: #148 で local/template が逆転し、ユーザーのコメント・フォーマットが失われた
-      expect(mockThreeWayMerge).toHaveBeenCalledWith({
-        base: "base content",
-        local: "local content",
-        template: "template content",
-        filePath: "file.txt",
+      // mergeOneFile に正しい引数が渡されること
+      expect(mockMergeOneFile).toHaveBeenCalledWith({
+        file: "file.txt",
+        targetDir: "/test",
+        templateDir: "/tmp/template",
+        baseTemplateDir: "/tmp/base-template",
       });
 
       expect(mockCreatePullRequest).toHaveBeenCalledWith(
@@ -907,11 +910,20 @@ describe("pushCommand", () => {
         unchanged: [],
       });
 
-      // 3-way マージ: local が空文字列 → conflict マーカー付き
-      mockThreeWayMerge.mockReturnValueOnce({
-        content: "<<<<<<< LOCAL\n=======\ntemplate content updated\n>>>>>>> TEMPLATE",
-        hasConflicts: true,
-      });
+      // downloadBaseForMerge がベースを返す
+      mockDownloadBaseForMerge.mockReturnValueOnce(
+        Effect.succeed({ templateDir: "/tmp/base-template", cleanup: vi.fn() }),
+      );
+
+      // mergeOneFile: コンフリクト（delete/modify conflict は mergeOneFile 内で
+      // readFileSafe により安全にローカル=空文字列で処理される）
+      mockMergeOneFile.mockReturnValueOnce(
+        Effect.succeed({
+          file: "deleted-file.txt",
+          content: "<<<<<<< LOCAL\n=======\ntemplate content updated\n>>>>>>> TEMPLATE",
+          hasConflicts: true,
+        }),
+      );
 
       // unresolved があるので確認ダイアログ → 続行
       mockConfirmAction
@@ -933,13 +945,6 @@ describe("pushCommand", () => {
       // unresolved として報告されること
       expect(mockLog.warn).toHaveBeenCalledWith(
         expect.stringContaining("could not be auto-merged"),
-      );
-
-      // threeWayMerge に空文字列の local が渡されること（delete/modify conflict）
-      expect(mockThreeWayMerge).toHaveBeenCalledWith(
-        expect.objectContaining({
-          local: "",
-        }),
       );
     });
 
