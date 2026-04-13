@@ -109,7 +109,7 @@ function loadCoverage(): CoverageData {
   } catch {
     console.error(`❌ Coverage file not found: ${coveragePath}`);
     console.error("   Run `pnpm run test:coverage` first.");
-    process.exit(1);
+    return process.exit(1);
   }
 }
 
