@@ -45,13 +45,17 @@ function getChangedLines(): ChangedLine[] {
   try {
     diffOutput = execFileSync(
       "git",
-      ["diff", "--unified=0", "--diff-filter=AM", `${baseBranch}...HEAD`, "--", "src/**/*.ts"],
+      ["diff", "--unified=0", "--diff-filter=AMR", `${baseBranch}...HEAD`, "--", "src/**/*.ts"],
       { encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 },
     );
-  } catch {
-    // baseBranch が存在しない場合（初回PRなど）は空扱い
-    console.warn(`⚠ Could not diff against ${baseBranch}, skipping diff coverage check`);
-    return [];
+  } catch (error: unknown) {
+    // baseBranch が存在しない場合（初回PRなど）は空扱い、それ以外は再スロー
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("unknown revision") || message.includes("bad revision")) {
+      console.warn(`⚠ Could not diff against ${baseBranch}, skipping diff coverage check`);
+      return [];
+    }
+    throw error;
   }
 
   const changedLines: ChangedLine[] = [];
