@@ -14,6 +14,7 @@ import pc from "picocolors";
 import { match } from "ts-pattern";
 import type { FileDiff, OverwriteStrategy } from "../modules/schemas";
 import { calculateDiffStats, formatStats } from "./diff-view";
+import { selectFilesWithDiffPreview } from "./file-select-with-diff";
 
 /** ユーザーが Ctrl+C でキャンセルした場合の統一処理 */
 function handleCancel(value: unknown): void {
@@ -195,9 +196,35 @@ function fileStatHint(file: FileDiff): string {
 }
 
 /**
- * push 対象ファイルの選択（+N -M 統計付き）
+ * push 対象ファイルの選択（Diff プレビュー付き）
+ *
+ * TTY 環境では diff プレビュー付きのカスタムセレクタを使い、
+ * 非 TTY 環境（テスト・CI）では @clack/prompts のフォールバックを使う。
  */
-export async function selectPushFiles(
+export function selectPushFiles(
+  files: FileDiff[],
+  options?: { preselectDeletions?: boolean },
+): Promise<FileDiff[]> {
+  // TTY: diff プレビュー付きカスタムセレクタ
+  // stdin と stdout の両方が TTY であることを確認する。
+  // stdout がリダイレクトされている場合（例: ziku push > out.txt）、
+  // ANSI 制御シーケンスが非対話ストリームに出力され操作不能になる。
+  if (process.stdin.isTTY && process.stdout.isTTY) {
+    return selectFilesWithDiffPreview(files, {
+      preselectDeletions: options?.preselectDeletions,
+    });
+  }
+
+  // 非 TTY フォールバック: @clack/prompts multiselect
+  return selectPushFilesFallback(files, options);
+}
+
+/**
+ * 非 TTY 環境用フォールバック（@clack/prompts multiselect）
+ *
+ * テスト・パイプ経由の実行で使われる。
+ */
+export async function selectPushFilesFallback(
   files: FileDiff[],
   options?: { preselectDeletions?: boolean },
 ): Promise<FileDiff[]> {

@@ -88,14 +88,16 @@ export function renderFileDiff(file: FileDiff): void {
   const diff = generateUnifiedDiff(file);
   if (!diff) return;
 
+  // unified diff ヘッダーのみ除外。コンテンツ行の ---/+++ を誤除去しないため
+  // タブ文字の存在で判定する（ヘッダーは "--- path\tlabel" 形式）。
   const lines = diff
     .split("\n")
     .filter(
       (l) =>
         !l.startsWith("Index:") &&
         !l.startsWith("===") &&
-        !l.startsWith("---") &&
-        !l.startsWith("+++"),
+        !(l.startsWith("--- ") && l.includes("\t")) &&
+        !(l.startsWith("+++ ") && l.includes("\t")),
     );
 
   const rendered = applyWordDiffAndColorize(lines);
@@ -108,7 +110,7 @@ export function renderFileDiff(file: FileDiff): void {
  * 隣接する deletion/addition ペアを検出し、diffWords で
  * 変更箇所を背景色でハイライトする。それ以外の行は通常の色付け。
  */
-function applyWordDiffAndColorize(lines: string[]): string[] {
+export function applyWordDiffAndColorize(lines: string[]): string[] {
   const result: string[] = [];
   let i = 0;
 
