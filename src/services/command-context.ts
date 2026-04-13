@@ -39,7 +39,7 @@ export interface CommandContextShape {
    * isGitHubSource/isLocalSource の分岐を吸収し、呼び出し元は
    * ソース種別を意識せずに使える。
    */
-  readonly resolveBaseRef: Effect.Effect<string | undefined>;
+  readonly resolveBaseRef: Effect.Effect<Option.Option<string>>;
 }
 
 /**
@@ -105,11 +105,10 @@ export function loadCommandContext(
 
     // resolveBaseRef: ソース種別の分岐を吸収
     const resolveBaseRef = isGitHubSource(source)
-      ? Effect.tryPromise({
-          try: () => resolveLatestCommitSha(source.owner, source.repo),
-          catch: () => undefined as string | undefined,
-        }).pipe(Effect.orElseSucceed(() => undefined as string | undefined))
-      : Effect.succeed(undefined as string | undefined);
+      ? Effect.tryPromise(() => resolveLatestCommitSha(source.owner, source.repo)).pipe(
+          Effect.option,
+        )
+      : Effect.succeed(Option.none<string>());
 
     return { config, lock, source, templateDir, cleanup, resolveBaseRef };
   });

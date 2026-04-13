@@ -1,5 +1,5 @@
 import { vol } from "memfs";
-import { Effect } from "effect";
+import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZikuError, FileNotFoundError } from "../../errors";
 
@@ -71,8 +71,14 @@ vi.mock("../../utils/github", () => ({
 
 vi.mock("../../utils/template-config", async () => {
   const effectMod = await import("effect");
+  const errorsMod = await import("../../errors");
   return {
-    loadTemplateConfig: vi.fn(() => effectMod.Effect.succeed(null)),
+    // デフォルト: テンプレートに ziku.jsonc がない（Option.none になる）
+    loadTemplateConfig: vi.fn(() =>
+      effectMod.Effect.fail(
+        new errorsMod.TemplateNotConfiguredError({ templateDir: "/tmp/template" }),
+      ),
+    ),
   };
 });
 
@@ -159,7 +165,7 @@ function mockContext(overrides?: {
       templateDir: overrides?.templateDir ?? "/tmp/template",
       cleanup,
       /** テスト用: GitHub API 呼び出しをスキップし undefined を返す */
-      resolveBaseRef: Effect.succeed(undefined as string | undefined),
+      resolveBaseRef: Effect.succeed(Option.none<string>()),
     }),
     cleanup,
   };

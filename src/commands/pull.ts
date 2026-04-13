@@ -1,6 +1,6 @@
 import { readFile, rm } from "node:fs/promises";
 import { defineCommand } from "citty";
-import { Effect } from "effect";
+import { Effect, Option } from "effect";
 import { join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
@@ -101,13 +101,13 @@ export const pullCommand = defineCommand({
       if (!zikuConfigExists(targetDir)) {
         throw new ZikuError("Not initialized", "Run `ziku init` first");
       }
-      const lock = await Effect.runPromise(
-        Effect.tryPromise(() => loadLock(targetDir)).pipe(Effect.orElseSucceed(() => null)),
+      const lockOption = await Effect.runPromise(
+        Effect.tryPromise(() => loadLock(targetDir)).pipe(Effect.option),
       );
-      if (!lock) {
+      if (Option.isNone(lockOption)) {
         throw new ZikuError("No .ziku/lock.json found", "Run `ziku init` first");
       }
-      await runContinue(targetDir, lock);
+      await runContinue(targetDir, lockOption.value);
       return;
     }
 
@@ -131,15 +131,16 @@ export const pullCommand = defineCommand({
 
     await withFinally(async () => {
       // テンプレートの ziku.jsonc から新パターンをマージ
-      const templateConfig = await Effect.runPromise(
-        loadTemplateConfig(templateDir).pipe(Effect.orElseSucceed(() => null)),
+      const templateConfigOption = await Effect.runPromise(
+        loadTemplateConfig(templateDir).pipe(Effect.option),
       );
 
       let mergedInclude = include;
       let mergedExclude = exclude;
       let patternsUpdated = false;
 
-      if (templateConfig) {
+      if (Option.isSome(templateConfigOption)) {
+        const templateConfig = templateConfigOption.value;
         const newInclude = templateConfig.include.filter((p) => !include.includes(p));
         const newExclude = (templateConfig.exclude ?? []).filter((p) => !exclude.includes(p));
 
@@ -202,14 +203,13 @@ export const pullCommand = defineCommand({
       });
 
       if (unresolvedConflicts.length > 0) {
-        // resolveBaseRef で isGitHubSource 分岐を吸収
-        const latestRef = await Effect.runPromise(resolveBaseRef);
+        const latestRefOption = await Effect.runPromise(resolveBaseRef);
         await saveLock(targetDir, {
           ...lock,
           pendingMerge: {
             conflicts: unresolvedConflicts,
             templateHashes,
-            ...(latestRef ? { latestRef } : {}),
+            ...(Option.isSome(latestRefOption) ? { latestRef: latestRefOption.value } : {}),
           },
         });
         outro("Merge paused — resolve conflicts then run `ziku pull --continue`");
@@ -231,13 +231,12 @@ export const pullCommand = defineCommand({
         log.success(`Updated ${ZIKU_CONFIG_FILE} with new patterns from template`);
       }
 
-      // resolveBaseRef で isGitHubSource 分岐を吸収
-      const latestRef = await Effect.runPromise(resolveBaseRef);
+      const latestRefOption = await Effect.runPromise(resolveBaseRef);
 
       await saveLock(targetDir, {
         ...lock,
         baseHashes: templateHashes,
-        ...(latestRef ? { baseRef: latestRef } : {}),
+        ...(Option.isSome(latestRefOption) ? { baseRef: latestRefOption.value } : {}),
       });
 
       outro("Pull complete");

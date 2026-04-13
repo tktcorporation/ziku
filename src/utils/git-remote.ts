@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { Effect } from "effect";
+import { Effect, Option } from "effect";
 
 /** テンプレートリポジトリのデフォルト名（優先順） */
 export const DEFAULT_TEMPLATE_REPOS: readonly string[] = [".ziku", ".github"];
@@ -63,16 +63,15 @@ export function detectGitHubOwner(cwd?: string): string | null {
  * 背景: テンプレートリポジトリ自体で init を実行した場合の検出に使用。
  */
 export function detectGitHubRepo(cwd?: string): { owner: string; repo: string } | null {
-  return Effect.runSync(
-    Effect.try(() =>
-      execFileSync("git", ["remote", "get-url", "origin"], {
-        encoding: "utf-8",
-        cwd,
-        stdio: ["pipe", "pipe", "pipe"],
-      }).trim(),
-    ).pipe(
-      Effect.map(parseGitHubRepo),
-      Effect.orElseSucceed(() => null),
+  return Option.getOrNull(
+    Effect.runSync(
+      Effect.try(() =>
+        execFileSync("git", ["remote", "get-url", "origin"], {
+          encoding: "utf-8",
+          cwd,
+          stdio: ["pipe", "pipe", "pipe"],
+        }).trim(),
+      ).pipe(Effect.map(parseGitHubRepo), Effect.option),
     ),
   );
 }
