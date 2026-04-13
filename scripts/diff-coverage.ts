@@ -146,15 +146,23 @@ function calculateDiffCoverage(
       continue;
     }
 
-    // この行をカバーするステートメントがあるか探す
+    // この行がいずれかのステートメント範囲に含まれるか確認
+    // コメント、型宣言、インポート等の非実行行はステートメントマップに存在しないため、
+    // 集計対象から除外する（テスト不可能な行をカウントすると新規ファイルで閾値達成が不可能になる）
+    let lineInStatement = false;
     let lineIsCovered = false;
     for (const [stmtId, loc] of Object.entries(fileCov.statementMap)) {
-      // ステートメントの範囲内 かつ 実行回数 > 0 ならカバー済み
-      if (line >= loc.start.line && line <= loc.end.line && fileCov.s[stmtId] > 0) {
-        lineIsCovered = true;
-        break;
+      if (line >= loc.start.line && line <= loc.end.line) {
+        lineInStatement = true;
+        if (fileCov.s[stmtId] > 0) {
+          lineIsCovered = true;
+          break;
+        }
       }
     }
+
+    // ステートメント範囲外の行はカバレッジ集計に含めない
+    if (!lineInStatement) continue;
 
     if (lineIsCovered) {
       coveredLines++;

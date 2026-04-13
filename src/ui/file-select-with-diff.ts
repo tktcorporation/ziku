@@ -38,6 +38,7 @@ export function stripAnsi(str: string): string {
   return str.replaceAll(ansiPattern, "");
 }
 
+/* v8 ignore start -- ターミナル制御定数。インタラクティブプロンプト専用でユニットテスト不可。 */
 /** カーソルを非表示にする */
 const hideCursor = "\u001B[?25l";
 /** カーソルを表示する */
@@ -51,6 +52,7 @@ const carriageReturn = "\r";
 function cursorUp(n: number): string {
   return n > 0 ? `\u001B[${n}A` : "";
 }
+/* v8 ignore end */
 
 // ─── Diff フォーマット ──────────────────────────────────────────
 
@@ -58,7 +60,7 @@ function cursorUp(n: number): string {
  * FileDiff から色付きの diff 行配列を生成する。
  *
  * unified diff を生成し、隣接する -/+ ペアに word diff ハイライトを適用する。
- * ヘッダー行（Index:, ===, ---, +++）は除外する。
+ * unified diff ヘッダー行のみ除外する（コンテンツ行の ---/+++ は保持）。
  */
 export function buildColoredDiffLines(file: FileDiff): string[] {
   if (file.type === "unchanged") return [pc.dim("(no changes)")];
@@ -66,14 +68,20 @@ export function buildColoredDiffLines(file: FileDiff): string[] {
   const raw = generateUnifiedDiff(file);
   if (!raw) return [pc.dim("(no diff available)")];
 
+  // unified diff ヘッダーのみ除外。diff ライブラリの出力形式:
+  //   Index: <path>
+  //   ===...
+  //   --- <path>\t<label>
+  //   +++ <path>\t<label>
+  // コンテンツ行の --- や +++ を誤除去しないため、タブ文字の存在で判定する。
   const lines = raw
     .split("\n")
     .filter(
       (l) =>
         !l.startsWith("Index:") &&
         !l.startsWith("===") &&
-        !l.startsWith("---") &&
-        !l.startsWith("+++"),
+        !(l.startsWith("--- ") && l.includes("\t")) &&
+        !(l.startsWith("+++ ") && l.includes("\t")),
     );
 
   return applyWordDiffAndColorize(lines);
@@ -110,7 +118,7 @@ export function buildFileItems(files: FileDiff[]): FileItem[] {
 
 // ─── レンダリング ──────────────────────────────────────────────
 
-interface RenderState {
+export interface RenderState {
   readonly items: FileItem[];
   readonly selected: Set<string>;
   cursorIndex: number;
@@ -158,14 +166,16 @@ export function truncateLine(line: string, maxWidth: number): string {
       continue;
     }
     if (visibleLen >= maxWidth - 1) {
-      result += pc.dim("…");
+      // ANSI リセットを付与し、色が後続行に漏れるのを防ぐ
+      result += `\u001B[0m${pc.dim("…")}`;
       break;
     }
     result += ch;
     visibleLen++;
   }
 
-  return result;
+  // 切り詰めなしでもエスケープ途中で終わるケースに備えリセットを保証
+  return `${result}\u001B[0m`;
 }
 
 /** テスト用にターミナルサイズを注入できるオプション */
@@ -255,7 +265,7 @@ export function render(state: RenderState, termSize?: TerminalSize): string {
 // ─── キー入力 → アクション解決 ──────────────────────────────────
 
 /** キーボードアクション名 */
-type KeyAction =
+export type KeyAction =
   | "cancel"
   | "confirm"
   | "toggle"
@@ -273,7 +283,7 @@ const simpleKeyMap: Record<string, KeyAction> = {
 };
 
 /** キー入力を正規化されたアクション名に変換する */
-function resolveKeyAction(key: readline.Key): KeyAction | undefined {
+export function resolveKeyAction(key: readline.Key): KeyAction | undefined {
   if (key.ctrl === true) {
     return key.name === "c" ? "cancel" : undefined;
   }
@@ -288,6 +298,67 @@ function resolveKeyAction(key: readline.Key): KeyAction | undefined {
   if (key.name === "k" && key.shift !== true) return "cursorUp";
   if (key.name === "j" && key.shift !== true) return "cursorDown";
   return undefined;
+}
+
+// ─── 純粋な状態遷移（テスト可能） ──────────────────────────────
+
+/** アクション実行結果: UI 副作用の指示 */
+export type ActionEffect = "redraw" | "cancel" | "confirm";
+
+/**
+ * アクションに応じて RenderState を変更し、必要な副作用を返す。
+ *
+ * 副作用なし（純粋関数）: state は in-place 変更される。
+ * テスタビリティのため、ターミナル I/O は呼び出し側が ActionEffect に基づいて行う。
+ */
+export function applyAction(state: RenderState, action: KeyAction, termRows: number): ActionEffect {
+  return match(action)
+    .with("cancel", (): ActionEffect => "cancel")
+    .with("confirm", (): ActionEffect => "confirm")
+    .with("cursorUp", (): ActionEffect => {
+      if (state.cursorIndex > 0) {
+        state.cursorIndex--;
+        state.diffScrollOffset = 0;
+      }
+      return "redraw";
+    })
+    .with("cursorDown", (): ActionEffect => {
+      if (state.cursorIndex < state.items.length - 1) {
+        state.cursorIndex++;
+        state.diffScrollOffset = 0;
+      }
+      return "redraw";
+    })
+    .with("scrollDiffUp", (): ActionEffect => {
+      if (state.diffScrollOffset > 0) state.diffScrollOffset--;
+      return "redraw";
+    })
+    .with("scrollDiffDown", (): ActionEffect => {
+      const currentItem = state.items[state.cursorIndex];
+      const diffHeight = getDiffPreviewHeight(termRows, state.items.length);
+      const maxScroll = Math.max(0, currentItem.diffLines.length - diffHeight);
+      if (state.diffScrollOffset < maxScroll) state.diffScrollOffset++;
+      return "redraw";
+    })
+    .with("toggle", (): ActionEffect => {
+      const path = state.items[state.cursorIndex].file.path;
+      if (state.selected.has(path)) {
+        state.selected.delete(path);
+      } else {
+        state.selected.add(path);
+      }
+      return "redraw";
+    })
+    .with("toggleAll", (): ActionEffect => {
+      const allSelected = state.items.every((item) => state.selected.has(item.file.path));
+      if (allSelected) {
+        state.selected.clear();
+      } else {
+        for (const item of state.items) state.selected.add(item.file.path);
+      }
+      return "redraw";
+    })
+    .exhaustive();
 }
 
 // ─── メインプロンプト ──────────────────────────────────────────
@@ -305,6 +376,7 @@ export interface FileSelectWithDiffOptions {
  *
  * @returns 選択されたファイルの配列。空配列 = 何も選択せず確定。
  */
+/* v8 ignore start -- readline raw mode のインタラクティブ I/O。ユニットテストでは再現不可。 */
 export function selectFilesWithDiffPreview(
   files: FileDiff[],
   options?: FileSelectWithDiffOptions,
@@ -370,9 +442,16 @@ export function selectFilesWithDiffPreview(
       resolve(result);
     }
 
-    /** アクションを実行する */
-    function handleAction(action: KeyAction): void {
-      match(action)
+    function onKeypress(_ch: string | undefined, key: readline.Key | undefined): void {
+      if (!key) return;
+      const action = resolveKeyAction(key);
+      if (!action) return;
+
+      const effect = applyAction(state, action, process.stdout.rows ?? 24);
+      match(effect)
+        .with("redraw", () => {
+          redraw();
+        })
         .with("cancel", () => {
           stdout.write(showCursor + "\n");
           if (stdin.isTTY) stdin.setRawMode(wasRaw ?? false);
@@ -381,57 +460,7 @@ export function selectFilesWithDiffPreview(
         .with("confirm", () => {
           finish(files.filter((f) => state.selected.has(f.path)));
         })
-        .with("cursorUp", () => {
-          if (state.cursorIndex > 0) {
-            state.cursorIndex--;
-            state.diffScrollOffset = 0;
-          }
-          redraw();
-        })
-        .with("cursorDown", () => {
-          if (state.cursorIndex < items.length - 1) {
-            state.cursorIndex++;
-            state.diffScrollOffset = 0;
-          }
-          redraw();
-        })
-        .with("scrollDiffUp", () => {
-          if (state.diffScrollOffset > 0) state.diffScrollOffset--;
-          redraw();
-        })
-        .with("scrollDiffDown", () => {
-          const currentItem = items[state.cursorIndex];
-          const termRows = process.stdout.rows || 24;
-          const diffHeight = getDiffPreviewHeight(termRows, items.length);
-          const maxScroll = Math.max(0, currentItem.diffLines.length - diffHeight);
-          if (state.diffScrollOffset < maxScroll) state.diffScrollOffset++;
-          redraw();
-        })
-        .with("toggle", () => {
-          const path = items[state.cursorIndex].file.path;
-          if (state.selected.has(path)) {
-            state.selected.delete(path);
-          } else {
-            state.selected.add(path);
-          }
-          redraw();
-        })
-        .with("toggleAll", () => {
-          const allSelected = items.every((item) => state.selected.has(item.file.path));
-          if (allSelected) {
-            state.selected.clear();
-          } else {
-            for (const item of items) state.selected.add(item.file.path);
-          }
-          redraw();
-        })
         .exhaustive();
-    }
-
-    function onKeypress(_ch: string | undefined, key: readline.Key | undefined): void {
-      if (!key) return;
-      const action = resolveKeyAction(key);
-      if (action) handleAction(action);
     }
 
     stdin.on("keypress", onKeypress);
@@ -440,3 +469,4 @@ export function selectFilesWithDiffPreview(
     redraw();
   });
 }
+/* v8 ignore end */
