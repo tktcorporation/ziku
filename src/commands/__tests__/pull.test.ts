@@ -163,6 +163,7 @@ function mockContext(overrides?: {
   lock?: typeof baseLock & Record<string, unknown>;
   source?: { owner: string; repo: string };
   templateDir?: string;
+  resolveBaseRef?: Effect.Effect<Option.Option<string>>;
 }) {
   const cleanup = vi.fn();
   const source = overrides?.source ?? { owner: "tktcorporation", repo: ".github" };
@@ -173,8 +174,7 @@ function mockContext(overrides?: {
       source,
       templateDir: overrides?.templateDir ?? "/tmp/template",
       cleanup,
-      /** テスト用: GitHub API 呼び出しをスキップし undefined を返す */
-      resolveBaseRef: Effect.succeed(Option.none<string>()),
+      resolveBaseRef: overrides?.resolveBaseRef ?? Effect.succeed(Option.none<string>()),
     }),
     cleanup,
   };
@@ -497,6 +497,74 @@ describe("pullCommand", () => {
           baseHashes: newTemplateHashes,
         }),
       );
+    });
+
+    it("resolveBaseRef が Some のとき baseRef が更新される", async () => {
+      vol.fromJSON({
+        "/test": null,
+        "/tmp/template/.mcp.json": "updated",
+      });
+
+      const { effect } = mockContext({
+        resolveBaseRef: Effect.succeed(Option.some("newsha456")),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [".mcp.json"],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockSaveLock).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ baseRef: "newsha456" }),
+      );
+    });
+
+    it("resolveBaseRef が None のとき既存の baseRef を上書きしない", async () => {
+      vol.fromJSON({
+        "/test": null,
+        "/tmp/template/.mcp.json": "updated",
+      });
+
+      const { effect } = mockContext({
+        lock: { ...baseLock, baseRef: "existing-sha" },
+        resolveBaseRef: Effect.succeed(Option.none<string>()),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [".mcp.json"],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // baseRef: undefined でロックを上書きしないことを確認
+      const lockArg = mockSaveLock.mock.calls[0][1];
+      expect(lockArg).not.toHaveProperty("baseRef", undefined);
+      // 既存の baseRef がスプレッドで保持される
+      expect(lockArg.baseRef).toBe("existing-sha");
     });
 
     it("cleanup が必ず呼ばれる", async () => {
