@@ -916,7 +916,7 @@ describe("pushCommand", () => {
       );
 
       // mergeOneFile: コンフリクト（delete/modify conflict は mergeOneFile 内で
-      // readFileOrEmpty により安全にローカル=空文字列で処理される）
+      // readFileSafe により安全にローカル=空文字列で処理される）
       mockMergeOneFile.mockReturnValueOnce(
         Effect.succeed({
           file: "deleted-file.txt",

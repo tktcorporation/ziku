@@ -562,7 +562,7 @@ async function resolveConflicts(
       for (const file of conflicts) {
         // ベースがない場合は 3-way マージ不可 → unresolved
         // 旧実装ではファイル単位で baseContent の truthy チェックをしていたが、
-        // mergeOneFile 内で readFileOrEmpty が空文字列を返すため、ベースに
+        // mergeOneFile 内で readFileSafe が空文字列を返すため、ベースに
         // 特定ファイルがない場合は空ベースでのマージ（= conflict マーカー付き）になる。
         // hasConflicts=true → unresolved に分類されるので PR に壊れた内容は送られない。
         if (!baseResult) {

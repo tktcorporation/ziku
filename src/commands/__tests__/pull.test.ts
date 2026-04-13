@@ -926,7 +926,7 @@ describe("pullCommand", () => {
       );
 
       // mergeOneFile が delete/modify conflict を処理する
-      // （内部で readFileOrEmpty が空文字列を返す）
+      // （内部で readFileSafe が空文字列を返す）
       mockMergeResult(
         ".claude/rules/worktree.md",
         "<<<<<<< LOCAL\n=======\ntemplate content updated\n>>>>>>> TEMPLATE",

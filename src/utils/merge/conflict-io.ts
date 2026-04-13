@@ -11,8 +11,9 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { Effect } from "effect";
 import { dirname, join } from "pathe";
-import { P, match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import type { TemplateSource } from "../../modules/schemas";
+import { FileNotFoundError } from "../../errors";
 import { downloadTemplateToTemp } from "../template";
 import { log } from "../../ui/renderer";
 import type { MergeResult } from "./types";
@@ -22,12 +23,15 @@ import { threeWayMerge } from "./three-way-merge";
 // ─── ファイル I/O プリミティブ ───
 
 /**
- * ファイルを読み込み、存在しない場合は空文字列を返す。
- * delete/modify conflict でローカルにファイルがないケースに対応するため、
- * existsSync + readFile を毎回手書きする代わりにこの関数を使う。
+ * ファイルを読み込む。存在しない場合は FileNotFoundError を返す。
+ *
+ * 空文字列で握りつぶさず、呼び出し側がエラーチャネルから
+ * 明示的にフォールバック戦略（catchTag）を選択する設計。
  */
-export const readFileOrEmpty = (path: string): Effect.Effect<string> =>
-  Effect.tryPromise(() => readFile(path, "utf-8")).pipe(Effect.orElseSucceed(() => ""));
+export const readFileSafe = (path: string): Effect.Effect<string, FileNotFoundError> =>
+  Effect.tryPromise(() => readFile(path, "utf-8")).pipe(
+    Effect.catchAll(() => Effect.fail(new FileNotFoundError({ path }))),
+  );
 
 /**
  * ファイルを書き込む。親ディレクトリがなければ自動作成する。
@@ -63,20 +67,26 @@ export interface MergeOneFileOutput extends MergeResult {
  * 1ファイルの 3-way マージを実行する。
  *
  * local/template/base の3バージョンを読み込み、threeWayMerge に渡す。
- * - local, base: ファイルがない場合は readFileOrEmpty で空文字列にフォールバック
+ * - local, base: ファイルがない場合は FileNotFoundError → 空文字列にフォールバック
  *   （delete/modify conflict でローカルが削除されているケースに対応）
  * - template: 必ず存在する前提（classifyFiles が検出済み）。不在時は orDie でクラッシュ。
  *   テンプレートファイルがないのに conflict に分類されることは classifyFiles の不変条件違反。
  */
 export const mergeOneFile = (input: MergeOneFileInput): Effect.Effect<MergeOneFileOutput> =>
   Effect.gen(function* () {
-    const localContent = yield* readFileOrEmpty(join(input.targetDir, input.file));
-    // テンプレート側のファイルは必ず存在するはず（classifyFiles が検出済み）
-    const templateContent = yield* Effect.tryPromise(() =>
-      readFile(join(input.templateDir, input.file), "utf-8"),
+    // local: 削除されている可能性がある → FileNotFoundError を空文字列にフォールバック
+    const localContent = yield* readFileSafe(join(input.targetDir, input.file)).pipe(
+      Effect.catchTag("FileNotFoundError", () => Effect.succeed("")),
     );
+
+    // template: classifyFiles が検出済みなので必ず存在する（不変条件）
+    const templateContent = yield* readFileSafe(join(input.templateDir, input.file));
+
+    // base: ダウンロードした時点でファイルがない可能性がある → 空文字列にフォールバック
     const baseContent = input.baseTemplateDir
-      ? yield* readFileOrEmpty(join(input.baseTemplateDir, input.file))
+      ? yield* readFileSafe(join(input.baseTemplateDir, input.file)).pipe(
+          Effect.catchTag("FileNotFoundError", () => Effect.succeed("")),
+        )
       : "";
 
     const result = threeWayMerge({
@@ -87,7 +97,10 @@ export const mergeOneFile = (input: MergeOneFileInput): Effect.Effect<MergeOneFi
     });
 
     return { ...result, file: input.file };
-  }).pipe(Effect.orDie);
+  }).pipe(
+    // template の FileNotFoundError は classifyFiles の不変条件違反 → defect
+    Effect.catchTag("FileNotFoundError", (e) => Effect.die(e)),
+  );
 
 // ─── ベーステンプレートのダウンロード ───
 

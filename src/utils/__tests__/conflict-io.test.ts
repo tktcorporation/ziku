@@ -9,7 +9,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { Effect } from "effect";
 import { join } from "pathe";
 import { afterEach, describe, expect, it } from "vitest";
-import { mergeOneFile, readFileOrEmpty, writeFileEnsureDir } from "../merge";
+import { mergeOneFile, readFileSafe, writeFileEnsureDir } from "../merge";
 import { tmpdir } from "node:os";
 
 /** テストごとにユニークな一時ディレクトリを作成 */
@@ -51,29 +51,41 @@ describe("conflict-io", () => {
     return dir;
   }
 
-  describe("readFileOrEmpty", () => {
+  describe("readFileSafe", () => {
     it("存在するファイルの内容を返す", async () => {
       const dir = await temp("read-exists");
       await writeFile(join(dir, "test.txt"), "hello", "utf-8");
 
-      const content = await Effect.runPromise(readFileOrEmpty(join(dir, "test.txt")));
+      const content = await Effect.runPromise(readFileSafe(join(dir, "test.txt")));
       expect(content).toBe("hello");
     });
 
-    it("存在しないファイルに対して空文字列を返す（ENOENT にならない）", async () => {
+    it("存在しないファイルに対して FileNotFoundError を返す", async () => {
       const dir = await temp("read-missing");
+      const path = join(dir, "nonexistent.txt");
 
-      const content = await Effect.runPromise(readFileOrEmpty(join(dir, "nonexistent.txt")));
-      expect(content).toBe("");
+      const exit = await Effect.runPromiseExit(readFileSafe(path));
+      expect(exit._tag).toBe("Failure");
     });
 
-    it("存在しないディレクトリ配下のファイルに対して空文字列を返す", async () => {
+    it("存在しないディレクトリ配下のファイルに対して FileNotFoundError を返す", async () => {
       const dir = await temp("read-missing-dir");
+      const path = join(dir, "nonexistent-dir", "file.txt");
+
+      const exit = await Effect.runPromiseExit(readFileSafe(path));
+      expect(exit._tag).toBe("Failure");
+    });
+
+    it("catchTag で FileNotFoundError をフォールバックできる", async () => {
+      const dir = await temp("read-catchTag");
+      const path = join(dir, "nonexistent.txt");
 
       const content = await Effect.runPromise(
-        readFileOrEmpty(join(dir, "nonexistent-dir", "file.txt")),
+        readFileSafe(path).pipe(
+          Effect.catchTag("FileNotFoundError", () => Effect.succeed("fallback")),
+        ),
       );
-      expect(content).toBe("");
+      expect(content).toBe("fallback");
     });
   });
 

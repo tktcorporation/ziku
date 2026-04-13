@@ -26,7 +26,7 @@ export { classifyFiles } from "./classify";
 export { hasConflictMarkers } from "./text-merge";
 export { threeWayMerge } from "./three-way-merge";
 export {
-  readFileOrEmpty,
+  readFileSafe,
   writeFileEnsureDir,
   mergeOneFile,
   downloadBaseForMerge,
