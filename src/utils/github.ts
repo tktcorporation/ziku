@@ -1,5 +1,5 @@
 import { Octokit } from "@octokit/rest";
-import { Effect } from "effect";
+import { Effect, Option } from "effect";
 import type { PrResult } from "../modules/schemas";
 
 export interface PushOptions {
@@ -168,24 +168,26 @@ export function getGitHubToken(): string | undefined {
  * gh CLI が未インストール or 未ログインの場合は undefined を返す。
  */
 export function getGhCliToken(): string | undefined {
-  return Effect.runSync(
-    Effect.try(() => {
-      const { execFileSync } = require("node:child_process");
-      return (
-        execFileSync("gh", ["auth", "token"], {
-          encoding: "utf-8",
-          timeout: 5000,
-          stdio: ["pipe", "pipe", "pipe"],
-        }) as string
-      ).trim();
-    }).pipe(
-      Effect.flatMap((token) =>
-        token &&
-        (token.startsWith("ghp_") || token.startsWith("gho_") || token.startsWith("github_pat_"))
-          ? Effect.succeed(token)
-          : Effect.succeed(undefined as string | undefined),
+  return Option.getOrUndefined(
+    Effect.runSync(
+      Effect.try(() => {
+        const { execFileSync } = require("node:child_process");
+        return (
+          execFileSync("gh", ["auth", "token"], {
+            encoding: "utf-8",
+            timeout: 5000,
+            stdio: ["pipe", "pipe", "pipe"],
+          }) as string
+        ).trim();
+      }).pipe(
+        Effect.flatMap((token) =>
+          token &&
+          (token.startsWith("ghp_") || token.startsWith("gho_") || token.startsWith("github_pat_"))
+            ? Effect.succeed(token)
+            : Effect.fail("invalid token format" as const),
+        ),
+        Effect.option,
       ),
-      Effect.orElseSucceed((): string | undefined => undefined),
     ),
   );
 }
@@ -200,15 +202,17 @@ export async function getAuthenticatedUserLogin(): Promise<string | undefined> {
   const token = getGitHubToken();
   if (!token) return undefined;
 
-  return await Effect.runPromise(
-    Effect.tryPromise(async () => {
-      const res = await fetch("https://api.github.com/user", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) return undefined;
-      const data = (await res.json()) as { login?: string };
-      return data.login;
-    }).pipe(Effect.orElseSucceed((): string | undefined => undefined)),
+  return Option.getOrUndefined(
+    await Effect.runPromise(
+      Effect.tryPromise(async () => {
+        const res = await fetch("https://api.github.com/user", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return undefined;
+        const data = (await res.json()) as { login?: string };
+        return data.login;
+      }).pipe(Effect.option),
+    ),
   );
 }
 
@@ -307,20 +311,22 @@ export async function scaffoldTemplateRepo(
  * GitHub API の `Accept: application/vnd.github.sha` を使い、SHA 文字列のみを取得する。
  * 認証不要（公開リポジトリの場合）。
  */
-export function resolveLatestCommitSha(
+export async function resolveLatestCommitSha(
   owner: string,
   repo: string,
   ref = "main",
 ): Promise<string | undefined> {
-  return Effect.runPromise(
-    Effect.tryPromise(async () => {
-      const url = `https://api.github.com/repos/${owner}/${repo}/commits/${ref}`;
-      const res = await fetch(url, {
-        headers: { Accept: "application/vnd.github.sha" },
-      });
-      if (!res.ok) return undefined;
-      return (await res.text()).trim();
-    }).pipe(Effect.orElseSucceed((): string | undefined => undefined)),
+  return Option.getOrUndefined(
+    await Effect.runPromise(
+      Effect.tryPromise(async () => {
+        const url = `https://api.github.com/repos/${owner}/${repo}/commits/${ref}`;
+        const res = await fetch(url, {
+          headers: { Accept: "application/vnd.github.sha" },
+        });
+        if (!res.ok) return undefined;
+        return (await res.text()).trim();
+      }).pipe(Effect.option),
+    ),
   );
 }
 

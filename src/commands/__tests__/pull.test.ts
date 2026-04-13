@@ -1,5 +1,5 @@
 import { vol } from "memfs";
-import { Effect } from "effect";
+import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZikuError, FileNotFoundError } from "../../errors";
 
@@ -52,6 +52,8 @@ vi.mock("../../utils/hash", () => ({
 
 vi.mock("../../utils/merge", async () => {
   const effectMod = await import("effect");
+  const fsMod = await import("node:fs/promises");
+  const errorsMod = await import("../../errors");
   return {
     classifyFiles: vi.fn(),
     hasConflictMarkers: vi.fn((content: string) => ({
@@ -59,6 +61,13 @@ vi.mock("../../utils/merge", async () => {
       lines: [],
     })),
     // conflict-io の共通ユーティリティ（pull.ts はこれらを経由して merge する）
+    readFileSafe: vi.fn((path: string) =>
+      effectMod.Effect.tryPromise(() => fsMod.readFile(path, "utf-8")).pipe(
+        effectMod.Effect.catchAll(() =>
+          effectMod.Effect.fail(new errorsMod.FileNotFoundError({ path })),
+        ),
+      ),
+    ),
     mergeOneFile: vi.fn(),
     writeFileEnsureDir: vi.fn(() => effectMod.Effect.succeed(undefined)),
     downloadBaseForMerge: vi.fn(() => effectMod.Effect.succeed(null)),
@@ -71,8 +80,14 @@ vi.mock("../../utils/github", () => ({
 
 vi.mock("../../utils/template-config", async () => {
   const effectMod = await import("effect");
+  const errorsMod = await import("../../errors");
   return {
-    loadTemplateConfig: vi.fn(() => effectMod.Effect.succeed(null)),
+    // デフォルト: テンプレートに ziku.jsonc がない → Effect.option で None になる
+    loadTemplateConfig: vi.fn(() =>
+      effectMod.Effect.fail(
+        new errorsMod.TemplateNotConfiguredError({ templateDir: "/tmp/template" }),
+      ),
+    ),
   };
 });
 
@@ -159,7 +174,7 @@ function mockContext(overrides?: {
       templateDir: overrides?.templateDir ?? "/tmp/template",
       cleanup,
       /** テスト用: GitHub API 呼び出しをスキップし undefined を返す */
-      resolveBaseRef: Effect.succeed(undefined as string | undefined),
+      resolveBaseRef: Effect.succeed(Option.none<string>()),
     }),
     cleanup,
   };

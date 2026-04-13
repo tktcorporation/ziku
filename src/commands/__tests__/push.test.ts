@@ -1,5 +1,5 @@
 import { vol } from "memfs";
-import { Effect } from "effect";
+import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FileNotFoundError } from "../../errors";
 
@@ -182,7 +182,7 @@ function mockContext(overrides?: {
       source,
       templateDir: overrides?.templateDir ?? "/tmp/template",
       cleanup,
-      resolveBaseRef: Effect.succeed(undefined as string | undefined),
+      resolveBaseRef: Effect.succeed(Option.none<string>()),
     }),
     cleanup,
   };
