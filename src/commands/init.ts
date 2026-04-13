@@ -467,49 +467,90 @@ async function resolveTemplateSourceWithCheck(
   sourceRepo: string;
 }> {
   // --from で明示指定
-  if (from) {
-    const resolved = parseFromArg(from);
-    // owner/repo 形式（明示的なリポジトリ指定）の場合はそのまま存在チェック
-    if (from.includes("/")) {
-      const exists = await checkRepoExists(resolved.sourceOwner, resolved.sourceRepo);
-      if (!exists) {
-        throw new ZikuError(
-          `Template repository "${resolved.sourceOwner}/${resolved.sourceRepo}" not found`,
-          "Check the --from value or create the repository first",
-        );
-      }
-      return resolved;
-    }
-    // owner のみ指定 → デフォルトリポジトリ候補を順に探索（セットアップ済みを優先）
-    const existsResults = await Promise.all(
-      DEFAULT_TEMPLATE_REPOS.map((repo) => checkRepoExists(resolved.sourceOwner, repo)),
-    );
-    const existingRepos = DEFAULT_TEMPLATE_REPOS.filter((_, i) => existsResults[i]);
-    if (existingRepos.length === 0) {
+  if (from) return resolveExplicitSource(from);
+
+  // 自動検出: 候補を収集し、存在チェック＋セットアップ状態を確認
+  const { candidateEntries, deduplicatedCandidates, existingCandidates } =
+    await discoverTemplateCandidates();
+
+  if (nonInteractive) {
+    return resolveNonInteractive(deduplicatedCandidates, candidateEntries);
+  }
+
+  // ─── インタラクティブモード ───
+
+  if (existingCandidates.length > 0) {
+    const selected = await selectTemplateCandidate(existingCandidates);
+    if (selected === "specify-other") return promptTemplateSource();
+    return { sourceOwner: selected.owner, sourceRepo: selected.repo };
+  }
+
+  if (candidateEntries.length > 0) {
+    const firstCandidate = candidateEntries[0];
+    return handleMissingTemplate(firstCandidate.owner, firstCandidate.repo);
+  }
+
+  log.warn("Could not detect template source from git remote.");
+  return promptTemplateSource();
+}
+
+/**
+ * --from で明示指定されたソースを解決する。
+ * owner/repo 形式ならそのまま存在チェック、owner のみならデフォルトリポジトリを探索。
+ */
+async function resolveExplicitSource(
+  from: string,
+): Promise<{ sourceOwner: string; sourceRepo: string }> {
+  const resolved = parseFromArg(from);
+
+  // owner/repo 形式
+  if (from.includes("/")) {
+    const exists = await checkRepoExists(resolved.sourceOwner, resolved.sourceRepo);
+    if (!exists) {
       throw new ZikuError(
-        `No template repository found for "${resolved.sourceOwner}" (checked: ${DEFAULT_TEMPLATE_REPOS.join(", ")})`,
+        `Template repository "${resolved.sourceOwner}/${resolved.sourceRepo}" not found`,
         "Check the --from value or create the repository first",
       );
     }
-    // 存在するリポジトリの中でセットアップ済みのものを優先
-    const setupResults = await Promise.all(
-      existingRepos.map((repo) => checkRepoSetup(resolved.sourceOwner, repo)),
-    );
-    const readyRepo = existingRepos.find((_, i) => setupResults[i]);
-    return {
-      sourceOwner: resolved.sourceOwner,
-      sourceRepo: readyRepo ?? existingRepos[0],
-    };
+    return resolved;
   }
 
-  // 候補を収集: 認証ユーザー + git remote オーナー
+  // owner のみ指定 → デフォルトリポジトリ候補を順に探索（セットアップ済みを優先）
+  const existsResults = await Promise.all(
+    DEFAULT_TEMPLATE_REPOS.map((repo) => checkRepoExists(resolved.sourceOwner, repo)),
+  );
+  const existingRepos = DEFAULT_TEMPLATE_REPOS.filter((_, i) => existsResults[i]);
+  if (existingRepos.length === 0) {
+    throw new ZikuError(
+      `No template repository found for "${resolved.sourceOwner}" (checked: ${DEFAULT_TEMPLATE_REPOS.join(", ")})`,
+      "Check the --from value or create the repository first",
+    );
+  }
+  const setupResults = await Promise.all(
+    existingRepos.map((repo) => checkRepoSetup(resolved.sourceOwner, repo)),
+  );
+  const readyRepo = existingRepos.find((_, i) => setupResults[i]);
+  return {
+    sourceOwner: resolved.sourceOwner,
+    sourceRepo: readyRepo ?? existingRepos[0],
+  };
+}
+
+/**
+ * 認証ユーザー・git remote オーナーからテンプレート候補を収集し、
+ * 存在チェックとセットアップ状態の確認を行う。
+ */
+async function discoverTemplateCandidates(): Promise<{
+  candidateEntries: TemplateCandidate[];
+  existingCandidates: TemplateCandidate[];
+  deduplicatedCandidates: TemplateCandidate[];
+}> {
   const detectedOwner = detectGitHubOwner();
   const authenticatedUser = await getAuthenticatedUserLogin();
 
   const candidateEntries: TemplateCandidate[] = [];
   const seen = new Set<string>();
 
-  // 候補: 認証ユーザー・git remote オーナー × デフォルトリポジトリ名
   const owners: Array<{ name: string; label: string }> = [];
   if (authenticatedUser) owners.push({ name: authenticatedUser, label: "Your account" });
   if (detectedOwner) owners.push({ name: detectedOwner, label: "Git remote owner" });
@@ -519,22 +560,16 @@ async function resolveTemplateSourceWithCheck(
       const key = `${owner.name}/${repo}`;
       if (!seen.has(key)) {
         seen.add(key);
-        candidateEntries.push({
-          owner: owner.name,
-          repo,
-          label: owner.label,
-        });
+        candidateEntries.push({ owner: owner.name, repo, label: owner.label });
       }
     }
   }
 
-  // 存在チェックを並列で実行
   const existsResults = await Promise.all(
     candidateEntries.map((c) => checkRepoExists(c.owner, c.repo)),
   );
   const existingCandidates = candidateEntries.filter((_, i) => existsResults[i]);
 
-  // セットアップ状態を並列でチェック
   const setupResults = await Promise.all(
     existingCandidates.map((c) => checkRepoSetup(c.owner, c.repo)),
   );
@@ -542,59 +577,43 @@ async function resolveTemplateSourceWithCheck(
     existingCandidates[i].ready = setupResults[i];
   }
 
-  // 同一オーナーで複数リポジトリが見つかった場合、セットアップ済みを優先し、
-  // それでも同順ならリスト順（.ziku > .github）で絞り込む
   const deduplicatedCandidates = deduplicateByOwner(existingCandidates);
 
-  if (nonInteractive) {
-    // 候補が1つだけ → そのまま使用
-    if (deduplicatedCandidates.length === 1) {
-      return {
-        sourceOwner: deduplicatedCandidates[0].owner,
-        sourceRepo: deduplicatedCandidates[0].repo,
-      };
-    }
-    // 候補が2つ以上（異なるオーナー）→ 曖昧なのでエラー
-    if (deduplicatedCandidates.length > 1) {
-      const candidateList = deduplicatedCandidates.map((c) => `${c.owner}/${c.repo}`).join(", ");
-      throw new ZikuError(
-        `Multiple template candidates found: ${candidateList}`,
-        "Specify --from <owner> or --from <owner/repo> to disambiguate",
-      );
-    }
-    // 候補なし
-    if (candidateEntries.length > 0) {
-      const firstCandidate = candidateEntries[0];
-      throw new ZikuError(
-        `Template repository "${firstCandidate.owner}/${firstCandidate.repo}" not found`,
-        "Create it first, or specify --from <owner> or --from <owner/repo>",
-      );
-    }
+  return { candidateEntries, existingCandidates, deduplicatedCandidates };
+}
+
+/**
+ * non-interactive モードでのテンプレートソース解決。
+ * 候補が1つなら使用、複数なら曖昧エラー、0ならエラー。
+ */
+function resolveNonInteractive(
+  deduplicatedCandidates: TemplateCandidate[],
+  candidateEntries: TemplateCandidate[],
+): { sourceOwner: string; sourceRepo: string } {
+  if (deduplicatedCandidates.length === 1) {
+    return {
+      sourceOwner: deduplicatedCandidates[0].owner,
+      sourceRepo: deduplicatedCandidates[0].repo,
+    };
+  }
+  if (deduplicatedCandidates.length > 1) {
+    const candidateList = deduplicatedCandidates.map((c) => `${c.owner}/${c.repo}`).join(", ");
     throw new ZikuError(
-      "Cannot detect template source: no git remote origin found",
-      "Specify --from <owner> or --from <owner/repo>",
+      `Multiple template candidates found: ${candidateList}`,
+      "Specify --from <owner> or --from <owner/repo> to disambiguate",
     );
   }
-
-  // ─── インタラクティブモード ───
-
-  // 候補が見つかった場合
-  if (existingCandidates.length > 0) {
-    const selected = await selectTemplateCandidate(existingCandidates);
-    if (selected === "specify-other") {
-      return promptTemplateSource();
-    }
-    return { sourceOwner: selected.owner, sourceRepo: selected.repo };
-  }
-
-  // 候補はあったが全て存在しない場合
   if (candidateEntries.length > 0) {
     const firstCandidate = candidateEntries[0];
-    return handleMissingTemplate(firstCandidate.owner, firstCandidate.repo);
+    throw new ZikuError(
+      `Template repository "${firstCandidate.owner}/${firstCandidate.repo}" not found`,
+      "Create it first, or specify --from <owner> or --from <owner/repo>",
+    );
   }
-
-  log.warn("Could not detect template source from git remote.");
-  return promptTemplateSource();
+  throw new ZikuError(
+    "Cannot detect template source: no git remote origin found",
+    "Specify --from <owner> or --from <owner/repo>",
+  );
 }
 
 /**

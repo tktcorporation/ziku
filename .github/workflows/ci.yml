@@ -105,6 +105,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
 
@@ -116,8 +118,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Run tests
-        run: pnpm run test:run
+      - name: Run tests with coverage
+        run: pnpm run test:coverage
+
+      - name: Check diff coverage
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: pnpm tsx scripts/diff-coverage.ts --threshold 80 --base "origin/$BASE_REF"
 
   docs:
     name: Check README

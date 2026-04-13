@@ -286,25 +286,29 @@ function updateSection(
   return `${before}\n\n${newSection}\n${after}`;
 }
 
-/**
- * Main
- */
-async function main(): Promise<void> {
-  const isCheck = process.argv.includes("--check");
+/** 各ドキュメントの更新前後のスナップショット */
+interface DocSnapshot {
+  readme: string;
+  originalReadme: string;
+  readmeUpdated: boolean;
+  lifecycleDoc: string;
+  originalLifecycleDoc: string;
+  lifecycleDocUpdated: boolean;
+  originalSchemas: Record<string, string>;
+  schemaUpdates: string[];
+  updated: boolean;
+}
 
-  console.log("📝 Generating documentation...\n");
-
-  // Generate JSON Schema from Zod schema
+/** ドキュメントを生成・更新し、更新前後のスナップショットを返す */
+async function generateAndApplyDocs(): Promise<DocSnapshot> {
   const zikuJsonSchema = JSON.stringify(z.toJSONSchema(zikuConfigSchema), null, 2);
 
-  // Generate sections
   const gettingStartedSection = generateGettingStartedSection();
   const featuresSection = generateFeaturesSection();
   const commandsSection = await generateCommandsSection();
   const filesSection = generateFilesSection();
   const lifecycleSection = generateLifecycleDocument();
 
-  // Read originals
   let readme = await readFile(README_PATH, "utf-8");
   const originalReadme = readme;
 
@@ -320,7 +324,6 @@ async function main(): Promise<void> {
     }
   }
 
-  // Update README sections
   readme = updateSection(
     readme,
     MARKERS.gettingStarted.start,
@@ -361,49 +364,79 @@ async function main(): Promise<void> {
 
   const updated = readmeUpdated || lifecycleDocUpdated || schemaUpdates.length > 0;
 
-  if (isCheck) {
-    // Restore original schemas if they were overwritten for formatting
-    for (const [path, original] of Object.entries(originalSchemas)) {
-      if (original) {
-        await writeFile(path, original);
-      }
-    }
-    // Restore lifecycle doc
-    if (lifecycleDocUpdated) {
-      await writeFile(LIFECYCLE_DOC_PATH, originalLifecycleDoc);
-    }
+  return {
+    readme,
+    originalReadme,
+    readmeUpdated,
+    lifecycleDoc,
+    originalLifecycleDoc,
+    lifecycleDocUpdated,
+    originalSchemas,
+    schemaUpdates,
+    updated,
+  };
+}
 
-    if (updated) {
-      if (readmeUpdated) console.error("  - README.md is out of date");
-      if (lifecycleDocUpdated)
-        console.error("  - docs/architecture/file-lifecycle.md is out of date");
-      for (const name of schemaUpdates) {
-        console.error(`  - schema/${name} is out of date`);
-      }
-      console.error("\n❌ Documentation is out of date.");
-      console.error("   Run `pnpm run docs` to update.\n");
-      process.exit(1);
+/** --check モード: ドキュメントが最新か検証し、変更があれば元に戻してエラー終了 */
+async function runCheck(snapshot: DocSnapshot): Promise<void> {
+  // Restore original schemas if they were overwritten for formatting
+  for (const [path, original] of Object.entries(snapshot.originalSchemas)) {
+    if (original) {
+      await writeFile(path, original);
     }
-    console.log("\n✅ Documentation is up to date.\n");
-    return;
+  }
+  if (snapshot.lifecycleDocUpdated) {
+    await writeFile(LIFECYCLE_DOC_PATH, snapshot.originalLifecycleDoc);
   }
 
-  // Schema files are already written and formatted above
-  if (readmeUpdated) {
-    await writeFile(README_PATH, readme);
+  if (snapshot.updated) {
+    if (snapshot.readmeUpdated) console.error("  - README.md is out of date");
+    if (snapshot.lifecycleDocUpdated)
+      console.error("  - docs/architecture/file-lifecycle.md is out of date");
+    for (const name of snapshot.schemaUpdates) {
+      console.error(`  - schema/${name} is out of date`);
+    }
+    console.error("\n❌ Documentation is out of date.");
+    console.error("   Run `pnpm run docs` to update.\n");
+    process.exit(1);
+  }
+  console.log("\n✅ Documentation is up to date.\n");
+}
+
+/** 書き込みモード: 更新されたドキュメントを保存 */
+async function runWrite(snapshot: DocSnapshot): Promise<void> {
+  if (snapshot.readmeUpdated) {
+    await writeFile(README_PATH, snapshot.readme);
     console.log("  ✅ README.md updated.");
   }
-  if (lifecycleDocUpdated) {
-    await writeFile(LIFECYCLE_DOC_PATH, lifecycleDoc);
+  if (snapshot.lifecycleDocUpdated) {
+    await writeFile(LIFECYCLE_DOC_PATH, snapshot.lifecycleDoc);
     console.log("  ✅ docs/architecture/file-lifecycle.md updated.");
   }
-  for (const name of schemaUpdates) {
+  for (const name of snapshot.schemaUpdates) {
     console.log(`  ✅ schema/${name} updated.`);
   }
-  if (updated) {
+  if (snapshot.updated) {
     console.log("");
   } else {
     console.log("\n✅ Documentation is already up to date.\n");
+  }
+}
+
+/**
+ * Main
+ */
+async function main(): Promise<void> {
+  const isCheck = process.argv.includes("--check");
+
+  console.log("📝 Generating documentation...\n");
+
+  const snapshot = await generateAndApplyDocs();
+
+  if (isCheck) {
+    await runCheck(snapshot);
+  } else {
+    await runWrite(snapshot);
   }
 }
 

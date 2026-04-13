@@ -46,6 +46,7 @@
     "test": "vitest",
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "test:diff-coverage": "vitest run --coverage && pnpm tsx scripts/diff-coverage.ts",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm run build && npm run test:run && npm run docs:check",
     "prepack": "npm run build",
     "docs": "pnpm tsx scripts/generate-readme.ts && pnpm tsx scripts/generate-site.ts",

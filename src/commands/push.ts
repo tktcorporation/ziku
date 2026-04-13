@@ -460,31 +460,11 @@ export const pushCommand = defineCommand({
       }
 
       // ファイル選択
-      if (args.files) {
-        const requestedPaths = (args.files as string)
-          .split(",")
-          .map((p) => p.trim())
-          .filter(Boolean);
-        const availablePaths = new Set(pushableFiles.map((f) => f.path));
-        const notFound = requestedPaths.filter((p) => !availablePaths.has(p));
-        if (notFound.length > 0) log.warn(`Files not found: ${notFound.join(", ")}`);
-        const requestedSet = new Set(requestedPaths);
-        pushableFiles = pushableFiles.filter((f) => requestedSet.has(f.path));
-        if (pushableFiles.length === 0) {
-          log.info("No matching files. Cancelled.");
-          return;
-        }
-        log.info(`${pushableFiles.length} file(s) selected via --files`);
-      } else {
-        log.step("Selecting files...");
-        pushableFiles = await selectPushFiles(pushableFiles, {
-          preselectDeletions: args.includeDeletions as boolean,
-        });
-        if (pushableFiles.length === 0) {
-          log.info("No files selected. Cancelled.");
-          return;
-        }
-      }
+      pushableFiles = await selectFilesToPush(pushableFiles, {
+        filesArg: args.files as string | undefined,
+        includeDeletions: args.includeDeletions as boolean,
+      });
+      if (pushableFiles.length === 0) return;
 
       const files = pushableFiles
         .filter((f) => f.type !== "deleted")
@@ -518,6 +498,45 @@ export const pushCommand = defineCommand({
     }, cleanup);
   },
 });
+
+// ─── ファイル選択 ───
+
+/**
+ * push 対象ファイルを選択する。
+ * --files 指定時はフィルタリング、未指定時はインタラクティブ選択。
+ * 選択結果が空の場合はログを出力して空配列を返す。
+ */
+async function selectFilesToPush(
+  candidates: FileDiff[],
+  opts: { filesArg: string | undefined; includeDeletions: boolean },
+): Promise<FileDiff[]> {
+  if (opts.filesArg) {
+    const requestedPaths = opts.filesArg
+      .split(",")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    const availablePaths = new Set(candidates.map((f) => f.path));
+    const notFound = requestedPaths.filter((p) => !availablePaths.has(p));
+    if (notFound.length > 0) log.warn(`Files not found: ${notFound.join(", ")}`);
+    const requestedSet = new Set(requestedPaths);
+    const filtered = candidates.filter((f) => requestedSet.has(f.path));
+    if (filtered.length === 0) {
+      log.info("No matching files. Cancelled.");
+      return [];
+    }
+    log.info(`${filtered.length} file(s) selected via --files`);
+    return filtered;
+  }
+
+  log.step("Selecting files...");
+  const selected = await selectPushFiles(candidates, {
+    preselectDeletions: opts.includeDeletions,
+  });
+  if (selected.length === 0) {
+    log.info("No files selected. Cancelled.");
+  }
+  return selected;
+}
 
 // ─── コンフリクト解決 ───
 

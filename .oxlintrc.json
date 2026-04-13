@@ -17,6 +17,9 @@
     "no-alert": "error",
     "no-script-url": "error",
 
+    /** ── Complexity: 条件分岐の複雑度を制限 ── */
+    "complexity": ["error", { "max": 15 }],
+
     /** ── Promoted: pedantic/style → error に昇格 ── */
     "prefer-const": "error",
     "no-var": "error",
