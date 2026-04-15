@@ -6,24 +6,19 @@ Initialize a template repository with ziku
 
 $ npx ziku setup
 
-> [bold][cyan] ziku setup [/cyan][/bold] [gray]v1.2.0[/gray]
+> [bold][cyan]┌   ziku setup  v1.2.0[/cyan][/bold]
+> [gray]│[/gray]
+> [bold]●[/bold]  Target: /home/user/dev-templates
+> [gray]│[/gray]
 
-[spinner:800] Scanning directory...
+[spinner:1500] Generating .ziku/ziku.jsonc...
 
-> [gray]ℹ[/gray] Found config files:
-> .claude/settings.json
-> .devcontainer/devcontainer.json
-> .github/workflows/ci.yml
-> .github/dependabot.yml
-
-> [gray]◇[/gray] Select patterns to include in template
-> [multiselect:1800] Patterns: | .claude/**, .devcontainer/**, .github/\*\* | 0,1,2
-
-[spinner:1000] Writing .ziku/ziku.jsonc...
-
-> [green]◆[/green] Template repository initialized!
+> [gray]│[/gray]
+> [green]◆[/green]  Created .ziku/ziku.jsonc
+> [gray]│[/gray]
+> [green]└[/green]  Template initialized!
 >
-> [gray]Created: .ziku/ziku.jsonc[/gray]
-> [gray]Include: .claude/**, .devcontainer/**, .github/\*\*[/gray]
->
-> [gray]Next: commit and push, then run[/gray] [cyan]npx ziku --from owner/repo[/cyan] [gray]in your projects[/gray]
+> Next steps:
+>   1. Review and customize .ziku/ziku.jsonc
+>   2. [cyan]git add .ziku/ && git commit -m 'chore: add ziku config'[/cyan]
+>   Then other projects can use this template with [cyan]npx ziku init[/cyan]

@@ -1,34 +1,46 @@
 # diff
 
-View differences between local files and the template
+Show differences between local files and the template
 
 ---
 
 $ npx ziku diff --verbose
 
-> [bold][cyan] ziku diff [/cyan][/bold] [gray]v1.2.0[/gray]
+> [bold][cyan]┌   ziku diff  v1.2.0[/cyan][/bold]
+> [gray]│[/gray]
+> [bold]●[/bold]  Template: my-org/dev-templates
 
-[spinner:1200] Comparing with template...
+[spinner:1200] Detecting changes...
 
-> [bold].claude/settings.json[/bold] [gray]—[/gray] [yellow]modified[/yellow] [green]+5[/green] [red]-2[/red]
->
-> [cyan]@@ -3,6 +3,9 @@[/cyan]
-> "permissions": {
-> [red]- "allow": ["npm test"][/red]
-> [green]+ "allow": [[/green]
-> [green]+ "npm test",[/green]
-> [green]+ "npm run lint",[/green]
-> [green]+ "npm run build"[/green]
-> [green]+ ][/green]
-> }
+[spinner:1000] Analyzing differences...
 
-> [bold].github/workflows/lint.yml[/bold] [gray]—[/gray] [green]added[/green] [green]+45[/green]
-> [gray](new file — 45 lines)[/gray]
-
-> [bold].devcontainer/devcontainer.json[/bold] [gray]—[/gray] [yellow]modified[/yellow] [green]+1[/green] [red]-1[/red]
->
-> [cyan]@@ -8,3 +8,3 @@[/cyan]
-> [red]- "postCreateCommand": "npm install"[/red]
-> [green]+ "postCreateCommand": "pnpm install"[/green]
-
-> [gray]Summary: 1 added, 2 modified, 0 deleted[/gray]
+> [gray]│[/gray]
+> [gray]│[/gray]  [yellow]~[/yellow] .claude/settings.json
+> [gray]│[/gray]  [green]+[/green] .github/workflows/lint.yml
+> [gray]│[/gray]  [yellow]~[/yellow] .devcontainer/devcontainer.json
+> [gray]│[/gray]
+> [gray]│[/gray]  [green]+1 added[/green] [gray]|[/gray] [yellow]~2 modified[/yellow]
+> [gray]│[/gray]
+> [gray]◇[/gray]  .claude/settings.json — [yellow]modified[/yellow] [green]+1[/green] [red]-0[/red]
+> [gray]│[/gray]
+> [gray]│[/gray]  [cyan]@@ -3,3 +3,4 @@[/cyan]
+> [gray]│[/gray]     "allow": [
+> [gray]│[/gray]       "npm test",
+> [gray]│[/gray]       "npm run lint",
+> [gray]│[/gray]  [green]+    "npm run build"[/green]
+> [gray]│[/gray]     ]
+> [gray]│[/gray]
+> [gray]◇[/gray]  .github/workflows/lint.yml — [green]added[/green] [green]+12[/green]
+> [gray]│[/gray]  [gray](new file — 12 lines)[/gray]
+> [gray]│[/gray]
+> [gray]◇[/gray]  .devcontainer/devcontainer.json — [yellow]modified[/yellow] [green]+2[/green] [red]-1[/red]
+> [gray]│[/gray]
+> [gray]│[/gray]  [cyan]@@ -4,3 +4,4 @@[/cyan]
+> [gray]│[/gray]  [red]-  "postCreateCommand": "npm install",[/red]
+> [gray]│[/gray]  [green]+  "postCreateCommand": "pnpm install",[/green]
+> [gray]│[/gray]       "extensions": [
+> [gray]│[/gray]  [red]-      "esbenp.prettier-vscode"[/red]
+> [gray]│[/gray]  [green]+      "esbenp.prettier-vscode",[/green]
+> [gray]│[/gray]  [green]+      "bradlc.vscode-tailwindcss"[/green]
+> [gray]│[/gray]
+> [gray]└[/gray]  Run [cyan]ziku push[/cyan] to push changes.

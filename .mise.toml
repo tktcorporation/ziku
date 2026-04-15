@@ -11,6 +11,9 @@ jj = "latest"
 
 "npm:@antfu/ni" = "latest"
 
+# Terminal recording
+"pipx:asciinema" = "latest"
+
 # Browser automation
 "npm:playwright" = "latest"
 
