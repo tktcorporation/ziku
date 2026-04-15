@@ -6,29 +6,26 @@ Pull the latest template updates with 3-way merge
 
 $ npx ziku pull
 
-> [bold][cyan]┌   ziku pull  v1.2.0[/cyan][/bold]
-> [gray]│[/gray]
-> [bold]●[/bold]  Template: my-org/dev-templates
+> ┌   [bold][cyan]ziku pull[/cyan][/bold]  [gray]v1.2.0[/gray]
+> │
+> ●  Template: my-org/dev-templates
 
-[spinner:1500] Fetching latest template...
+[spinner:1500] Analyzing changes...
 
-> [gray]│[/gray]
+> │
+> │  ↓ .claude/settings.json
+> │  [green]+[/green] .claude/rules/testing.md
+> │  [green]+[/green] .github/workflows/lint.yml
+> │  [green]+[/green] .github/workflows/security.yml
+> │
+> │  [cyan]↓1 updated[/cyan] | [green]+3 new[/green]
+> │
 
-[spinner:1800] Analyzing changes...
+[spinner:1200] Merging changes...
 
-> [gray]│[/gray]
-> [gray]│[/gray]  [green]+[/green] .github/workflows/security.yml
-> [gray]│[/gray]  [green]+[/green] .claude/rules/testing.md
-> [gray]│[/gray]  [yellow]~[/yellow] .devcontainer/devcontainer.json
-> [gray]│[/gray]
-> [gray]│[/gray]  [green]+2 added[/green] [gray]|[/gray] [yellow]~1 modified[/yellow]
-> [gray]│[/gray]
-
-[spinner:1500] Merging changes (3-way)...
-
-> [gray]│[/gray]
-> [gray]│[/gray]  [green]✓[/green] .github/workflows/security.yml [gray]— new file[/gray]
-> [gray]│[/gray]  [green]✓[/green] .claude/rules/testing.md [gray]— new file[/gray]
-> [gray]│[/gray]  [green]✓[/green] .devcontainer/devcontainer.json [gray]— auto-merged[/gray]
-> [gray]│[/gray]
-> [green]└[/green]  Pull complete — 3 files updated, 0 conflicts
+> │
+> [green]◆[/green]  Updated 1 file(s)
+> │
+> [green]◆[/green]  Added 3 new file(s)
+> │
+> └  Pull complete

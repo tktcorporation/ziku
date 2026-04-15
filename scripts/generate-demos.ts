@@ -37,7 +37,7 @@ for (const file of files) {
 
   console.log(`  ${file} → demos/${name}.cast`);
 
-  execFileSync("npx", ["terminal-demo", "play", input, "--record", output, "--speed", "3"], {
+  execFileSync("npx", ["terminal-demo", "play", input, "--record", output, "--speed", "1"], {
     stdio: ["pipe", "pipe", "inherit"],
     input: "\n",
     cwd: ROOT,
