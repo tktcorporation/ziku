@@ -90,6 +90,9 @@ importers:
       oxlint-tsgolint:
         specifier: latest
         version: 0.20.0
+      terminal-demo:
+        specifier: ^0.1.11
+        version: 0.1.11
       tsdown:
         specifier: ^0.21.7
         version: 0.21.7(@emnapi/core@1.9.2)(@emnapi/runtime@1.9.2)(typescript@5.9.3)
@@ -2529,6 +2532,16 @@ packages:
   term-size@2.2.1:
     resolution: {integrity: sha512-wK0Ri4fOGjv/XPy8SBHZChl8CM7uMc5VML7SqiQ0zG7+J5Vr+RMQDoHa2CNT6KHUnTGIXH34UDMkPzAUyapBZg==}
     engines: {node: '>=8'}
+
+  terminal-demo@0.1.11:
+    resolution: {integrity: sha512-Mj3tIqwh2MrH6t2amsC6nPS0KJ052S3QhEFtxJOPre7Ac5llptW0gjYb5RYVbqNjHdiQtR/ZrUv688myzGLpyA==}
+    engines: {node: '>=18.0.0'}
+    hasBin: true
+    peerDependencies:
+      react: '>=18.0.0'
+    peerDependenciesMeta:
+      react:
+        optional: true
 
   thingies@2.6.0:
     resolution: {integrity: sha512-rMHRjmlFLM1R96UYPvpmnc3LYtdFrT33JIB7L9hetGue1qAPfn1N2LJeEjxUSidu1Iku+haLZXDuEXUHNGO/lg==}
@@ -5080,6 +5093,8 @@ snapshots:
   tabbable@6.4.0: {}
 
   term-size@2.2.1: {}
+
+  terminal-demo@0.1.11: {}
 
   thingies@2.6.0(tslib@2.8.1):
     dependencies:
