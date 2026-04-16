@@ -168,6 +168,8 @@ const sectionStates = reactive<Record<string, SectionState>>(
 
 const heroVisible = ref(true);
 const ctaVisible = ref(false);
+const heroBgEl = ref<HTMLDivElement>();
+let heroBgPlayer: { dispose: () => void; play: () => void; pause: () => void } | null = null;
 let rafId = 0;
 let observers: IntersectionObserver[] = [];
 
@@ -296,6 +298,20 @@ onMounted(() => {
   nextTick(() => {
     setupObservers();
     rafId = requestAnimationFrame(updateProgress);
+
+    // ヒーロー背景の cast プレイヤー（ループ自動再生）
+    if (heroBgEl.value) {
+      heroBgPlayer = AsciinemaPlayerLib.create("/ziku/demos/01-init.cast", heroBgEl.value, {
+        cols: 100,
+        rows: 37,
+        speed: 0.5,
+        theme: "asciinema",
+        fit: "width",
+        idleTimeLimit: 1,
+        loop: true,
+        autoPlay: true,
+      });
+    }
   });
 });
 
@@ -303,6 +319,7 @@ onBeforeUnmount(() => {
   document.documentElement.classList.remove("landing-dark");
   cancelAnimationFrame(rafId);
   observers.forEach((o) => o.disconnect());
+  heroBgPlayer?.dispose();
   for (const state of Object.values(sectionStates)) {
     state.player?.dispose();
   }
@@ -337,9 +354,15 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   <div class="scroll-landing">
     <!-- ── Hero ── -->
     <section id="landing-hero" class="hero-section">
+      <!-- 背景: 拡大・薄く表示されるループ再生 cast -->
+      <div class="hero-bg-cast" ref="heroBgEl" />
+
       <div class="hero-content" :class="{ visible: heroVisible }">
         <div class="hero-badge">Open Source CLI Tool</div>
-        <h1 class="hero-title"><span class="hero-title-main">ziku</span></h1>
+        <h1 class="hero-title">
+          <img src="/ziku/logo-icon.svg" alt="" class="hero-logo-icon" />
+          <span class="hero-title-main">ziku</span>
+        </h1>
         <p class="hero-tagline">
           Templates go stale. <strong>ziku</strong> keeps them alive.<br />
           Push improvements back, pull updates forward —<br />
@@ -453,6 +476,32 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   justify-content: center;
   position: relative;
   padding: 2rem;
+  overflow: hidden;
+}
+
+/* 背景 cast — 拡大して薄く、画面からはみ出す */
+.hero-bg-cast {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 140%;
+  max-width: 1400px;
+  transform: translate(-50%, -50%);
+  opacity: 0.03;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* 背景 cast 内のプレイヤーUIを非表示 */
+.hero-bg-cast :deep(.ap-overlay),
+.hero-bg-cast :deep(.ap-start-button),
+.hero-bg-cast :deep(.ap-control-bar) {
+  display: none !important;
+}
+.hero-bg-cast :deep(.ap-wrapper),
+.hero-bg-cast :deep(.ap-player) {
+  border-radius: 0;
+  height: 100% !important;
 }
 
 .hero-content {
@@ -461,6 +510,8 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   opacity: 0;
   transform: translateY(40px);
   transition: opacity 0.8s ease, transform 0.8s ease;
+  position: relative;
+  z-index: 1;
 }
 .hero-content.visible { opacity: 1; transform: translateY(0); }
 
@@ -476,7 +527,18 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   margin-bottom: 2rem;
 }
 
-.hero-title { margin: 0 0 1.5rem; line-height: 1; }
+.hero-title {
+  margin: 0 0 1.5rem;
+  line-height: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
+.hero-logo-icon {
+  height: clamp(60px, 10vw, 90px);
+  width: auto;
+}
 .hero-title-main {
   font-size: clamp(4rem, 12vw, 8rem);
   font-weight: 800;
@@ -508,6 +570,7 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   color: var(--muted);
   font-size: 0.8rem;
   animation: fade-pulse 2s ease-in-out infinite;
+  z-index: 1;
 }
 .scroll-arrow {
   width: 1.5rem; height: 1.5rem;

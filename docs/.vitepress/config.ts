@@ -84,7 +84,7 @@ export default defineConfig({
 
   // Theme configuration
   themeConfig: {
-    logo: "/logo.svg",
+    logo: "/logo-icon.svg",
 
     nav: [
       { text: "Guide", link: "/guide/getting-started" },
