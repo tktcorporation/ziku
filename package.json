@@ -62,7 +62,6 @@
   "dependencies": {
     "@clack/prompts": "^1.2.0",
     "@octokit/rest": "^22.0.1",
-    "asciinema-player": "^3.15.1",
     "citty": "^0.2.2",
     "defu": "^6.1.7",
     "diff": "^8.0.4",
@@ -86,6 +85,7 @@
     "@changesets/cli": "^2.30.0",
     "@types/node": "^22.19.17",
     "@vitest/coverage-v8": "^4.1.4",
+    "asciinema-player": "^3.15.1",
     "memfs": "^4.57.1",
     "oxfmt": "^0.44.0",
     "oxlint": "~1.59.0",

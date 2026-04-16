@@ -70,7 +70,24 @@ title: ziku — Bi-directional template sync
 sidebar: false
 ---
 
-<ScrollLanding />
+<ScrollLanding>
+
+<!-- SSR フォールバック: client hydration 前にクローラー/no-JS 環境で表示される -->
+<div style="text-align:center;padding:4rem 2rem;max-width:700px;margin:0 auto">
+
+# ziku
+
+Bi-directional template sync. Push improvements back, pull updates forward — with structure-aware 3-way merge.
+
+\\\`\\\`\\\`bash
+npx ziku setup
+\\\`\\\`\\\`
+
+[Get Started](/guide/getting-started) | [GitHub](https://github.com/tktcorporation/ziku)
+
+</div>
+
+</ScrollLanding>
 `;
 }
 
