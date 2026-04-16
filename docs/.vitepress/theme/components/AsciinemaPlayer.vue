@@ -10,6 +10,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, watch } from "vue";
 import * as AsciinemaPlayerLib from "asciinema-player";
+// eslint-disable-next-line import/no-unassigned-import -- CSS side-effect import
 import "asciinema-player/dist/bundle/asciinema-player.css";
 
 const props = withDefaults(

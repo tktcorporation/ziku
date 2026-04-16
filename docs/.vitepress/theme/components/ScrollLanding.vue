@@ -14,6 +14,7 @@
 import { ref, reactive, onMounted, onBeforeUnmount, nextTick } from "vue";
 import { withBase } from "vitepress";
 import * as AsciinemaPlayerLib from "asciinema-player";
+// eslint-disable-next-line import/no-unassigned-import -- CSS side-effect import
 import "asciinema-player/dist/bundle/asciinema-player.css";
 
 interface Step {
@@ -174,13 +175,15 @@ const copied = ref(false);
 function copyCommand() {
   navigator.clipboard.writeText("npx ziku setup").then(() => {
     copied.value = true;
-    setTimeout(() => { copied.value = false; }, 2000);
+    setTimeout(() => {
+      copied.value = false;
+    }, 2000);
   });
 }
 const heroBgEl = ref<HTMLDivElement>();
 let heroBgPlayer: { dispose: () => void; play: () => void; pause: () => void } | null = null;
 let rafId = 0;
-let observers: IntersectionObserver[] = [];
+const observers: IntersectionObserver[] = [];
 
 /** セクション要素の ref を収集 */
 function setTerminalRef(id: string, el: HTMLDivElement | null) {
@@ -266,8 +269,12 @@ function updateProgress() {
       seekingSection = section.id;
       const targetTime = progress * state.duration;
       (state.player.seek(targetTime) as unknown as Promise<void>)
-        .then(() => { seekingSection = null; })
-        .catch(() => { seekingSection = null; });
+        .then(() => {
+          seekingSection = null;
+        })
+        .catch(() => {
+          seekingSection = null;
+        });
     }
   }
 
@@ -379,7 +386,7 @@ function stepTransform(sectionId: string, stepIndex: number): string {
         </p>
         <div class="hero-command" @click="copyCommand">
           <code class="hero-command-text">npx ziku setup</code>
-          <span class="hero-command-copy">{{ copied ? 'Copied!' : 'Copy' }}</span>
+          <span class="hero-command-copy">{{ copied ? "Copied!" : "Copy" }}</span>
         </div>
       </div>
       <div class="scroll-indicator">
@@ -438,7 +445,7 @@ function stepTransform(sectionId: string, stepIndex: number): string {
         <div class="progress-track">
           <div
             class="progress-fill"
-            :style="{ width: (sectionStates[section.id].progress * 100) + '%' }"
+            :style="{ width: sectionStates[section.id].progress * 100 + '%' }"
           />
         </div>
       </div>
@@ -498,8 +505,8 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   transform: translateY(-50%) scale(1.3);
   pointer-events: none;
   z-index: 0;
-  mask-image: linear-gradient(to left, rgba(0,0,0,0.8) 5%, rgba(0,0,0,0.05) 85%);
-  -webkit-mask-image: linear-gradient(to left, rgba(0,0,0,0.8) 5%, rgba(0,0,0,0.05) 85%);
+  mask-image: linear-gradient(to left, rgba(0, 0, 0, 0.8) 5%, rgba(0, 0, 0, 0.05) 85%);
+  -webkit-mask-image: linear-gradient(to left, rgba(0, 0, 0, 0.8) 5%, rgba(0, 0, 0, 0.05) 85%);
 }
 
 .hero-bg-cast :deep(.ap-overlay),
@@ -524,11 +531,16 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   padding-left: max(2rem, 8vw);
   opacity: 0;
   transform: translateY(40px);
-  transition: opacity 0.8s ease, transform 0.8s ease;
+  transition:
+    opacity 0.8s ease,
+    transform 0.8s ease;
   position: relative;
   z-index: 1;
 }
-.hero-content.visible { opacity: 1; transform: translateY(0); }
+.hero-content.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
 
 .hero-title {
   margin: 0 0 1.25rem;
@@ -568,7 +580,9 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   border: 1px solid var(--border);
   border-radius: 10px;
   cursor: pointer;
-  transition: background 0.2s, border-color 0.2s;
+  transition:
+    background 0.2s,
+    border-color 0.2s;
 }
 .hero-command:hover {
   background: rgba(255, 255, 255, 0.1);
@@ -604,37 +618,74 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   z-index: 1;
 }
 .scroll-arrow {
-  width: 1.5rem; height: 1.5rem;
+  width: 1.5rem;
+  height: 1.5rem;
   border-right: 2px solid var(--muted);
   border-bottom: 2px solid var(--muted);
   transform: rotate(45deg);
   animation: bounce-down 2s ease-in-out infinite;
 }
-@keyframes fade-pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+@keyframes fade-pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 1;
+  }
+}
 @keyframes bounce-down {
-  0%, 100% { transform: rotate(45deg) translate(0, 0); }
-  50% { transform: rotate(45deg) translate(4px, 4px); }
+  0%,
+  100% {
+    transform: rotate(45deg) translate(0, 0);
+  }
+  50% {
+    transform: rotate(45deg) translate(4px, 4px);
+  }
 }
 
 /* ── Buttons ────────────────────────────────── */
 
 .btn-primary {
-  display: inline-block; padding: 0.75rem 2rem;
-  background: var(--accent); color: #fff; border-radius: 8px;
-  text-decoration: none; font-weight: 600; font-size: 1rem;
-  transition: background 0.2s, transform 0.2s;
+  display: inline-block;
+  padding: 0.75rem 2rem;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 8px;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 1rem;
+  transition:
+    background 0.2s,
+    transform 0.2s;
 }
-.btn-primary:hover { background: var(--accent-hover); transform: translateY(-1px); }
+.btn-primary:hover {
+  background: var(--accent-hover);
+  transform: translateY(-1px);
+}
 
 .btn-secondary {
-  display: inline-block; padding: 0.75rem 2rem;
-  background: transparent; color: var(--text);
-  border: 1px solid var(--border); border-radius: 8px;
-  text-decoration: none; font-weight: 600; font-size: 1rem;
-  transition: border-color 0.2s, transform 0.2s;
+  display: inline-block;
+  padding: 0.75rem 2rem;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 1rem;
+  transition:
+    border-color 0.2s,
+    transform 0.2s;
 }
-.btn-secondary:hover { border-color: var(--muted); transform: translateY(-1px); }
-.btn-large { padding: 1rem 2.5rem; font-size: 1.1rem; }
+.btn-secondary:hover {
+  border-color: var(--muted);
+  transform: translateY(-1px);
+}
+.btn-large {
+  padding: 1rem 2.5rem;
+  font-size: 1.1rem;
+}
 
 /* ── Chapter (feature section) ──────────────── */
 
@@ -667,7 +718,9 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   font-variant-numeric: tabular-nums;
 }
 .chapter-divider {
-  width: 2rem; height: 1px; background: var(--border);
+  width: 2rem;
+  height: 1px;
+  background: var(--border);
 }
 .chapter-label {
   font-size: 0.85rem;
@@ -714,10 +767,21 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
-.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--border); }
-.dot.red    { background: #ff5f57; }
-.dot.yellow { background: #febc2e; }
-.dot.green  { background: #28c840; }
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--border);
+}
+.dot.red {
+  background: #ff5f57;
+}
+.dot.yellow {
+  background: #febc2e;
+}
+.dot.green {
+  background: #28c840;
+}
 
 .terminal-body {
   flex: 1;
@@ -787,29 +851,50 @@ function stepTransform(sectionId: string, stepIndex: number): string {
 }
 
 .cta-content {
-  text-align: center; max-width: 600px;
-  opacity: 0; transform: translateY(40px);
-  transition: opacity 0.8s ease, transform 0.8s ease;
+  text-align: center;
+  max-width: 600px;
+  opacity: 0;
+  transform: translateY(40px);
+  transition:
+    opacity 0.8s ease,
+    transform 0.8s ease;
 }
-.cta-content.visible { opacity: 1; transform: translateY(0); }
+.cta-content.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
 
 .cta-title {
   font-size: clamp(1.8rem, 4vw, 2.5rem);
-  font-weight: 700; margin: 0 0 1rem; letter-spacing: -0.02em;
+  font-weight: 700;
+  margin: 0 0 1rem;
+  letter-spacing: -0.02em;
 }
 .cta-description {
-  font-size: 1.1rem; color: var(--muted); line-height: 1.6; margin: 0 0 2rem;
+  font-size: 1.1rem;
+  color: var(--muted);
+  line-height: 1.6;
+  margin: 0 0 2rem;
 }
 .cta-code {
-  display: inline-block; padding: 0.75rem 2rem;
-  background: var(--card-bg); border: 1px solid var(--border);
-  border-radius: 8px; margin-bottom: 2.5rem;
+  display: inline-block;
+  padding: 0.75rem 2rem;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 2.5rem;
 }
 .cta-code code {
-  font-size: 1.2rem; color: var(--accent);
+  font-size: 1.2rem;
+  color: var(--accent);
   font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace;
 }
-.cta-actions { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
+.cta-actions {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
 
 /* ── Responsive ─────────────────────────────── */
 
@@ -834,7 +919,9 @@ function stepTransform(sectionId: string, stepIndex: number): string {
     padding: 1rem;
   }
 
-  .hero-title-main { font-size: 3rem; }
+  .hero-title-main {
+    font-size: 3rem;
+  }
 }
 
 /* ── Asciinema overrides ────────────────────── */

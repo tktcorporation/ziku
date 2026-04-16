@@ -39,7 +39,6 @@ function extractSection(readme: string, startMarker: string, endMarker: string):
   return readme.slice(startIndex + startMarker.length, endIndex).trim();
 }
 
-
 /** ## を # に、### を ## に変換する（README の見出しレベルをページ用に調整） */
 function promoteHeadings(content: string): string {
   return content.replaceAll(
