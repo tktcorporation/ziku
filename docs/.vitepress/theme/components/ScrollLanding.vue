@@ -359,7 +359,6 @@ function stepTransform(sectionId: string, stepIndex: number): string {
 
       <!-- テキストコンテンツ: 中央寄せ -->
       <div class="hero-content" :class="{ visible: heroVisible }">
-        <div class="hero-badge">Open Source CLI Tool</div>
         <h1 class="hero-title">
           <img src="/ziku/logo-icon.svg" alt="" class="hero-logo-icon" />
           <span class="hero-title-main">ziku</span>
@@ -484,11 +483,11 @@ function stepTransform(sectionId: string, stepIndex: number): string {
 .hero-bg-cast {
   position: absolute;
   top: 50%;
-  right: -8%;
+  right: -15%;
   width: 65%;
   max-width: 900px;
   transform: translateY(-50%) scale(1.1);
-  opacity: 0.08;
+  opacity: 0.22;
   pointer-events: none;
   z-index: 0;
   mask-image: radial-gradient(ellipse 80% 70% at 60% 50%, black 30%, transparent 80%);
@@ -505,10 +504,12 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   border-radius: 0;
 }
 
-/* テキストコンテンツ — 中央寄せ */
+/* テキストコンテンツ — 左寄りだが中身は中央揃え */
 .hero-content {
   text-align: center;
   max-width: 700px;
+  margin-right: auto;
+  padding-left: max(2rem, 8vw);
   opacity: 0;
   transform: translateY(40px);
   transition: opacity 0.8s ease, transform 0.8s ease;
@@ -516,18 +517,6 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   z-index: 1;
 }
 .hero-content.visible { opacity: 1; transform: translateY(0); }
-
-.hero-badge {
-  display: inline-block;
-  padding: 0.35rem 1rem;
-  border: 1px solid var(--border);
-  border-radius: 100px;
-  font-size: 0.75rem;
-  color: var(--muted);
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  margin-bottom: 1.5rem;
-}
 
 .hero-title {
   margin: 0 0 1.25rem;
