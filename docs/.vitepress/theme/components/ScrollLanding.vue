@@ -168,6 +168,14 @@ const sectionStates = reactive<Record<string, SectionState>>(
 
 const heroVisible = ref(true);
 const ctaVisible = ref(false);
+const copied = ref(false);
+
+function copyCommand() {
+  navigator.clipboard.writeText("npx ziku setup").then(() => {
+    copied.value = true;
+    setTimeout(() => { copied.value = false; }, 2000);
+  });
+}
 const heroBgEl = ref<HTMLDivElement>();
 let heroBgPlayer: { dispose: () => void; play: () => void; pause: () => void } | null = null;
 let rafId = 0;
@@ -368,9 +376,9 @@ function stepTransform(sectionId: string, stepIndex: number): string {
           Push improvements back, pull updates forward —<br />
           with structure-aware 3-way merge.
         </p>
-        <div class="hero-actions">
-          <a href="/ziku/guide/getting-started" class="btn-primary">Get Started</a>
-          <a href="https://github.com/tktcorporation/ziku" class="btn-secondary" target="_blank">GitHub</a>
+        <div class="hero-command" @click="copyCommand">
+          <code class="hero-command-text">npx ziku setup</code>
+          <span class="hero-command-copy">{{ copied ? 'Copied!' : 'Copy' }}</span>
         </div>
       </div>
       <div class="scroll-indicator">
@@ -550,7 +558,35 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   margin: 0 0 2rem;
 }
 
-.hero-actions { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
+.hero-command {
+  display: inline-flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.7rem 1.2rem;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+.hero-command:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--muted);
+}
+.hero-command-text {
+  font-size: 1.1rem;
+  font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace;
+  color: var(--text);
+  letter-spacing: 0.02em;
+}
+.hero-command-copy {
+  font-size: 0.75rem;
+  color: var(--accent);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
 
 .scroll-indicator {
   position: absolute;
