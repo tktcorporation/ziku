@@ -487,11 +487,11 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   width: 65%;
   max-width: 900px;
   transform: translateY(-50%) scale(1.1);
-  opacity: 0.22;
+  opacity: 0.4;
   pointer-events: none;
   z-index: 0;
-  mask-image: radial-gradient(ellipse 80% 70% at 60% 50%, black 30%, transparent 80%);
-  -webkit-mask-image: radial-gradient(ellipse 80% 70% at 60% 50%, black 30%, transparent 80%);
+  mask-image: linear-gradient(to left, black 20%, transparent 90%);
+  -webkit-mask-image: linear-gradient(to left, black 20%, transparent 90%);
 }
 
 .hero-bg-cast :deep(.ap-overlay),
