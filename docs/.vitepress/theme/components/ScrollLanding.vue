@@ -487,7 +487,7 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   width: 65%;
   max-width: 900px;
   transform: translateY(-50%) scale(1.1);
-  opacity: 0.4;
+  opacity: 0.55;
   pointer-events: none;
   z-index: 0;
   mask-image: linear-gradient(to left, black 20%, transparent 90%);
