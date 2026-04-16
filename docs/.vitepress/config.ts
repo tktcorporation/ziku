@@ -24,6 +24,14 @@ export default defineConfig({
     server: {
       host: true,
     },
+    // asciinema-player はブラウザ専用ライブラリ。
+    // optimizeDeps で事前バンドルし、ssr.noExternal で SSR 時も Vite に処理させる。
+    optimizeDeps: {
+      include: ["asciinema-player"],
+    },
+    ssr: {
+      noExternal: ["asciinema-player"],
+    },
   },
 
   // 内部計画ドキュメント、未公開記事、日本語のみの技術ドキュメントをサイトから除外
@@ -76,7 +84,7 @@ export default defineConfig({
 
   // Theme configuration
   themeConfig: {
-    logo: "/logo.svg",
+    logo: "/logo-icon.svg",
 
     nav: [
       { text: "Guide", link: "/guide/getting-started" },
@@ -100,6 +108,7 @@ export default defineConfig({
           { text: "Getting Started", link: "/guide/getting-started" },
           { text: "How it Works", link: "/guide/how-it-works" },
           { text: "Commands", link: "/guide/commands" },
+          { text: "Demos", link: "/guide/demos" },
         ],
       },
       // NOTE: /architecture/file-lifecycle は日本語の自動生成ドキュメント。
