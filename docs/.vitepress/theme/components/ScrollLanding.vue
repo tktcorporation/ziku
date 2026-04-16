@@ -40,7 +40,7 @@ const sections: Section[] = [
     id: "init",
     label: "init",
     castSrc: "/ziku/demos/01-init.cast",
-    cols: 144,
+    cols: 100,
     rows: 37,
     castDuration: 12.7,
     scrollHeight: "350vh",
