@@ -106,7 +106,7 @@ const sections: Section[] = [
     castSrc: "/ziku/demos/03-pull.cast",
     cols: 100,
     rows: 42,
-    castDuration: 0.3,
+    castDuration: 6.0,
     scrollHeight: "250vh",
     steps: [
       {
@@ -129,7 +129,7 @@ const sections: Section[] = [
     castSrc: "/ziku/demos/04-diff.cast",
     cols: 100,
     rows: 42,
-    castDuration: 0.3,
+    castDuration: 6.0,
     scrollHeight: "250vh",
     steps: [
       {
