@@ -40,34 +40,34 @@ const sections: Section[] = [
     id: "init",
     label: "init",
     castSrc: "/ziku/demos/01-init.cast",
-    cols: 100,
-    rows: 42,
-    castDuration: 21.9,
-    scrollHeight: "400vh",
+    cols: 144,
+    rows: 37,
+    castDuration: 12.7,
+    scrollHeight: "350vh",
     steps: [
       {
-        title: "Run a single command",
+        title: "Run npx ziku",
         description:
-          "npx ziku init --from your-org/templates. That's it. ziku detects the template, connects to the repo, and starts pulling files.",
+          "Auto-detects your template from the git remote. Or choose from available repositories interactively.",
         at: 0,
+      },
+      {
+        title: "Download from GitHub",
+        description:
+          "ziku fetches the template directly from GitHub — no local clone needed. Works with any public or private repo you have access to.",
+        at: 0.25,
       },
       {
         title: "Choose what to sync",
         description:
-          "Interactively select which directories to track — .claude, .github, .devcontainer, root configs. Pick only what you need.",
-        at: 0.25,
-      },
-      {
-        title: "Handle existing files",
-        description:
-          "Already have those files? Choose to overwrite, skip, or decide file-by-file. Your existing work is never silently destroyed.",
-        at: 0.5,
+          "Interactively select which directories to track — .claude, .devcontainer, .github, root configs. Pick only what you need.",
+        at: 0.45,
       },
       {
         title: "Template applied",
         description:
-          "Files are copied, .ziku/ziku.jsonc tracks your patterns, and .ziku/lock.json records the sync state. You're ready to go.",
-        at: 0.75,
+          "Files are synced, .ziku/ziku.jsonc tracks your patterns, and lock.json records the state. You're ready to go.",
+        at: 0.8,
       },
     ],
   },
