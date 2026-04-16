@@ -354,23 +354,29 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   <div class="scroll-landing">
     <!-- ── Hero ── -->
     <section id="landing-hero" class="hero-section">
-      <!-- 背景: 拡大・薄く表示されるループ再生 cast -->
-      <div class="hero-bg-cast" ref="heroBgEl" />
-
-      <div class="hero-content" :class="{ visible: heroVisible }">
-        <div class="hero-badge">Open Source CLI Tool</div>
-        <h1 class="hero-title">
-          <img src="/ziku/logo-icon.svg" alt="" class="hero-logo-icon" />
-          <span class="hero-title-main">ziku</span>
-        </h1>
-        <p class="hero-tagline">
-          Templates go stale. <strong>ziku</strong> keeps them alive.<br />
-          Push improvements back, pull updates forward —<br />
-          with structure-aware 3-way merge.
-        </p>
-        <div class="hero-actions">
-          <a href="/ziku/guide/getting-started" class="btn-primary">Get Started</a>
-          <a href="https://github.com/tktcorporation/ziku" class="btn-secondary" target="_blank">GitHub</a>
+      <div class="hero-layout" :class="{ visible: heroVisible }">
+        <!-- 左: テキストコンテンツ -->
+        <div class="hero-left">
+          <div class="hero-badge">Open Source CLI Tool</div>
+          <h1 class="hero-title">
+            <img src="/ziku/logo-icon.svg" alt="" class="hero-logo-icon" />
+            <span class="hero-title-main">ziku</span>
+          </h1>
+          <p class="hero-tagline">
+            Templates go stale. <strong>ziku</strong> keeps them alive.<br />
+            Push improvements back, pull updates forward —<br />
+            with structure-aware 3-way merge.
+          </p>
+          <div class="hero-actions">
+            <a href="/ziku/guide/getting-started" class="btn-primary">Get Started</a>
+            <a href="https://github.com/tktcorporation/ziku" class="btn-secondary" target="_blank">GitHub</a>
+          </div>
+        </div>
+        <!-- 右: cast プレビュー -->
+        <div class="hero-right">
+          <div class="hero-cast-wrapper">
+            <div class="hero-cast-player" ref="heroBgEl" />
+          </div>
         </div>
       </div>
       <div class="scroll-indicator">
@@ -479,68 +485,52 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   overflow: hidden;
 }
 
-/* 背景 cast — 拡大して薄く、画面からはみ出す */
-.hero-bg-cast {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 140%;
-  max-width: 1400px;
-  transform: translate(-50%, -50%);
-  opacity: 0.03;
-  pointer-events: none;
-  z-index: 0;
-}
-
-/* 背景 cast 内のプレイヤーUIを非表示 */
-.hero-bg-cast :deep(.ap-overlay),
-.hero-bg-cast :deep(.ap-start-button),
-.hero-bg-cast :deep(.ap-control-bar) {
-  display: none !important;
-}
-.hero-bg-cast :deep(.ap-wrapper),
-.hero-bg-cast :deep(.ap-player) {
-  border-radius: 0;
-  height: 100% !important;
-}
-
-.hero-content {
-  text-align: center;
-  max-width: 800px;
+.hero-layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3rem;
+  align-items: center;
+  max-width: 1200px;
+  width: 100%;
+  padding: 0 2rem;
   opacity: 0;
   transform: translateY(40px);
   transition: opacity 0.8s ease, transform 0.8s ease;
-  position: relative;
-  z-index: 1;
 }
-.hero-content.visible { opacity: 1; transform: translateY(0); }
+.hero-layout.visible { opacity: 1; transform: translateY(0); }
+
+/* 左カラム: テキスト */
+.hero-left {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
 
 .hero-badge {
   display: inline-block;
   padding: 0.35rem 1rem;
   border: 1px solid var(--border);
   border-radius: 100px;
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   color: var(--muted);
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  margin-bottom: 2rem;
+  margin-bottom: 1.5rem;
 }
 
 .hero-title {
-  margin: 0 0 1.5rem;
+  margin: 0 0 1.25rem;
   line-height: 1;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.75rem;
 }
 .hero-logo-icon {
-  height: clamp(60px, 10vw, 90px);
+  height: clamp(48px, 6vw, 72px);
   width: auto;
 }
 .hero-title-main {
-  font-size: clamp(4rem, 12vw, 8rem);
+  font-size: clamp(3rem, 6vw, 5rem);
   font-weight: 800;
   letter-spacing: -0.04em;
   background: linear-gradient(135deg, #fff 0%, #666 100%);
@@ -549,14 +539,43 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   background-clip: text;
 }
 
-.hero-tagline {
-  font-size: clamp(1rem, 2.5vw, 1.35rem);
-  color: var(--muted);
-  line-height: 1.7;
-  margin: 0 0 2.5rem;
+/* 右カラム: cast プレビュー */
+.hero-right {
+  position: relative;
 }
 
-.hero-actions { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
+.hero-cast-wrapper {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.05),
+    0 20px 60px rgba(0, 0, 0, 0.4);
+  /* 少しはみ出して大きく見せる */
+  margin-right: -4rem;
+  opacity: 0.35;
+}
+
+/* cast プレイヤーUIを非表示 */
+.hero-cast-wrapper :deep(.ap-overlay),
+.hero-cast-wrapper :deep(.ap-start-button),
+.hero-cast-wrapper :deep(.ap-control-bar) {
+  display: none !important;
+}
+.hero-cast-wrapper :deep(.ap-wrapper),
+.hero-cast-wrapper :deep(.ap-player) {
+  border-radius: 0;
+}
+
+.hero-tagline {
+  font-size: clamp(0.95rem, 1.8vw, 1.15rem);
+  color: var(--muted);
+  line-height: 1.7;
+  margin: 0 0 2rem;
+}
+
+.hero-actions { display: flex; gap: 1rem; flex-wrap: wrap; }
 
 .scroll-indicator {
   position: absolute;
@@ -783,6 +802,19 @@ function stepTransform(sectionId: string, stepIndex: number): string {
 /* ── Responsive ─────────────────────────────── */
 
 @media (max-width: 900px) {
+  .hero-layout {
+    grid-template-columns: 1fr;
+    gap: 2rem;
+  }
+
+  .hero-left { align-items: center; text-align: center; }
+  .hero-actions { justify-content: center; }
+
+  .hero-cast-wrapper {
+    margin-right: 0;
+    opacity: 0.25;
+  }
+
   .chapter-layout {
     grid-template-columns: 1fr;
     grid-template-rows: 1fr auto;
@@ -797,7 +829,7 @@ function stepTransform(sectionId: string, stepIndex: number): string {
     padding: 1rem;
   }
 
-  .hero-title-main { font-size: 3.5rem; }
+  .hero-title-main { font-size: 3rem; }
 }
 
 /* ── Asciinema overrides ────────────────────── */
