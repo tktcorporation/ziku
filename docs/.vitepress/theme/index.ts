@@ -4,6 +4,7 @@
  * デフォルトテーマを拡張し、グローバルコンポーネント（AsciinemaPlayer 等）を登録する。
  * デフォルトテーマ不要時: このファイルごと削除して config.ts のみに戻せる。
  */
+import type { App } from "vue";
 import DefaultTheme from "vitepress/theme";
 import { defineClientComponent } from "vitepress";
 
@@ -15,7 +16,7 @@ const ScrollLanding = defineClientComponent(() => import("./components/ScrollLan
 
 export default {
   extends: DefaultTheme,
-  enhanceApp({ app }) {
+  enhanceApp({ app }: { app: App }) {
     app.component("AsciinemaPlayer", AsciinemaPlayer);
     app.component("ScrollLanding", ScrollLanding);
   },
