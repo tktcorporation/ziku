@@ -354,29 +354,24 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   <div class="scroll-landing">
     <!-- ── Hero ── -->
     <section id="landing-hero" class="hero-section">
-      <div class="hero-layout" :class="{ visible: heroVisible }">
-        <!-- 左: テキストコンテンツ -->
-        <div class="hero-left">
-          <div class="hero-badge">Open Source CLI Tool</div>
-          <h1 class="hero-title">
-            <img src="/ziku/logo-icon.svg" alt="" class="hero-logo-icon" />
-            <span class="hero-title-main">ziku</span>
-          </h1>
-          <p class="hero-tagline">
-            Templates go stale. <strong>ziku</strong> keeps them alive.<br />
-            Push improvements back, pull updates forward —<br />
-            with structure-aware 3-way merge.
-          </p>
-          <div class="hero-actions">
-            <a href="/ziku/guide/getting-started" class="btn-primary">Get Started</a>
-            <a href="https://github.com/tktcorporation/ziku" class="btn-secondary" target="_blank">GitHub</a>
-          </div>
-        </div>
-        <!-- 右: cast プレビュー -->
-        <div class="hero-right">
-          <div class="hero-cast-wrapper">
-            <div class="hero-cast-player" ref="heroBgEl" />
-          </div>
+      <!-- 背景 cast: 拡大してはみ出し、薄く表示 -->
+      <div class="hero-bg-cast" ref="heroBgEl" />
+
+      <!-- テキストコンテンツ: 中央寄せ -->
+      <div class="hero-content" :class="{ visible: heroVisible }">
+        <div class="hero-badge">Open Source CLI Tool</div>
+        <h1 class="hero-title">
+          <img src="/ziku/logo-icon.svg" alt="" class="hero-logo-icon" />
+          <span class="hero-title-main">ziku</span>
+        </h1>
+        <p class="hero-tagline">
+          Templates go stale. <strong>ziku</strong> keeps them alive.<br />
+          Push improvements back, pull updates forward —<br />
+          with structure-aware 3-way merge.
+        </p>
+        <div class="hero-actions">
+          <a href="/ziku/guide/getting-started" class="btn-primary">Get Started</a>
+          <a href="https://github.com/tktcorporation/ziku" class="btn-secondary" target="_blank">GitHub</a>
         </div>
       </div>
       <div class="scroll-indicator">
@@ -485,26 +480,42 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   overflow: hidden;
 }
 
-.hero-layout {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 3rem;
-  align-items: center;
-  max-width: 1200px;
-  width: 100%;
-  padding: 0 2rem;
+/* 背景 cast — 拡大・右寄せ・はみ出し・薄く */
+.hero-bg-cast {
+  position: absolute;
+  top: 50%;
+  right: -8%;
+  width: 65%;
+  max-width: 900px;
+  transform: translateY(-50%) scale(1.1);
+  opacity: 0.08;
+  pointer-events: none;
+  z-index: 0;
+  mask-image: radial-gradient(ellipse 80% 70% at 60% 50%, black 30%, transparent 80%);
+  -webkit-mask-image: radial-gradient(ellipse 80% 70% at 60% 50%, black 30%, transparent 80%);
+}
+
+.hero-bg-cast :deep(.ap-overlay),
+.hero-bg-cast :deep(.ap-start-button),
+.hero-bg-cast :deep(.ap-control-bar) {
+  display: none !important;
+}
+.hero-bg-cast :deep(.ap-wrapper),
+.hero-bg-cast :deep(.ap-player) {
+  border-radius: 0;
+}
+
+/* テキストコンテンツ — 中央寄せ */
+.hero-content {
+  text-align: center;
+  max-width: 700px;
   opacity: 0;
   transform: translateY(40px);
   transition: opacity 0.8s ease, transform 0.8s ease;
+  position: relative;
+  z-index: 1;
 }
-.hero-layout.visible { opacity: 1; transform: translateY(0); }
-
-/* 左カラム: テキスト */
-.hero-left {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-}
+.hero-content.visible { opacity: 1; transform: translateY(0); }
 
 .hero-badge {
   display: inline-block;
@@ -523,14 +534,15 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   line-height: 1;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 0.75rem;
 }
 .hero-logo-icon {
-  height: clamp(48px, 6vw, 72px);
+  height: clamp(48px, 7vw, 76px);
   width: auto;
 }
 .hero-title-main {
-  font-size: clamp(3rem, 6vw, 5rem);
+  font-size: clamp(3.5rem, 8vw, 5.5rem);
   font-weight: 800;
   letter-spacing: -0.04em;
   background: linear-gradient(135deg, #fff 0%, #666 100%);
@@ -539,43 +551,14 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   background-clip: text;
 }
 
-/* 右カラム: cast プレビュー */
-.hero-right {
-  position: relative;
-}
-
-.hero-cast-wrapper {
-  position: relative;
-  border-radius: 12px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.05),
-    0 20px 60px rgba(0, 0, 0, 0.4);
-  /* 少しはみ出して大きく見せる */
-  margin-right: -4rem;
-  opacity: 0.35;
-}
-
-/* cast プレイヤーUIを非表示 */
-.hero-cast-wrapper :deep(.ap-overlay),
-.hero-cast-wrapper :deep(.ap-start-button),
-.hero-cast-wrapper :deep(.ap-control-bar) {
-  display: none !important;
-}
-.hero-cast-wrapper :deep(.ap-wrapper),
-.hero-cast-wrapper :deep(.ap-player) {
-  border-radius: 0;
-}
-
 .hero-tagline {
-  font-size: clamp(0.95rem, 1.8vw, 1.15rem);
+  font-size: clamp(0.95rem, 2vw, 1.2rem);
   color: var(--muted);
   line-height: 1.7;
   margin: 0 0 2rem;
 }
 
-.hero-actions { display: flex; gap: 1rem; flex-wrap: wrap; }
+.hero-actions { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
 
 .scroll-indicator {
   position: absolute;
@@ -802,17 +785,10 @@ function stepTransform(sectionId: string, stepIndex: number): string {
 /* ── Responsive ─────────────────────────────── */
 
 @media (max-width: 900px) {
-  .hero-layout {
-    grid-template-columns: 1fr;
-    gap: 2rem;
-  }
-
-  .hero-left { align-items: center; text-align: center; }
-  .hero-actions { justify-content: center; }
-
-  .hero-cast-wrapper {
-    margin-right: 0;
-    opacity: 0.25;
+  .hero-bg-cast {
+    right: -20%;
+    width: 90%;
+    opacity: 0.05;
   }
 
   .chapter-layout {
