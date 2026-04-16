@@ -12,6 +12,7 @@
 -->
 <script setup lang="ts">
 import { ref, reactive, onMounted, onBeforeUnmount, nextTick } from "vue";
+import { withBase } from "vitepress";
 import * as AsciinemaPlayerLib from "asciinema-player";
 import "asciinema-player/dist/bundle/asciinema-player.css";
 
@@ -368,7 +369,7 @@ function stepTransform(sectionId: string, stepIndex: number): string {
       <!-- テキストコンテンツ: 中央寄せ -->
       <div class="hero-content" :class="{ visible: heroVisible }">
         <h1 class="hero-title">
-          <img src="/ziku/logo-icon.svg" alt="" class="hero-logo-icon" />
+          <img :src="withBase('/logo-icon.svg')" alt="" class="hero-logo-icon" />
           <span class="hero-title-main">ziku</span>
         </h1>
         <p class="hero-tagline">
