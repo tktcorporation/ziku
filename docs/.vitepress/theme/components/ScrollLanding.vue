@@ -490,8 +490,8 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   opacity: 0.55;
   pointer-events: none;
   z-index: 0;
-  mask-image: linear-gradient(to left, black 20%, transparent 90%);
-  -webkit-mask-image: linear-gradient(to left, black 20%, transparent 90%);
+  mask-image: linear-gradient(to left, black 40%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to left, black 40%, transparent 100%);
 }
 
 .hero-bg-cast :deep(.ap-overlay),
