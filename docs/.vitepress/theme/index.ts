@@ -12,9 +12,15 @@ const AsciinemaPlayer = defineClientComponent(
   () => import("./components/AsciinemaPlayer.vue"),
 );
 
+// ランディングページ用のスクロール同期コンポーネント（同じくブラウザ専用）
+const ScrollLanding = defineClientComponent(
+  () => import("./components/ScrollLanding.vue"),
+);
+
 export default {
   extends: DefaultTheme,
   enhanceApp({ app }) {
     app.component("AsciinemaPlayer", AsciinemaPlayer);
+    app.component("ScrollLanding", ScrollLanding);
   },
 };
