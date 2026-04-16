@@ -483,25 +483,14 @@ function stepTransform(sectionId: string, stepIndex: number): string {
 .hero-bg-cast {
   position: absolute;
   top: 50%;
-  right: -12%;
+  right: -30%;
   width: 70%;
   max-width: 1000px;
   transform: translateY(-50%) scale(1.3);
-  opacity: 0.5;
   pointer-events: none;
   z-index: 0;
-  mask-image: linear-gradient(to left,
-    rgba(0,0,0,1) 0%,
-    rgba(0,0,0,0.8) 30%,
-    rgba(0,0,0,0.3) 60%,
-    rgba(0,0,0,0) 85%
-  );
-  -webkit-mask-image: linear-gradient(to left,
-    rgba(0,0,0,1) 0%,
-    rgba(0,0,0,0.8) 30%,
-    rgba(0,0,0,0.3) 60%,
-    rgba(0,0,0,0) 85%
-  );
+  mask-image: linear-gradient(to left, rgba(0,0,0,0.8) 5%, rgba(0,0,0,0.05) 85%);
+  -webkit-mask-image: linear-gradient(to left, rgba(0,0,0,0.8) 5%, rgba(0,0,0,0.05) 85%);
 }
 
 .hero-bg-cast :deep(.ap-overlay),
