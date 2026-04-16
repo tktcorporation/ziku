@@ -479,19 +479,29 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   overflow: hidden;
 }
 
-/* 背景 cast — 拡大・右寄せ・はみ出し・薄く */
+/* 背景 cast — 文字だけ浮かぶ演出。プレイヤー背景を透明にし、テキストのみ表示 */
 .hero-bg-cast {
   position: absolute;
   top: 50%;
-  right: -15%;
-  width: 65%;
-  max-width: 900px;
-  transform: translateY(-50%) scale(1.1);
-  opacity: 0.55;
+  right: -12%;
+  width: 70%;
+  max-width: 1000px;
+  transform: translateY(-50%) scale(1.3);
+  opacity: 0.5;
   pointer-events: none;
   z-index: 0;
-  mask-image: linear-gradient(to left, black 40%, transparent 100%);
-  -webkit-mask-image: linear-gradient(to left, black 40%, transparent 100%);
+  mask-image: linear-gradient(to left,
+    rgba(0,0,0,1) 0%,
+    rgba(0,0,0,0.8) 30%,
+    rgba(0,0,0,0.3) 60%,
+    rgba(0,0,0,0) 85%
+  );
+  -webkit-mask-image: linear-gradient(to left,
+    rgba(0,0,0,1) 0%,
+    rgba(0,0,0,0.8) 30%,
+    rgba(0,0,0,0.3) 60%,
+    rgba(0,0,0,0) 85%
+  );
 }
 
 .hero-bg-cast :deep(.ap-overlay),
@@ -502,6 +512,10 @@ function stepTransform(sectionId: string, stepIndex: number): string {
 .hero-bg-cast :deep(.ap-wrapper),
 .hero-bg-cast :deep(.ap-player) {
   border-radius: 0;
+  background: transparent !important;
+}
+.hero-bg-cast :deep(.ap-term) {
+  background: transparent !important;
 }
 
 /* テキストコンテンツ — 左寄りだが中身は中央揃え */
