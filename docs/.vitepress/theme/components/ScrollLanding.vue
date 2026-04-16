@@ -42,32 +42,32 @@ const sections: Section[] = [
     castSrc: "/ziku/demos/01-init.cast",
     cols: 100,
     rows: 37,
-    castDuration: 12.7,
-    scrollHeight: "350vh",
+    castDuration: 14.4,
+    scrollHeight: "400vh",
     steps: [
       {
-        title: "Run npx ziku",
+        title: "Just run npx ziku",
         description:
-          "Auto-detects your template from the git remote. Or choose from available repositories interactively.",
+          "Pick 'init' from the interactive menu — or run npx ziku init directly. ziku auto-detects your template from the git remote.",
         at: 0,
       },
       {
         title: "Download from GitHub",
         description:
-          "ziku fetches the template directly from GitHub — no local clone needed. Works with any public or private repo you have access to.",
-        at: 0.25,
+          "The template is fetched directly from GitHub. No local clone needed — works with any repo you have access to.",
+        at: 0.3,
       },
       {
         title: "Choose what to sync",
         description:
-          "Interactively select which directories to track — .claude, .devcontainer, .github, root configs. Pick only what you need.",
-        at: 0.45,
+          "Select which directories to track — .claude, .github, root configs. Deselect what you don't need.",
+        at: 0.55,
       },
       {
-        title: "Template applied",
+        title: "Setup complete",
         description:
-          "Files are synced, .ziku/ziku.jsonc tracks your patterns, and lock.json records the state. You're ready to go.",
-        at: 0.8,
+          "26 files synced. .ziku/ziku.jsonc tracks your patterns, lock.json records the state. You're ready.",
+        at: 0.85,
       },
     ],
   },
