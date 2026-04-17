@@ -310,7 +310,6 @@ function setupObservers() {
 }
 
 onMounted(() => {
-  document.documentElement.classList.add("landing-dark");
   nextTick(() => {
     setupObservers();
     rafId = requestAnimationFrame(updateProgress);
@@ -332,7 +331,6 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
-  document.documentElement.classList.remove("landing-dark");
   cancelAnimationFrame(rafId);
   observers.forEach((o) => o.disconnect());
   heroBgPlayer?.dispose();
@@ -469,17 +467,52 @@ function stepTransform(sectionId: string, stepIndex: number): string {
 </template>
 
 <style scoped>
+/*
+  ランディングページのカラーパレット。
+
+  - デフォルト（ライト）を :root スコープ相当で宣言
+  - html.dark がついたときに上書きして VitePress のテーマ切替に追従させる
+  - CSS 変数で統一しているので個別要素側では var(--...) を参照するだけ
+*/
 .scroll-landing {
-  --bg: #0a0a0a;
-  --text: #fafafa;
-  --muted: #888;
-  --accent: #3b82f6;
-  --accent-hover: #60a5fa;
-  --card-bg: #141414;
-  --border: #222;
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --text: #0a0a0a;
+  --muted: #5a5a5a;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --card-bg: #ffffff;
+  --card-bg-glass: rgba(255, 255, 255, 0.82);
+  --border: rgba(15, 15, 15, 0.1);
+  --border-strong: rgba(15, 15, 15, 0.18);
+  --chip-bg: rgba(15, 15, 15, 0.04);
+  --chip-bg-hover: rgba(15, 15, 15, 0.08);
+  --title-from: #0a0a0a;
+  --title-to: #555;
+  --shadow-soft: 0 10px 40px rgba(15, 23, 42, 0.08);
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.06);
 
   background: var(--bg);
   color: var(--text);
+}
+
+html.dark .scroll-landing {
+  --bg: #0a0a0a;
+  --surface: #111111;
+  --text: #fafafa;
+  --muted: #9a9a9a;
+  --accent: #60a5fa;
+  --accent-hover: #93c5fd;
+  --card-bg: #141414;
+  --card-bg-glass: rgba(20, 20, 20, 0.78);
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --chip-bg: rgba(255, 255, 255, 0.06);
+  --chip-bg-hover: rgba(255, 255, 255, 0.1);
+  --title-from: #ffffff;
+  --title-to: #6b7280;
+  --shadow-soft: 0 10px 40px rgba(0, 0, 0, 0.5);
+  --shadow-card: 0 0 0 1px rgba(255, 255, 255, 0.04), 0 20px 60px rgba(0, 0, 0, 0.45);
 }
 
 /* ── Hero ───────────────────────────────────── */
@@ -558,7 +591,7 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   font-size: clamp(3.5rem, 8vw, 5.5rem);
   font-weight: 800;
   letter-spacing: -0.04em;
-  background: linear-gradient(135deg, #fff 0%, #666 100%);
+  background: linear-gradient(135deg, var(--title-from) 0%, var(--title-to) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -576,7 +609,7 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   align-items: center;
   gap: 1rem;
   padding: 0.7rem 1.2rem;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--chip-bg);
   border: 1px solid var(--border);
   border-radius: 10px;
   cursor: pointer;
@@ -585,8 +618,8 @@ function stepTransform(sectionId: string, stepIndex: number): string {
     border-color 0.2s;
 }
 .hero-command:hover {
-  background: rgba(255, 255, 255, 0.1);
-  border-color: var(--muted);
+  background: var(--chip-bg-hover);
+  border-color: var(--border-strong);
 }
 .hero-command-text {
   font-size: 1.1rem;
@@ -746,17 +779,20 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   align-items: stretch;
 }
 
+/*
+  ターミナルウィンドウは cast 再生領域。
+  ターミナル自体はダーク配色のまま（録画がダーク背景のため）、
+  外周のシャドウだけテーマに合わせて変数化する。
+*/
 .terminal-window {
   width: 100%;
   background: #1a1a2e;
   border-radius: 12px;
-  border: 1px solid var(--border);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.05),
-    0 20px 60px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-card);
 }
 
 .terminal-chrome {
@@ -764,14 +800,14 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   gap: 6px;
   padding: 0.75rem 1rem;
   background: #0d0d1a;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   flex-shrink: 0;
 }
 .dot {
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: var(--border);
+  background: rgba(255, 255, 255, 0.2);
 }
 .dot.red {
   background: #ff5f57;
@@ -804,11 +840,17 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   background: var(--card-bg);
   border: 1px solid var(--border);
   border-radius: 12px;
-  transition: box-shadow 0.3s ease;
+  box-shadow: var(--shadow-soft);
+  transition:
+    box-shadow 0.3s ease,
+    border-color 0.3s ease;
   will-change: opacity, transform;
 }
 .step-card:hover {
-  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.3);
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 1px var(--accent),
+    var(--shadow-soft);
 }
 
 .step-title {
@@ -882,6 +924,7 @@ function stepTransform(sectionId: string, stepIndex: number): string {
   background: var(--card-bg);
   border: 1px solid var(--border);
   border-radius: 8px;
+  box-shadow: var(--shadow-soft);
   margin-bottom: 2.5rem;
 }
 .cta-code code {
@@ -898,29 +941,124 @@ function stepTransform(sectionId: string, stepIndex: number): string {
 
 /* ── Responsive ─────────────────────────────── */
 
+/*
+  モバイル / 狭幅: 2 カラムを崩し、ステップカードをターミナル上に
+  フローティング表示する（ユーザー要望）。
+  - ターミナルは chapter-layout いっぱいに広げる
+  - steps-col は absolute で終盤 1 枚分だけ浮かせる
+  - 背景ブラー + 半透明でプレビューを隠しすぎないようにする
+*/
 @media (max-width: 900px) {
   .hero-bg-cast {
     right: -20%;
     width: 90%;
-    opacity: 0.05;
+    opacity: 0.08;
+  }
+
+  .chapter-sticky {
+    padding: 1rem 1rem 0.75rem;
   }
 
   .chapter-layout {
-    grid-template-columns: 1fr;
-    grid-template-rows: 1fr auto;
+    display: block;
+    position: relative;
+    /*
+      flex: 1 だけでは一部ブラウザで height: 100% の解決に不安が残るため、
+      .chapter-layout 自体にも明示的な高さを渡して子（.terminal-col）に伝播させる
+    */
+    height: 100%;
+  }
+
+  .terminal-col {
+    height: 100%;
   }
 
   .steps-col {
-    gap: 0.75rem;
+    position: absolute;
+    left: 0.75rem;
+    right: 0.75rem;
+    bottom: 0.75rem;
     padding: 0;
+    gap: 0;
+    justify-content: flex-end;
+    pointer-events: none;
+    z-index: 2;
   }
 
   .step-card {
-    padding: 1rem;
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: 0.85rem 1rem;
+    background: var(--card-bg-glass);
+    border: 1px solid var(--border-strong);
+    backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+    box-shadow: var(--shadow-soft);
+    pointer-events: auto;
+  }
+  .step-card:hover {
+    box-shadow: var(--shadow-soft);
   }
 
+  .step-title {
+    font-size: 1rem;
+    margin-bottom: 0.25rem;
+  }
+  .step-desc {
+    font-size: 0.82rem;
+    line-height: 1.5;
+    /* オーバーレイが縦に伸びすぎないよう 3 行で省略 */
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .hero-content {
+    padding-left: 1.25rem;
+    padding-right: 1.25rem;
+  }
   .hero-title-main {
-    font-size: 3rem;
+    font-size: clamp(2.75rem, 12vw, 3.5rem);
+  }
+  .hero-tagline {
+    font-size: 0.95rem;
+  }
+
+  .cta-section {
+    padding: 3rem 1.25rem;
+  }
+  .cta-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .btn-large {
+    padding: 0.85rem 1.5rem;
+  }
+}
+
+/* ── さらに小さい画面（スマートフォン縦） ───── */
+@media (max-width: 520px) {
+  .chapter-sticky {
+    top: 56px;
+    height: calc(100vh - 56px);
+    padding: 0.75rem 0.75rem 0.5rem;
+  }
+  .chapter-header {
+    margin-bottom: 0.5rem;
+  }
+  .steps-col {
+    left: 0.5rem;
+    right: 0.5rem;
+    bottom: 0.5rem;
+  }
+  .step-card {
+    padding: 0.75rem 0.9rem;
+  }
+  .step-title {
+    font-size: 0.95rem;
   }
 }
 
@@ -937,27 +1075,5 @@ function stepTransform(sectionId: string, stepIndex: number): string {
 .terminal-body :deep(.ap-start-button),
 .terminal-body :deep(.control-bar) {
   display: none !important;
-}
-</style>
-
-<!-- ランディングページ専用ダークテーマ。他ページに影響しない。 -->
-<style>
-.landing-dark .VPNav .VPNavBar {
-  background: #0a0a0a !important;
-  border-bottom-color: #222 !important;
-}
-.landing-dark .VPNav .VPNavBar .VPNavBarTitle .title {
-  color: #fafafa !important;
-}
-.landing-dark .VPNav .content-body {
-  background: #0a0a0a !important;
-}
-.landing-dark .VPFooter {
-  background: #0a0a0a !important;
-  border-top-color: #222 !important;
-}
-.landing-dark .VPFooter .message,
-.landing-dark .VPFooter .copyright {
-  color: #888 !important;
 }
 </style>
