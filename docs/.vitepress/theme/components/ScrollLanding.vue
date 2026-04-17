@@ -150,6 +150,21 @@ const sections: Section[] = [
   },
 ];
 
+/**
+ * モバイル幅では viewport が狭く、fit: "width" で cols=100 を描画すると
+ * 1 文字あたり数 px しかなく読めない。VT 側の cols を 60 まで絞ることで
+ * 1 文字を大きく描画しつつ、長い行は asciinema-player の VT が自動で
+ * 折り返す（.ap-line は absolute 配置のため CSS 側での折り返しは不可）。
+ */
+const MOBILE_BREAKPOINT = 900;
+const MOBILE_MAX_COLS = 60;
+
+function getEffectiveCols(baseCols: number): number {
+  if (typeof window === "undefined") return baseCols;
+  if (window.innerWidth > MOBILE_BREAKPOINT) return baseCols;
+  return Math.min(baseCols, MOBILE_MAX_COLS);
+}
+
 /** セクションごとのランタイム状態 */
 interface SectionState {
   progress: number;
@@ -205,7 +220,7 @@ function ensurePlayer(section: Section) {
   state.duration = section.castDuration;
 
   state.player = AsciinemaPlayerLib.create(section.castSrc, state.containerEl, {
-    cols: section.cols,
+    cols: getEffectiveCols(section.cols),
     rows: section.rows,
     speed: 1,
     theme: "asciinema",

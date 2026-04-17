@@ -44,10 +44,25 @@ const container = ref<HTMLDivElement>();
 let player: { dispose: () => void; play: () => void; pause: () => void } | null = null;
 let observer: IntersectionObserver | null = null;
 
+/**
+ * モバイル幅では viewport が狭く、fit: "width" で cols=100 を描画すると
+ * 1 文字あたり数 px しかなく読めない。VT 側の cols を 60 まで絞ることで
+ * 1 文字を大きく描画しつつ、長い行は asciinema-player の VT が自動で
+ * 折り返す（.ap-line は absolute 配置のため CSS 側での折り返しは不可）。
+ */
+const MOBILE_BREAKPOINT = 900;
+const MOBILE_MAX_COLS = 60;
+
+function getEffectiveCols(): number {
+  if (typeof window === "undefined") return props.cols;
+  if (window.innerWidth > MOBILE_BREAKPOINT) return props.cols;
+  return Math.min(props.cols, MOBILE_MAX_COLS);
+}
+
 function createPlayer() {
   if (!container.value) return;
   player = AsciinemaPlayerLib.create(props.src, container.value, {
-    cols: props.cols,
+    cols: getEffectiveCols(),
     rows: props.rows,
     speed: props.speed,
     theme: props.theme,
