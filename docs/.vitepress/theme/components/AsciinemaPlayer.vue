@@ -104,24 +104,29 @@ function clearContainer() {
   }
 }
 
+function recreatePlayer() {
+  observer?.disconnect();
+  player?.dispose();
+  clearContainer();
+  createPlayer();
+}
+
+let mobileMql: MediaQueryList | null = null;
+
 onMounted(() => {
   createPlayer();
+  // モバイル/デスクトップ閾値を跨いだ際に cols を反映させるため再生成する
+  mobileMql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT}px)`);
+  mobileMql.addEventListener("change", recreatePlayer);
 });
 
 onBeforeUnmount(() => {
   observer?.disconnect();
+  mobileMql?.removeEventListener("change", recreatePlayer);
   player?.dispose();
 });
 
-watch(
-  () => props.src,
-  () => {
-    observer?.disconnect();
-    player?.dispose();
-    clearContainer();
-    createPlayer();
-  },
-);
+watch(() => props.src, recreatePlayer);
 </script>
 
 <template>
