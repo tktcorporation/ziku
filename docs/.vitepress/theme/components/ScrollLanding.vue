@@ -150,6 +150,21 @@ const sections: Section[] = [
   },
 ];
 
+/**
+ * モバイル幅では viewport が狭く、fit: "width" で cols=100 を描画すると
+ * 1 文字あたり数 px しかなく読めない。VT 側の cols を 60 まで絞ることで
+ * 1 文字を大きく描画しつつ、長い行は asciinema-player の VT が自動で
+ * 折り返す（.ap-line は absolute 配置のため CSS 側での折り返しは不可）。
+ */
+const MOBILE_BREAKPOINT = 900;
+const MOBILE_MAX_COLS = 60;
+
+function getEffectiveCols(baseCols: number): number {
+  if (typeof window === "undefined") return baseCols;
+  if (window.innerWidth > MOBILE_BREAKPOINT) return baseCols;
+  return Math.min(baseCols, MOBILE_MAX_COLS);
+}
+
 /** セクションごとのランタイム状態 */
 interface SectionState {
   progress: number;
@@ -184,10 +199,67 @@ const heroBgEl = ref<HTMLDivElement>();
 let heroBgPlayer: { dispose: () => void; play: () => void; pause: () => void } | null = null;
 let rafId = 0;
 const observers: IntersectionObserver[] = [];
+let mobileMql: MediaQueryList | null = null;
+/** 直前に発行した seek の管理。seekingSection はスロットリング、playerGeneration
+ * は recreateAllPlayers 後に破棄済みプレイヤーの seek Promise が stale に解決
+ * しても現世代の seekingSection を誤って clear しないようにするためのガード。 */
+let seekingSection: string | null = null;
+let playerGeneration = 0;
 
 /** セクション要素の ref を収集 */
 function setTerminalRef(id: string, el: HTMLDivElement | null) {
   if (el) sectionStates[id].containerEl = el;
+}
+
+/**
+ * ヒーロー背景用の cast プレイヤーを生成する。
+ * モバイル/デスクトップ閾値跨ぎで cols を更新するため関数化している。
+ */
+function createHeroBgPlayer() {
+  if (!heroBgEl.value) return;
+  heroBgPlayer = AsciinemaPlayerLib.create("/ziku/demos/01-init.cast", heroBgEl.value, {
+    cols: getEffectiveCols(100),
+    rows: 37,
+    speed: 0.5,
+    theme: "asciinema",
+    fit: "width",
+    idleTimeLimit: 1,
+    loop: true,
+    autoPlay: true,
+  });
+}
+
+/**
+ * ビューポートがモバイル/デスクトップ閾値を跨いだら、すべてのプレイヤーを
+ * 破棄して再生成する。cols は作成時にしか反映されないため、回転やリサイズで
+ * セクションごとに cols が食い違う不整合（モバイル横幅で生成済みのセクション 1 と
+ * デスクトップで新規生成されるセクション 2 が混在）を防ぐ。
+ */
+function recreateAllPlayers() {
+  // 世代を進めることで、破棄したプレイヤーの in-flight seek Promise が
+  // resolve しても seekingSection を勝手に null に戻さないようにする
+  playerGeneration++;
+
+  heroBgPlayer?.dispose();
+  heroBgPlayer = null;
+  createHeroBgPlayer();
+
+  for (const state of Object.values(sectionStates)) {
+    if (state.player) {
+      state.player.dispose();
+      state.player = null;
+    }
+    if (state.containerEl) {
+      while (state.containerEl.firstChild) {
+        state.containerEl.removeChild(state.containerEl.firstChild);
+      }
+    }
+    // state.active=true のままだと updateProgress の (isVisible && !wasActive)
+    // 分岐が発火せず、現在表示中のセクションが再生成されない。false に戻して
+    // 次フレームで ensurePlayer を走らせる。
+    state.active = false;
+  }
+  seekingSection = null;
 }
 
 /**
@@ -205,7 +277,7 @@ function ensurePlayer(section: Section) {
   state.duration = section.castDuration;
 
   state.player = AsciinemaPlayerLib.create(section.castSrc, state.containerEl, {
-    cols: section.cols,
+    cols: getEffectiveCols(section.cols),
     rows: section.rows,
     speed: 1,
     theme: "asciinema",
@@ -239,9 +311,9 @@ function ensurePlayer(section: Section) {
  * asciinema-player を seek で同期させる。
  *
  * seek は Promise を返すため、前の seek が完了するまで次の seek を発行しない。
+ * 破棄済みプレイヤーの stale Promise が現世代の seekingSection を誤って clear
+ * しないよう、seek 発行時の playerGeneration を閉じ込めて世代一致チェックする。
  */
-let seekingSection: string | null = null;
-
 function updateProgress() {
   for (const section of sections) {
     const el = document.getElementById(`chapter-${section.id}`);
@@ -267,14 +339,14 @@ function updateProgress() {
     // seek — Promise なので前のが完了するまでスキップ
     if (isVisible && state.player && state.duration > 0 && seekingSection === null) {
       seekingSection = section.id;
+      const seekGen = playerGeneration;
       const targetTime = progress * state.duration;
+      const clearIfCurrent = () => {
+        if (seekGen === playerGeneration) seekingSection = null;
+      };
       (state.player.seek(targetTime) as unknown as Promise<void>)
-        .then(() => {
-          seekingSection = null;
-        })
-        .catch(() => {
-          seekingSection = null;
-        });
+        .then(clearIfCurrent)
+        .catch(clearIfCurrent);
     }
   }
 
@@ -313,26 +385,18 @@ onMounted(() => {
   nextTick(() => {
     setupObservers();
     rafId = requestAnimationFrame(updateProgress);
+    createHeroBgPlayer();
 
-    // ヒーロー背景の cast プレイヤー（ループ自動再生）
-    if (heroBgEl.value) {
-      heroBgPlayer = AsciinemaPlayerLib.create("/ziku/demos/01-init.cast", heroBgEl.value, {
-        cols: 100,
-        rows: 37,
-        speed: 0.5,
-        theme: "asciinema",
-        fit: "width",
-        idleTimeLimit: 1,
-        loop: true,
-        autoPlay: true,
-      });
-    }
+    // モバイル/デスクトップ閾値を跨いだら player を再生成して cols を反映
+    mobileMql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT}px)`);
+    mobileMql.addEventListener("change", recreateAllPlayers);
   });
 });
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(rafId);
   observers.forEach((o) => o.disconnect());
+  mobileMql?.removeEventListener("change", recreateAllPlayers);
   heroBgPlayer?.dispose();
   for (const state of Object.values(sectionStates)) {
     state.player?.dispose();
