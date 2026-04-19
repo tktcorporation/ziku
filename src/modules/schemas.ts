@@ -142,6 +142,16 @@ export const lockSchema = z.object({
       templateHashes: z.record(z.string(), z.string()),
       /** pull 対象の最新コミット SHA（解決後の baseRef として適用） */
       latestRef: z.string().optional(),
+      /**
+       * pendingMerge を作成した pull がスコープ指定だった場合の scope boundary。
+       *
+       * 背景: スコープ指定 pull で conflict が起きた場合、`pull --continue` 解決時に
+       * scope 外の baseHashes/baseRef を保持する必要がある。このフィールドが存在する
+       * 場合、--continue は scope-aware な finalize を行う（templateHashes を
+       * 該当 scope 内のみ適用、baseRef は更新しない）。
+       * 未定義（または空配列）の場合は legacy のフルオーバーライト動作。
+       */
+      scopeBoundary: z.array(z.string()).optional(),
     })
     .optional(),
 });

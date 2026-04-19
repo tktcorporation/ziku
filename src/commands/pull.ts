@@ -229,7 +229,7 @@ async function performPull(opts: {
     lock: opts.lock,
   });
   if (unresolvedConflicts.length > 0) {
-    await savePendingMerge(opts, unresolvedConflicts, templateHashes);
+    await savePendingMerge(opts, unresolvedConflicts, templateHashes, localHashes);
     return;
   }
 
@@ -275,23 +275,35 @@ async function applyClassifiedChanges(
   }
 }
 
-/** 未解決コンフリクトを lock.pendingMerge に保存する。 */
+/**
+ * 未解決コンフリクトを lock.pendingMerge に保存する。
+ *
+ * scope 指定時は `scopeBoundary` も記録する。これにより `--continue` 解決時に
+ * scope 外の baseHashes を保持し、baseRef を更新しないようにできる
+ * （未記録だと scope 外エントリが消失するバグになる）。
+ */
 async function savePendingMerge(
   opts: {
     targetDir: string;
     lock: LockState;
     resolveBaseRef: Effect.Effect<Option.Option<string>>;
+    isScoped: boolean;
   },
   unresolvedConflicts: string[],
   templateHashes: Record<string, string>,
+  localHashes: Record<string, string>,
 ): Promise<void> {
   const latestRefOption = await Effect.runPromise(opts.resolveBaseRef);
+  const scopeBoundary = opts.isScoped
+    ? [...new Set([...Object.keys(templateHashes), ...Object.keys(localHashes)])]
+    : undefined;
   await saveLock(opts.targetDir, {
     ...opts.lock,
     pendingMerge: {
       conflicts: unresolvedConflicts,
       templateHashes,
       ...(Option.isSome(latestRefOption) ? { latestRef: latestRefOption.value } : {}),
+      ...(scopeBoundary ? { scopeBoundary } : {}),
     },
   });
   outro("Merge paused — resolve conflicts then run `ziku pull --continue`");
@@ -528,7 +540,8 @@ async function runContinue(targetDir: string, lock: LockState): Promise<void> {
     throw new ZikuError("No pending merge found", "Run `ziku pull` first to start a merge");
   }
 
-  const { conflicts, templateHashes, latestRef } = lock.pendingMerge;
+  const { conflicts, templateHashes, latestRef, scopeBoundary } = lock.pendingMerge;
+  const wasScoped = scopeBoundary !== undefined && scopeBoundary.length > 0;
 
   const stillConflicted: string[] = [];
   for (const file of conflicts) {
@@ -550,10 +563,21 @@ async function runContinue(targetDir: string, lock: LockState): Promise<void> {
     );
   }
 
+  // scope 指定 pull で生成された pendingMerge を解決する場合は、scope 外の
+  // baseHashes を保持し、baseRef も更新しない（scope 外ファイルは未同期のため、
+  // 古い baseRef を残すほうが3-way マージの整合が取れる）。
+  const newBaseHashes = wasScoped
+    ? mergeScopedBaseHashes({
+        previous: lock.baseHashes ?? {},
+        scopedHashes: templateHashes,
+        scopeBoundary: new Set(scopeBoundary),
+      })
+    : templateHashes;
+
   await saveLock(targetDir, {
     ...lock,
-    baseHashes: templateHashes,
-    ...(latestRef ? { baseRef: latestRef } : {}),
+    baseHashes: newBaseHashes,
+    ...(!wasScoped && latestRef ? { baseRef: latestRef } : {}),
     pendingMerge: undefined,
   });
 

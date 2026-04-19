@@ -1169,6 +1169,95 @@ describe("pullCommand", () => {
       );
     });
 
+    it("scope 指定 pull で conflict 発生時は pendingMerge.scopeBoundary を記録する", async () => {
+      vol.fromJSON({
+        "/test/docs/a.md": "local docs",
+        "/tmp/template/docs/a.md": "template docs",
+      });
+
+      const { effect } = mockContext({
+        config: {
+          include: [],
+          exclude: [],
+          labels: { docs: { include: ["docs/**"] } },
+        } as any,
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      mockHashFiles.mockResolvedValueOnce({ "docs/a.md": "thash" });
+      mockHashFiles.mockResolvedValueOnce({ "docs/a.md": "lhash" });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: ["docs/a.md"],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+      mockMergeResult(
+        "docs/a.md",
+        "<<<<<<< LOCAL\nlocal\n=======\ntemplate\n>>>>>>> TEMPLATE",
+        true,
+      );
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, labels: "docs" },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // pendingMerge には scopeBoundary が含まれているはず
+      expect(mockSaveLock).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          pendingMerge: expect.objectContaining({
+            conflicts: ["docs/a.md"],
+            scopeBoundary: expect.arrayContaining(["docs/a.md"]),
+          }),
+        }),
+      );
+    });
+
+    it("--continue: scopeBoundary 付き pendingMerge は scope 外 baseHashes を保持し baseRef を更新しない", async () => {
+      // scope 外ファイル "ci.yml" の baseHash が previously 存在
+      vol.fromJSON({
+        "/test/docs/a.md": "resolved content",
+      });
+
+      mockLoadLock.mockResolvedValueOnce({
+        ...baseLock,
+        baseRef: "oldsha",
+        baseHashes: {
+          "docs/a.md": "oldhash-docs",
+          "ci.yml": "oldhash-ci",
+        },
+        pendingMerge: {
+          conflicts: ["docs/a.md"],
+          templateHashes: { "docs/a.md": "newhash-docs" },
+          latestRef: "newsha-999",
+          scopeBoundary: ["docs/a.md"],
+        },
+      } as any);
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, continue: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      const saveCall = mockSaveLock.mock.calls.at(-1);
+      expect(saveCall?.[1]).toMatchObject({
+        baseHashes: {
+          "ci.yml": "oldhash-ci", // scope 外: 保持
+          "docs/a.md": "newhash-docs", // scope 内: 更新
+        },
+        baseRef: "oldsha", // scope 指定なので latestRef に更新しない
+        pendingMerge: undefined,
+      });
+    });
+
     it("scope 指定時は baseRef を更新しない", async () => {
       vol.fromJSON({ "/test": null });
 
