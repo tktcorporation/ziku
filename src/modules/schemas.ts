@@ -43,10 +43,30 @@ export type FileOperationResult = z.infer<typeof fileOperationResultSchema>;
 // source（どこから同期するか）は lock.json に分離。
 // ────────────────────────────────────────────────────────────────
 
+/**
+ * ラベル定義: 名前付きのパターングループ。
+ *
+ * 背景: ユーザーが include/exclude をラベルで束ね、
+ * `--labels foo,bar` で同期スコープを絞り込むための機能。
+ * トップレベルの include/exclude は「常時適用の共通プール」扱いで、
+ * ラベルはそれに追加される overlay として機能する。
+ */
+export const labelDefinitionSchema = z.object({
+  include: z.array(z.string()),
+  exclude: z.array(z.string()).optional(),
+});
+export type LabelDefinition = z.infer<typeof labelDefinitionSchema>;
+
 export const zikuConfigSchema = z.object({
   $schema: z.string().optional(),
   include: z.array(z.string()),
   exclude: z.array(z.string()).optional(),
+  /**
+   * 名前付きパターングループ。
+   * `--labels a,b` で同期を選択的に適用するためのグルーピング。
+   * 未指定時は全ラベルがトップレベル include/exclude と合集合で同期される。
+   */
+  labels: z.record(z.string(), labelDefinitionSchema).optional(),
 });
 
 export type ZikuConfig = z.infer<typeof zikuConfigSchema>;

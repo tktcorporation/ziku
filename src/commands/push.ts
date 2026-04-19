@@ -10,7 +10,7 @@ import type { FileDiff, TemplateSource } from "../modules/schemas";
 import { LOCK_FILE, saveLock } from "../utils/lock";
 import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
 import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
-import { downloadBaseForMerge, mergeOneFile } from "../utils/merge";
+import { classifyFiles, downloadBaseForMerge, mergeOneFile } from "../utils/merge";
 import type { CommandContextShape } from "../services/command-context";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
@@ -28,6 +28,14 @@ import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/render
 import { detectDiff } from "../utils/diff";
 import { createPullRequest, getGitHubToken } from "../utils/github";
 import { hashFiles } from "../utils/hash";
+import {
+  type LabelFilter,
+  filterBaseHashesToScope,
+  formatUnknownLabelMessage,
+  mergeScopedBaseHashes,
+  parseLabelsFlag,
+  resolveLabeledPatterns,
+} from "../utils/labels";
 import { detectAndUpdateReadme } from "../utils/readme";
 import { detectUntrackedFiles } from "../utils/untracked";
 
@@ -163,6 +171,7 @@ function pushToLocal(
   ctx: CommandContextShape,
   projectDir: string,
   args: { yes?: boolean },
+  opts: { scopedPatterns: { include: string[]; exclude: string[] }; isScoped: boolean },
 ): Effect.Effect<void, ZikuError> {
   return Effect.tryPromise({
     try: async () => {
@@ -206,11 +215,24 @@ function pushToLocal(
       }
 
       // lock.json の baseHashes を更新（テンプレート側のハッシュを再計算）
-      const patterns = {
-        include: ctx.config.include,
-        exclude: ctx.config.exclude ?? [],
-      };
-      const baseHashes = await hashFiles(localSource.path, patterns.include, patterns.exclude);
+      // スコープ指定時は scope 内のみ更新、scope 外のエントリは保持する。
+      const scopedHashes = await hashFiles(
+        localSource.path,
+        opts.scopedPatterns.include,
+        opts.scopedPatterns.exclude,
+      );
+      const baseHashes = opts.isScoped
+        ? mergeScopedBaseHashes({
+            previous: ctx.lock.baseHashes ?? {},
+            scopedHashes,
+            // scope boundary: 今回 push 対象とした全ファイル + 再計算結果にあるファイル
+            scopeBoundary: new Set<string>([
+              ...target.files.map((f) => f.path),
+              ...target.deletions.map((d) => d.path),
+              ...Object.keys(scopedHashes),
+            ]),
+          })
+        : scopedHashes;
       await saveLock(projectDir, { ...ctx.lock, baseHashes });
 
       const totalCount = target.files.length + target.deletions.length;
@@ -351,6 +373,14 @@ export const pushCommand = defineCommand({
       description: "Include locally deleted files (default: unselected in interactive mode)",
       default: false,
     },
+    labels: {
+      type: "string",
+      description: "Comma-separated labels to include in this push (others are skipped)",
+    },
+    "skip-labels": {
+      type: "string",
+      description: "Comma-separated labels to exclude from this push",
+    },
   },
   async run({ args }) {
     intro("push");
@@ -371,13 +401,25 @@ export const pushCommand = defineCommand({
       );
     }
 
-    const patterns = {
-      include: config.include,
-      exclude: config.exclude ?? [],
+    const labelFilter: LabelFilter = {
+      include: parseLabelsFlag(args.labels as string | undefined),
+      skip: parseLabelsFlag(args["skip-labels"] as string | undefined),
     };
+    const isScoped = labelFilter.include !== undefined || labelFilter.skip !== undefined;
+
+    const patterns = await runCommandEffect(
+      resolveLabeledPatterns(config, labelFilter).pipe(
+        Effect.mapError((e) => {
+          const { title, hint } = formatUnknownLabelMessage(e);
+          return new ZikuError(title, hint);
+        }),
+      ),
+    );
 
     if (patterns.include.length === 0) {
-      log.warn("No patterns configured");
+      log.warn(
+        isScoped ? "No patterns match the current label selection" : "No patterns configured",
+      );
       cleanup();
       return;
     }
@@ -389,13 +431,21 @@ export const pushCommand = defineCommand({
       const pushableFilePaths: Set<string> = new Set();
 
       {
-        const { classifyFiles } = await import("../utils/merge");
-
         const templateHashes = await hashFiles(templateDir, patterns.include, patterns.exclude);
         const localHashes = await hashFiles(targetDir, patterns.include, patterns.exclude);
 
+        // scope 指定時は scope 外の baseHashes エントリを除外してから分類する。
+        // 現状 push は deletedFiles / unchanged を参照しないため scope 外エントリは
+        // 結果に影響しないが、invariant を壊さないため pull と同じ扱いにする。
+        const scopedBase = isScoped
+          ? filterBaseHashesToScope(
+              lock.baseHashes ?? {},
+              new Set([...Object.keys(templateHashes), ...Object.keys(localHashes)]),
+            )
+          : (lock.baseHashes ?? {});
+
         const classification = classifyFiles({
-          baseHashes: lock.baseHashes ?? {},
+          baseHashes: scopedBase,
           localHashes,
           templateHashes,
         });
@@ -489,9 +539,14 @@ export const pushCommand = defineCommand({
             }),
           )
           .with({ path: P.string }, (localSource) =>
-            pushToLocal(localSource, { files, deletions, pushableFiles }, ctx, targetDir, {
-              yes: args.yes as boolean,
-            }),
+            pushToLocal(
+              localSource,
+              { files, deletions, pushableFiles },
+              ctx,
+              targetDir,
+              { yes: args.yes as boolean },
+              { scopedPatterns: patterns, isScoped },
+            ),
           )
           .exhaustive(),
       );

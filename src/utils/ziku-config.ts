@@ -5,6 +5,8 @@ import { dirname, join } from "pathe";
 import type { ZikuConfig } from "../modules/schemas";
 import { zikuConfigSchema } from "../modules/schemas";
 
+type ZikuLabels = NonNullable<ZikuConfig["labels"]>;
+
 export const ZIKU_CONFIG_FILE = ".ziku/ziku.jsonc";
 
 export const ZIKU_CONFIG_SCHEMA_URL =
@@ -45,13 +47,20 @@ export function zikuConfigExists(targetDir: string): boolean {
  * テンプレート側・ユーザー側で同一フォーマット。
  * source 情報は lock.json に分離されたため、ここにはパターンのみ。
  */
-export function generateZikuJsonc(opts: { include: string[]; exclude: string[] }): string {
+export function generateZikuJsonc(opts: {
+  include: string[];
+  exclude: string[];
+  labels?: ZikuLabels;
+}): string {
   const content: Record<string, unknown> = {
     $schema: ZIKU_CONFIG_SCHEMA_URL,
     include: opts.include,
   };
   if (opts.exclude.length > 0) {
     content.exclude = opts.exclude;
+  }
+  if (opts.labels && Object.keys(opts.labels).length > 0) {
+    content.labels = opts.labels;
   }
   return `${JSON.stringify(content, null, 2)}\n`;
 }

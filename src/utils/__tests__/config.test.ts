@@ -180,6 +180,32 @@ describe("generateZikuJsonc", () => {
     expect(result).toContain("  ");
     expect(result.endsWith("\n")).toBe(true);
   });
+
+  it("labels を含む設定を生成できる", () => {
+    const result = generateZikuJsonc({
+      include: ["README.md"],
+      exclude: [],
+      labels: {
+        docs: { include: ["docs/**"] },
+        ci: { include: [".github/**"], exclude: [".github/secret.yml"] },
+      },
+    });
+
+    const parsed = JSON.parse(result);
+    expect(parsed.labels.docs.include).toEqual(["docs/**"]);
+    expect(parsed.labels.ci.exclude).toEqual([".github/secret.yml"]);
+  });
+
+  it("空の labels は出力に含まれない", () => {
+    const result = generateZikuJsonc({
+      include: ["README.md"],
+      exclude: [],
+      labels: {},
+    });
+
+    const parsed = JSON.parse(result);
+    expect(parsed.labels).toBeUndefined();
+  });
 });
 
 describe("addIncludePattern", () => {

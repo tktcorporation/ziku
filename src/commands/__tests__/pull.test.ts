@@ -1043,4 +1043,173 @@ describe("pullCommand", () => {
       );
     });
   });
+
+  // ─── ラベルフィルタ (--labels / --skip-labels) ─────────────────────────
+  describe("labels filter", () => {
+    it("未知のラベルを指定した場合は ZikuError", async () => {
+      vol.fromJSON({ "/test": null });
+
+      const { effect } = mockContext({
+        config: {
+          include: [],
+          exclude: [],
+          labels: { docs: { include: ["docs/**"] } },
+        } as any,
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      await expect(
+        (pullCommand.run as any)({
+          args: { dir: "/test", force: false, labels: "typo" },
+          rawArgs: [],
+          cmd: pullCommand,
+        }),
+      ).rejects.toThrow(/Unknown label/);
+    });
+
+    it("--labels 指定時はそのラベルのパターンで hashFiles が呼ばれる", async () => {
+      vol.fromJSON({ "/test": null });
+
+      const { effect } = mockContext({
+        config: {
+          include: ["README.md"],
+          exclude: [],
+          labels: {
+            docs: { include: ["docs/**"] },
+            ci: { include: [".github/**"] },
+          },
+        } as any,
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, labels: "docs" },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // hashFiles は template/local の 2 回呼ばれる。
+      // どちらも include に "docs/**" と "README.md" を含むが ".github/**" は含まない。
+      for (const call of mockHashFiles.mock.calls) {
+        const includeArg = call[1] as string[];
+        expect(includeArg).toContain("docs/**");
+        expect(includeArg).toContain("README.md");
+        expect(includeArg).not.toContain(".github/**");
+      }
+    });
+
+    it("scope 外の baseHashes エントリは保持される（scope 指定 pull）", async () => {
+      vol.fromJSON({ "/test": null });
+
+      const existingBaseHashes = {
+        "docs/a.md": "oldhash-docs",
+        ".github/workflows/ci.yml": "oldhash-ci",
+      };
+      const { effect } = mockContext({
+        config: {
+          include: [],
+          exclude: [],
+          labels: {
+            docs: { include: ["docs/**"] },
+            ci: { include: [".github/**"] },
+          },
+        } as any,
+        lock: {
+          ...baseLock,
+          baseHashes: existingBaseHashes,
+        } as any,
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      // docs スコープのみ新ハッシュ返却（template, local の順）
+      mockHashFiles.mockResolvedValueOnce({ "docs/a.md": "newhash-docs" });
+      mockHashFiles.mockResolvedValueOnce({});
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: ["docs/a.md"],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      vol.fromJSON({
+        "/test": null,
+        "/tmp/template/docs/a.md": "updated",
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, labels: "docs" },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // scope 外 (.github/workflows/ci.yml) の baseHash は維持され、
+      // scope 内 (docs/a.md) は新しいハッシュに更新されている
+      expect(mockSaveLock).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          baseHashes: {
+            ".github/workflows/ci.yml": "oldhash-ci",
+            "docs/a.md": "newhash-docs",
+          },
+        }),
+      );
+    });
+
+    it("scope 指定時は baseRef を更新しない", async () => {
+      vol.fromJSON({ "/test": null });
+
+      const { effect } = mockContext({
+        config: {
+          include: [],
+          exclude: [],
+          labels: {
+            docs: { include: ["docs/**"] },
+          },
+        } as any,
+        lock: { ...baseLock, baseRef: "oldsha" } as any,
+        resolveBaseRef: Effect.succeed(Option.some("newsha-999")),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: ["docs/new.md"],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      vol.fromJSON({
+        "/test": null,
+        "/tmp/template/docs/new.md": "new content",
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, labels: "docs" },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // saveLock の呼び出しで baseRef が渡されていないこと（既存 baseRef は
+      // spread で維持されるが、更新は行われない）
+      const saveLockCall = mockSaveLock.mock.calls.at(-1);
+      expect(saveLockCall?.[1].baseRef).toBe("oldsha");
+    });
+  });
 });
