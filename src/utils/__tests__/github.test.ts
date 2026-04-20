@@ -396,6 +396,10 @@ describe("checkRepoExists", () => {
     // 既存の認証トークンを除去して未認証の挙動を検証する
     delete process.env.GITHUB_TOKEN;
     delete process.env.GH_TOKEN;
+    // getGitHubToken は gh CLI (`gh auth token`) にフォールバックするため、
+    // gh 認証済みのマシン上ではトークンが漏れ込み authenticated 判定が崩れる。
+    // PATH を空にして execFileSync("gh", ...) を ENOENT にし、確実に未認証状態を作る。
+    process.env.PATH = "";
   });
 
   afterEach(() => {
