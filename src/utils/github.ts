@@ -221,15 +221,26 @@ export async function getAuthenticatedUserLogin(): Promise<string | undefined> {
  *
  * 背景: ziku init でテンプレートリポジトリが存在しない場合に、
  * giget のエラーメッセージではなく分かりやすいガイダンスを表示するため、
- * 事前にリポジトリの存在をチェックする。
- * 認証不要（公開リポジトリの場合）。HEAD リクエストで軽量に確認。
+ * 事前にリポジトリの存在をチェックする。HEAD リクエストで軽量に確認。
+ *
+ * 認証トークンがあれば付与する理由: 未認証 API は 60req/h のレート制限があり、
+ * すぐに 403 で弾かれる。また、プライベートリポジトリは未認証だと 404 扱いになる。
+ *
+ * 戻り値は「確実に存在しない（404）」の時のみ false。レート制限 (403)、
+ * サーバエラー (5xx)、ネットワークエラー等の「判別不能」な応答は楽観的に true を返し、
+ * 実際の取得時に giget 側で本来のエラーを出させる。
  */
 export function checkRepoExists(owner: string, repo: string): Promise<boolean> {
+  const token = getGitHubToken();
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
   return Effect.runPromise(
     Effect.tryPromise(() =>
-      fetch(`https://api.github.com/repos/${owner}/${repo}`, { method: "HEAD" }),
+      fetch(`https://api.github.com/repos/${owner}/${repo}`, { method: "HEAD", headers }),
     ).pipe(
-      Effect.map((res) => res.ok),
+      Effect.map((res) => res.status !== 404),
       // ネットワークエラー等の場合は存在チェックをスキップ（楽観的に続行）
       Effect.orElseSucceed(() => true),
     ),

@@ -375,26 +375,52 @@ describe("createPullRequest", () => {
 
 describe("checkRepoExists", () => {
   const originalFetch = globalThis.fetch;
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    // 既存の認証トークンを除去して未認証の挙動を検証する
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+  });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    process.env = originalEnv;
   });
 
   it("リポジトリが存在する場合は true を返す", async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true });
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
 
     const result = await checkRepoExists("owner", "repo");
     expect(result).toBe(true);
     expect(globalThis.fetch).toHaveBeenCalledWith("https://api.github.com/repos/owner/repo", {
       method: "HEAD",
+      headers: {},
     });
   });
 
-  it("リポジトリが存在しない場合は false を返す", async () => {
+  it("リポジトリが存在しない場合（404）は false を返す", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 404 });
 
     const result = await checkRepoExists("owner", "nonexistent");
     expect(result).toBe(false);
+  });
+
+  it("レート制限 (403) は楽観的に true を返す", async () => {
+    // 未認証 API の 60req/h 制限で 403 になったケース。false にすると
+    // 存在するリポジトリを「ない」と誤判定してしまうため true を返す。
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 403 });
+
+    const result = await checkRepoExists("owner", "repo");
+    expect(result).toBe(true);
+  });
+
+  it("サーバエラー (5xx) は楽観的に true を返す", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 500 });
+
+    const result = await checkRepoExists("owner", "repo");
+    expect(result).toBe(true);
   });
 
   it("ネットワークエラーの場合は true を返す（楽観的続行）", async () => {
@@ -402,6 +428,17 @@ describe("checkRepoExists", () => {
 
     const result = await checkRepoExists("owner", "repo");
     expect(result).toBe(true);
+  });
+
+  it("GITHUB_TOKEN がある場合は Authorization ヘッダを付与する", async () => {
+    process.env.GITHUB_TOKEN = "ghp_test";
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+
+    await checkRepoExists("owner", "repo");
+    expect(globalThis.fetch).toHaveBeenCalledWith("https://api.github.com/repos/owner/repo", {
+      method: "HEAD",
+      headers: { Authorization: "Bearer ghp_test" },
+    });
   });
 });
 
