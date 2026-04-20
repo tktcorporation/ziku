@@ -2,9 +2,15 @@
 "ziku": patch
 ---
 
-Fix false "template repository not found" errors caused by GitHub API rate limiting.
+Fix false "template repository not found" errors caused by GitHub API rate limiting, and tighten the check into a typed discriminated union so each outcome is handled explicitly.
 
-`checkRepoExists` previously treated any non-2xx response (including 403 rate-limit responses) as "repo does not exist", which caused `ziku init` to fail with a misleading error when the anonymous GitHub API quota (60 req/h) was exhausted. The existence probe now:
+`checkRepoExists` previously returned `Promise<boolean>`, which conflated "the repo is confirmed missing (404)" with "we couldn't tell" (403 rate-limit, 5xx, network error). When the anonymous 60 req/h quota was exhausted, GitHub returns `403 + x-ratelimit-remaining: 0`, and `ziku init` mistook that for a missing repo.
 
-- sends `Authorization: Bearer <token>` when a GitHub token is available, so the 5000 req/h authenticated quota is used when possible
-- only returns `false` for an explicit `404`; other non-ok responses (403, 5xx, etc.) are treated as "unknown" and optimistically allow the init flow to continue so that giget surfaces the real error if one occurs
+The probe now returns a tagged `RepoExistence`:
+
+- `Exists` — HEAD returned 2xx
+- `NotFound` — explicit 404
+- `RateLimited` — 403 with `x-ratelimit-remaining: 0`, including the reset time and whether the call was authenticated, so users get an actionable hint (set `GITHUB_TOKEN` / wait for reset)
+- `Unknown` — 5xx, unexpected 403, or network error; the init/setup flow logs a warning and keeps going so the download step surfaces the real error if any
+
+Callers in `init` / `setup` now use `match().exhaustive()` to handle every case explicitly, so future RepoExistence variants will surface as type errors. The probe also sends `Authorization: Bearer <token>` when a GitHub token is available (via `GITHUB_TOKEN`, `GH_TOKEN`, or `gh auth token`), which raises the per-host quota from 60 req/h to 5000 req/h.

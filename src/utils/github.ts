@@ -1,5 +1,6 @@
 import { Octokit } from "@octokit/rest";
 import { Effect, Option } from "effect";
+import { ZikuError } from "../errors";
 import type { PrResult } from "../modules/schemas";
 
 export interface PushOptions {
@@ -217,34 +218,111 @@ export async function getAuthenticatedUserLogin(): Promise<string | undefined> {
 }
 
 /**
+ * GitHub リポジトリの存在確認結果。
+ *
+ * 背景: 単純な boolean では「確実に存在しない（404）」と「確認不能
+ * （レート制限・ネットワーク断・5xx 等）」を区別できず、後者を "not found"
+ * と誤判定する問題があった（未認証 API は 60req/h で 403 が返る）。
+ * 呼び出し側で match().exhaustive() により網羅的にハンドリングできるよう、
+ * 確認結果をタグ付き Union で表現する。
+ *
+ * ライフサイクル: checkRepoExists が返し、init/setup の解決ロジックで消費される。
+ */
+export type RepoExistence =
+  | { readonly _tag: "Exists" }
+  | { readonly _tag: "NotFound" }
+  | {
+      readonly _tag: "RateLimited";
+      /** `x-ratelimit-reset` ヘッダから算出したリセット時刻。取得できなければ undefined */
+      readonly resetAt: Date | undefined;
+      /** 認証済みトークンで問い合わせたかどうか。エラーメッセージの分岐に使う */
+      readonly authenticated: boolean;
+    }
+  | {
+      readonly _tag: "Unknown";
+      /** HTTP ステータス。ネットワークエラー等で取得できない場合は undefined */
+      readonly status: number | undefined;
+      readonly reason: string;
+    };
+
+/**
  * GitHub リポジトリの存在を確認する。
  *
- * 背景: ziku init でテンプレートリポジトリが存在しない場合に、
- * giget のエラーメッセージではなく分かりやすいガイダンスを表示するため、
+ * 背景: ziku init でテンプレートリポジトリが存在しない場合に、giget の
+ * エラーメッセージではなく分かりやすいガイダンスを表示するため、
  * 事前にリポジトリの存在をチェックする。HEAD リクエストで軽量に確認。
  *
  * 認証トークンがあれば付与する理由: 未認証 API は 60req/h のレート制限があり、
  * すぐに 403 で弾かれる。また、プライベートリポジトリは未認証だと 404 扱いになる。
  *
- * 戻り値は「確実に存在しない（404）」の時のみ false。レート制限 (403)、
- * サーバエラー (5xx)、ネットワークエラー等の「判別不能」な応答は楽観的に true を返し、
- * 実際の取得時に giget 側で本来のエラーを出させる。
+ * 戻り値は RepoExistence 型で、各ケース（Exists/NotFound/RateLimited/Unknown）を
+ * 呼び出し側が match で網羅的にハンドリングできるようにする。
  */
-export function checkRepoExists(owner: string, repo: string): Promise<boolean> {
+export function checkRepoExists(owner: string, repo: string): Promise<RepoExistence> {
   const token = getGitHubToken();
   const headers: Record<string, string> = {};
   if (token) {
     headers.Authorization = `Bearer ${token}`;
   }
   return Effect.runPromise(
-    Effect.tryPromise(() =>
-      fetch(`https://api.github.com/repos/${owner}/${repo}`, { method: "HEAD", headers }),
-    ).pipe(
-      Effect.map((res) => res.status !== 404),
-      // ネットワークエラー等の場合は存在チェックをスキップ（楽観的に続行）
-      Effect.orElseSucceed(() => true),
+    Effect.tryPromise({
+      try: () =>
+        fetch(`https://api.github.com/repos/${owner}/${repo}`, { method: "HEAD", headers }),
+      // 明示的に catch を指定しないと Effect.tryPromise は原因を UnknownException で
+      // ラップしてしまい、元の Error.message（"Network error" 等）が失われる。
+      catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+    }).pipe(
+      Effect.map((res): RepoExistence => classifyRepoResponse(res, token !== undefined)),
+      Effect.catchAll((cause) =>
+        Effect.succeed<RepoExistence>({
+          _tag: "Unknown",
+          status: undefined,
+          reason: cause.message,
+        }),
+      ),
     ),
   );
+}
+
+/**
+ * RepoExistence の RateLimited ケースを ZikuError に変換する。
+ *
+ * 認証状況とリセット時刻を hint に含めることで、ユーザーが
+ * 「GITHUB_TOKEN を設定する」か「しばらく待つ」かを判断できる。
+ */
+export function rateLimitedError(
+  r: Extract<RepoExistence, { readonly _tag: "RateLimited" }>,
+): ZikuError {
+  const base = r.authenticated
+    ? "Authenticated quota (5000/hr) exhausted"
+    : "Unauthenticated quota (60/hr) exhausted — set GITHUB_TOKEN or run `gh auth login` to raise it to 5000/hr";
+  const reset = r.resetAt
+    ? ` (resets in ~${Math.max(0, Math.ceil((r.resetAt.getTime() - Date.now()) / 60000))} min)`
+    : "";
+  return new ZikuError("GitHub API rate limit exceeded", `${base}${reset}`);
+}
+
+/**
+ * HTTP レスポンスを RepoExistence に分類する。
+ *
+ * GitHub のレート制限応答は「403 + x-ratelimit-remaining: 0」で判定する。
+ * 403 でも二要素認証要求など別原因のケースがあるため、ヘッダで明示的に確認する。
+ */
+function classifyRepoResponse(res: Response, authenticated: boolean): RepoExistence {
+  if (res.ok) return { _tag: "Exists" };
+  if (res.status === 404) return { _tag: "NotFound" };
+  if (res.status === 403 && res.headers.get("x-ratelimit-remaining") === "0") {
+    const resetHeader = res.headers.get("x-ratelimit-reset") ?? "";
+    // 数値にパースして有限値でなければ undefined（タイムスタンプ不明）とする。
+    const resetEpoch = resetHeader !== "" ? Number(resetHeader) : Number.NaN;
+    const resetAt = Number.isFinite(resetEpoch) ? new Date(resetEpoch * 1000) : undefined;
+    return { _tag: "RateLimited", resetAt, authenticated };
+  }
+  return {
+    _tag: "Unknown",
+    status: res.status,
+    reason: res.statusText || `HTTP ${res.status}`,
+  };
 }
 
 /**

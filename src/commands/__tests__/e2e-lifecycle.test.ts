@@ -46,21 +46,26 @@ vi.mock("../../utils/git-remote", () => ({
   DEFAULT_TEMPLATE_REPO: ".ziku",
 }));
 
-vi.mock("../../utils/github", () => ({
-  resolveLatestCommitSha: vi.fn(() => Promise.resolve("sha-001")),
-  checkRepoExists: vi.fn(() => Promise.resolve(true)),
-  checkRepoSetup: vi.fn(() => Promise.resolve(true)),
-  getGitHubToken: vi.fn(() => "ghp_test"),
-  getAuthenticatedUserLogin: vi.fn(() => Promise.resolve()),
-  scaffoldTemplateRepo: vi.fn(),
-  createPullRequest: vi.fn(() =>
-    Promise.resolve({
-      url: "https://github.com/test-org/.ziku/pull/1",
-      number: 1,
-      branch: "ziku-sync",
-    }),
-  ),
-}));
+vi.mock("../../utils/github", async () => {
+  const actual = await vi.importActual<typeof import("../../utils/github")>("../../utils/github");
+  return {
+    resolveLatestCommitSha: vi.fn(() => Promise.resolve("sha-001")),
+    checkRepoExists: vi.fn(() => Promise.resolve({ _tag: "Exists" as const })),
+    checkRepoSetup: vi.fn(() => Promise.resolve(true)),
+    getGitHubToken: vi.fn(() => "ghp_test"),
+    getAuthenticatedUserLogin: vi.fn(() => Promise.resolve()),
+    scaffoldTemplateRepo: vi.fn(),
+    createPullRequest: vi.fn(() =>
+      Promise.resolve({
+        url: "https://github.com/test-org/.ziku/pull/1",
+        number: 1,
+        branch: "ziku-sync",
+      }),
+    ),
+    // rateLimitedError は実装を使う（モックすると型に合わない）
+    rateLimitedError: actual.rateLimitedError,
+  };
+});
 
 vi.mock("../../utils/template", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../utils/template")>();

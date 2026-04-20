@@ -373,6 +373,20 @@ describe("createPullRequest", () => {
   });
 });
 
+// Response の部分的な形で十分。headers は Headers インスタンスを要求するので
+// Map ベースの簡易ビルダで済ませる。
+const mockResponse = (init: {
+  ok?: boolean;
+  status: number;
+  statusText?: string;
+  headers?: Record<string, string>;
+}) => ({
+  ok: init.ok ?? (init.status >= 200 && init.status < 300),
+  status: init.status,
+  statusText: init.statusText ?? "",
+  headers: new Map(Object.entries(init.headers ?? {})) as unknown as Headers,
+});
+
 describe("checkRepoExists", () => {
   const originalFetch = globalThis.fetch;
   const originalEnv = process.env;
@@ -389,50 +403,97 @@ describe("checkRepoExists", () => {
     process.env = originalEnv;
   });
 
-  it("リポジトリが存在する場合は true を返す", async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+  it("リポジトリが存在する場合は Exists を返す", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(mockResponse({ status: 200 }));
 
     const result = await checkRepoExists("owner", "repo");
-    expect(result).toBe(true);
+    expect(result).toEqual({ _tag: "Exists" });
     expect(globalThis.fetch).toHaveBeenCalledWith("https://api.github.com/repos/owner/repo", {
       method: "HEAD",
       headers: {},
     });
   });
 
-  it("リポジトリが存在しない場合（404）は false を返す", async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 404 });
+  it("リポジトリが存在しない場合 (404) は NotFound を返す", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(mockResponse({ status: 404 }));
 
     const result = await checkRepoExists("owner", "nonexistent");
-    expect(result).toBe(false);
+    expect(result).toEqual({ _tag: "NotFound" });
   });
 
-  it("レート制限 (403) は楽観的に true を返す", async () => {
-    // 未認証 API の 60req/h 制限で 403 になったケース。false にすると
-    // 存在するリポジトリを「ない」と誤判定してしまうため true を返す。
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 403 });
+  it("レート制限 (403 + x-ratelimit-remaining: 0) は RateLimited を返す", async () => {
+    // 未認証時 API の 60req/h 制限で 403 が返るケース。404 と誤認させず、
+    // リセット時刻と認証状況を呼び出し側に伝える。
+    const resetEpoch = Math.floor(Date.now() / 1000) + 3600;
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      mockResponse({
+        status: 403,
+        headers: {
+          "x-ratelimit-remaining": "0",
+          "x-ratelimit-reset": String(resetEpoch),
+        },
+      }),
+    );
 
     const result = await checkRepoExists("owner", "repo");
-    expect(result).toBe(true);
+    expect(result).toMatchObject({
+      _tag: "RateLimited",
+      authenticated: false,
+    });
+    if (result._tag === "RateLimited") {
+      expect(result.resetAt?.getTime()).toBe(resetEpoch * 1000);
+    }
   });
 
-  it("サーバエラー (5xx) は楽観的に true を返す", async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 500 });
+  it("認証済みトークンでレート制限に当たった場合は authenticated: true", async () => {
+    process.env.GITHUB_TOKEN = "ghp_test";
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      mockResponse({
+        status: 403,
+        headers: { "x-ratelimit-remaining": "0" },
+      }),
+    );
 
     const result = await checkRepoExists("owner", "repo");
-    expect(result).toBe(true);
+    expect(result).toEqual({
+      _tag: "RateLimited",
+      authenticated: true,
+      resetAt: undefined,
+    });
   });
 
-  it("ネットワークエラーの場合は true を返す（楽観的続行）", async () => {
+  it("403 でも x-ratelimit-remaining が 0 でない場合は Unknown 扱い", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      mockResponse({
+        status: 403,
+        statusText: "Forbidden",
+        headers: { "x-ratelimit-remaining": "42" },
+      }),
+    );
+
+    const result = await checkRepoExists("owner", "repo");
+    expect(result).toEqual({ _tag: "Unknown", status: 403, reason: "Forbidden" });
+  });
+
+  it("サーバエラー (5xx) は Unknown を返す", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ status: 500, statusText: "Internal Server Error" }));
+
+    const result = await checkRepoExists("owner", "repo");
+    expect(result).toEqual({ _tag: "Unknown", status: 500, reason: "Internal Server Error" });
+  });
+
+  it("ネットワークエラーの場合は Unknown を返す", async () => {
     globalThis.fetch = vi.fn().mockRejectedValue(new Error("Network error"));
 
     const result = await checkRepoExists("owner", "repo");
-    expect(result).toBe(true);
+    expect(result).toEqual({ _tag: "Unknown", status: undefined, reason: "Network error" });
   });
 
   it("GITHUB_TOKEN がある場合は Authorization ヘッダを付与する", async () => {
     process.env.GITHUB_TOKEN = "ghp_test";
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    globalThis.fetch = vi.fn().mockResolvedValue(mockResponse({ status: 200 }));
 
     await checkRepoExists("owner", "repo");
     expect(globalThis.fetch).toHaveBeenCalledWith("https://api.github.com/repos/owner/repo", {
