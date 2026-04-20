@@ -231,7 +231,9 @@ describe("init: セットアップ UX", () => {
 
     it("リポジトリ作成を選択するとリポジトリを作成して続行する", async () => {
       // 2候補（.ziku, .github）とも存在しない
-      mockCheckRepoExists.mockResolvedValueOnce({ _tag: "NotFound" }).mockResolvedValueOnce({ _tag: "NotFound" });
+      mockCheckRepoExists
+        .mockResolvedValueOnce({ _tag: "NotFound" })
+        .mockResolvedValueOnce({ _tag: "NotFound" });
       mockSelectMissingTemplateAction.mockResolvedValueOnce("create-repo");
       mockGetGitHubToken.mockReturnValue("ghp_test_token");
       mockScaffoldTemplateRepo.mockResolvedValueOnce({
@@ -261,7 +263,9 @@ describe("init: セットアップ UX", () => {
     });
 
     it("リポジトリ作成時に GitHub トークンがなければエラー", async () => {
-      mockCheckRepoExists.mockResolvedValueOnce({ _tag: "NotFound" }).mockResolvedValueOnce({ _tag: "NotFound" });
+      mockCheckRepoExists
+        .mockResolvedValueOnce({ _tag: "NotFound" })
+        .mockResolvedValueOnce({ _tag: "NotFound" });
       mockSelectMissingTemplateAction.mockResolvedValueOnce("create-repo");
       mockGetGitHubToken.mockReturnValue(undefined);
 
@@ -269,7 +273,9 @@ describe("init: セットアップ UX", () => {
     });
 
     it("カスタムソースを指定すると存在チェック後に続行する", async () => {
-      mockCheckRepoExists.mockResolvedValueOnce({ _tag: "NotFound" }).mockResolvedValueOnce({ _tag: "NotFound" });
+      mockCheckRepoExists
+        .mockResolvedValueOnce({ _tag: "NotFound" })
+        .mockResolvedValueOnce({ _tag: "NotFound" });
       mockSelectMissingTemplateAction.mockResolvedValueOnce("specify-source");
       mockInputTemplateSource.mockResolvedValueOnce("custom-org/templates");
       mockCheckRepoExists.mockResolvedValueOnce({ _tag: "Exists" });
@@ -293,7 +299,9 @@ describe("init: セットアップ UX", () => {
 
     it("カスタムソースも存在しない場合はさらにリカバリを提示する", async () => {
       // detected-org/.ziku, detected-org/.github が存在しない
-      mockCheckRepoExists.mockResolvedValueOnce({ _tag: "NotFound" }).mockResolvedValueOnce({ _tag: "NotFound" });
+      mockCheckRepoExists
+        .mockResolvedValueOnce({ _tag: "NotFound" })
+        .mockResolvedValueOnce({ _tag: "NotFound" });
       mockSelectMissingTemplateAction.mockResolvedValueOnce("specify-source");
       // ユーザーが入力したリポジトリも存在しない
       mockInputTemplateSource.mockResolvedValueOnce("nonexistent-org/repo");
@@ -522,7 +530,9 @@ describe("init: セットアップ UX", () => {
   describe("E2E: テンプレートなし → 作成 → ziku.jsonc なし → setup 誘導", () => {
     it("リポ作成後に ziku.jsonc がなければ setup への誘導エラー", async () => {
       // 1. テンプレートリポが存在しない（.ziku, .github 両方）
-      mockCheckRepoExists.mockResolvedValueOnce({ _tag: "NotFound" }).mockResolvedValueOnce({ _tag: "NotFound" });
+      mockCheckRepoExists
+        .mockResolvedValueOnce({ _tag: "NotFound" })
+        .mockResolvedValueOnce({ _tag: "NotFound" });
       // 2. ユーザーがリポジトリ作成を選択
       mockSelectMissingTemplateAction.mockResolvedValueOnce("create-repo");
       mockGetGitHubToken.mockReturnValue("ghp_test_token");
@@ -555,7 +565,9 @@ describe("init: セットアップ UX", () => {
   describe("E2E: カスタムソース → .ziku なし → setup 誘導", () => {
     it("ziku.jsonc がなければ setup への誘導エラー", async () => {
       // 2候補とも存在しない
-      mockCheckRepoExists.mockResolvedValueOnce({ _tag: "NotFound" }).mockResolvedValueOnce({ _tag: "NotFound" });
+      mockCheckRepoExists
+        .mockResolvedValueOnce({ _tag: "NotFound" })
+        .mockResolvedValueOnce({ _tag: "NotFound" });
       mockSelectMissingTemplateAction.mockResolvedValueOnce("specify-source");
       mockInputTemplateSource.mockResolvedValueOnce("my-org/my-templates");
       mockCheckRepoExists.mockResolvedValueOnce({ _tag: "Exists" });

@@ -628,7 +628,8 @@ async function discoverTemplateCandidates(): Promise<{
   // 警告は resolveExplicitSource 同様ユーザーに可視化する。
   for (let i = 0; i < candidateEntries.length; i++) {
     const r = existenceResults[i];
-    if (r._tag === "Unknown") warnUnknownRepo(candidateEntries[i].owner, candidateEntries[i].repo, r);
+    if (r._tag === "Unknown")
+      warnUnknownRepo(candidateEntries[i].owner, candidateEntries[i].repo, r);
   }
   const existingCandidates = candidateEntries.filter(
     (_, i) => existenceResults[i]._tag !== "NotFound",

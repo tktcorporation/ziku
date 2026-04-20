@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { checkRepoExists, checkRepoSetup, getGhCliToken, getGitHubToken } from "../github";
+import {
+  checkRepoExists,
+  checkRepoSetup,
+  getGhCliToken,
+  getGitHubToken,
+  rateLimitedError,
+} from "../github";
 
 // Octokit をモック
 const mockGetAuthenticated = vi.fn();
@@ -504,6 +510,31 @@ describe("checkRepoExists", () => {
       method: "HEAD",
       headers: { Authorization: "Bearer ghp_test" },
     });
+  });
+});
+
+describe("rateLimitedError", () => {
+  it("未認証ケース: 60req/h クォータ exhausted メッセージと resetAt からの残り分を含める", () => {
+    // Date.now() 基準で 5 分後にリセット
+    const resetAt = new Date(Date.now() + 5 * 60_000);
+    const err = rateLimitedError({ _tag: "RateLimited", authenticated: false, resetAt });
+
+    expect(err.message).toBe("GitHub API rate limit exceeded");
+    expect(err.hint).toContain("Unauthenticated quota (60/hr) exhausted");
+    expect(err.hint).toContain("GITHUB_TOKEN");
+    expect(err.hint).toMatch(/resets in ~\d+ min/);
+  });
+
+  it("認証済みケース + resetAt 不明: 5000req/h クォータ メッセージ、reset 情報なし", () => {
+    const err = rateLimitedError({
+      _tag: "RateLimited",
+      authenticated: true,
+      resetAt: undefined,
+    });
+
+    expect(err.hint).toContain("Authenticated quota (5000/hr) exhausted");
+    // resetAt が無ければ "resets in" 部分を付けない
+    expect(err.hint).not.toContain("resets in");
   });
 });
 
