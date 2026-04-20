@@ -620,10 +620,18 @@ async function discoverTemplateCandidates(): Promise<{
   );
   if (rateLimited) throw rateLimitedError(rateLimited);
 
-  // Exists のみを「存在する候補」として扱う。Unknown は不明確なので、
-  // 自動検出のデフォルト提示からは外す（ユーザーが --from で明示すれば通る）。
+  // Exists と Unknown を「ありえる候補」として扱う。Unknown は 5xx・ネットワーク断・
+  // 予期しない 403 など確認不能なケースで、除外すると transient 障害時に本来存在する
+  // リポジトリが誤って "not found" 扱いされる（非インタラクティブでエラー、
+  // インタラクティブでは既存リポを「作成しますか」と聞く）退行になる。
+  // 判別できないリポは候補に含め、実取得時に giget が本来のエラーを出す余地を残す。
+  // 警告は resolveExplicitSource 同様ユーザーに可視化する。
+  for (let i = 0; i < candidateEntries.length; i++) {
+    const r = existenceResults[i];
+    if (r._tag === "Unknown") warnUnknownRepo(candidateEntries[i].owner, candidateEntries[i].repo, r);
+  }
   const existingCandidates = candidateEntries.filter(
-    (_, i) => existenceResults[i]._tag === "Exists",
+    (_, i) => existenceResults[i]._tag !== "NotFound",
   );
 
   const setupResults = await Promise.all(
