@@ -556,7 +556,19 @@ async function resolveExplicitSource(
 
   // Exists または Unknown (5xx/ネットワーク断等) を「ありえる候補」として採用。
   // NotFound のみ除外する。
-  const candidateRepos = DEFAULT_TEMPLATE_REPOS.filter((_, i) => results[i]._tag !== "NotFound");
+  //
+  // 並び: Exists を先頭、Unknown を末尾。末尾の readyRepo フォールバック
+  // (candidateRepos[0]) が確認済み候補を優先するようにする。
+  // 例: results=[Unknown(.ziku), Exists(.github)] の時、素朴に DEFAULT_TEMPLATE_REPOS 順
+  // にすると .ziku が先頭に来て、ready でないケースで transient な .ziku を選んでしまう。
+  // Exists/Unknown 内の相対順序は DEFAULT_TEMPLATE_REPOS の順（.ziku → .github）を保つ。
+  const candidateRepos: string[] = [];
+  for (let i = 0; i < DEFAULT_TEMPLATE_REPOS.length; i++) {
+    if (results[i]._tag === "Exists") candidateRepos.push(DEFAULT_TEMPLATE_REPOS[i]);
+  }
+  for (let i = 0; i < DEFAULT_TEMPLATE_REPOS.length; i++) {
+    if (results[i]._tag === "Unknown") candidateRepos.push(DEFAULT_TEMPLATE_REPOS[i]);
+  }
   if (candidateRepos.length === 0) {
     throw new ZikuError(
       `No template repository found for "${resolved.sourceOwner}" (checked: ${DEFAULT_TEMPLATE_REPOS.join(", ")})`,
@@ -631,9 +643,13 @@ async function discoverTemplateCandidates(): Promise<{
     if (r._tag === "Unknown")
       warnUnknownRepo(candidateEntries[i].owner, candidateEntries[i].repo, r);
   }
-  const existingCandidates = candidateEntries.filter(
-    (_, i) => existenceResults[i]._tag !== "NotFound",
-  );
+  // Exists を先頭、Unknown を末尾に配置。deduplicateByOwner / resolveNonInteractive は
+  // 先頭の候補を採用するため、Unknown より確認済みの Exists を優先させる。
+  // 同タグ内の相対順序（candidateEntries 順 = owner × DEFAULT_TEMPLATE_REPOS の積順）は保つ。
+  const existingCandidates: TemplateCandidate[] = [
+    ...candidateEntries.filter((_, i) => existenceResults[i]._tag === "Exists"),
+    ...candidateEntries.filter((_, i) => existenceResults[i]._tag === "Unknown"),
+  ];
 
   const setupResults = await Promise.all(
     existingCandidates.map((c) => checkRepoSetup(c.owner, c.repo)),
