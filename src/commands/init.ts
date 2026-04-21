@@ -515,6 +515,43 @@ function warnUnknownRepo(
 }
 
 /**
+ * 並列存在チェックの結果から、RateLimited / Unauthorized を即失敗にすべきか判断する。
+ *
+ * 背景: `Promise.all` で複数候補を並列に問い合わせると、クォータ境界で
+ * `[Exists, RateLimited]` のように混在することがある。確認済みの Exists が
+ * 1 つでもあれば、RateLimited / Unauthorized は警告に降格して候補選択を続行する
+ * （以前の楽観的フォールバックに近い挙動を保つ）。Exists が無ければ、判定が
+ * 全く不能なので RateLimited → Unauthorized の順で即時に明確なエラーを投げる。
+ */
+function ensureProbeUnblocked(results: readonly RepoExistence[], context: string): void {
+  const hasExists = results.some((r) => r._tag === "Exists");
+  if (hasExists) {
+    for (const r of results) {
+      if (r._tag === "RateLimited") {
+        log.warn(
+          `Rate-limited probing ${context}, but at least one verified candidate is available — proceeding with the verified one.`,
+        );
+      } else if (r._tag === "Unauthorized") {
+        log.warn(
+          `Auth check failed probing ${context} (${r.message}), but at least one verified candidate is available — proceeding with the verified one.`,
+        );
+      }
+    }
+    return;
+  }
+  // Exists が 1 つも無い: 候補判定が不能なので即失敗
+  const rateLimited = results.find(
+    (r): r is Extract<RepoExistence, { readonly _tag: "RateLimited" }> => r._tag === "RateLimited",
+  );
+  if (rateLimited) throw rateLimitedError(rateLimited);
+  const unauthorized = results.find(
+    (r): r is Extract<RepoExistence, { readonly _tag: "Unauthorized" }> =>
+      r._tag === "Unauthorized",
+  );
+  if (unauthorized) throw unauthorizedError(unauthorized);
+}
+
+/**
  * --from で明示指定されたソースを解決する。
  * owner/repo 形式ならそのまま存在チェック、owner のみならデフォルトリポジトリを探索。
  */
@@ -552,16 +589,9 @@ async function resolveExplicitSource(
     DEFAULT_TEMPLATE_REPOS.map((repo) => checkRepoExists(resolved.sourceOwner, repo)),
   );
 
-  // レート制限・認証失敗は即失敗: 候補判定自体が信頼できないため続行しない
-  const rateLimited = results.find(
-    (r): r is Extract<RepoExistence, { readonly _tag: "RateLimited" }> => r._tag === "RateLimited",
-  );
-  if (rateLimited) throw rateLimitedError(rateLimited);
-  const unauthorized = results.find(
-    (r): r is Extract<RepoExistence, { readonly _tag: "Unauthorized" }> =>
-      r._tag === "Unauthorized",
-  );
-  if (unauthorized) throw unauthorizedError(unauthorized);
+  // 並列チェックで Exists と RateLimited が混在しても、Exists があれば続行する。
+  // Exists が皆無のときだけ RateLimited / Unauthorized を即失敗にする。
+  ensureProbeUnblocked(results, `${resolved.sourceOwner}/<default repos>`);
 
   // Exists または Unknown (5xx/ネットワーク断等) を「ありえる候補」として採用。
   // NotFound のみ除外する。
@@ -634,17 +664,9 @@ async function discoverTemplateCandidates(): Promise<{
     candidateEntries.map((c) => checkRepoExists(c.owner, c.repo)),
   );
 
-  // 自動検出中にレート制限や認証失敗に当たると全候補が誤って NotFound 扱いになりがち。
-  // 明示的に失敗させ、ユーザーが GITHUB_TOKEN 設定やトークン更新などの対処を取れるようにする。
-  const rateLimited = existenceResults.find(
-    (r): r is Extract<RepoExistence, { readonly _tag: "RateLimited" }> => r._tag === "RateLimited",
-  );
-  if (rateLimited) throw rateLimitedError(rateLimited);
-  const unauthorized = existenceResults.find(
-    (r): r is Extract<RepoExistence, { readonly _tag: "Unauthorized" }> =>
-      r._tag === "Unauthorized",
-  );
-  if (unauthorized) throw unauthorizedError(unauthorized);
+  // 並列チェックで Exists と RateLimited が混在しても、Exists があれば続行する。
+  // Exists が皆無のときだけ RateLimited / Unauthorized を即失敗にする。
+  ensureProbeUnblocked(existenceResults, "auto-detected templates");
 
   // Exists と Unknown を「ありえる候補」として扱う。Unknown は 5xx・ネットワーク断・
   // 予期しない 403 など確認不能なケースで、除外すると transient 障害時に本来存在する
