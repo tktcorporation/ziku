@@ -35,6 +35,7 @@ import {
   rateLimitedError,
   resolveLatestCommitSha,
   scaffoldTemplateRepo,
+  unauthorizedError,
 } from "../utils/github";
 import type { RepoExistence } from "../utils/github";
 import { hashFiles } from "../utils/hash";
@@ -540,6 +541,9 @@ async function resolveExplicitSource(
       .with({ _tag: "RateLimited" }, (r): never => {
         throw rateLimitedError(r);
       })
+      .with({ _tag: "Unauthorized" }, (u): never => {
+        throw unauthorizedError(u);
+      })
       .exhaustive();
   }
 
@@ -548,11 +552,16 @@ async function resolveExplicitSource(
     DEFAULT_TEMPLATE_REPOS.map((repo) => checkRepoExists(resolved.sourceOwner, repo)),
   );
 
-  // レート制限は即失敗: 候補判定自体が信頼できないため続行しない
+  // レート制限・認証失敗は即失敗: 候補判定自体が信頼できないため続行しない
   const rateLimited = results.find(
     (r): r is Extract<RepoExistence, { readonly _tag: "RateLimited" }> => r._tag === "RateLimited",
   );
   if (rateLimited) throw rateLimitedError(rateLimited);
+  const unauthorized = results.find(
+    (r): r is Extract<RepoExistence, { readonly _tag: "Unauthorized" }> =>
+      r._tag === "Unauthorized",
+  );
+  if (unauthorized) throw unauthorizedError(unauthorized);
 
   // Exists または Unknown (5xx/ネットワーク断等) を「ありえる候補」として採用。
   // NotFound のみ除外する。
@@ -625,12 +634,17 @@ async function discoverTemplateCandidates(): Promise<{
     candidateEntries.map((c) => checkRepoExists(c.owner, c.repo)),
   );
 
-  // 自動検出中にレート制限に当たると全候補が誤って NotFound 扱いになりがち。
-  // 明示的に失敗させ、ユーザーが GITHUB_TOKEN 設定などの対処を取れるようにする。
+  // 自動検出中にレート制限や認証失敗に当たると全候補が誤って NotFound 扱いになりがち。
+  // 明示的に失敗させ、ユーザーが GITHUB_TOKEN 設定やトークン更新などの対処を取れるようにする。
   const rateLimited = existenceResults.find(
     (r): r is Extract<RepoExistence, { readonly _tag: "RateLimited" }> => r._tag === "RateLimited",
   );
   if (rateLimited) throw rateLimitedError(rateLimited);
+  const unauthorized = existenceResults.find(
+    (r): r is Extract<RepoExistence, { readonly _tag: "Unauthorized" }> =>
+      r._tag === "Unauthorized",
+  );
+  if (unauthorized) throw unauthorizedError(unauthorized);
 
   // Exists と Unknown を「ありえる候補」として扱う。Unknown は 5xx・ネットワーク断・
   // 予期しない 403 など確認不能なケースで、除外すると transient 障害時に本来存在する
@@ -716,6 +730,9 @@ async function promptTemplateSource(): Promise<{ sourceOwner: string; sourceRepo
     .with({ _tag: "NotFound" }, () => handleMissingTemplate(owner, repo))
     .with({ _tag: "RateLimited" }, (r): never => {
       throw rateLimitedError(r);
+    })
+    .with({ _tag: "Unauthorized" }, (u): never => {
+      throw unauthorizedError(u);
     })
     .exhaustive();
 }

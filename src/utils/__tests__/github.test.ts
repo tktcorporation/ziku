@@ -5,6 +5,7 @@ import {
   getGhCliToken,
   getGitHubToken,
   rateLimitedError,
+  unauthorizedError,
 } from "../github";
 
 // Octokit をモック
@@ -431,6 +432,17 @@ describe("checkRepoExists", () => {
     expect(result).toEqual({ _tag: "NotFound" });
   });
 
+  it("認証失敗 (401) は Unauthorized を返し、GitHub のメッセージを保持する", async () => {
+    // 失効/無効トークンで Authorization ヘッダを付けたときのケース。
+    // Unknown に落とすと後続の download/PR 作成でしか問題に気づけない。
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ status: 401, statusText: "Bad credentials" }));
+
+    const result = await checkRepoExists("owner", "repo");
+    expect(result).toEqual({ _tag: "Unauthorized", message: "Bad credentials" });
+  });
+
   it("レート制限 (403 + x-ratelimit-remaining: 0) は RateLimited を返す", async () => {
     // 未認証時 API の 60req/h 制限で 403 が返るケース。404 と誤認させず、
     // リセット時刻と認証状況を呼び出し側に伝える。
@@ -510,6 +522,16 @@ describe("checkRepoExists", () => {
       method: "HEAD",
       headers: { Authorization: "Bearer ghp_test" },
     });
+  });
+});
+
+describe("unauthorizedError", () => {
+  it("GitHub のメッセージと gh auth login 誘導を hint に含める", () => {
+    const err = unauthorizedError({ _tag: "Unauthorized", message: "Bad credentials" });
+
+    expect(err.message).toBe("GitHub authentication failed: Bad credentials");
+    expect(err.hint).toContain("gh auth login");
+    expect(err.hint).toContain("GITHUB_TOKEN");
   });
 });
 

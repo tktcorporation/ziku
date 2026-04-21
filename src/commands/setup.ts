@@ -9,6 +9,7 @@ import {
   getGitHubToken,
   createPullRequest,
   rateLimitedError,
+  unauthorizedError,
 } from "../utils/github";
 import { detectGitHubOwner, DEFAULT_TEMPLATE_REPO } from "../utils/git-remote";
 import { ZIKU_CONFIG_FILE, generateZikuJsonc } from "../utils/ziku-config";
@@ -151,6 +152,9 @@ async function handleRemoteSetup(from: string | undefined): Promise<void> {
     })
     .with({ _tag: "RateLimited" }, (r): never => {
       throw rateLimitedError(r);
+    })
+    .with({ _tag: "Unauthorized" }, (u): never => {
+      throw unauthorizedError(u);
     })
     .exhaustive();
 

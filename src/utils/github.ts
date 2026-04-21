@@ -239,6 +239,16 @@ export type RepoExistence =
       readonly authenticated: boolean;
     }
   | {
+      readonly _tag: "Unauthorized";
+      /**
+       * GitHub が返したメッセージ（例: "Bad credentials"）。
+       * 認証トークンを付けて問い合わせたが、401 が返ったケースに使う。
+       * ライフサイクル: checkRepoExists が返し、init/setup は即 ZikuError に変換して
+       * ユーザーにトークン更新を促す。
+       */
+      readonly message: string;
+    }
+  | {
       readonly _tag: "Unknown";
       /** HTTP ステータス。ネットワークエラー等で取得できない場合は undefined */
       readonly status: number | undefined;
@@ -285,6 +295,22 @@ export function checkRepoExists(owner: string, repo: string): Promise<RepoExiste
 }
 
 /**
+ * RepoExistence の Unauthorized ケースを ZikuError に変換する。
+ *
+ * 背景: `GITHUB_TOKEN` / `GH_TOKEN` が失効または無効な場合、GitHub API は 401 を返す。
+ * この状態のまま init/setup を続行するとダウンロードや PR 作成で分かりにくいエラーが
+ * 発生するため、早い段階で「トークンを更新せよ」と明確に案内する。
+ */
+export function unauthorizedError(
+  r: Extract<RepoExistence, { readonly _tag: "Unauthorized" }>,
+): ZikuError {
+  return new ZikuError(
+    `GitHub authentication failed: ${r.message}`,
+    "GITHUB_TOKEN / GH_TOKEN が無効または失効しています。`gh auth login` で再ログインするか、環境変数を更新してください。",
+  );
+}
+
+/**
  * RepoExistence の RateLimited ケースを ZikuError に変換する。
  *
  * 認証状況とリセット時刻を hint に含めることで、ユーザーが
@@ -307,10 +333,15 @@ export function rateLimitedError(
  *
  * GitHub のレート制限応答は「403 + x-ratelimit-remaining: 0」で判定する。
  * 403 でも二要素認証要求など別原因のケースがあるため、ヘッダで明示的に確認する。
+ * 401 は無効/失効トークンのシグナル（パブリックリポジトリへの未認証アクセスは
+ * 200 や 404 を返すので、401 は付与した Authorization が拒否されたことを意味する）。
  */
 function classifyRepoResponse(res: Response, authenticated: boolean): RepoExistence {
   if (res.ok) return { _tag: "Exists" };
   if (res.status === 404) return { _tag: "NotFound" };
+  if (res.status === 401) {
+    return { _tag: "Unauthorized", message: res.statusText || "Bad credentials" };
+  }
   if (res.status === 403 && res.headers.get("x-ratelimit-remaining") === "0") {
     const resetHeader = res.headers.get("x-ratelimit-reset") ?? "";
     // 数値にパースして有限値でなければ undefined（タイムスタンプ不明）とする。
