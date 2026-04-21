@@ -1,5 +1,6 @@
 import { Octokit } from "@octokit/rest";
 import { Effect, Option } from "effect";
+import { ZikuError } from "../errors";
 import type { PrResult } from "../modules/schemas";
 
 export interface PushOptions {
@@ -217,23 +218,142 @@ export async function getAuthenticatedUserLogin(): Promise<string | undefined> {
 }
 
 /**
+ * GitHub リポジトリの存在確認結果。
+ *
+ * 背景: 単純な boolean では「確実に存在しない（404）」と「確認不能
+ * （レート制限・ネットワーク断・5xx 等）」を区別できず、後者を "not found"
+ * と誤判定する問題があった（未認証 API は 60req/h で 403 が返る）。
+ * 呼び出し側で match().exhaustive() により網羅的にハンドリングできるよう、
+ * 確認結果をタグ付き Union で表現する。
+ *
+ * ライフサイクル: checkRepoExists が返し、init/setup の解決ロジックで消費される。
+ */
+export type RepoExistence =
+  | { readonly _tag: "Exists" }
+  | { readonly _tag: "NotFound" }
+  | {
+      readonly _tag: "RateLimited";
+      /** `x-ratelimit-reset` ヘッダから算出したリセット時刻。取得できなければ undefined */
+      readonly resetAt: Date | undefined;
+      /** 認証済みトークンで問い合わせたかどうか。エラーメッセージの分岐に使う */
+      readonly authenticated: boolean;
+    }
+  | {
+      readonly _tag: "Unauthorized";
+      /**
+       * GitHub が返したメッセージ（例: "Bad credentials"）。
+       * 認証トークンを付けて問い合わせたが、401 が返ったケースに使う。
+       * ライフサイクル: checkRepoExists が返し、init/setup は即 ZikuError に変換して
+       * ユーザーにトークン更新を促す。
+       */
+      readonly message: string;
+    }
+  | {
+      readonly _tag: "Unknown";
+      /** HTTP ステータス。ネットワークエラー等で取得できない場合は undefined */
+      readonly status: number | undefined;
+      readonly reason: string;
+    };
+
+/**
  * GitHub リポジトリの存在を確認する。
  *
- * 背景: ziku init でテンプレートリポジトリが存在しない場合に、
- * giget のエラーメッセージではなく分かりやすいガイダンスを表示するため、
- * 事前にリポジトリの存在をチェックする。
- * 認証不要（公開リポジトリの場合）。HEAD リクエストで軽量に確認。
+ * 背景: ziku init でテンプレートリポジトリが存在しない場合に、giget の
+ * エラーメッセージではなく分かりやすいガイダンスを表示するため、
+ * 事前にリポジトリの存在をチェックする。HEAD リクエストで軽量に確認。
+ *
+ * 認証トークンがあれば付与する理由: 未認証 API は 60req/h のレート制限があり、
+ * すぐに 403 で弾かれる。また、プライベートリポジトリは未認証だと 404 扱いになる。
+ *
+ * 戻り値は RepoExistence 型で、各ケース（Exists/NotFound/RateLimited/Unknown）を
+ * 呼び出し側が match で網羅的にハンドリングできるようにする。
  */
-export function checkRepoExists(owner: string, repo: string): Promise<boolean> {
+export function checkRepoExists(owner: string, repo: string): Promise<RepoExistence> {
+  const token = getGitHubToken();
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
   return Effect.runPromise(
-    Effect.tryPromise(() =>
-      fetch(`https://api.github.com/repos/${owner}/${repo}`, { method: "HEAD" }),
-    ).pipe(
-      Effect.map((res) => res.ok),
-      // ネットワークエラー等の場合は存在チェックをスキップ（楽観的に続行）
-      Effect.orElseSucceed(() => true),
+    Effect.tryPromise({
+      try: () =>
+        fetch(`https://api.github.com/repos/${owner}/${repo}`, { method: "HEAD", headers }),
+      // 明示的に catch を指定しないと Effect.tryPromise は原因を UnknownException で
+      // ラップしてしまい、元の Error.message（"Network error" 等）が失われる。
+      catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+    }).pipe(
+      Effect.map((res): RepoExistence => classifyRepoResponse(res, token !== undefined)),
+      Effect.catchAll((cause) =>
+        Effect.succeed<RepoExistence>({
+          _tag: "Unknown",
+          status: undefined,
+          reason: cause.message,
+        }),
+      ),
     ),
   );
+}
+
+/**
+ * RepoExistence の Unauthorized ケースを ZikuError に変換する。
+ *
+ * 背景: `GITHUB_TOKEN` / `GH_TOKEN` が失効または無効な場合、GitHub API は 401 を返す。
+ * この状態のまま init/setup を続行するとダウンロードや PR 作成で分かりにくいエラーが
+ * 発生するため、早い段階で「トークンを更新せよ」と明確に案内する。
+ */
+export function unauthorizedError(
+  r: Extract<RepoExistence, { readonly _tag: "Unauthorized" }>,
+): ZikuError {
+  return new ZikuError(
+    `GitHub authentication failed: ${r.message}`,
+    "GITHUB_TOKEN / GH_TOKEN が無効または失効しています。`gh auth login` で再ログインするか、環境変数を更新してください。",
+  );
+}
+
+/**
+ * RepoExistence の RateLimited ケースを ZikuError に変換する。
+ *
+ * 認証状況とリセット時刻を hint に含めることで、ユーザーが
+ * 「GITHUB_TOKEN を設定する」か「しばらく待つ」かを判断できる。
+ */
+export function rateLimitedError(
+  r: Extract<RepoExistence, { readonly _tag: "RateLimited" }>,
+): ZikuError {
+  const base = r.authenticated
+    ? "Authenticated quota (5000/hr) exhausted"
+    : "Unauthenticated quota (60/hr) exhausted — set GITHUB_TOKEN or run `gh auth login` to raise it to 5000/hr";
+  const reset = r.resetAt
+    ? ` (resets in ~${Math.max(0, Math.ceil((r.resetAt.getTime() - Date.now()) / 60000))} min)`
+    : "";
+  return new ZikuError("GitHub API rate limit exceeded", `${base}${reset}`);
+}
+
+/**
+ * HTTP レスポンスを RepoExistence に分類する。
+ *
+ * GitHub のレート制限応答は「403 + x-ratelimit-remaining: 0」で判定する。
+ * 403 でも二要素認証要求など別原因のケースがあるため、ヘッダで明示的に確認する。
+ * 401 は無効/失効トークンのシグナル（パブリックリポジトリへの未認証アクセスは
+ * 200 や 404 を返すので、401 は付与した Authorization が拒否されたことを意味する）。
+ */
+function classifyRepoResponse(res: Response, authenticated: boolean): RepoExistence {
+  if (res.ok) return { _tag: "Exists" };
+  if (res.status === 404) return { _tag: "NotFound" };
+  if (res.status === 401) {
+    return { _tag: "Unauthorized", message: res.statusText || "Bad credentials" };
+  }
+  if (res.status === 403 && res.headers.get("x-ratelimit-remaining") === "0") {
+    const resetHeader = res.headers.get("x-ratelimit-reset") ?? "";
+    // 数値にパースして有限値でなければ undefined（タイムスタンプ不明）とする。
+    const resetEpoch = resetHeader !== "" ? Number(resetHeader) : Number.NaN;
+    const resetAt = Number.isFinite(resetEpoch) ? new Date(resetEpoch * 1000) : undefined;
+    return { _tag: "RateLimited", resetAt, authenticated };
+  }
+  return {
+    _tag: "Unknown",
+    status: res.status,
+    reason: res.statusText || `HTTP ${res.status}`,
+  };
 }
 
 /**

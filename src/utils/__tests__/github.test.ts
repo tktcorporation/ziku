@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { checkRepoExists, checkRepoSetup, getGhCliToken, getGitHubToken } from "../github";
+import {
+  checkRepoExists,
+  checkRepoSetup,
+  getGhCliToken,
+  getGitHubToken,
+  rateLimitedError,
+  unauthorizedError,
+} from "../github";
 
 // Octokit をモック
 const mockGetAuthenticated = vi.fn();
@@ -373,35 +380,183 @@ describe("createPullRequest", () => {
   });
 });
 
+// Response の部分的な形で十分。headers は Headers インスタンスを要求するので
+// Map ベースの簡易ビルダで済ませる。
+const mockResponse = (init: {
+  ok?: boolean;
+  status: number;
+  statusText?: string;
+  headers?: Record<string, string>;
+}) => ({
+  ok: init.ok ?? (init.status >= 200 && init.status < 300),
+  status: init.status,
+  statusText: init.statusText ?? "",
+  headers: new Map(Object.entries(init.headers ?? {})) as unknown as Headers,
+});
+
 describe("checkRepoExists", () => {
   const originalFetch = globalThis.fetch;
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    // 既存の認証トークンを除去して未認証の挙動を検証する
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+    // getGitHubToken は gh CLI (`gh auth token`) にフォールバックするため、
+    // gh 認証済みのマシン上ではトークンが漏れ込み authenticated 判定が崩れる。
+    // PATH を空にして execFileSync("gh", ...) を ENOENT にし、確実に未認証状態を作る。
+    process.env.PATH = "";
+  });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    process.env = originalEnv;
   });
 
-  it("リポジトリが存在する場合は true を返す", async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true });
+  it("リポジトリが存在する場合は Exists を返す", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(mockResponse({ status: 200 }));
 
     const result = await checkRepoExists("owner", "repo");
-    expect(result).toBe(true);
+    expect(result).toEqual({ _tag: "Exists" });
     expect(globalThis.fetch).toHaveBeenCalledWith("https://api.github.com/repos/owner/repo", {
       method: "HEAD",
+      headers: {},
     });
   });
 
-  it("リポジトリが存在しない場合は false を返す", async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 404 });
+  it("リポジトリが存在しない場合 (404) は NotFound を返す", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(mockResponse({ status: 404 }));
 
     const result = await checkRepoExists("owner", "nonexistent");
-    expect(result).toBe(false);
+    expect(result).toEqual({ _tag: "NotFound" });
   });
 
-  it("ネットワークエラーの場合は true を返す（楽観的続行）", async () => {
+  it("認証失敗 (401) は Unauthorized を返し、GitHub のメッセージを保持する", async () => {
+    // 失効/無効トークンで Authorization ヘッダを付けたときのケース。
+    // Unknown に落とすと後続の download/PR 作成でしか問題に気づけない。
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ status: 401, statusText: "Bad credentials" }));
+
+    const result = await checkRepoExists("owner", "repo");
+    expect(result).toEqual({ _tag: "Unauthorized", message: "Bad credentials" });
+  });
+
+  it("レート制限 (403 + x-ratelimit-remaining: 0) は RateLimited を返す", async () => {
+    // 未認証時 API の 60req/h 制限で 403 が返るケース。404 と誤認させず、
+    // リセット時刻と認証状況を呼び出し側に伝える。
+    const resetEpoch = Math.floor(Date.now() / 1000) + 3600;
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      mockResponse({
+        status: 403,
+        headers: {
+          "x-ratelimit-remaining": "0",
+          "x-ratelimit-reset": String(resetEpoch),
+        },
+      }),
+    );
+
+    const result = await checkRepoExists("owner", "repo");
+    expect(result).toMatchObject({
+      _tag: "RateLimited",
+      authenticated: false,
+    });
+    if (result._tag === "RateLimited") {
+      expect(result.resetAt?.getTime()).toBe(resetEpoch * 1000);
+    }
+  });
+
+  it("認証済みトークンでレート制限に当たった場合は authenticated: true", async () => {
+    process.env.GITHUB_TOKEN = "ghp_test";
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      mockResponse({
+        status: 403,
+        headers: { "x-ratelimit-remaining": "0" },
+      }),
+    );
+
+    const result = await checkRepoExists("owner", "repo");
+    expect(result).toEqual({
+      _tag: "RateLimited",
+      authenticated: true,
+      resetAt: undefined,
+    });
+  });
+
+  it("403 でも x-ratelimit-remaining が 0 でない場合は Unknown 扱い", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      mockResponse({
+        status: 403,
+        statusText: "Forbidden",
+        headers: { "x-ratelimit-remaining": "42" },
+      }),
+    );
+
+    const result = await checkRepoExists("owner", "repo");
+    expect(result).toEqual({ _tag: "Unknown", status: 403, reason: "Forbidden" });
+  });
+
+  it("サーバエラー (5xx) は Unknown を返す", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ status: 500, statusText: "Internal Server Error" }));
+
+    const result = await checkRepoExists("owner", "repo");
+    expect(result).toEqual({ _tag: "Unknown", status: 500, reason: "Internal Server Error" });
+  });
+
+  it("ネットワークエラーの場合は Unknown を返す", async () => {
     globalThis.fetch = vi.fn().mockRejectedValue(new Error("Network error"));
 
     const result = await checkRepoExists("owner", "repo");
-    expect(result).toBe(true);
+    expect(result).toEqual({ _tag: "Unknown", status: undefined, reason: "Network error" });
+  });
+
+  it("GITHUB_TOKEN がある場合は Authorization ヘッダを付与する", async () => {
+    process.env.GITHUB_TOKEN = "ghp_test";
+    globalThis.fetch = vi.fn().mockResolvedValue(mockResponse({ status: 200 }));
+
+    await checkRepoExists("owner", "repo");
+    expect(globalThis.fetch).toHaveBeenCalledWith("https://api.github.com/repos/owner/repo", {
+      method: "HEAD",
+      headers: { Authorization: "Bearer ghp_test" },
+    });
+  });
+});
+
+describe("unauthorizedError", () => {
+  it("GitHub のメッセージと gh auth login 誘導を hint に含める", () => {
+    const err = unauthorizedError({ _tag: "Unauthorized", message: "Bad credentials" });
+
+    expect(err.message).toBe("GitHub authentication failed: Bad credentials");
+    expect(err.hint).toContain("gh auth login");
+    expect(err.hint).toContain("GITHUB_TOKEN");
+  });
+});
+
+describe("rateLimitedError", () => {
+  it("未認証ケース: 60req/h クォータ exhausted メッセージと resetAt からの残り分を含める", () => {
+    // Date.now() 基準で 5 分後にリセット
+    const resetAt = new Date(Date.now() + 5 * 60_000);
+    const err = rateLimitedError({ _tag: "RateLimited", authenticated: false, resetAt });
+
+    expect(err.message).toBe("GitHub API rate limit exceeded");
+    expect(err.hint).toContain("Unauthenticated quota (60/hr) exhausted");
+    expect(err.hint).toContain("GITHUB_TOKEN");
+    expect(err.hint).toMatch(/resets in ~\d+ min/);
+  });
+
+  it("認証済みケース + resetAt 不明: 5000req/h クォータ メッセージ、reset 情報なし", () => {
+    const err = rateLimitedError({
+      _tag: "RateLimited",
+      authenticated: true,
+      resetAt: undefined,
+    });
+
+    expect(err.hint).toContain("Authenticated quota (5000/hr) exhausted");
+    // resetAt が無ければ "resets in" 部分を付けない
+    expect(err.hint).not.toContain("resets in");
   });
 });
 

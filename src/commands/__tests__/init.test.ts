@@ -36,14 +36,18 @@ vi.mock("../../utils/hash", () => ({
   hashFiles: vi.fn(),
 }));
 
-vi.mock("../../utils/github", () => ({
-  resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
-  checkRepoExists: vi.fn(() => Promise.resolve(true)),
-  checkRepoSetup: vi.fn(() => Promise.resolve(true)),
-  getGitHubToken: vi.fn(() => {}),
-  getAuthenticatedUserLogin: vi.fn(() => Promise.resolve()),
-  scaffoldTemplateRepo: vi.fn(() => Promise.resolve({ url: "https://github.com/test/repo" })),
-}));
+vi.mock("../../utils/github", async () => {
+  const actual = await vi.importActual<typeof import("../../utils/github")>("../../utils/github");
+  return {
+    resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
+    checkRepoExists: vi.fn(() => Promise.resolve({ _tag: "Exists" as const })),
+    checkRepoSetup: vi.fn(() => Promise.resolve(true)),
+    getGitHubToken: vi.fn(() => {}),
+    getAuthenticatedUserLogin: vi.fn(() => Promise.resolve()),
+    scaffoldTemplateRepo: vi.fn(() => Promise.resolve({ url: "https://github.com/test/repo" })),
+    rateLimitedError: actual.rateLimitedError,
+  };
+});
 
 vi.mock("../../ui/prompts", () => ({
   selectDirectories: vi.fn(),
@@ -611,7 +615,7 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
-      // checkRepoExists がデフォルトで true を返すため、先頭の .ziku が使われる
+      // checkRepoExists がデフォルトで Exists を返すため、先頭の .ziku が使われる
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),
         "gh:my-org/.ziku",
@@ -624,7 +628,7 @@ describe("initCommand", () => {
       });
 
       // 両方存在するが .ziku はセットアップ未完了
-      mockCheckRepoExists.mockResolvedValue(true);
+      mockCheckRepoExists.mockResolvedValue({ _tag: "Exists" });
       mockCheckRepoSetup
         .mockResolvedValueOnce(false) // .ziku
         .mockResolvedValueOnce(true); // .github
@@ -653,8 +657,8 @@ describe("initCommand", () => {
 
       // .ziku のみ存在
       mockCheckRepoExists
-        .mockResolvedValueOnce(true) // .ziku
-        .mockResolvedValueOnce(false); // .github
+        .mockResolvedValueOnce({ _tag: "Exists" }) // .ziku
+        .mockResolvedValueOnce({ _tag: "NotFound" }); // .github
       mockCheckRepoSetup.mockResolvedValueOnce(false); // .ziku はセットアップ未完了
 
       mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
@@ -713,7 +717,7 @@ describe("initCommand", () => {
       const mockInputTemplateSource = vi.mocked(inputTemplateSource);
       // ユーザーが custom-org/templates を入力
       mockInputTemplateSource.mockResolvedValueOnce("custom-org/templates");
-      mockCheckRepoExists.mockResolvedValueOnce(true);
+      mockCheckRepoExists.mockResolvedValueOnce({ _tag: "Exists" });
       mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 

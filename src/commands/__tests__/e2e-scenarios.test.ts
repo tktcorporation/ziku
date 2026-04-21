@@ -50,17 +50,21 @@ vi.mock("../../utils/hash", () => ({
   hashFiles: vi.fn(),
 }));
 
-vi.mock("../../utils/github", () => ({
-  resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123")),
-  checkRepoExists: vi.fn(() => Promise.resolve(true)),
-  checkRepoSetup: vi.fn(() => Promise.resolve(true)),
-  getGitHubToken: vi.fn(() => "ghp_test"),
-  getAuthenticatedUserLogin: vi.fn(() => Promise.resolve()),
-  scaffoldTemplateRepo: vi.fn(() => Promise.resolve({ url: "https://github.com/test/repo" })),
-  createPullRequest: vi.fn(() =>
-    Promise.resolve({ url: "https://github.com/test/repo/pull/2", number: 2, branch: "sync" }),
-  ),
-}));
+vi.mock("../../utils/github", async () => {
+  const actual = await vi.importActual<typeof import("../../utils/github")>("../../utils/github");
+  return {
+    resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123")),
+    checkRepoExists: vi.fn(() => Promise.resolve({ _tag: "Exists" as const })),
+    checkRepoSetup: vi.fn(() => Promise.resolve(true)),
+    getGitHubToken: vi.fn(() => "ghp_test"),
+    getAuthenticatedUserLogin: vi.fn(() => Promise.resolve()),
+    scaffoldTemplateRepo: vi.fn(() => Promise.resolve({ url: "https://github.com/test/repo" })),
+    createPullRequest: vi.fn(() =>
+      Promise.resolve({ url: "https://github.com/test/repo/pull/2", number: 2, branch: "sync" }),
+    ),
+    rateLimitedError: actual.rateLimitedError,
+  };
+});
 
 vi.mock("../../ui/prompts", () => ({
   selectDirectories: vi.fn(),
@@ -279,7 +283,7 @@ describe("E2E: multi-scenario tests", () => {
     mockFetchTemplates.mockResolvedValue([]);
     mockWriteFileWithStrategy.mockResolvedValue({ action: "created", path: ".ziku/ziku.jsonc" });
     mockHashFiles.mockResolvedValue({});
-    mockCheckRepoExists.mockResolvedValue(true);
+    mockCheckRepoExists.mockResolvedValue({ _tag: "Exists" });
     mockLoadTemplateConfig.mockReturnValue(
       Effect.succeed({
         include: [".mcp.json", ".devcontainer/**"],
@@ -415,7 +419,7 @@ describe("E2E: multi-scenario tests", () => {
     });
 
     it("--from のリポジトリが存在しない → ZikuError", async () => {
-      mockCheckRepoExists.mockResolvedValueOnce(false);
+      mockCheckRepoExists.mockResolvedValueOnce({ _tag: "NotFound" });
       vol.fromJSON({ "/test": null });
 
       await expect(

@@ -32,9 +32,12 @@ import {
   checkRepoSetup,
   getAuthenticatedUserLogin,
   getGitHubToken,
+  rateLimitedError,
   resolveLatestCommitSha,
   scaffoldTemplateRepo,
+  unauthorizedError,
 } from "../utils/github";
+import type { RepoExistence } from "../utils/github";
 import { hashFiles } from "../utils/hash";
 import { LOCK_FILE, saveLock } from "../utils/lock";
 import { ZIKU_CONFIG_FILE, generateZikuJsonc, zikuConfigExists } from "../utils/ziku-config";
@@ -495,6 +498,60 @@ async function resolveTemplateSourceWithCheck(
 }
 
 /**
+ * 判別不能 (Unknown) レスポンスを受け取ったときに警告を出す。
+ *
+ * Unknown は 5xx やネットワーク断など "リポジトリ無し" とは断定できないケース。
+ * 呼び出し側は続行を選択できるため、ここではログだけ出して戻る。
+ */
+function warnUnknownRepo(
+  owner: string,
+  repo: string,
+  u: Extract<RepoExistence, { readonly _tag: "Unknown" }>,
+): void {
+  const statusPart = u.status !== undefined ? ` (HTTP ${u.status})` : "";
+  log.warn(
+    `Could not verify ${owner}/${repo}${statusPart}: ${u.reason}. Proceeding and letting the download step surface any real error.`,
+  );
+}
+
+/**
+ * 並列存在チェックの結果から、RateLimited / Unauthorized を即失敗にすべきか判断する。
+ *
+ * 背景: `Promise.all` で複数候補を並列に問い合わせると、クォータ境界で
+ * `[Exists, RateLimited]` のように混在することがある。確認済みの Exists が
+ * 1 つでもあれば、RateLimited / Unauthorized は警告に降格して候補選択を続行する
+ * （以前の楽観的フォールバックに近い挙動を保つ）。Exists が無ければ、判定が
+ * 全く不能なので RateLimited → Unauthorized の順で即時に明確なエラーを投げる。
+ */
+function ensureProbeUnblocked(results: readonly RepoExistence[], context: string): void {
+  const hasExists = results.some((r) => r._tag === "Exists");
+  if (hasExists) {
+    for (const r of results) {
+      if (r._tag === "RateLimited") {
+        log.warn(
+          `Rate-limited probing ${context}, but at least one verified candidate is available — proceeding with the verified one.`,
+        );
+      } else if (r._tag === "Unauthorized") {
+        log.warn(
+          `Auth check failed probing ${context} (${r.message}), but at least one verified candidate is available — proceeding with the verified one.`,
+        );
+      }
+    }
+    return;
+  }
+  // Exists が 1 つも無い: 候補判定が不能なので即失敗
+  const rateLimited = results.find(
+    (r): r is Extract<RepoExistence, { readonly _tag: "RateLimited" }> => r._tag === "RateLimited",
+  );
+  if (rateLimited) throw rateLimitedError(rateLimited);
+  const unauthorized = results.find(
+    (r): r is Extract<RepoExistence, { readonly _tag: "Unauthorized" }> =>
+      r._tag === "Unauthorized",
+  );
+  if (unauthorized) throw unauthorizedError(unauthorized);
+}
+
+/**
  * --from で明示指定されたソースを解決する。
  * owner/repo 形式ならそのまま存在チェック、owner のみならデフォルトリポジトリを探索。
  */
@@ -505,34 +562,72 @@ async function resolveExplicitSource(
 
   // owner/repo 形式
   if (from.includes("/")) {
-    const exists = await checkRepoExists(resolved.sourceOwner, resolved.sourceRepo);
-    if (!exists) {
-      throw new ZikuError(
-        `Template repository "${resolved.sourceOwner}/${resolved.sourceRepo}" not found`,
-        "Check the --from value or create the repository first",
-      );
-    }
-    return resolved;
+    const existence = await checkRepoExists(resolved.sourceOwner, resolved.sourceRepo);
+    return match(existence)
+      .with({ _tag: "Exists" }, () => resolved)
+      .with({ _tag: "Unknown" }, (u) => {
+        warnUnknownRepo(resolved.sourceOwner, resolved.sourceRepo, u);
+        return resolved;
+      })
+      .with({ _tag: "NotFound" }, (): never => {
+        throw new ZikuError(
+          `Template repository "${resolved.sourceOwner}/${resolved.sourceRepo}" not found`,
+          "Check the --from value or create the repository first",
+        );
+      })
+      .with({ _tag: "RateLimited" }, (r): never => {
+        throw rateLimitedError(r);
+      })
+      .with({ _tag: "Unauthorized" }, (u): never => {
+        throw unauthorizedError(u);
+      })
+      .exhaustive();
   }
 
   // owner のみ指定 → デフォルトリポジトリ候補を順に探索（セットアップ済みを優先）
-  const existsResults = await Promise.all(
+  const results = await Promise.all(
     DEFAULT_TEMPLATE_REPOS.map((repo) => checkRepoExists(resolved.sourceOwner, repo)),
   );
-  const existingRepos = DEFAULT_TEMPLATE_REPOS.filter((_, i) => existsResults[i]);
-  if (existingRepos.length === 0) {
+
+  // 並列チェックで Exists と RateLimited が混在しても、Exists があれば続行する。
+  // Exists が皆無のときだけ RateLimited / Unauthorized を即失敗にする。
+  ensureProbeUnblocked(results, `${resolved.sourceOwner}/<default repos>`);
+
+  // Exists または Unknown (5xx/ネットワーク断等) を「ありえる候補」として採用。
+  // NotFound のみ除外する。
+  //
+  // 並び: Exists を先頭、Unknown を末尾。末尾の readyRepo フォールバック
+  // (candidateRepos[0]) が確認済み候補を優先するようにする。
+  // 例: results=[Unknown(.ziku), Exists(.github)] の時、素朴に DEFAULT_TEMPLATE_REPOS 順
+  // にすると .ziku が先頭に来て、ready でないケースで transient な .ziku を選んでしまう。
+  // Exists/Unknown 内の相対順序は DEFAULT_TEMPLATE_REPOS の順（.ziku → .github）を保つ。
+  const candidateRepos: string[] = [];
+  for (let i = 0; i < DEFAULT_TEMPLATE_REPOS.length; i++) {
+    if (results[i]._tag === "Exists") candidateRepos.push(DEFAULT_TEMPLATE_REPOS[i]);
+  }
+  for (let i = 0; i < DEFAULT_TEMPLATE_REPOS.length; i++) {
+    if (results[i]._tag === "Unknown") candidateRepos.push(DEFAULT_TEMPLATE_REPOS[i]);
+  }
+  if (candidateRepos.length === 0) {
     throw new ZikuError(
       `No template repository found for "${resolved.sourceOwner}" (checked: ${DEFAULT_TEMPLATE_REPOS.join(", ")})`,
       "Check the --from value or create the repository first",
     );
   }
+
+  // Unknown のみの候補には警告を出す（ユーザーが次のステップで何が起きているか分かるように）
+  for (let i = 0; i < DEFAULT_TEMPLATE_REPOS.length; i++) {
+    const r = results[i];
+    if (r._tag === "Unknown") warnUnknownRepo(resolved.sourceOwner, DEFAULT_TEMPLATE_REPOS[i], r);
+  }
+
   const setupResults = await Promise.all(
-    existingRepos.map((repo) => checkRepoSetup(resolved.sourceOwner, repo)),
+    candidateRepos.map((repo) => checkRepoSetup(resolved.sourceOwner, repo)),
   );
-  const readyRepo = existingRepos.find((_, i) => setupResults[i]);
+  const readyRepo = candidateRepos.find((_, i) => setupResults[i]);
   return {
     sourceOwner: resolved.sourceOwner,
-    sourceRepo: readyRepo ?? existingRepos[0],
+    sourceRepo: readyRepo ?? candidateRepos[0],
   };
 }
 
@@ -565,10 +660,32 @@ async function discoverTemplateCandidates(): Promise<{
     }
   }
 
-  const existsResults = await Promise.all(
+  const existenceResults = await Promise.all(
     candidateEntries.map((c) => checkRepoExists(c.owner, c.repo)),
   );
-  const existingCandidates = candidateEntries.filter((_, i) => existsResults[i]);
+
+  // 並列チェックで Exists と RateLimited が混在しても、Exists があれば続行する。
+  // Exists が皆無のときだけ RateLimited / Unauthorized を即失敗にする。
+  ensureProbeUnblocked(existenceResults, "auto-detected templates");
+
+  // Exists と Unknown を「ありえる候補」として扱う。Unknown は 5xx・ネットワーク断・
+  // 予期しない 403 など確認不能なケースで、除外すると transient 障害時に本来存在する
+  // リポジトリが誤って "not found" 扱いされる（非インタラクティブでエラー、
+  // インタラクティブでは既存リポを「作成しますか」と聞く）退行になる。
+  // 判別できないリポは候補に含め、実取得時に giget が本来のエラーを出す余地を残す。
+  // 警告は resolveExplicitSource 同様ユーザーに可視化する。
+  for (let i = 0; i < candidateEntries.length; i++) {
+    const r = existenceResults[i];
+    if (r._tag === "Unknown")
+      warnUnknownRepo(candidateEntries[i].owner, candidateEntries[i].repo, r);
+  }
+  // Exists を先頭、Unknown を末尾に配置。deduplicateByOwner / resolveNonInteractive は
+  // 先頭の候補を採用するため、Unknown より確認済みの Exists を優先させる。
+  // 同タグ内の相対順序（candidateEntries 順 = owner × DEFAULT_TEMPLATE_REPOS の積順）は保つ。
+  const existingCandidates: TemplateCandidate[] = [
+    ...candidateEntries.filter((_, i) => existenceResults[i]._tag === "Exists"),
+    ...candidateEntries.filter((_, i) => existenceResults[i]._tag === "Unknown"),
+  ];
 
   const setupResults = await Promise.all(
     existingCandidates.map((c) => checkRepoSetup(c.owner, c.repo)),
@@ -625,12 +742,21 @@ async function promptTemplateSource(): Promise<{ sourceOwner: string; sourceRepo
   const owner = source.slice(0, slashIndex);
   const repo = source.slice(slashIndex + 1);
 
-  const exists = await checkRepoExists(owner, repo);
-  if (!exists) {
-    return handleMissingTemplate(owner, repo);
-  }
-
-  return { sourceOwner: owner, sourceRepo: repo };
+  const existence = await checkRepoExists(owner, repo);
+  return match(existence)
+    .with({ _tag: "Exists" }, () => ({ sourceOwner: owner, sourceRepo: repo }))
+    .with({ _tag: "Unknown" }, (u) => {
+      warnUnknownRepo(owner, repo, u);
+      return { sourceOwner: owner, sourceRepo: repo };
+    })
+    .with({ _tag: "NotFound" }, () => handleMissingTemplate(owner, repo))
+    .with({ _tag: "RateLimited" }, (r): never => {
+      throw rateLimitedError(r);
+    })
+    .with({ _tag: "Unauthorized" }, (u): never => {
+      throw unauthorizedError(u);
+    })
+    .exhaustive();
 }
 
 /**

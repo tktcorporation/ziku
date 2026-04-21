@@ -1,9 +1,16 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { defineCommand } from "citty";
 import { join, resolve } from "pathe";
+import { match } from "ts-pattern";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { ZikuError } from "../errors";
-import { checkRepoExists, getGitHubToken, createPullRequest } from "../utils/github";
+import {
+  checkRepoExists,
+  getGitHubToken,
+  createPullRequest,
+  rateLimitedError,
+  unauthorizedError,
+} from "../utils/github";
 import { detectGitHubOwner, DEFAULT_TEMPLATE_REPO } from "../utils/git-remote";
 import { ZIKU_CONFIG_FILE, generateZikuJsonc } from "../utils/ziku-config";
 import { confirmAction } from "../ui/prompts";
@@ -129,13 +136,27 @@ async function handleRemoteSetup(from: string | undefined): Promise<void> {
 
   log.info(`Template: ${pc.cyan(`${owner}/${repo}`)}`);
 
-  const exists = await checkRepoExists(owner, repo);
-  if (!exists) {
-    throw new ZikuError(
-      `Repository ${owner}/${repo} not found`,
-      "Check the --from value or create the repository first",
-    );
-  }
+  const existence = await checkRepoExists(owner, repo);
+  match(existence)
+    .with({ _tag: "Exists" }, () => {})
+    .with({ _tag: "Unknown" }, (u) => {
+      // 確認不能（5xx/ネットワーク断等）は続行し、後続の PR 作成で本当のエラーを出させる
+      const statusPart = u.status !== undefined ? ` (HTTP ${u.status})` : "";
+      log.warn(`Could not verify ${owner}/${repo}${statusPart}: ${u.reason}. Proceeding anyway.`);
+    })
+    .with({ _tag: "NotFound" }, (): never => {
+      throw new ZikuError(
+        `Repository ${owner}/${repo} not found`,
+        "Check the --from value or create the repository first",
+      );
+    })
+    .with({ _tag: "RateLimited" }, (r): never => {
+      throw rateLimitedError(r);
+    })
+    .with({ _tag: "Unauthorized" }, (u): never => {
+      throw unauthorizedError(u);
+    })
+    .exhaustive();
 
   const confirmed = await confirmAction(
     `Create a PR to add .ziku/ziku.jsonc to ${owner}/${repo}?`,
