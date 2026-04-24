@@ -4,7 +4,7 @@ import { Effect, Option } from "effect";
 import { join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
-import type { LockState, TemplateSource } from "../modules/schemas";
+import type { LockState, TemplateSource, ZikuConfig } from "../modules/schemas";
 import { selectDeletedFiles } from "../ui/prompts";
 import { intro, log, outro, pc } from "../ui/renderer";
 import { LOCK_FILE, loadLock, saveLock } from "../utils/lock";
@@ -27,6 +27,16 @@ import {
   readFileSafe,
   writeFileEnsureDir,
 } from "../utils/merge";
+import {
+  type LabelFilter,
+  computeActiveLabels,
+  filterBaseHashesToScope,
+  formatUnknownLabelMessage,
+  mergeLabelDefinitions,
+  mergeScopedBaseHashes,
+  parseLabelsFlag,
+  resolveLabeledPatterns,
+} from "../utils/labels";
 
 /**
  * pull コマンドのファイル操作メタデータ。
@@ -91,6 +101,14 @@ export const pullCommand = defineCommand({
       description: "Continue after resolving merge conflicts",
       default: false,
     },
+    labels: {
+      type: "string",
+      description: "Comma-separated labels to include in this sync (others are skipped)",
+    },
+    "skip-labels": {
+      type: "string",
+      description: "Comma-separated labels to exclude from this sync",
+    },
   },
   async run({ args }) {
     intro("pull");
@@ -121,133 +139,254 @@ export const pullCommand = defineCommand({
 
     log.info(`Template: ${pc.cyan(templateDir)}${"path" in source ? " (local)" : ""}`);
 
-    const include = config.include;
-    const exclude = config.exclude ?? [];
-
-    if (include.length === 0) {
+    if (config.include.length === 0 && Object.keys(config.labels ?? {}).length === 0) {
       log.warn("No patterns configured");
       cleanup();
       return;
     }
 
-    await withFinally(async () => {
-      const { mergedInclude, mergedExclude, patternsUpdated } = await mergeTemplatePatterns(
-        templateDir,
-        include,
-        exclude,
-      );
+    const labelFilter: LabelFilter = {
+      include: parseLabelsFlag(args.labels as string | undefined),
+      skip: parseLabelsFlag(args["skip-labels"] as string | undefined),
+    };
+    const isScoped = labelFilter.include !== undefined || labelFilter.skip !== undefined;
 
-      log.step("Analyzing changes...");
-
-      const [templateHashes, localHashes] = await Promise.all([
-        hashFiles(templateDir, mergedInclude, mergedExclude),
-        hashFiles(targetDir, mergedInclude, mergedExclude),
-      ]);
-      const baseHashes = lock.baseHashes ?? {};
-
-      const classification = classifyFiles({ baseHashes, localHashes, templateHashes });
-
-      const totalChanges =
-        classification.autoUpdate.length +
-        classification.newFiles.length +
-        classification.conflicts.length +
-        classification.deletedFiles.length;
-
-      if (totalChanges === 0) {
-        log.success("Already up to date");
-        outro("No changes needed");
-        return;
-      }
-
-      logPullSummary(classification);
-
-      // 自動更新ファイルを適用
-      await applyFiles(classification.autoUpdate, templateDir, targetDir);
-      if (classification.autoUpdate.length > 0) {
-        log.success(`Updated ${classification.autoUpdate.length} file(s)`);
-      }
-
-      // 新規ファイルを追加
-      await applyFiles(classification.newFiles, templateDir, targetDir);
-      if (classification.newFiles.length > 0) {
-        log.success(`Added ${classification.newFiles.length} new file(s)`);
-      }
-
-      // コンフリクト解決
-      const unresolvedConflicts = await resolveConflicts(classification.conflicts, {
-        targetDir,
-        templateDir,
-        source,
-        lock,
-      });
-
-      if (unresolvedConflicts.length > 0) {
-        const latestRefOption = await Effect.runPromise(resolveBaseRef);
-        await saveLock(targetDir, {
-          ...lock,
-          pendingMerge: {
-            conflicts: unresolvedConflicts,
-            templateHashes,
-            ...(Option.isSome(latestRefOption) ? { latestRef: latestRefOption.value } : {}),
-          },
-        });
-        outro("Merge paused — resolve conflicts then run `ziku pull --continue`");
-        return;
-      }
-
-      // 削除されたファイルを処理
-      if (classification.deletedFiles.length > 0) {
-        await handleDeletedFiles(classification.deletedFiles, targetDir, args.force as boolean);
-      }
-
-      // パターンが更新された場合、ユーザーの ziku.jsonc を上書き
-      if (patternsUpdated) {
-        const updatedContent = generateZikuJsonc({
-          include: mergedInclude,
-          exclude: mergedExclude,
-        });
-        await saveZikuConfig(targetDir, updatedContent);
-        log.success(`Updated ${ZIKU_CONFIG_FILE} with new patterns from template`);
-      }
-
-      const latestRefOption = await Effect.runPromise(resolveBaseRef);
-
-      await saveLock(targetDir, {
-        ...lock,
-        baseHashes: templateHashes,
-        ...(Option.isSome(latestRefOption) ? { baseRef: latestRefOption.value } : {}),
-      });
-
-      outro("Pull complete");
-    }, cleanup);
+    await withFinally(
+      () =>
+        performPull({
+          targetDir,
+          templateDir,
+          config,
+          lock,
+          source,
+          resolveBaseRef,
+          labelFilter,
+          isScoped,
+          force: args.force as boolean,
+        }),
+      cleanup,
+    );
   },
 });
+
+/**
+ * pull の本体ロジック。withFinally の async 本体から切り出すことで
+ * 各ステップを独立して読めるようにし、関数の複雑度を抑える。
+ */
+async function performPull(opts: {
+  targetDir: string;
+  templateDir: string;
+  config: ZikuConfig;
+  lock: LockState;
+  source: TemplateSource;
+  resolveBaseRef: Effect.Effect<Option.Option<string>>;
+  labelFilter: LabelFilter;
+  isScoped: boolean;
+  force: boolean;
+}): Promise<void> {
+  const { mergedConfig, patternsUpdated } = await mergeTemplateConfig(
+    opts.templateDir,
+    opts.config,
+  );
+  const syncPatterns = await resolveSyncPatterns(mergedConfig, opts.labelFilter);
+
+  if (syncPatterns.include.length === 0) {
+    log.warn("No patterns match the current label selection");
+    return;
+  }
+  if (opts.isScoped) logActiveLabels(mergedConfig, opts.labelFilter);
+
+  log.step("Analyzing changes...");
+
+  const [templateHashes, localHashes] = await Promise.all([
+    hashFiles(opts.templateDir, syncPatterns.include, syncPatterns.exclude),
+    hashFiles(opts.targetDir, syncPatterns.include, syncPatterns.exclude),
+  ]);
+  const classification = classifyFiles({
+    baseHashes: opts.isScoped
+      ? filterBaseHashesToScope(
+          opts.lock.baseHashes ?? {},
+          new Set([...Object.keys(templateHashes), ...Object.keys(localHashes)]),
+        )
+      : (opts.lock.baseHashes ?? {}),
+    localHashes,
+    templateHashes,
+  });
+
+  if (pullSummaryHasNoChanges(classification)) {
+    log.success("Already up to date");
+    outro("No changes needed");
+    return;
+  }
+
+  logPullSummary(classification);
+  await applyClassifiedChanges(classification, opts);
+
+  const unresolvedConflicts = await resolveConflicts(classification.conflicts, {
+    targetDir: opts.targetDir,
+    templateDir: opts.templateDir,
+    source: opts.source,
+    lock: opts.lock,
+  });
+  if (unresolvedConflicts.length > 0) {
+    await savePendingMerge(opts, unresolvedConflicts, templateHashes, localHashes);
+    return;
+  }
+
+  if (classification.deletedFiles.length > 0) {
+    await handleDeletedFiles(classification.deletedFiles, opts.targetDir, opts.force);
+  }
+
+  if (patternsUpdated) {
+    await saveMergedConfig(opts.targetDir, mergedConfig);
+  }
+
+  await finalizePull(opts, templateHashes, localHashes);
+  outro("Pull complete");
+}
+
+/** classification の主要カテゴリ（自動更新・新規・コンフリクト・削除）が空か判定する。 */
+function pullSummaryHasNoChanges(c: {
+  autoUpdate: string[];
+  newFiles: string[];
+  conflicts: string[];
+  deletedFiles: string[];
+}): boolean {
+  return (
+    c.autoUpdate.length === 0 &&
+    c.newFiles.length === 0 &&
+    c.conflicts.length === 0 &&
+    c.deletedFiles.length === 0
+  );
+}
+
+/** autoUpdate / newFiles を順次適用し、件数に応じた成功ログを出す。 */
+async function applyClassifiedChanges(
+  classification: { autoUpdate: string[]; newFiles: string[] },
+  opts: { templateDir: string; targetDir: string },
+): Promise<void> {
+  await applyFiles(classification.autoUpdate, opts.templateDir, opts.targetDir);
+  if (classification.autoUpdate.length > 0) {
+    log.success(`Updated ${classification.autoUpdate.length} file(s)`);
+  }
+  await applyFiles(classification.newFiles, opts.templateDir, opts.targetDir);
+  if (classification.newFiles.length > 0) {
+    log.success(`Added ${classification.newFiles.length} new file(s)`);
+  }
+}
+
+/**
+ * 未解決コンフリクトを lock.pendingMerge に保存する。
+ *
+ * scope 指定時は `scopeBoundary` も記録する。これにより `--continue` 解決時に
+ * scope 外の baseHashes を保持し、baseRef を更新しないようにできる
+ * （未記録だと scope 外エントリが消失するバグになる）。
+ */
+async function savePendingMerge(
+  opts: {
+    targetDir: string;
+    lock: LockState;
+    resolveBaseRef: Effect.Effect<Option.Option<string>>;
+    isScoped: boolean;
+  },
+  unresolvedConflicts: string[],
+  templateHashes: Record<string, string>,
+  localHashes: Record<string, string>,
+): Promise<void> {
+  const latestRefOption = await Effect.runPromise(opts.resolveBaseRef);
+  const scopeBoundary = opts.isScoped
+    ? [...new Set([...Object.keys(templateHashes), ...Object.keys(localHashes)])]
+    : undefined;
+  await saveLock(opts.targetDir, {
+    ...opts.lock,
+    pendingMerge: {
+      conflicts: unresolvedConflicts,
+      templateHashes,
+      ...(Option.isSome(latestRefOption) ? { latestRef: latestRefOption.value } : {}),
+      ...(scopeBoundary ? { scopeBoundary } : {}),
+    },
+  });
+  outro("Merge paused — resolve conflicts then run `ziku pull --continue`");
+}
+
+/** pull 完了時にローカルの ziku.jsonc を更新する。 */
+async function saveMergedConfig(targetDir: string, mergedConfig: ZikuConfig): Promise<void> {
+  const updatedContent = generateZikuJsonc({
+    include: mergedConfig.include,
+    exclude: mergedConfig.exclude ?? [],
+    labels: mergedConfig.labels,
+  });
+  await saveZikuConfig(targetDir, updatedContent);
+  log.success(`Updated ${ZIKU_CONFIG_FILE} with new patterns from template`);
+}
+
+/**
+ * pull 完了時の lock 更新。scope 指定時は scope 外の baseHashes を保持し、
+ * baseRef も更新しない（scope 外ファイルの3-wayマージで古い baseRef が必要）。
+ */
+async function finalizePull(
+  opts: {
+    targetDir: string;
+    lock: LockState;
+    resolveBaseRef: Effect.Effect<Option.Option<string>>;
+    isScoped: boolean;
+  },
+  templateHashes: Record<string, string>,
+  localHashes: Record<string, string>,
+): Promise<void> {
+  const latestRefOption = await Effect.runPromise(opts.resolveBaseRef);
+  const newBaseHashes = opts.isScoped
+    ? mergeScopedBaseHashes({
+        previous: opts.lock.baseHashes ?? {},
+        scopedHashes: templateHashes,
+        scopeBoundary: new Set([...Object.keys(templateHashes), ...Object.keys(localHashes)]),
+      })
+    : templateHashes;
+
+  await saveLock(opts.targetDir, {
+    ...opts.lock,
+    baseHashes: newBaseHashes,
+    ...(!opts.isScoped && Option.isSome(latestRefOption) ? { baseRef: latestRefOption.value } : {}),
+  });
+}
 
 // ─── ヘルパー関数 ───
 
 /**
- * テンプレートの ziku.jsonc からパターンを読み込み、ローカルのパターンにマージする。
- * テンプレート側で追加されたパターンがあればログに表示する。
+ * テンプレートの ziku.jsonc からパターン（include/exclude/labels）を読み込み、
+ * ローカル設定にマージする。テンプレート側で追加された分はログに表示する。
+ *
+ * ラベルの扱い: テンプレートにしかないラベルはローカルに追加し、
+ * 両方にあるラベルはパターンのみマージする（ローカルのカスタマイズを尊重）。
  */
-async function mergeTemplatePatterns(
+async function mergeTemplateConfig(
   templateDir: string,
-  include: string[],
-  exclude: string[],
-): Promise<{ mergedInclude: string[]; mergedExclude: string[]; patternsUpdated: boolean }> {
+  local: ZikuConfig,
+): Promise<{ mergedConfig: ZikuConfig; patternsUpdated: boolean }> {
   const templateConfigOption = await Effect.runPromise(
     loadTemplateConfig(templateDir).pipe(Effect.option),
   );
 
   if (Option.isNone(templateConfigOption)) {
-    return { mergedInclude: include, mergedExclude: exclude, patternsUpdated: false };
+    return { mergedConfig: local, patternsUpdated: false };
   }
 
-  const templateConfig = templateConfigOption.value;
-  const newInclude = templateConfig.include.filter((p) => !include.includes(p));
-  const newExclude = (templateConfig.exclude ?? []).filter((p) => !exclude.includes(p));
+  const template = templateConfigOption.value;
+  const include = local.include;
+  const exclude = local.exclude ?? [];
 
-  if (newInclude.length === 0 && newExclude.length === 0) {
-    return { mergedInclude: include, mergedExclude: exclude, patternsUpdated: false };
+  const newInclude = template.include.filter((p) => !include.includes(p));
+  const newExclude = (template.exclude ?? []).filter((p) => !exclude.includes(p));
+
+  const {
+    merged: mergedLabels,
+    addedLabels,
+    addedPatterns,
+  } = mergeLabelDefinitions(local.labels, template.labels);
+
+  const labelsChanged = addedLabels.length > 0 || addedPatterns > 0;
+  if (newInclude.length === 0 && newExclude.length === 0 && !labelsChanged) {
+    return { mergedConfig: local, patternsUpdated: false };
   }
 
   if (newInclude.length > 0) {
@@ -256,12 +395,47 @@ async function mergeTemplatePatterns(
       log.message(`  ${pc.green("+")} ${p}`);
     }
   }
+  if (addedLabels.length > 0) {
+    log.info(`Template added ${addedLabels.length} new label(s): ${addedLabels.join(", ")}`);
+  }
 
   return {
-    mergedInclude: [...include, ...newInclude],
-    mergedExclude: [...exclude, ...newExclude],
+    mergedConfig: {
+      ...local,
+      include: [...include, ...newInclude],
+      ...(exclude.length + newExclude.length > 0 ? { exclude: [...exclude, ...newExclude] } : {}),
+      ...(mergedLabels ? { labels: mergedLabels } : {}),
+    },
     patternsUpdated: true,
   };
+}
+
+/**
+ * ラベルフィルタを適用して同期対象パターンを解決する。
+ * UnknownLabelError を ZikuError に変換する共通処理。
+ */
+function resolveSyncPatterns(
+  config: ZikuConfig,
+  filter: LabelFilter,
+): Promise<{ include: string[]; exclude: string[] }> {
+  return runCommandEffect(
+    resolveLabeledPatterns(config, filter).pipe(
+      Effect.mapError((e) => {
+        const { title, hint } = formatUnknownLabelMessage(e);
+        return new ZikuError(title, hint);
+      }),
+    ),
+  );
+}
+
+/**
+ * 現在有効なラベル選択をログに表示する。
+ */
+function logActiveLabels(config: ZikuConfig, filter: LabelFilter): void {
+  const { effective, skipped } = computeActiveLabels(Object.keys(config.labels ?? {}), filter);
+  const parts = [`${pc.cyan("labels:")} ${effective.join(", ") || "(none)"}`];
+  if (skipped.length > 0) parts.push(pc.dim(`(skipped: ${skipped.join(", ")})`));
+  log.info(parts.join(" "));
 }
 
 /**
@@ -366,7 +540,8 @@ async function runContinue(targetDir: string, lock: LockState): Promise<void> {
     throw new ZikuError("No pending merge found", "Run `ziku pull` first to start a merge");
   }
 
-  const { conflicts, templateHashes, latestRef } = lock.pendingMerge;
+  const { conflicts, templateHashes, latestRef, scopeBoundary } = lock.pendingMerge;
+  const wasScoped = scopeBoundary !== undefined && scopeBoundary.length > 0;
 
   const stillConflicted: string[] = [];
   for (const file of conflicts) {
@@ -388,10 +563,21 @@ async function runContinue(targetDir: string, lock: LockState): Promise<void> {
     );
   }
 
+  // scope 指定 pull で生成された pendingMerge を解決する場合は、scope 外の
+  // baseHashes を保持し、baseRef も更新しない（scope 外ファイルは未同期のため、
+  // 古い baseRef を残すほうが3-way マージの整合が取れる）。
+  const newBaseHashes = wasScoped
+    ? mergeScopedBaseHashes({
+        previous: lock.baseHashes ?? {},
+        scopedHashes: templateHashes,
+        scopeBoundary: new Set(scopeBoundary),
+      })
+    : templateHashes;
+
   await saveLock(targetDir, {
     ...lock,
-    baseHashes: templateHashes,
-    ...(latestRef ? { baseRef: latestRef } : {}),
+    baseHashes: newBaseHashes,
+    ...(!wasScoped && latestRef ? { baseRef: latestRef } : {}),
     pendingMerge: undefined,
   });
 

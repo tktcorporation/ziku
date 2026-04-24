@@ -2,9 +2,16 @@ import { defineCommand } from "citty";
 import { Effect } from "effect";
 import { resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
+import { ZikuError } from "../errors";
 import { renderFileDiff } from "../ui/diff-view";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
 import { detectDiff, hasDiff } from "../utils/diff";
+import {
+  type LabelFilter,
+  formatUnknownLabelMessage,
+  parseLabelsFlag,
+  resolveLabeledPatterns,
+} from "../utils/labels";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked";
 import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
 import { LOCK_FILE } from "../utils/lock";
@@ -54,6 +61,14 @@ export const diffCommand = defineCommand({
       description: "Show detailed diff",
       default: false,
     },
+    labels: {
+      type: "string",
+      description: "Comma-separated labels to include in the diff (others are skipped)",
+    },
+    "skip-labels": {
+      type: "string",
+      description: "Comma-separated labels to exclude from the diff",
+    },
   },
   async run({ args }) {
     intro("diff");
@@ -69,11 +84,20 @@ export const diffCommand = defineCommand({
 
     log.info(`Template: ${pc.cyan(templateDir)}${"path" in source ? " (local)" : ""}`);
 
+    const labelFilter: LabelFilter = {
+      include: parseLabelsFlag(args.labels as string | undefined),
+      skip: parseLabelsFlag(args["skip-labels"] as string | undefined),
+    };
+
     await withFinally(async () => {
-      const patterns = {
-        include: config.include,
-        exclude: config.exclude ?? [],
-      };
+      const patterns = await runCommandEffect(
+        resolveLabeledPatterns(config, labelFilter).pipe(
+          Effect.mapError((e) => {
+            const { title, hint } = formatUnknownLabelMessage(e);
+            return new ZikuError(title, hint);
+          }),
+        ),
+      );
 
       if (patterns.include.length === 0) {
         log.warn("No patterns configured");

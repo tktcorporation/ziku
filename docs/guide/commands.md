@@ -61,12 +61,14 @@ ARGUMENTS
 
 OPTIONS
 
-             -n, --dryRun    Preview only, don't push (Default: false)
-  -m, --message=<message>    PR title (GitHub only)
-            -y, -f, --yes    Skip confirmation prompts (Default: false)
-                   --edit    Edit PR title and description before creating (GitHub only) (Default: false)
-          --files=<files>    Comma-separated file paths to include (skips file selection prompt)
-       --includeDeletions    Include locally deleted files (default: unselected in interactive mode) (Default: false)
+                 -n, --dryRun    Preview only, don't push (Default: false)
+      -m, --message=<message>    PR title (GitHub only)
+                -y, -f, --yes    Skip confirmation prompts (Default: false)
+                       --edit    Edit PR title and description before creating (GitHub only) (Default: false)
+              --files=<files>    Comma-separated file paths to include (skips file selection prompt)
+           --includeDeletions    Include locally deleted files (default: unselected in interactive mode) (Default: false)
+            --labels=<labels>    Comma-separated labels to include in this push (others are skipped)
+  --skip-labels=<skip_labels>    Comma-separated labels to exclude from this push
 ```
 
 ## `pull`
@@ -84,8 +86,10 @@ ARGUMENTS
 
 OPTIONS
 
-  -f, --force    Skip confirmations (Default: false)
-   --continue    Continue after resolving merge conflicts (Default: false)
+                  -f, --force    Skip confirmations (Default: false)
+                   --continue    Continue after resolving merge conflicts (Default: false)
+            --labels=<labels>    Comma-separated labels to include in this sync (others are skipped)
+  --skip-labels=<skip_labels>    Comma-separated labels to exclude from this sync
 ```
 
 ## `diff`
@@ -103,7 +107,9 @@ ARGUMENTS
 
 OPTIONS
 
-  -v, --verbose    Show detailed diff (Default: false)
+                -v, --verbose    Show detailed diff (Default: false)
+            --labels=<labels>    Comma-separated labels to include in the diff (others are skipped)
+  --skip-labels=<skip_labels>    Comma-separated labels to exclude from the diff
 ```
 
 ## `track`

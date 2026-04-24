@@ -43,10 +43,30 @@ export type FileOperationResult = z.infer<typeof fileOperationResultSchema>;
 // source（どこから同期するか）は lock.json に分離。
 // ────────────────────────────────────────────────────────────────
 
+/**
+ * ラベル定義: 名前付きのパターングループ。
+ *
+ * 背景: ユーザーが include/exclude をラベルで束ね、
+ * `--labels foo,bar` で同期スコープを絞り込むための機能。
+ * トップレベルの include/exclude は「常時適用の共通プール」扱いで、
+ * ラベルはそれに追加される overlay として機能する。
+ */
+export const labelDefinitionSchema = z.object({
+  include: z.array(z.string()),
+  exclude: z.array(z.string()).optional(),
+});
+export type LabelDefinition = z.infer<typeof labelDefinitionSchema>;
+
 export const zikuConfigSchema = z.object({
   $schema: z.string().optional(),
   include: z.array(z.string()),
   exclude: z.array(z.string()).optional(),
+  /**
+   * 名前付きパターングループ。
+   * `--labels a,b` で同期を選択的に適用するためのグルーピング。
+   * 未指定時は全ラベルがトップレベル include/exclude と合集合で同期される。
+   */
+  labels: z.record(z.string(), labelDefinitionSchema).optional(),
 });
 
 export type ZikuConfig = z.infer<typeof zikuConfigSchema>;
@@ -122,6 +142,16 @@ export const lockSchema = z.object({
       templateHashes: z.record(z.string(), z.string()),
       /** pull 対象の最新コミット SHA（解決後の baseRef として適用） */
       latestRef: z.string().optional(),
+      /**
+       * pendingMerge を作成した pull がスコープ指定だった場合の scope boundary。
+       *
+       * 背景: スコープ指定 pull で conflict が起きた場合、`pull --continue` 解決時に
+       * scope 外の baseHashes/baseRef を保持する必要がある。このフィールドが存在する
+       * 場合、--continue は scope-aware な finalize を行う（templateHashes を
+       * 該当 scope 内のみ適用、baseRef は更新しない）。
+       * 未定義（または空配列）の場合は legacy のフルオーバーライト動作。
+       */
+      scopeBoundary: z.array(z.string()).optional(),
     })
     .optional(),
 });
