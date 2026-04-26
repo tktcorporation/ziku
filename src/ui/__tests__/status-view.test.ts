@@ -1,10 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  recommendationLine,
-  renderStatusLong,
-  renderStatusShort,
-  type StatusViewModel,
-} from "../status-view";
+import { recommendationLine, renderStatusLong, type StatusViewModel } from "../status-view";
 import type { Recommendation, StatusBuckets, StatusEntry } from "../../utils/status";
 
 function entry(
@@ -157,55 +152,6 @@ describe("status-view", () => {
         ),
       );
       expect(out).not.toContain("Tracked files are in sync");
-    });
-  });
-
-  describe("renderStatusShort", () => {
-    it("pull カテゴリは Y 列に文字、X 列はスペース（template 起点）", () => {
-      const out = renderStatusShort(
-        model({
-          buckets: buckets({
-            pull: [
-              entry("a.txt", "pull", "autoUpdate"),
-              entry("b.txt", "pull", "newFiles"),
-              entry("c.txt", "pull", "deletedFiles", true),
-            ],
-          }),
-        }),
-      );
-      expect(out).toBe(" M a.txt\n A b.txt\n D c.txt");
-    });
-
-    it("push カテゴリは X 列に文字、Y 列はスペース（local 起点）", () => {
-      const out = renderStatusShort(
-        model({
-          buckets: buckets({
-            push: [
-              entry("x.txt", "push", "localOnly"),
-              entry("y.txt", "push", "deletedLocally", true),
-            ],
-          }),
-        }),
-      );
-      expect(out).toBe("M  x.txt\nD  y.txt");
-    });
-
-    it("conflict は UU", () => {
-      const out = renderStatusShort(
-        model({
-          buckets: buckets({ conflict: [entry("c.txt", "conflict", "conflicts")] }),
-        }),
-      );
-      expect(out).toBe("UU c.txt");
-    });
-
-    it("untracked は ?? で表示", () => {
-      const out = renderStatusShort(model({ untracked: [{ files: [{ path: "draft.md" }] }] }));
-      expect(out).toBe("?? draft.md");
-    });
-
-    it("全部空なら空文字", () => {
-      expect(renderStatusShort(model())).toBe("");
     });
   });
 });

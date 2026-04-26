@@ -5,11 +5,8 @@ import {
   categorizeForStatus,
   decideRecommendation,
   directionOfCategory,
-  exitCodeForRecommendation,
   isDestructiveCategory,
   isEntryCategory,
-  STATUS_EXIT_CODE,
-  type Recommendation,
   type StatusBuckets,
 } from "../status";
 
@@ -265,23 +262,6 @@ describe("status", () => {
         kind: "continueMerge",
         conflictCount: 0,
       });
-    });
-  });
-
-  describe("exitCodeForRecommendation", () => {
-    it.each<[Recommendation, number]>([
-      [{ kind: "inSync" }, STATUS_EXIT_CODE.SYNC],
-      [{ kind: "pullOnly", pullCount: 1 }, STATUS_EXIT_CODE.OUT_OF_SYNC],
-      [{ kind: "pushOnly", pushCount: 1 }, STATUS_EXIT_CODE.OUT_OF_SYNC],
-      [{ kind: "pullThenPush", pullCount: 1, pushCount: 1 }, STATUS_EXIT_CODE.OUT_OF_SYNC],
-      [
-        { kind: "resolveConflict", conflictCount: 1, pullCount: 0, pushCount: 0 },
-        STATUS_EXIT_CODE.OUT_OF_SYNC,
-      ],
-      [{ kind: "continueMerge", conflictCount: 1 }, STATUS_EXIT_CODE.PENDING_MERGE],
-      [{ kind: "continueMerge", conflictCount: 0 }, STATUS_EXIT_CODE.PENDING_MERGE],
-    ])("%j → exit code %i", (rec, expected) => {
-      expect(exitCodeForRecommendation(rec)).toBe(expected);
     });
   });
 });

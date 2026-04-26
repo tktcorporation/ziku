@@ -7,7 +7,6 @@
  * `git status` のメンタルモデルを踏襲:
  *   - グルーピング (Pull pending / Push pending / Conflict / Untracked)
  *   - 各セクションにアクションヒント "(use \"ziku pull\" to apply)"
- *   - --short モードでは XY 形式の porcelain ライク出力
  */
 import { match } from "ts-pattern";
 import pc from "picocolors";
@@ -164,45 +163,4 @@ export function renderStatusLong(model: StatusViewModel): string {
     ...untrackedLines,
     ...cleanLines,
   ].join("\n");
-}
-
-/**
- * short / porcelain モード。1ファイル1行の `XY <path>` 形式。
- *
- * X (template 側), Y (local 側):
- *   - "M": modified, "A": added, "D": deleted, "U": both modified, "?": untracked
- *
- * 例:
- *   " M .mcp.json"          (template-modified, locally unchanged base — autoUpdate)
- *   " A new.md"             (template-added)
- *   " D old.md"             (template-deleted)
- *   "M  settings.json"      (locally-modified)
- *   "D  removed.md"         (locally-deleted)
- *   "UU both.md"            (conflict)
- *   "?? draft.md"           (untracked)
- *
- * 注: `unchanged` は EntryCategory に含まれないため、shortCodeFor の入力には現れない。
- */
-function shortCodeFor(entry: StatusEntry): string {
-  return match(entry.category)
-    .with("autoUpdate", () => " M")
-    .with("newFiles", () => " A")
-    .with("deletedFiles", () => " D")
-    .with("localOnly", () => "M ")
-    .with("deletedLocally", () => "D ")
-    .with("conflicts", () => "UU")
-    .exhaustive();
-}
-
-export function renderStatusShort(model: StatusViewModel): string {
-  const lines: string[] = [];
-  // 順序は git -s の慣習（Conflict → Push → Pull → Untracked）ではなく、
-  // ziku の主要関心事（Pull → Push → Conflict → Untracked）に合わせる。
-  for (const entry of model.buckets.pull) lines.push(`${shortCodeFor(entry)} ${entry.path}`);
-  for (const entry of model.buckets.push) lines.push(`${shortCodeFor(entry)} ${entry.path}`);
-  for (const entry of model.buckets.conflict) lines.push(`${shortCodeFor(entry)} ${entry.path}`);
-  for (const group of model.untracked) {
-    for (const file of group.files) lines.push(`?? ${file.path}`);
-  }
-  return lines.join("\n");
 }

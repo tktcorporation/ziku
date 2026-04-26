@@ -12,11 +12,6 @@ Add `ziku status` command to summarize pending pull/push and recommend the next 
 
 The recommendation engine considers `lock.pendingMerge` first (suggests `ziku pull --continue`), then conflicts (`ziku pull` for 3-way merge), then the pull/push split (`ziku pull` first if both are non-empty), so the user can sync without thinking about ordering.
 
-Two output modes:
-
-- Default: `git status` style, grouped by direction with action hints.
-- `--short` / `-s`: porcelain `XY <path>` format for scripting.
-
-`--exit-code` makes the command return non-zero (1 for out-of-sync, 2 for `pendingMerge`) so CI can gate on sync state.
+`status` is purely observational, mirroring `git status` — no flags beyond the directory argument and always exits 0. CI gating ("require sync before merge") will be addressed by future commands such as `pull --dry-run` or `diff --exit-code` rather than overloading `status`.
 
 Internally, the shared `analyzeSync` helper consolidates the `hashFiles ×2 → classifyFiles` pattern that `pull` and `push` already use, so the three commands now share a single source of truth for 3-way comparison.

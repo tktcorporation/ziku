@@ -90,24 +90,6 @@ export type Recommendation =
     }
   | { readonly kind: "continueMerge"; readonly conflictCount: number };
 
-/**
- * exit code 戦略の SSOT。`--exit-code` 指定時の終了コードをここに集約する。
- *
- * - SYNC: 完全 in-sync
- * - OUT_OF_SYNC: 何らかの差分 (pull/push/conflict) がある
- * - PENDING_MERGE: pendingMerge 中（最も注意が必要な状態）
- *
- * 値は git status と意図を揃えており、CI ユーザーが `if rc -ne 0` で out-of-sync を
- * 検知できるようにしている。`PENDING_MERGE` を別値にしているのは、CI 上で
- * 「pull --continue 必要」を `2` で識別したいユースケース向け。
- */
-export const STATUS_EXIT_CODE = {
-  SYNC: 0,
-  OUT_OF_SYNC: 1,
-  PENDING_MERGE: 2,
-} as const;
-export type StatusExitCode = (typeof STATUS_EXIT_CODE)[keyof typeof STATUS_EXIT_CODE];
-
 // ────────────────────────────────────────────────────────────────
 // (A) categorizeForStatus
 // ────────────────────────────────────────────────────────────────
@@ -235,23 +217,4 @@ export function decideRecommendation(
     return { kind: "pushOnly", pushCount };
   }
   return { kind: "inSync" };
-}
-
-/**
- * Recommendation から `--exit-code` 用の終了コードを決定する。
- *
- * SSOT: コマンド層でコードをハードコードせず、本関数経由で取得する。
- */
-export function exitCodeForRecommendation(rec: Recommendation): StatusExitCode {
-  return match(rec)
-    .with({ kind: "inSync" }, () => STATUS_EXIT_CODE.SYNC)
-    .with({ kind: "continueMerge" }, () => STATUS_EXIT_CODE.PENDING_MERGE)
-    .with(
-      { kind: "pullOnly" },
-      { kind: "pushOnly" },
-      { kind: "pullThenPush" },
-      { kind: "resolveConflict" },
-      () => STATUS_EXIT_CODE.OUT_OF_SYNC,
-    )
-    .exhaustive();
 }

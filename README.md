@@ -296,11 +296,6 @@ USAGE status [OPTIONS] [DIR]
 ARGUMENTS
 
   DIR    Project directory (Default: .)
-
-OPTIONS
-
-  -s, --short    Porcelain-style one-line-per-file output (Default: false)
-  --exit-code    Exit non-zero when out of sync (CI use) (Default: false)
 ```
 
 ### `track`

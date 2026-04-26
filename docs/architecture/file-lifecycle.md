@@ -168,7 +168,7 @@ Add file patterns to the sync whitelist
 
 `status` は読み取り専用。ファイルや lock.json を一切変更しない。
 
-`--exit-code` フラグを付けると、in-sync で 0、差分ありで 1、`pendingMerge` 中で 2 を返す。CI で `ziku status --exit-code` を呼ぶことで「ローカルがテンプレートと同期しているか」を判定できる。
+`status` は git status と同じく常に exit 0 で終了する（観察コマンドの責務）。CI でゲートしたい場合は将来 `pull --dry-run` や `diff --exit-code` 等の専用コマンドに任せる予定。
 
 ### track
 

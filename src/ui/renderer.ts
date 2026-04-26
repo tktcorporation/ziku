@@ -21,7 +21,6 @@ const nonInteractiveHints: Record<string, string> = {
   push: "Non-interactive: ziku push --yes --files <paths> -m <title>",
   pull: "Non-interactive: ziku pull --force",
   diff: "Non-interactive: ziku diff --verbose",
-  status: "Non-interactive: ziku status --short  or  ziku status --exit-code",
 };
 
 /** CLI の開始表示 */
