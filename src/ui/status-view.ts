@@ -11,22 +11,21 @@
  */
 import { match } from "ts-pattern";
 import pc from "picocolors";
-import type { FileClassification } from "../utils/merge/types";
-import type { Recommendation, StatusBuckets, StatusEntry } from "../utils/status";
+import type { EntryCategory, Recommendation, StatusBuckets, StatusEntry } from "../utils/status";
 
 /**
  * カテゴリごとのラベルとカラーの SSOT。
  *
  * `git status` の "modified:" / "new file:" / "deleted:" / "both modified:" を踏襲。
+ * `unchanged` は EntryCategory に含まれないため定義不要（型レベルで保証）。
  */
-const CATEGORY_LABEL: Record<keyof FileClassification, string> = {
+const CATEGORY_LABEL: Record<EntryCategory, string> = {
   autoUpdate: "modified:",
   newFiles: "new file:",
   deletedFiles: "deleted: ",
   localOnly: "modified:",
   deletedLocally: "deleted: ",
   conflicts: "both modified:",
-  unchanged: "unchanged:",
 };
 
 function colorForEntry(entry: StatusEntry): (s: string) => string {
@@ -65,6 +64,10 @@ function renderSection(
 /**
  * Recommendation を1行ヒントに変換する。`git status` の
  * "(use \"git push\" to publish your local commits)" の感覚。
+ *
+ * `continueMerge` は conflictCount で2分岐:
+ *   - count > 0: 通常の merge resume
+ *   - count === 0: 縮退（stale lock）。`pull --continue` でクリアを案内
  */
 export function recommendationLine(rec: Recommendation): string {
   return match(rec)
@@ -89,10 +92,10 @@ export function recommendationLine(rec: Recommendation): string {
       ({ conflictCount }) =>
         `${pc.yellow("⚠")} Run ${pc.cyan("`ziku pull`")} to start a 3-way merge for ${conflictCount} conflict(s).`,
     )
-    .with(
-      { kind: "continueMerge" },
-      ({ conflictCount }) =>
-        `${pc.yellow("⏸")} Merge paused — resolve ${conflictCount} conflict(s) and run ${pc.cyan("`ziku pull --continue`")}.`,
+    .with({ kind: "continueMerge" }, ({ conflictCount }) =>
+      conflictCount === 0
+        ? `${pc.yellow("⏸")} Stale merge state in lock — run ${pc.cyan("`ziku pull --continue`")} to clear it (push will be blocked otherwise).`
+        : `${pc.yellow("⏸")} Merge paused — resolve ${conflictCount} conflict(s) and run ${pc.cyan("`ziku pull --continue`")}.`,
     )
     .exhaustive();
 }
@@ -110,9 +113,12 @@ export interface StatusViewModel {
 /**
  * long モード（git status 風）の出力を生成する。
  * `clack/prompts` の log.message に渡す前提のプレーン文字列を返す。
+ *
+ * 注: recommendation 行は含めない。コマンド側で `outro(recommendationLine(...))` として
+ * 別途レンダリングし、@clack/prompts のフッタとして強調表示する設計のため。
  */
 export function renderStatusLong(model: StatusViewModel): string {
-  const { buckets, untracked, recommendation } = model;
+  const { buckets, untracked } = model;
   const untrackedFiles = untracked.flatMap((g) => g.files);
 
   const untrackedLines: string[] =
@@ -133,7 +139,6 @@ export function renderStatusLong(model: StatusViewModel): string {
   const cleanLines = isClean
     ? [
         `  ${pc.green("✓")} Tracked files are in sync (${buckets.inSyncCount} file(s) match template).`,
-        "",
       ]
     : [];
 
@@ -158,7 +163,6 @@ export function renderStatusLong(model: StatusViewModel): string {
     ),
     ...untrackedLines,
     ...cleanLines,
-    recommendationLine(recommendation),
   ].join("\n");
 }
 
@@ -166,7 +170,7 @@ export function renderStatusLong(model: StatusViewModel): string {
  * short / porcelain モード。1ファイル1行の `XY <path>` 形式。
  *
  * X (template 側), Y (local 側):
- *   - "M": modified, "A": added, "D": deleted, "U": both modified, " ": unchanged, "?": untracked
+ *   - "M": modified, "A": added, "D": deleted, "U": both modified, "?": untracked
  *
  * 例:
  *   " M .mcp.json"          (template-modified, locally unchanged base — autoUpdate)
@@ -176,6 +180,8 @@ export function renderStatusLong(model: StatusViewModel): string {
  *   "D  removed.md"         (locally-deleted)
  *   "UU both.md"            (conflict)
  *   "?? draft.md"           (untracked)
+ *
+ * 注: `unchanged` は EntryCategory に含まれないため、shortCodeFor の入力には現れない。
  */
 function shortCodeFor(entry: StatusEntry): string {
   return match(entry.category)
@@ -185,7 +191,6 @@ function shortCodeFor(entry: StatusEntry): string {
     .with("localOnly", () => "M ")
     .with("deletedLocally", () => "D ")
     .with("conflicts", () => "UU")
-    .with("unchanged", () => "  ")
     .exhaustive();
 }
 

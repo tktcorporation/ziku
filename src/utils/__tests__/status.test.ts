@@ -7,6 +7,7 @@ import {
   directionOfCategory,
   exitCodeForRecommendation,
   isDestructiveCategory,
+  isEntryCategory,
   STATUS_EXIT_CODE,
   type Recommendation,
   type StatusBuckets,
@@ -31,6 +32,23 @@ function emptyBuckets(): StatusBuckets {
 }
 
 describe("status", () => {
+  describe("isEntryCategory", () => {
+    it.each([
+      "autoUpdate",
+      "newFiles",
+      "deletedFiles",
+      "localOnly",
+      "deletedLocally",
+      "conflicts",
+    ] as const)("%s は EntryCategory（status の表示対象）", (cat) => {
+      expect(isEntryCategory(cat)).toBe(true);
+    });
+
+    it("unchanged は EntryCategory ではない（どのバケツにも入らない）", () => {
+      expect(isEntryCategory("unchanged")).toBe(false);
+    });
+  });
+
   describe("directionOfCategory", () => {
     it.each([
       ["autoUpdate", "pull"],
@@ -42,10 +60,8 @@ describe("status", () => {
     ] as const)("%s カテゴリは %s 方向にマップされる", (cat, expected) => {
       expect(directionOfCategory(cat)).toBe(expected);
     });
-
-    it("unchanged カテゴリは null を返す（どのバケツにも入らない）", () => {
-      expect(directionOfCategory("unchanged")).toBeNull();
-    });
+    // unchanged は EntryCategory に含まれないため、directionOfCategory の入力として
+    // 型レベルで除外されている（呼び出し自体がコンパイルエラー）。
   });
 
   describe("isDestructiveCategory", () => {
@@ -59,7 +75,6 @@ describe("status", () => {
       expect(isDestructiveCategory("newFiles")).toBe(false);
       expect(isDestructiveCategory("localOnly")).toBe(false);
       expect(isDestructiveCategory("conflicts")).toBe(false);
-      expect(isDestructiveCategory("unchanged")).toBe(false);
     });
   });
 
@@ -235,7 +250,10 @@ describe("status", () => {
       });
     });
 
-    it("pendingMerge が空 conflicts のレアケースでは continueMerge を選ばない（縮退ガード）", () => {
+    it("pendingMerge が空 conflicts でも continueMerge を返す（stale lock として扱う）", () => {
+      // --continue 直前にプロセスが死んだ等で lock が stale な状態。
+      // inSync にフォールスルーすると、その後 push が pendingMerge ガードで
+      // ブロックされる際に理由が分からなくなるため、明示的に continueMerge を返す。
       const lock: Pick<LockState, "pendingMerge"> = {
         pendingMerge: {
           conflicts: [],
@@ -243,7 +261,10 @@ describe("status", () => {
         },
       };
       const buckets = emptyBuckets();
-      expect(decideRecommendation(buckets, lock)).toEqual({ kind: "inSync" });
+      expect(decideRecommendation(buckets, lock)).toEqual({
+        kind: "continueMerge",
+        conflictCount: 0,
+      });
     });
   });
 
@@ -258,6 +279,7 @@ describe("status", () => {
         STATUS_EXIT_CODE.OUT_OF_SYNC,
       ],
       [{ kind: "continueMerge", conflictCount: 1 }, STATUS_EXIT_CODE.PENDING_MERGE],
+      [{ kind: "continueMerge", conflictCount: 0 }, STATUS_EXIT_CODE.PENDING_MERGE],
     ])("%j → exit code %i", (rec, expected) => {
       expect(exitCodeForRecommendation(rec)).toBe(expected);
     });

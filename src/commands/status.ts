@@ -6,13 +6,19 @@ import { loadCommandContext, runCommandEffect, toZikuError } from "../services/c
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 import { intro, log, outro, pc, withSpinner } from "../ui/renderer";
-import { renderStatusLong, renderStatusShort, type StatusViewModel } from "../ui/status-view";
+import {
+  recommendationLine,
+  renderStatusLong,
+  renderStatusShort,
+  type StatusViewModel,
+} from "../ui/status-view";
 import { LOCK_FILE } from "../utils/lock";
 import {
   categorizeForStatus,
   decideRecommendation,
   exitCodeForRecommendation,
   STATUS_EXIT_CODE,
+  type StatusExitCode,
 } from "../utils/status";
 import { analyzeSync } from "../utils/sync-analysis";
 import { detectUntrackedFiles } from "../utils/untracked";
@@ -91,6 +97,11 @@ export const statusCommand = defineCommand({
       log.info(`Template: ${pc.cyan(templateDir)}${"path" in source ? " (local)" : ""}`);
     }
 
+    // process.exit を withFinally の中で呼ぶと Effect.ensuring がスキップされ
+    // 一時テンプレートディレクトリ (GitHub source 時) がリークする。
+    // まず exit code を変数に確定させ、cleanup 完了後にプロセスを終了する。
+    let exitCode: StatusExitCode = STATUS_EXIT_CODE.SYNC;
+
     await withFinally(async () => {
       const include = config.include;
       const exclude = config.exclude ?? [];
@@ -130,13 +141,16 @@ export const statusCommand = defineCommand({
         if (out.length > 0) process.stdout.write(`${out}\n`);
       } else {
         log.message(renderStatusLong(model));
-        outro("status");
+        // recommendation を outro として強調表示する。renderStatusLong には含めず
+        // ここで一元化することで、メッセージの SSOT を保つ。
+        outro(recommendationLine(recommendation));
       }
 
       if (args["exit-code"]) {
-        const code = exitCodeForRecommendation(recommendation);
-        if (code !== STATUS_EXIT_CODE.SYNC) process.exit(code);
+        exitCode = exitCodeForRecommendation(recommendation);
       }
     }, cleanup);
+
+    if (exitCode !== STATUS_EXIT_CODE.SYNC) process.exit(exitCode);
   },
 });

@@ -13,6 +13,15 @@ import type { FileClassification } from "./merge/types";
 export type StatusDirection = "pull" | "push" | "conflict";
 
 /**
+ * StatusEntry に乗せるカテゴリ。`unchanged` は status の表示対象外（inSyncCount にのみ集計）
+ * のため型レベルで除外し、UI 側で `unchanged` ケースをハンドルする死コードが発生しないようにする。
+ *
+ * `make illegal states unrepresentable` の方針: status の display パイプラインに
+ * `unchanged` が紛れ込まないことを型で保証する。
+ */
+export type EntryCategory = Exclude<keyof FileClassification, "unchanged">;
+
+/**
  * ファイル単位のステータスエントリ。
  *
  * UI は `direction` でグルーピング、`category` で「modified / new file / deleted」等の
@@ -22,7 +31,7 @@ export type StatusDirection = "pull" | "push" | "conflict";
 export interface StatusEntry {
   readonly path: string;
   readonly direction: StatusDirection;
-  readonly category: keyof FileClassification;
+  readonly category: EntryCategory;
   /**
    * 破壊的（ファイル削除を伴う）変更か。
    *
@@ -61,6 +70,8 @@ export interface StatusBuckets {
  * - pullThenPush     : 先に pull、その後 push（順序が重要なので分岐させている）
  * - resolveConflict  : conflict があるので pull で 3-way merge を始める
  * - continueMerge    : pendingMerge 中。`ziku pull --continue` で再開
+ *                     conflictCount === 0 のケースは「stale lock のクリア」を促す
+ *                     縮退状態（pull --continue 実行直前にプロセスが死んだ等）。
  */
 export type Recommendation =
   | { readonly kind: "inSync" }
@@ -102,10 +113,14 @@ export type StatusExitCode = (typeof STATUS_EXIT_CODE)[keyof typeof STATUS_EXIT_
 // ────────────────────────────────────────────────────────────────
 
 /**
- * FileClassification の 7 カテゴリ → 3方向 の SSOT マッピング。
- *
- * `null` 戻りは「unchanged は inSyncCount にのみ反映、どのバケツにも入れない」
- * を意味する。export してマッピング変更時のデグレを単体テストできるようにしている。
+ * `unchanged` は status の表示対象外。それ以外（EntryCategory）かどうかを判定する型ガード。
+ */
+export function isEntryCategory(category: keyof FileClassification): category is EntryCategory {
+  return category !== "unchanged";
+}
+
+/**
+ * EntryCategory を 3方向 (pull / push / conflict) に振り分ける SSOT マッピング。
  *
  * 設計意図:
  *   - autoUpdate / newFiles / deletedFiles はすべて「テンプレート起点の変更」
@@ -114,13 +129,14 @@ export type StatusExitCode = (typeof STATUS_EXIT_CODE)[keyof typeof STATUS_EXIT_
  *     （deletedLocally は push --includeDeletions で実反映。
  *      status の役割は「方向を見せる」ことなので、フラグの有無は別問題として扱う）
  *   - conflicts は両方変更されているので merge 必要
+ *
+ * `unchanged` は型から除外しているため `match.exhaustive()` の対象にならない。
  */
-export function directionOfCategory(category: keyof FileClassification): StatusDirection | null {
+export function directionOfCategory(category: EntryCategory): StatusDirection {
   return match(category)
     .with("autoUpdate", "newFiles", "deletedFiles", () => "pull" as const)
     .with("localOnly", "deletedLocally", () => "push" as const)
     .with("conflicts", () => "conflict" as const)
-    .with("unchanged", () => null)
     .exhaustive();
 }
 
@@ -130,7 +146,7 @@ export function directionOfCategory(category: keyof FileClassification): StatusD
  * UI が破壊的操作を警告表示するために StatusEntry.isDestructive にコピーする。
  * `deletedFiles` (テンプレ側削除) と `deletedLocally` (ローカル側削除) が破壊的。
  */
-export function isDestructiveCategory(category: keyof FileClassification): boolean {
+export function isDestructiveCategory(category: EntryCategory): boolean {
   return category === "deletedFiles" || category === "deletedLocally";
 }
 
@@ -154,8 +170,8 @@ export function categorizeForStatus(classification: FileClassification): StatusB
   const bucketOf: Record<StatusDirection, StatusEntry[]> = { pull, push, conflict };
 
   for (const cat of Object.keys(classification) as Array<keyof FileClassification>) {
+    if (!isEntryCategory(cat)) continue;
     const direction = directionOfCategory(cat);
-    if (!direction) continue;
     const isDestructive = isDestructiveCategory(cat);
     for (const path of classification[cat]) {
       bucketOf[direction].push({ path, direction, category: cat, isDestructive });
@@ -179,8 +195,10 @@ export function categorizeForStatus(classification: FileClassification): StatusB
  *
  * 優先度（上から評価）:
  *   1. pendingMerge があれば continueMerge（最優先；他の差分より先に解決すべき）
- *      - ただし conflicts.length === 0 のレアケース（--continue 直前にプロセスが
- *        死んだ場合）では continueMerge を選ばず、通常フローで再評価する
+ *      - conflicts.length === 0 のレアケース（--continue 直前にプロセスが死んだ等で
+ *        lock が stale）でも continueMerge を返し、UI が「stale lock のクリア」を案内する。
+ *        inSync にフォールスルーすると、その後 push が pendingMerge ガードでブロック
+ *        される際に理由が分からなくなるため。
  *   2. conflict があれば resolveConflict（pull --continue ではなく新規 pull で merge を開始）
  *   3. pull も push もある → pullThenPush（pull 先行で取りこぼし防止）
  *   4. pull だけ → pullOnly
@@ -193,9 +211,7 @@ export function decideRecommendation(
   buckets: StatusBuckets,
   lock: Pick<LockState, "pendingMerge">,
 ): Recommendation {
-  // pendingMerge.conflicts が空の縮退ケースは continueMerge を選ばない。
-  // UI 側で「0 件のコンフリクトを解消してください」という矛盾表示を避ける。
-  if (lock.pendingMerge !== undefined && lock.pendingMerge.conflicts.length > 0) {
+  if (lock.pendingMerge !== undefined) {
     return {
       kind: "continueMerge",
       conflictCount: lock.pendingMerge.conflicts.length,

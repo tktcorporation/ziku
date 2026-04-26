@@ -38,9 +38,15 @@ function model(
   };
 }
 
-/** ANSI 制御文字を取り除いた素のテキスト比較を可能にする */
+/**
+ * ANSI SGR エスケープシーケンス（ESC + `[` + 数値 + `m`）を取り除き、素のテキストで比較する。
+ * RegExp コンストラクタに ESC を動的に流し込むことで、正規表現リテラル内に制御文字を
+ * 直書きするのを避けている（lint の no-control-regex 回避 + ソース可読性向上）。
+ */
+const ESC = String.fromCodePoint(0x1b);
+const ANSI_SGR_PATTERN = new RegExp(`${ESC}\\[[0-9;]*m`, "g");
 function strip(s: string): string {
-  return s.replaceAll(/\[[0-9;]*m/g, "");
+  return s.replaceAll(ANSI_SGR_PATTERN, "");
 }
 
 describe("status-view", () => {
@@ -86,13 +92,27 @@ describe("status-view", () => {
       expect(line).toContain("ziku pull --continue");
       expect(line).toContain("2");
     });
+
+    it("continueMerge with conflictCount=0 は stale lock のクリアを案内する", () => {
+      const line = strip(recommendationLine({ kind: "continueMerge", conflictCount: 0 }));
+      expect(line).toContain("Stale merge state");
+      expect(line).toContain("ziku pull --continue");
+      // 0 件と表示しないことを保証（混乱回避）
+      expect(line).not.toMatch(/\b0 conflict/);
+    });
   });
 
   describe("renderStatusLong", () => {
-    it("全部空のときは in sync メッセージとレコメンデーションを出す", () => {
+    it("recommendation 行は含めない（outro 側で別途表示するため SSOT を outro に集約）", () => {
+      const out = strip(
+        renderStatusLong(model({ buckets: buckets({ inSyncCount: 5 }) }, { kind: "inSync" })),
+      );
+      expect(out).not.toContain("In sync — nothing to do");
+    });
+
+    it("全部空のときは in sync メッセージを出す", () => {
       const out = strip(renderStatusLong(model({ buckets: buckets({ inSyncCount: 5 }) })));
       expect(out).toContain("Tracked files are in sync");
-      expect(out).toContain("In sync");
     });
 
     it("pull バケツは modified / new file / deleted ラベルを描き分ける", () => {
