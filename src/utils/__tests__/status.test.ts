@@ -1,0 +1,265 @@
+import { describe, expect, it } from "vitest";
+import type { LockState } from "../../modules/schemas";
+import type { FileClassification } from "../merge/types";
+import {
+  categorizeForStatus,
+  decideRecommendation,
+  directionOfCategory,
+  exitCodeForRecommendation,
+  isDestructiveCategory,
+  STATUS_EXIT_CODE,
+  type Recommendation,
+  type StatusBuckets,
+} from "../status";
+
+/** ヘルパー: 空の FileClassification を作る */
+function emptyClassification(): FileClassification {
+  return {
+    autoUpdate: [],
+    localOnly: [],
+    conflicts: [],
+    newFiles: [],
+    deletedFiles: [],
+    deletedLocally: [],
+    unchanged: [],
+  };
+}
+
+/** ヘルパー: 空の StatusBuckets を作る */
+function emptyBuckets(): StatusBuckets {
+  return { pull: [], push: [], conflict: [], inSyncCount: 0 };
+}
+
+describe("status", () => {
+  describe("directionOfCategory", () => {
+    it.each([
+      ["autoUpdate", "pull"],
+      ["newFiles", "pull"],
+      ["deletedFiles", "pull"],
+      ["localOnly", "push"],
+      ["deletedLocally", "push"],
+      ["conflicts", "conflict"],
+    ] as const)("%s カテゴリは %s 方向にマップされる", (cat, expected) => {
+      expect(directionOfCategory(cat)).toBe(expected);
+    });
+
+    it("unchanged カテゴリは null を返す（どのバケツにも入らない）", () => {
+      expect(directionOfCategory("unchanged")).toBeNull();
+    });
+  });
+
+  describe("isDestructiveCategory", () => {
+    it("deletedFiles と deletedLocally は破壊的", () => {
+      expect(isDestructiveCategory("deletedFiles")).toBe(true);
+      expect(isDestructiveCategory("deletedLocally")).toBe(true);
+    });
+
+    it("非削除カテゴリは非破壊的", () => {
+      expect(isDestructiveCategory("autoUpdate")).toBe(false);
+      expect(isDestructiveCategory("newFiles")).toBe(false);
+      expect(isDestructiveCategory("localOnly")).toBe(false);
+      expect(isDestructiveCategory("conflicts")).toBe(false);
+      expect(isDestructiveCategory("unchanged")).toBe(false);
+    });
+  });
+
+  describe("categorizeForStatus", () => {
+    it("空の classification では全バケツが空", () => {
+      const result = categorizeForStatus(emptyClassification());
+      expect(result.pull).toEqual([]);
+      expect(result.push).toEqual([]);
+      expect(result.conflict).toEqual([]);
+      expect(result.inSyncCount).toBe(0);
+    });
+
+    it("autoUpdate / newFiles / deletedFiles はすべて pull バケツに入る", () => {
+      const result = categorizeForStatus({
+        ...emptyClassification(),
+        autoUpdate: ["a.txt"],
+        newFiles: ["b.txt"],
+        deletedFiles: ["c.txt"],
+      });
+
+      expect(result.pull.map((e) => e.path)).toEqual(["a.txt", "b.txt", "c.txt"]);
+      expect(result.push).toEqual([]);
+      expect(result.conflict).toEqual([]);
+    });
+
+    it("localOnly / deletedLocally は push バケツに入る", () => {
+      const result = categorizeForStatus({
+        ...emptyClassification(),
+        localOnly: ["x.txt"],
+        deletedLocally: ["y.txt"],
+      });
+
+      expect(result.push.map((e) => e.path)).toEqual(["x.txt", "y.txt"]);
+      expect(result.pull).toEqual([]);
+    });
+
+    it("conflicts は conflict バケツに入る", () => {
+      const result = categorizeForStatus({
+        ...emptyClassification(),
+        conflicts: ["both.txt"],
+      });
+
+      expect(result.conflict.map((e) => e.path)).toEqual(["both.txt"]);
+    });
+
+    it("unchanged は inSyncCount に反映される（バケツには入らない）", () => {
+      const result = categorizeForStatus({
+        ...emptyClassification(),
+        unchanged: ["a.txt", "b.txt", "c.txt"],
+      });
+
+      expect(result.inSyncCount).toBe(3);
+      expect(result.pull).toEqual([]);
+      expect(result.push).toEqual([]);
+      expect(result.conflict).toEqual([]);
+    });
+
+    it("deletedFiles と deletedLocally は isDestructive: true、それ以外は false", () => {
+      const result = categorizeForStatus({
+        ...emptyClassification(),
+        autoUpdate: ["a.txt"],
+        newFiles: ["b.txt"],
+        deletedFiles: ["c.txt"],
+        localOnly: ["x.txt"],
+        deletedLocally: ["y.txt"],
+        conflicts: ["both.txt"],
+      });
+
+      const findEntry = (path: string) =>
+        [...result.pull, ...result.push, ...result.conflict].find((e) => e.path === path);
+
+      expect(findEntry("a.txt")?.isDestructive).toBe(false);
+      expect(findEntry("b.txt")?.isDestructive).toBe(false);
+      expect(findEntry("c.txt")?.isDestructive).toBe(true);
+      expect(findEntry("x.txt")?.isDestructive).toBe(false);
+      expect(findEntry("y.txt")?.isDestructive).toBe(true);
+      expect(findEntry("both.txt")?.isDestructive).toBe(false);
+    });
+
+    it("各バケツ内は path 昇順でソートされる（決定論的出力）", () => {
+      const result = categorizeForStatus({
+        ...emptyClassification(),
+        autoUpdate: ["z.txt", "a.txt", "m.txt"],
+      });
+      expect(result.pull.map((e) => e.path)).toEqual(["a.txt", "m.txt", "z.txt"]);
+    });
+
+    it("category フィールドが元のカテゴリを保持する（UI でラベル分けに使用）", () => {
+      const result = categorizeForStatus({
+        ...emptyClassification(),
+        autoUpdate: ["modified.txt"],
+        newFiles: ["new.txt"],
+        deletedFiles: ["gone.txt"],
+      });
+
+      const byPath = Object.fromEntries(result.pull.map((e) => [e.path, e.category]));
+      expect(byPath["modified.txt"]).toBe("autoUpdate");
+      expect(byPath["new.txt"]).toBe("newFiles");
+      expect(byPath["gone.txt"]).toBe("deletedFiles");
+    });
+  });
+
+  describe("decideRecommendation", () => {
+    const noLock: Pick<LockState, "pendingMerge"> = {};
+
+    it("全バケツ空 → inSync", () => {
+      const rec = decideRecommendation(emptyBuckets(), noLock);
+      expect(rec).toEqual({ kind: "inSync" });
+    });
+
+    it("pull のみ → pullOnly", () => {
+      const buckets: StatusBuckets = {
+        ...emptyBuckets(),
+        pull: [{ path: "a", direction: "pull", category: "autoUpdate", isDestructive: false }],
+      };
+      expect(decideRecommendation(buckets, noLock)).toEqual({ kind: "pullOnly", pullCount: 1 });
+    });
+
+    it("push のみ → pushOnly", () => {
+      const buckets: StatusBuckets = {
+        ...emptyBuckets(),
+        push: [{ path: "a", direction: "push", category: "localOnly", isDestructive: false }],
+      };
+      expect(decideRecommendation(buckets, noLock)).toEqual({ kind: "pushOnly", pushCount: 1 });
+    });
+
+    it("pull + push → pullThenPush", () => {
+      const buckets: StatusBuckets = {
+        ...emptyBuckets(),
+        pull: [{ path: "a", direction: "pull", category: "autoUpdate", isDestructive: false }],
+        push: [{ path: "b", direction: "push", category: "localOnly", isDestructive: false }],
+      };
+      expect(decideRecommendation(buckets, noLock)).toEqual({
+        kind: "pullThenPush",
+        pullCount: 1,
+        pushCount: 1,
+      });
+    });
+
+    it("conflict があれば pull/push の有無に関係なく resolveConflict", () => {
+      const buckets: StatusBuckets = {
+        ...emptyBuckets(),
+        pull: [{ path: "a", direction: "pull", category: "autoUpdate", isDestructive: false }],
+        push: [{ path: "b", direction: "push", category: "localOnly", isDestructive: false }],
+        conflict: [
+          { path: "c", direction: "conflict", category: "conflicts", isDestructive: false },
+        ],
+      };
+      expect(decideRecommendation(buckets, noLock)).toEqual({
+        kind: "resolveConflict",
+        conflictCount: 1,
+        pullCount: 1,
+        pushCount: 1,
+      });
+    });
+
+    it("pendingMerge が存在し conflicts に内容があれば continueMerge（最優先）", () => {
+      const lock: Pick<LockState, "pendingMerge"> = {
+        pendingMerge: {
+          conflicts: ["a.txt", "b.txt"],
+          templateHashes: {},
+        },
+      };
+      // 通常なら pullThenPush になる buckets でも continueMerge が優先される
+      const buckets: StatusBuckets = {
+        ...emptyBuckets(),
+        pull: [{ path: "x", direction: "pull", category: "autoUpdate", isDestructive: false }],
+        push: [{ path: "y", direction: "push", category: "localOnly", isDestructive: false }],
+      };
+      expect(decideRecommendation(buckets, lock)).toEqual({
+        kind: "continueMerge",
+        conflictCount: 2,
+      });
+    });
+
+    it("pendingMerge が空 conflicts のレアケースでは continueMerge を選ばない（縮退ガード）", () => {
+      const lock: Pick<LockState, "pendingMerge"> = {
+        pendingMerge: {
+          conflicts: [],
+          templateHashes: {},
+        },
+      };
+      const buckets = emptyBuckets();
+      expect(decideRecommendation(buckets, lock)).toEqual({ kind: "inSync" });
+    });
+  });
+
+  describe("exitCodeForRecommendation", () => {
+    it.each<[Recommendation, number]>([
+      [{ kind: "inSync" }, STATUS_EXIT_CODE.SYNC],
+      [{ kind: "pullOnly", pullCount: 1 }, STATUS_EXIT_CODE.OUT_OF_SYNC],
+      [{ kind: "pushOnly", pushCount: 1 }, STATUS_EXIT_CODE.OUT_OF_SYNC],
+      [{ kind: "pullThenPush", pullCount: 1, pushCount: 1 }, STATUS_EXIT_CODE.OUT_OF_SYNC],
+      [
+        { kind: "resolveConflict", conflictCount: 1, pullCount: 0, pushCount: 0 },
+        STATUS_EXIT_CODE.OUT_OF_SYNC,
+      ],
+      [{ kind: "continueMerge", conflictCount: 1 }, STATUS_EXIT_CODE.PENDING_MERGE],
+    ])("%j → exit code %i", (rec, expected) => {
+      expect(exitCodeForRecommendation(rec)).toBe(expected);
+    });
+  });
+});

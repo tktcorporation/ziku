@@ -8,6 +8,7 @@ import { initCommand } from "./commands/init";
 import { pullCommand } from "./commands/pull";
 import { pushCommand } from "./commands/push";
 import { setupCommand } from "./commands/setup";
+import { statusCommand } from "./commands/status";
 import { trackCommand } from "./commands/track";
 import { ZikuError } from "./errors";
 import { intro, logZikuError, pc } from "./ui/renderer";
@@ -24,6 +25,7 @@ const main = defineCommand({
     push: pushCommand,
     pull: pullCommand,
     diff: diffCommand,
+    status: statusCommand,
     track: trackCommand,
   },
 });
@@ -32,13 +34,15 @@ type CommandType =
   | typeof initCommand
   | typeof pushCommand
   | typeof pullCommand
-  | typeof diffCommand;
+  | typeof diffCommand
+  | typeof statusCommand;
 
-const commandMap: Record<"init" | "push" | "pull" | "diff", CommandType> = {
+const commandMap: Record<"init" | "push" | "pull" | "diff" | "status", CommandType> = {
   init: initCommand,
   push: pushCommand,
   pull: pullCommand,
   diff: diffCommand,
+  status: statusCommand,
 };
 
 /**
@@ -75,6 +79,11 @@ async function promptCommand(): Promise<void> {
         label: "diff",
         hint: "Show differences from template",
       },
+      {
+        value: "status" as const,
+        label: "status",
+        hint: "Show pending pull/push and recommend next action",
+      },
     ],
   });
 
@@ -105,6 +114,7 @@ async function run(): Promise<void> {
           "push",
           "pull",
           "diff",
+          "status",
           "track",
           "--help",
           "-h",

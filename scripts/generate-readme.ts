@@ -33,6 +33,7 @@ import { initCommand } from "../src/commands/init";
 import { pullCommand } from "../src/commands/pull";
 import { pushCommand } from "../src/commands/push";
 import { setupCommand } from "../src/commands/setup";
+import { statusCommand } from "../src/commands/status";
 import { trackCommand } from "../src/commands/track";
 import { zikuConfigSchema } from "../src/modules/schemas";
 import {
@@ -246,6 +247,7 @@ async function generateCommandsSection(): Promise<string> {
     ...(await commandSection("push", pushCommand)),
     ...(await commandSection("pull", pullCommand)),
     ...(await commandSection("diff", diffCommand)),
+    ...(await commandSection("status", statusCommand)),
     ...(await commandSection("track", trackCommand)),
   ];
 

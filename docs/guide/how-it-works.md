@@ -26,6 +26,7 @@ graph TB
   pull([pull]) -->|read| ZIKU & LOCK
   pull -->|update| U_FILES & ZIKU & LOCK
   diff([diff]) -.->|read| ZIKU & LOCK & U_FILES
+  status([status]) -.->|read| ZIKU & LOCK & U_FILES
   track([track]) -.->|update| ZIKU
 
 ```
@@ -49,6 +50,7 @@ Both the template and user project share the same `.ziku/ziku.jsonc` format — 
 | **`pull`**                | Template user   | Pull latest template updates to local project                    |
 | **`push`**                | Template user   | Push local changes to template (GitHub: PR / local: direct copy) |
 | **`diff`**                | Template user   | Show differences between local and template                      |
+| **`status`**              | Template user   | Show pending pull/push counts and recommend next action          |
 | **`track`**               | Template user   | Add file patterns to the sync whitelist                          |
 
 Template source info (owner/repo or local path) is stored in `.ziku/lock.json`, separate from patterns. When you `pull`, new patterns added to the template's `.ziku/ziku.jsonc` are automatically merged into yours.
