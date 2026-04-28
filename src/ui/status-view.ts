@@ -71,20 +71,23 @@ function renderSection(
 export function recommendationLine(rec: Recommendation): string {
   return match(rec)
     .with({ kind: "inSync" }, () => `${pc.green("✓")} In sync — nothing to do.`)
-    .with(
-      { kind: "pullOnly" },
-      ({ pullCount }) =>
-        `${pc.cyan("→")} Run ${pc.cyan("`ziku pull`")} to apply ${pullCount} incoming change(s).`,
+    .with({ kind: "pullOnly" }, ({ pullCount }) =>
+      pullCount === 0
+        ? // patternsUpdated 由来 (テンプレが新パターン追加、ファイル差分はゼロ)。
+          // 「0 incoming change(s)」と書くと無意味な操作に見えるので別文言にする。
+          `${pc.cyan("→")} Run ${pc.cyan("`ziku pull`")} to sync new template patterns into your config.`
+        : `${pc.cyan("→")} Run ${pc.cyan("`ziku pull`")} to apply ${pullCount} incoming change(s).`,
     )
     .with(
       { kind: "pushOnly" },
       ({ pushCount }) =>
         `${pc.green("→")} Run ${pc.green("`ziku push`")} to send ${pushCount} local change(s) to the template.`,
     )
-    .with(
-      { kind: "pullThenPush" },
-      ({ pullCount, pushCount }) =>
-        `${pc.yellow("→")} Run ${pc.cyan("`ziku pull`")} (${pullCount}), then ${pc.green("`ziku push`")} (${pushCount}).`,
+    .with({ kind: "pullThenPush" }, ({ pullCount, pushCount }) =>
+      pullCount === 0
+        ? // 同上: ファイル差分ゼロでもパターンの取り込みが必要。
+          `${pc.yellow("→")} Run ${pc.cyan("`ziku pull`")} to sync new template patterns, then ${pc.green("`ziku push`")} (${pushCount}).`
+        : `${pc.yellow("→")} Run ${pc.cyan("`ziku pull`")} (${pullCount}), then ${pc.green("`ziku push`")} (${pushCount}).`,
     )
     .with(
       { kind: "resolveConflict" },

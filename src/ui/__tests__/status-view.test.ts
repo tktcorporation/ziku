@@ -88,6 +88,22 @@ describe("status-view", () => {
       expect(line).toContain("2");
     });
 
+    it("pullOnly with pullCount=0 は patterns sync 用文言になる (no-op 防止)", () => {
+      const line = strip(recommendationLine({ kind: "pullOnly", pullCount: 0 }));
+      expect(line).toContain("ziku pull");
+      expect(line).toContain("template patterns");
+      // "0 incoming change(s)" のような無意味な数字を出さない
+      expect(line).not.toMatch(/\b0 incoming/);
+    });
+
+    it("pullThenPush with pullCount=0 は patterns sync 文言 + push 案内", () => {
+      const line = strip(recommendationLine({ kind: "pullThenPush", pullCount: 0, pushCount: 2 }));
+      expect(line).toContain("ziku pull");
+      expect(line).toContain("template patterns");
+      expect(line).toContain("ziku push");
+      expect(line).toContain("2");
+    });
+
     it("continueMerge with conflictCount=0 は stale lock のクリアを案内する", () => {
       const line = strip(recommendationLine({ kind: "continueMerge", conflictCount: 0 }));
       expect(line).toContain("Stale merge state");

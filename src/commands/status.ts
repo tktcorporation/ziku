@@ -87,11 +87,8 @@ export const statusCommand = defineCommand({
       // これをしないと、テンプレに新規パターンが追加されている状況で status が
       // 「in sync」と誤判定し、その後 `pull` で大量の新ファイルが降ってくる現象が起きる
       // (pull.ts と同じマージ処理を走らせて整合させる)。
-      const { mergedInclude, mergedExclude, newInclude } = await mergeTemplatePatterns(
-        templateDir,
-        include,
-        exclude,
-      );
+      const { mergedInclude, mergedExclude, newInclude, patternsUpdated } =
+        await mergeTemplatePatterns(templateDir, include, exclude);
 
       if (newInclude.length > 0) {
         log.info(
@@ -117,7 +114,10 @@ export const statusCommand = defineCommand({
         targetDir,
         patterns: { include: mergedInclude, exclude: mergedExclude },
       });
-      const recommendation = decideRecommendation(buckets, lock);
+      // patternsUpdated を渡すことで、ファイル差分はゼロでも「テンプレが新パターンを追加」
+      // しているケースで pull を強制推奨する (push は raw config.include を読むため、
+      // パターン追加を反映するには pull が必要 — codex review #71)。
+      const recommendation = decideRecommendation(buckets, lock, patternsUpdated);
 
       const model: StatusViewModel = { buckets, untracked, recommendation };
       log.message(renderStatusLong(model));

@@ -319,6 +319,36 @@ describe("statusCommand", () => {
       expect(outroArg).toContain("merge");
     });
 
+    it("patternsUpdated + ファイル差分ゼロのとき outro は pull (push を no-op で誤推奨しない, codex P1 #2)", async () => {
+      const { effect } = mockContext();
+      mockLoadCommandContext.mockReturnValue(effect);
+      mockMergeTemplatePatterns.mockResolvedValueOnce({
+        mergedInclude: [".claude/**", ".new-pattern/**"],
+        mergedExclude: [],
+        newInclude: [".new-pattern/**"],
+        newExclude: [],
+        patternsUpdated: true,
+      });
+      mockAnalyzeSync.mockResolvedValueOnce({
+        // 新パターンに該当するファイルが無い（テンプレも local も空）
+        classification: emptyClassification(),
+        hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
+      });
+
+      // biome-ignore lint/suspicious/noExplicitAny: citty run signature
+      await (statusCommand.run as any)({
+        args: { dir: "/test" },
+        rawArgs: [],
+        cmd: statusCommand,
+      });
+
+      const outroArg = mockOutro.mock.calls.at(-1)?.[0] ?? "";
+      // pull を強制推奨する（in sync や push にならない）
+      expect(outroArg).toContain("ziku pull");
+      expect(outroArg).toContain("template patterns");
+      expect(outroArg).not.toContain("In sync");
+    });
+
     it("テンプレ側で新規 include が追加されているとマージ済みパターンで analyzeSync を呼ぶ (codex P1)", async () => {
       const { effect } = mockContext();
       mockLoadCommandContext.mockReturnValue(effect);
