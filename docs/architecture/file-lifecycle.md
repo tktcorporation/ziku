@@ -30,6 +30,7 @@ graph TB
   pull([pull]) -->|read| ZIKU & LOCK
   pull -->|update| U_FILES & ZIKU & LOCK
   diff([diff]) -.->|read| ZIKU & LOCK & U_FILES
+  status([status]) -.->|read| ZIKU & LOCK & U_FILES
   track([track]) -.->|update| ZIKU
 
 ```
@@ -129,6 +130,17 @@ Show differences between local and template
 | 読み取り | synced files       | local    | ローカルファイルを読み取り         |
 | 読み取り | synced files       | template | テンプレートをダウンロードして比較 |
 
+### `status`
+
+Show pending pull/push counts and recommend next action
+
+| 操作     | ファイル           | 場所     | 詳細                                         |
+| -------- | ------------------ | -------- | -------------------------------------------- |
+| 読み取り | `.ziku/ziku.jsonc` | local    | patterns を取得                              |
+| 読み取り | `.ziku/lock.json`  | local    | baseHashes と pendingMerge を取得            |
+| 読み取り | synced files       | local    | ローカルファイルのハッシュを計算             |
+| 読み取り | synced files       | template | テンプレートをダウンロードしてハッシュを計算 |
+
 ### `track`
 
 Add file patterns to the sync whitelist
@@ -151,6 +163,12 @@ Add file patterns to the sync whitelist
 テンプレートの `ziku.jsonc` に新しいパターンが追加された場合、pull 時にユーザーの `ziku.jsonc` へ自動マージされる。既存パターンはそのまま維持される。
 
 テンプレートで削除されたファイルは `--force` で自動削除、またはユーザーが選択的に削除できる。
+
+### status
+
+`status` は読み取り専用。ファイルや lock.json を一切変更しない。
+
+`status` は git status と同じく常に exit 0 で終了する（観察コマンドの責務）。CI でゲートしたい場合は将来 `pull --dry-run` や `diff --exit-code` 等の専用コマンドに任せる予定。
 
 ### track
 

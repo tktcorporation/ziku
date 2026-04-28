@@ -106,6 +106,20 @@ OPTIONS
   -v, --verbose    Show detailed diff (Default: false)
 ```
 
+## `status`
+
+Show pending pull/push counts and recommend next action
+
+```
+Show pending pull/push counts and recommend next action (status)
+
+USAGE status [OPTIONS] [DIR]
+
+ARGUMENTS
+
+  DIR    Project directory (Default: .)
+```
+
 ## `track`
 
 Add file patterns to the tracking whitelist in ziku.jsonc

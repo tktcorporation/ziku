@@ -11,6 +11,7 @@ Templates go stale the moment you scaffold them. Each project improves upon the 
 - **`init`** — Pull the latest template into your project
 - **`push`** — Push your improvements back to the template
 - **`pull`** — Sync latest template updates with 3-way merge
+- **`status`** — See pending pull/push counts and what to do next
 - **`diff`** — See what's changed
 - **`track`** — Add file patterns to the sync whitelist
 
@@ -121,6 +122,7 @@ graph TB
   pull([pull]) -->|read| ZIKU & LOCK
   pull -->|update| U_FILES & ZIKU & LOCK
   diff([diff]) -.->|read| ZIKU & LOCK & U_FILES
+  status([status]) -.->|read| ZIKU & LOCK & U_FILES
   track([track]) -.->|update| ZIKU
 
 ```
@@ -150,6 +152,7 @@ Both the template and user project share the same `.ziku/ziku.jsonc` format — 
 | **`pull`** | Template user | Pull latest template updates to local project |
 | **`push`** | Template user | Push local changes to template (GitHub: PR / local: direct copy) |
 | **`diff`** | Template user | Show differences between local and template |
+| **`status`** | Template user | Show pending pull/push counts and recommend next action |
 | **`track`** | Template user | Add file patterns to the sync whitelist |
 
 Template source info (owner/repo or local path) is stored in `.ziku/lock.json`, separate from patterns. When you `pull`, new patterns added to the template's `.ziku/ziku.jsonc` are automatically merged into yours.
@@ -262,6 +265,20 @@ ARGUMENTS
 OPTIONS
 
   -v, --verbose    Show detailed diff (Default: false)
+```
+
+### `status`
+
+Show pending pull/push counts and recommend next action
+
+```
+Show pending pull/push counts and recommend next action (status)
+
+USAGE status [OPTIONS] [DIR]
+
+ARGUMENTS
+
+  DIR    Project directory (Default: .)
 ```
 
 ### `track`

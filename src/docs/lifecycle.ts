@@ -30,6 +30,7 @@ import { pullLifecycle } from "../commands/pull";
 import { pushLifecycle } from "../commands/push";
 import { setupLifecycle } from "../commands/setup";
 import { diffLifecycle } from "../commands/diff";
+import { statusLifecycle } from "../commands/status";
 import { trackLifecycle } from "../commands/track";
 
 export const lifecycle: readonly CommandLifecycle[] = [
@@ -38,6 +39,7 @@ export const lifecycle: readonly CommandLifecycle[] = [
   pullLifecycle,
   pushLifecycle,
   diffLifecycle,
+  statusLifecycle,
   trackLifecycle,
 ];
 
@@ -87,6 +89,7 @@ export function generateComponentDiagram(): string {
     "  pull([pull]) -->|read| ZIKU & LOCK",
     "  pull -->|update| U_FILES & ZIKU & LOCK",
     "  diff([diff]) -.->|read| ZIKU & LOCK & U_FILES",
+    "  status([status]) -.->|read| ZIKU & LOCK & U_FILES",
     "  track([track]) -.->|update| ZIKU",
     "",
     "```",
