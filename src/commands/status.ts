@@ -1,5 +1,5 @@
 import { defineCommand } from "citty";
-import { Effect } from "effect";
+import { Effect, Option } from "effect";
 import { resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
@@ -7,8 +7,8 @@ import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 import { intro, log, outro, pc, withSpinner } from "../ui/renderer";
 import { recommendationLine, renderStatusLong, type StatusViewModel } from "../ui/status-view";
-import { LOCK_FILE } from "../utils/lock";
-import { categorizeForStatus, decideRecommendation } from "../utils/status";
+import { LOCK_FILE, loadLock } from "../utils/lock";
+import { categorizeForStatus, decideRecommendation, type Recommendation } from "../utils/status";
 import { analyzeSync } from "../utils/sync-analysis";
 import { mergeTemplatePatterns } from "../utils/template-patterns";
 import { detectUntrackedFiles } from "../utils/untracked";
@@ -64,6 +64,38 @@ export const statusCommand = defineCommand({
     intro("status");
 
     const targetDir = resolve(args.dir);
+
+    // Fast-path: pendingMerge を検出できればテンプレートを fetch せずに案内する。
+    //
+    // 背景: pendingMerge 中の回復コマンド (`ziku pull --continue`) は
+    // `pendingMerge.templateHashes` をそのまま使うため、新たなテンプレ取得は不要。
+    // ところが status が常に `loadCommandContext` 経由で template を fetch していると、
+    // ネットワーク不通やテンプレリポジトリ移動時に status 自体が失敗し、
+    // ユーザーが「`pull --continue` を実行すれば回復できる」と知る術が無くなる
+    // (codex review #71)。
+    //
+    // lock.json はローカルのみで読めるので、ここで先に検査する。
+    // Effect.option で失敗 (lock 未作成等) を None に正規化し、None なら通常の
+    // `loadCommandContext` 経路 (適切なエラーメッセージを出す) に進む。
+    const lockOption = await Effect.runPromise(
+      Effect.tryPromise(() => loadLock(targetDir)).pipe(Effect.option),
+    );
+    if (Option.isSome(lockOption) && lockOption.value.pendingMerge !== undefined) {
+      const conflicts = lockOption.value.pendingMerge.conflicts;
+      const recommendation: Recommendation = {
+        kind: "continueMerge",
+        conflictCount: conflicts.length,
+      };
+      if (conflicts.length > 0) {
+        log.message(
+          `${pc.yellow("⚠")} Merge paused. Conflicts to resolve:\n${conflicts
+            .map((p) => `  ${pc.dim("•")} ${p}`)
+            .join("\n")}`,
+        );
+      }
+      outro(recommendationLine(recommendation));
+      return;
+    }
 
     const ctx = await runCommandEffect(
       loadCommandContext(targetDir).pipe(Effect.mapError(toZikuError)),

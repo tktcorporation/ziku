@@ -40,6 +40,14 @@ vi.mock("../../utils/template-patterns", () => ({
   }),
 }));
 
+// utils/lock をモック (fast-path で読まれる)。
+// デフォルトは ENOENT 相当: status が loadLock に失敗 → fast-path をスルーして
+// 通常の loadCommandContext 経路に進む (= 既存テストの挙動と互換)。
+vi.mock("../../utils/lock", () => ({
+  loadLock: vi.fn().mockRejectedValue(new Error("ENOENT")),
+  LOCK_FILE: ".ziku/lock.json",
+}));
+
 // utils/untracked をモック
 vi.mock("../../utils/untracked", () => ({
   detectUntrackedFiles: vi.fn().mockResolvedValue([]),
@@ -74,12 +82,14 @@ const { loadCommandContext } = await import("../../services/command-context");
 const { analyzeSync } = await import("../../utils/sync-analysis");
 const { mergeTemplatePatterns } = await import("../../utils/template-patterns");
 const { detectUntrackedFiles } = await import("../../utils/untracked");
+const { loadLock } = await import("../../utils/lock");
 const { log, outro } = await import("../../ui/renderer");
 
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
 const mockAnalyzeSync = vi.mocked(analyzeSync);
 const mockMergeTemplatePatterns = vi.mocked(mergeTemplatePatterns);
 const mockDetectUntrackedFiles = vi.mocked(detectUntrackedFiles);
+const mockLoadLock = vi.mocked(loadLock);
 const mockLog = vi.mocked(log);
 const mockOutro = vi.mocked(outro);
 
@@ -134,6 +144,8 @@ describe("statusCommand", () => {
       newExclude: [],
       patternsUpdated: false,
     });
+    // デフォルト: lock 未作成相当 (fast-path をスキップし、通常の loadCommandContext 経路に進む)
+    mockLoadLock.mockRejectedValue(new Error("ENOENT"));
   });
 
   describe("meta", () => {
@@ -157,6 +169,44 @@ describe("statusCommand", () => {
   });
 
   describe("run", () => {
+    it("pendingMerge があれば fast-path で template fetch せずに案内する (codex P2 #6)", async () => {
+      // codex review #71 の最後の P2: pendingMerge 中はネットワーク不通でも
+      // status が "pull --continue" を案内できるべき。lock を local だけで読んで
+      // 早期 return することで、loadCommandContext (= template download) を回避する。
+      mockLoadLock.mockResolvedValueOnce({
+        version: "0.1.0",
+        installedAt: "2024-01-01T00:00:00.000Z",
+        source: { owner: "tktcorporation", repo: ".github" },
+        pendingMerge: {
+          conflicts: [".claude/settings.json", ".mcp.json"],
+          templateHashes: {},
+        },
+      });
+      // loadCommandContext は失敗するように設定 (template 取得不可をシミュレート)
+      const { TemplateError } = await import("../../errors");
+      mockLoadCommandContext.mockReturnValue(
+        Effect.fail(new TemplateError({ message: "network unreachable" })),
+      );
+
+      // biome-ignore lint/suspicious/noExplicitAny: citty run signature
+      await (statusCommand.run as any)({
+        args: { dir: "/test" },
+        rawArgs: [],
+        cmd: statusCommand,
+      });
+
+      // テンプレ取得が呼ばれない (fast-path で先に return)
+      expect(mockLoadCommandContext).not.toHaveBeenCalled();
+      // outro で pull --continue を案内
+      const outroArg = mockOutro.mock.calls.at(-1)?.[0] ?? "";
+      expect(outroArg).toContain("ziku pull --continue");
+      expect(outroArg).toContain("2");
+      // conflict 一覧も表示される
+      const messageCalls = mockLog.message.mock.calls.flat().join("\n");
+      expect(messageCalls).toContain(".claude/settings.json");
+      expect(messageCalls).toContain(".mcp.json");
+    });
+
     it("loadCommandContext 失敗時は ZikuError をスロー", async () => {
       mockLoadCommandContext.mockReturnValue(
         Effect.fail(new FileNotFoundError({ path: ".ziku/ziku.jsonc" })),
