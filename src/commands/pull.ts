@@ -159,13 +159,22 @@ export const pullCommand = defineCommand({
         classification.conflicts.length +
         classification.deletedFiles.length;
 
-      if (totalChanges === 0) {
+      // ファイル差分ゼロでも patternsUpdated なら処理を続行する。
+      // テンプレが新パターンを追加しただけ (該当ファイルなし) のケースでは
+      // ziku.jsonc の上書き + lock.json baseHashes 更新を実行する必要がある。
+      // ここで早期 return すると status の "pull が必要" 推奨が永遠に解消されない
+      // (codex review #71 P1)。
+      if (totalChanges === 0 && !patternsUpdated) {
         log.success("Already up to date");
         outro("No changes needed");
         return;
       }
 
-      logPullSummary(classification);
+      if (totalChanges === 0 && patternsUpdated) {
+        log.info("No file-level changes — applying template pattern additions only");
+      } else {
+        logPullSummary(classification);
+      }
 
       // 自動更新ファイルを適用
       await applyFiles(classification.autoUpdate, templateDir, targetDir);

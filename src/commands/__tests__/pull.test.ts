@@ -125,6 +125,8 @@ const mockSelectDeletedFiles = vi.mocked(selectDeletedFiles);
 const { downloadTemplateToTemp } = await import("../../utils/template");
 const { zikuConfigExists } = await import("../../utils/ziku-config");
 const { loadLock, saveLock } = await import("../../utils/lock");
+const { saveZikuConfig } = await import("../../utils/ziku-config");
+const { loadTemplateConfig } = await import("../../utils/template-config");
 const { hashFiles } = await import("../../utils/hash");
 const { classifyFiles, mergeOneFile, writeFileEnsureDir, downloadBaseForMerge } =
   await import("../../utils/merge");
@@ -141,6 +143,8 @@ const mockMergeOneFile = vi.mocked(mergeOneFile);
 const mockWriteFileEnsureDir = vi.mocked(writeFileEnsureDir);
 const mockDownloadBaseForMerge = vi.mocked(downloadBaseForMerge);
 const mockLog = vi.mocked(log);
+const mockSaveZikuConfig = vi.mocked(saveZikuConfig);
+const mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
 
 const baseZikuConfig = {
   include: [".mcp.json", ".mise.toml"],
@@ -253,6 +257,46 @@ describe("pullCommand", () => {
       });
 
       expect(mockLog.success).toHaveBeenCalledWith("Already up to date");
+    });
+
+    it("ファイル差分ゼロでも patternsUpdated なら ziku.jsonc を上書きし lock を更新する (codex P1 #4)", async () => {
+      // codex review #71 の最後の P1 で指摘されたシナリオの回帰テスト:
+      // テンプレが新パターンを追加しただけ (該当ファイル無し) のときに pull が
+      // 早期 return してしまうと、status が永遠に "pull 必要" を推奨し続ける。
+      vol.fromJSON({ "/test": null });
+
+      // テンプレ側 ziku.jsonc に新規パターンが追加されている状態を再現
+      const effectMod = await import("effect");
+      mockLoadTemplateConfig.mockReturnValueOnce(
+        effectMod.Effect.succeed({
+          $schema: undefined,
+          include: [".root/**", ".github/**", ".new-pattern/**"],
+          exclude: undefined,
+        }),
+      );
+      // ファイル差分はゼロ
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // 早期 return しない (Already up to date は出ない)
+      expect(mockLog.success).not.toHaveBeenCalledWith("Already up to date");
+      // ziku.jsonc が新パターンで上書きされる
+      expect(mockSaveZikuConfig).toHaveBeenCalled();
+      // lock も更新される (新しい baseHashes)
+      expect(mockSaveLock).toHaveBeenCalled();
     });
 
     it("自動更新ファイルをコピー", async () => {
