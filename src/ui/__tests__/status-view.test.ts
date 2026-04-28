@@ -158,6 +158,34 @@ describe("status-view", () => {
       expect(out).not.toContain("Tracked files are in sync");
     });
 
+    it("conflict セクションのヒントは pendingMerge 中だと 'pull --continue' に切り替わる (codex P2)", () => {
+      const conflictEntry = entry("c.txt", "conflict", "conflicts");
+      const out = strip(
+        renderStatusLong(
+          model(
+            { buckets: buckets({ conflict: [conflictEntry] }) },
+            { kind: "continueMerge", conflictCount: 1 },
+          ),
+        ),
+      );
+      expect(out).toContain("ziku pull --continue");
+      expect(out).not.toContain("start a 3-way merge");
+    });
+
+    it("conflict セクションのヒントは pendingMerge 無しなら従来の '3-way merge を始める' のまま", () => {
+      const conflictEntry = entry("c.txt", "conflict", "conflicts");
+      const out = strip(
+        renderStatusLong(
+          model(
+            { buckets: buckets({ conflict: [conflictEntry] }) },
+            { kind: "resolveConflict", conflictCount: 1, pullCount: 0, pushCount: 0 },
+          ),
+        ),
+      );
+      expect(out).toContain("start a 3-way merge");
+      expect(out).not.toContain("--continue");
+    });
+
     it("空でないバケツがある場合は in sync メッセージを出さない", () => {
       const out = strip(
         renderStatusLong(

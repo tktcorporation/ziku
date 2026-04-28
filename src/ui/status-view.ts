@@ -130,15 +130,25 @@ export function renderStatusLong(model: StatusViewModel): string {
           "",
         ];
 
-  // pendingMerge 中（stale lock 含む）はバケツが全部空でも `pull --continue` が
-  // 必要なため、"in sync" バナーを出すと outro の継続指示と矛盾する。
-  // recommendation 側で kind === "continueMerge" を保持しているのでそれを参照する。
+  // isClean: 「全バケツ空 + untracked なし + continueMerge でない」の複合条件。
+  //
+  // continueMerge の除外が必要な理由:
+  //   pendingMerge が lock に残っている間は (stale-lock 含め) `pull --continue` が
+  //   必要で、outro の指示と矛盾するため "in sync" バナーを抑制する。
   const isClean =
     buckets.pull.length === 0 &&
     buckets.push.length === 0 &&
     buckets.conflict.length === 0 &&
     untrackedFiles.length === 0 &&
     recommendation.kind !== "continueMerge";
+
+  // conflict section のアクションヒントは recommendation 種別で出し分ける。
+  // pendingMerge 中の場合は新規 merge ではなく `pull --continue` を案内する
+  // (codex review #71 P2 で指摘された矛盾を防ぐ)。
+  const conflictHint =
+    recommendation.kind === "continueMerge"
+      ? `(resolve and run "ziku pull --continue")`
+      : `(use "ziku pull" to start a 3-way merge)`;
   const cleanLines = isClean
     ? [
         `  ${pc.green("✓")} Tracked files are in sync (${buckets.inSyncCount} file(s) match template).`,
@@ -158,12 +168,7 @@ export function renderStatusLong(model: StatusViewModel): string {
       `(use "ziku push" to send)`,
       buckets.push,
     ),
-    ...renderSection(
-      "⚠",
-      "Conflict — both sides changed",
-      `(use "ziku pull" to start a 3-way merge)`,
-      buckets.conflict,
-    ),
+    ...renderSection("⚠", "Conflict — both sides changed", conflictHint, buckets.conflict),
     ...untrackedLines,
     ...cleanLines,
   ].join("\n");

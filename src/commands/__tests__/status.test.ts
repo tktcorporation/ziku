@@ -29,6 +29,17 @@ vi.mock("../../utils/sync-analysis", () => ({
   analyzeSync: vi.fn(),
 }));
 
+// utils/template-patterns をモック (デフォルトはマージ無し = テンプレ側に追加パターン無し)
+vi.mock("../../utils/template-patterns", () => ({
+  mergeTemplatePatterns: vi.fn().mockResolvedValue({
+    mergedInclude: [".claude/**"],
+    mergedExclude: [],
+    newInclude: [],
+    newExclude: [],
+    patternsUpdated: false,
+  }),
+}));
+
 // utils/untracked をモック
 vi.mock("../../utils/untracked", () => ({
   detectUntrackedFiles: vi.fn().mockResolvedValue([]),
@@ -50,6 +61,10 @@ vi.mock("../../ui/renderer", () => ({
   pc: {
     cyan: vi.fn((s: string) => s),
     dim: vi.fn((s: string) => s),
+    green: vi.fn((s: string) => s),
+    red: vi.fn((s: string) => s),
+    yellow: vi.fn((s: string) => s),
+    bold: vi.fn((s: string) => s),
   },
 }));
 
@@ -57,11 +72,13 @@ vi.mock("../../ui/renderer", () => ({
 const { statusCommand } = await import("../status");
 const { loadCommandContext } = await import("../../services/command-context");
 const { analyzeSync } = await import("../../utils/sync-analysis");
+const { mergeTemplatePatterns } = await import("../../utils/template-patterns");
 const { detectUntrackedFiles } = await import("../../utils/untracked");
 const { log, outro } = await import("../../ui/renderer");
 
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
 const mockAnalyzeSync = vi.mocked(analyzeSync);
+const mockMergeTemplatePatterns = vi.mocked(mergeTemplatePatterns);
 const mockDetectUntrackedFiles = vi.mocked(detectUntrackedFiles);
 const mockLog = vi.mocked(log);
 const mockOutro = vi.mocked(outro);
@@ -109,6 +126,14 @@ describe("statusCommand", () => {
   beforeEach(() => {
     vol.reset();
     vi.clearAllMocks();
+    // デフォルト: テンプレ側にパターン追加なし (P1 fix の no-op パス)
+    mockMergeTemplatePatterns.mockResolvedValue({
+      mergedInclude: [".claude/**"],
+      mergedExclude: [],
+      newInclude: [],
+      newExclude: [],
+      patternsUpdated: false,
+    });
   });
 
   describe("meta", () => {
@@ -226,7 +251,12 @@ describe("statusCommand", () => {
 
     it("pendingMerge が立っている場合は outro に 'pull --continue'", async () => {
       const { effect } = mockContext({
-        pendingMerge: { conflicts: ["c.txt"], templateHashes: {} },
+        pendingMerge: {
+          conflicts: ["c.txt"],
+          // templateHashes の中身は decideRecommendation の分岐に影響しないため空で十分。
+          // pendingMerge フラグの存在自体が continueMerge を発火させる。
+          templateHashes: {},
+        },
       });
       mockLoadCommandContext.mockReturnValue(effect);
       mockAnalyzeSync.mockResolvedValueOnce({
@@ -243,6 +273,83 @@ describe("statusCommand", () => {
 
       const outroArg = mockOutro.mock.calls.at(-1)?.[0] ?? "";
       expect(outroArg).toContain("ziku pull --continue");
+    });
+
+    it("pull + push 両方 pending のとき outro に 'ziku pull' と 'ziku push' を含む (pullThenPush パイプライン)", async () => {
+      const { effect } = mockContext();
+      mockLoadCommandContext.mockReturnValue(effect);
+      mockAnalyzeSync.mockResolvedValueOnce({
+        classification: {
+          ...emptyClassification(),
+          autoUpdate: ["a.txt"],
+          localOnly: ["b.txt"],
+        },
+        hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
+      });
+
+      // biome-ignore lint/suspicious/noExplicitAny: citty run signature
+      await (statusCommand.run as any)({
+        args: { dir: "/test" },
+        rawArgs: [],
+        cmd: statusCommand,
+      });
+
+      const outroArg = mockOutro.mock.calls.at(-1)?.[0] ?? "";
+      expect(outroArg).toContain("ziku pull");
+      expect(outroArg).toContain("ziku push");
+    });
+
+    it("conflict あり (pendingMerge なし) のとき outro に merge 開始の案内", async () => {
+      const { effect } = mockContext();
+      mockLoadCommandContext.mockReturnValue(effect);
+      mockAnalyzeSync.mockResolvedValueOnce({
+        classification: { ...emptyClassification(), conflicts: ["c.txt"] },
+        hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
+      });
+
+      // biome-ignore lint/suspicious/noExplicitAny: citty run signature
+      await (statusCommand.run as any)({
+        args: { dir: "/test" },
+        rawArgs: [],
+        cmd: statusCommand,
+      });
+
+      const outroArg = mockOutro.mock.calls.at(-1)?.[0] ?? "";
+      expect(outroArg).toContain("ziku pull");
+      expect(outroArg).toContain("merge");
+    });
+
+    it("テンプレ側で新規 include が追加されているとマージ済みパターンで analyzeSync を呼ぶ (codex P1)", async () => {
+      const { effect } = mockContext();
+      mockLoadCommandContext.mockReturnValue(effect);
+      mockMergeTemplatePatterns.mockResolvedValueOnce({
+        mergedInclude: [".claude/**", ".new-feature/**"],
+        mergedExclude: [],
+        newInclude: [".new-feature/**"],
+        newExclude: [],
+        patternsUpdated: true,
+      });
+      mockAnalyzeSync.mockResolvedValueOnce({
+        classification: emptyClassification(),
+        hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
+      });
+
+      // biome-ignore lint/suspicious/noExplicitAny: citty run signature
+      await (statusCommand.run as any)({
+        args: { dir: "/test" },
+        rawArgs: [],
+        cmd: statusCommand,
+      });
+
+      // analyzeSync がマージ済み include で呼ばれることを確認 (P1 の本質)
+      expect(mockAnalyzeSync).toHaveBeenCalledWith(
+        expect.objectContaining({
+          include: [".claude/**", ".new-feature/**"],
+        }),
+      );
+      // ユーザー向けの新パターン通知
+      const infoCalls = mockLog.info.mock.calls.flat().join(" ");
+      expect(infoCalls).toContain("Template added 1 new pattern");
     });
 
     it("untracked がある場合は detectUntrackedFiles の結果が描画される", async () => {

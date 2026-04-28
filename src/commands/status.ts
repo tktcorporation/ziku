@@ -10,6 +10,7 @@ import { recommendationLine, renderStatusLong, type StatusViewModel } from "../u
 import { LOCK_FILE } from "../utils/lock";
 import { categorizeForStatus, decideRecommendation } from "../utils/status";
 import { analyzeSync } from "../utils/sync-analysis";
+import { mergeTemplatePatterns } from "../utils/template-patterns";
 import { detectUntrackedFiles } from "../utils/untracked";
 import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
 
@@ -82,20 +83,39 @@ export const statusCommand = defineCommand({
         return;
       }
 
+      // テンプレ側で追加された include/exclude パターンを取り込んだ後でハッシュ比較する。
+      // これをしないと、テンプレに新規パターンが追加されている状況で status が
+      // 「in sync」と誤判定し、その後 `pull` で大量の新ファイルが降ってくる現象が起きる
+      // (pull.ts と同じマージ処理を走らせて整合させる)。
+      const { mergedInclude, mergedExclude, newInclude } = await mergeTemplatePatterns(
+        templateDir,
+        include,
+        exclude,
+      );
+
+      if (newInclude.length > 0) {
+        log.info(
+          `Template added ${newInclude.length} new pattern(s) — files matching these will appear as 'new file:' below:`,
+        );
+        for (const p of newInclude) {
+          log.message(`  ${pc.green("+")} ${p}`);
+        }
+      }
+
       const { classification } = await withSpinner("Comparing local with template...", () =>
         analyzeSync({
           targetDir,
           templateDir,
           baseHashes: lock.baseHashes,
-          include,
-          exclude,
+          include: mergedInclude,
+          exclude: mergedExclude,
         }),
       );
 
       const buckets = categorizeForStatus(classification);
       const untracked = await detectUntrackedFiles({
         targetDir,
-        patterns: { include, exclude },
+        patterns: { include: mergedInclude, exclude: mergedExclude },
       });
       const recommendation = decideRecommendation(buckets, lock);
 
