@@ -48,6 +48,13 @@ vi.mock("../../utils/lock", () => ({
   LOCK_FILE: ".ziku/lock.json",
 }));
 
+// utils/ziku-config をモック (fast-path の整合性チェックで呼ばれる)。
+// デフォルトは false: config 未作成相当 → fast-path をスルーして既存テストと互換。
+vi.mock("../../utils/ziku-config", () => ({
+  zikuConfigExists: vi.fn().mockReturnValue(false),
+  ZIKU_CONFIG_FILE: ".ziku/ziku.jsonc",
+}));
+
 // utils/untracked をモック
 vi.mock("../../utils/untracked", () => ({
   detectUntrackedFiles: vi.fn().mockResolvedValue([]),
@@ -83,6 +90,7 @@ const { analyzeSync } = await import("../../utils/sync-analysis");
 const { mergeTemplatePatterns } = await import("../../utils/template-patterns");
 const { detectUntrackedFiles } = await import("../../utils/untracked");
 const { loadLock } = await import("../../utils/lock");
+const { zikuConfigExists } = await import("../../utils/ziku-config");
 const { log, outro } = await import("../../ui/renderer");
 
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
@@ -90,6 +98,7 @@ const mockAnalyzeSync = vi.mocked(analyzeSync);
 const mockMergeTemplatePatterns = vi.mocked(mergeTemplatePatterns);
 const mockDetectUntrackedFiles = vi.mocked(detectUntrackedFiles);
 const mockLoadLock = vi.mocked(loadLock);
+const mockZikuConfigExists = vi.mocked(zikuConfigExists);
 const mockLog = vi.mocked(log);
 const mockOutro = vi.mocked(outro);
 
@@ -146,6 +155,8 @@ describe("statusCommand", () => {
     });
     // デフォルト: lock 未作成相当 (fast-path をスキップし、通常の loadCommandContext 経路に進む)
     mockLoadLock.mockRejectedValue(new Error("ENOENT"));
+    // デフォルト: config 未作成相当 (fast-path をスキップ)
+    mockZikuConfigExists.mockReturnValue(false);
   });
 
   describe("meta", () => {
@@ -173,6 +184,7 @@ describe("statusCommand", () => {
       // codex review #71 の最後の P2: pendingMerge 中はネットワーク不通でも
       // status が "pull --continue" を案内できるべき。lock を local だけで読んで
       // 早期 return することで、loadCommandContext (= template download) を回避する。
+      mockZikuConfigExists.mockReturnValue(true);
       mockLoadLock.mockResolvedValueOnce({
         version: "0.1.0",
         installedAt: "2024-01-01T00:00:00.000Z",
@@ -205,6 +217,42 @@ describe("statusCommand", () => {
       const messageCalls = mockLog.message.mock.calls.flat().join("\n");
       expect(messageCalls).toContain(".claude/settings.json");
       expect(messageCalls).toContain(".mcp.json");
+    });
+
+    it("ziku.jsonc が無い場合は fast-path をスキップして通常エラー経路に流す (codex P2 #7)", async () => {
+      // codex review #71 のさらなる P2: lock.json は残っているが ziku.jsonc が
+      // 削除/破損している半壊状態で fast-path に入ると、
+      // "pull --continue を実行して" と案内するが pull --continue は zikuConfigExists で
+      // "Not initialized" を出して失敗する。動かない命令を出さないために、
+      // fast-path 内でも config 存在を前提条件として確認する。
+      mockZikuConfigExists.mockReturnValue(false);
+      mockLoadLock.mockResolvedValueOnce({
+        version: "0.1.0",
+        installedAt: "2024-01-01T00:00:00.000Z",
+        source: { owner: "tktcorporation", repo: ".github" },
+        pendingMerge: {
+          conflicts: ["foo.txt"],
+          templateHashes: {},
+        },
+      });
+      mockLoadCommandContext.mockReturnValue(
+        Effect.fail(new FileNotFoundError({ path: ".ziku/ziku.jsonc" })),
+      );
+
+      await expect(
+        // biome-ignore lint/suspicious/noExplicitAny: citty run signature
+        (statusCommand.run as any)({
+          args: { dir: "/test" },
+          rawArgs: [],
+          cmd: statusCommand,
+        }),
+      ).rejects.toThrow(ZikuError);
+
+      // fast-path を踏まないので outro での "pull --continue" 案内は出ない
+      const outroCalls = mockOutro.mock.calls.flat().join("\n");
+      expect(outroCalls).not.toContain("ziku pull --continue");
+      // 通常経路で loadCommandContext が呼ばれてエラーが伝播
+      expect(mockLoadCommandContext).toHaveBeenCalled();
     });
 
     it("loadCommandContext 失敗時は ZikuError をスロー", async () => {

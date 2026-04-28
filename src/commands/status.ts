@@ -12,7 +12,7 @@ import { categorizeForStatus, decideRecommendation, type Recommendation } from "
 import { analyzeSync } from "../utils/sync-analysis";
 import { mergeTemplatePatterns } from "../utils/template-patterns";
 import { detectUntrackedFiles } from "../utils/untracked";
-import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
+import { ZIKU_CONFIG_FILE, zikuConfigExists } from "../utils/ziku-config";
 
 /**
  * status コマンドのファイル操作メタデータ。
@@ -74,27 +74,35 @@ export const statusCommand = defineCommand({
     // ユーザーが「`pull --continue` を実行すれば回復できる」と知る術が無くなる
     // (codex review #71)。
     //
-    // lock.json はローカルのみで読めるので、ここで先に検査する。
-    // Effect.option で失敗 (lock 未作成等) を None に正規化し、None なら通常の
-    // `loadCommandContext` 経路 (適切なエラーメッセージを出す) に進む。
-    const lockOption = await Effect.runPromise(
-      Effect.tryPromise(() => loadLock(targetDir)).pipe(Effect.option),
-    );
-    if (Option.isSome(lockOption) && lockOption.value.pendingMerge !== undefined) {
-      const conflicts = lockOption.value.pendingMerge.conflicts;
-      const recommendation: Recommendation = {
-        kind: "continueMerge",
-        conflictCount: conflicts.length,
-      };
-      if (conflicts.length > 0) {
-        log.message(
-          `${pc.yellow("⚠")} Merge paused. Conflicts to resolve:\n${conflicts
-            .map((p) => `  ${pc.dim("•")} ${p}`)
-            .join("\n")}`,
-        );
+    // 整合性条件 (codex review #71 follow-up):
+    //   `pull --continue` 自身は `zikuConfigExists` を前提に動く。fast-path で
+    //   この前提を満たさない (config 削除済み等) のに `pull --continue` を案内すると、
+    //   ユーザーが従っても "Not initialized" で失敗するので「動かない命令」を
+    //   出すことになる。zikuConfigExists を先に確認し、不成立なら通常の
+    //   `loadCommandContext` 経路に進ませて適切なエラーを出す。
+    //
+    // lock.json はローカルのみで読めるので、Effect.option で失敗を None に正規化する。
+    // None / config 不在のいずれも fast-path をスキップする。
+    if (zikuConfigExists(targetDir)) {
+      const lockOption = await Effect.runPromise(
+        Effect.tryPromise(() => loadLock(targetDir)).pipe(Effect.option),
+      );
+      if (Option.isSome(lockOption) && lockOption.value.pendingMerge !== undefined) {
+        const conflicts = lockOption.value.pendingMerge.conflicts;
+        const recommendation: Recommendation = {
+          kind: "continueMerge",
+          conflictCount: conflicts.length,
+        };
+        if (conflicts.length > 0) {
+          log.message(
+            `${pc.yellow("⚠")} Merge paused. Conflicts to resolve:\n${conflicts
+              .map((p) => `  ${pc.dim("•")} ${p}`)
+              .join("\n")}`,
+          );
+        }
+        outro(recommendationLine(recommendation));
+        return;
       }
-      outro(recommendationLine(recommendation));
-      return;
     }
 
     const ctx = await runCommandEffect(
