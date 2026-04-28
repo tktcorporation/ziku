@@ -143,6 +143,21 @@ describe("status-view", () => {
       expect(out).toContain(".claude/rules/draft.md");
     });
 
+    it("pendingMerge 中（continueMerge）はバケツが空でも in sync バナーを出さない", () => {
+      // バグ再現: bucket/untracked が全部空でも pendingMerge があれば
+      // outro で `pull --continue` を案内するため、"Tracked files are in sync"
+      // と矛盾するメッセージを同時に出してはいけない (codex review #71 より)
+      const out = strip(
+        renderStatusLong(
+          model(
+            { buckets: buckets({ inSyncCount: 5 }) },
+            { kind: "continueMerge", conflictCount: 0 },
+          ),
+        ),
+      );
+      expect(out).not.toContain("Tracked files are in sync");
+    });
+
     it("空でないバケツがある場合は in sync メッセージを出さない", () => {
       const out = strip(
         renderStatusLong(

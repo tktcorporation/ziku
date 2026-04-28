@@ -117,7 +117,7 @@ export interface StatusViewModel {
  * 別途レンダリングし、@clack/prompts のフッタとして強調表示する設計のため。
  */
 export function renderStatusLong(model: StatusViewModel): string {
-  const { buckets, untracked } = model;
+  const { buckets, untracked, recommendation } = model;
   const untrackedFiles = untracked.flatMap((g) => g.files);
 
   const untrackedLines: string[] =
@@ -130,11 +130,15 @@ export function renderStatusLong(model: StatusViewModel): string {
           "",
         ];
 
+  // pendingMerge 中（stale lock 含む）はバケツが全部空でも `pull --continue` が
+  // 必要なため、"in sync" バナーを出すと outro の継続指示と矛盾する。
+  // recommendation 側で kind === "continueMerge" を保持しているのでそれを参照する。
   const isClean =
     buckets.pull.length === 0 &&
     buckets.push.length === 0 &&
     buckets.conflict.length === 0 &&
-    untrackedFiles.length === 0;
+    untrackedFiles.length === 0 &&
+    recommendation.kind !== "continueMerge";
   const cleanLines = isClean
     ? [
         `  ${pc.green("✓")} Tracked files are in sync (${buckets.inSyncCount} file(s) match template).`,
