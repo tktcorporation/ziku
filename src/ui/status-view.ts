@@ -133,17 +133,19 @@ export function renderStatusLong(model: StatusViewModel): string {
           "",
         ];
 
-  // isClean: 「全バケツ空 + untracked なし + continueMerge でない」の複合条件。
+  // isClean は decideRecommendation の結論をそのまま尊重する SSOT 設計。
   //
-  // continueMerge の除外が必要な理由:
-  //   pendingMerge が lock に残っている間は (stale-lock 含め) `pull --continue` が
-  //   必要で、outro の指示と矛盾するため "in sync" バナーを抑制する。
-  const isClean =
-    buckets.pull.length === 0 &&
-    buckets.push.length === 0 &&
-    buckets.conflict.length === 0 &&
-    untrackedFiles.length === 0 &&
-    recommendation.kind !== "continueMerge";
+  // recommendation.kind === "inSync" はすでに「全バケツ空 + pendingMerge 無し +
+  // patternsUpdated 無し」を意味する (decideRecommendation 側で集約済み)。
+  // ここで bucket や untracked を再評価すると、新しい pull-pending 信号
+  // (例: patternsUpdated, pendingMerge) を decideRecommendation に追加するたびに
+  // この条件式も同期更新する必要が出てしまい、矛盾の温床になる
+  // (codex review #71 — pendingMerge 中の "in sync" 矛盾、pattern-only pull の
+  //  "in sync" 矛盾、いずれも本質はビューが SSOT を信用していなかったこと)。
+  //
+  // untracked は「Tracked files are in sync」というメッセージとは独立。
+  // 「追跡対象は in sync、それ以外は別途」という直交した情報なので、両方表示してよい。
+  const isClean = recommendation.kind === "inSync";
 
   // conflict section のアクションヒントは recommendation 種別で出し分ける。
   // pendingMerge 中の場合は新規 merge ではなく `pull --continue` を案内する

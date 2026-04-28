@@ -202,12 +202,66 @@ describe("status-view", () => {
       expect(out).not.toContain("--continue");
     });
 
-    it("空でないバケツがある場合は in sync メッセージを出さない", () => {
+    it("pattern-only pull (recommendation=pullOnly with pullCount=0) のとき in sync バナーを出さない (codex P2 #2)", () => {
+      // codex review #71 のさらなる P2: テンプレが新パターンを追加して
+      // ファイル差分はゼロ。decideRecommendation は pullOnly with pullCount=0 を返すが、
+      // 旧 isClean は「全バケツ空 + untracked 空 + continueMerge でない」なので true になり、
+      // 「Tracked files are in sync」を出してしまっていた。
+      // recommendation.kind === "inSync" を SSOT として参照すれば矛盾しない。
       const out = strip(
         renderStatusLong(
-          model({
-            buckets: buckets({ pull: [entry("a.txt", "pull", "autoUpdate")] }),
-          }),
+          model({ buckets: buckets({ inSyncCount: 5 }) }, { kind: "pullOnly", pullCount: 0 }),
+        ),
+      );
+      expect(out).not.toContain("Tracked files are in sync");
+    });
+
+    it("pattern-only pull + push (pullThenPush with pullCount=0) でも in sync バナーを出さない", () => {
+      const out = strip(
+        renderStatusLong(
+          model(
+            {
+              buckets: buckets({
+                push: [entry("local.txt", "push", "localOnly")],
+                inSyncCount: 5,
+              }),
+            },
+            { kind: "pullThenPush", pullCount: 0, pushCount: 1 },
+          ),
+        ),
+      );
+      expect(out).not.toContain("Tracked files are in sync");
+    });
+
+    it("untracked のみ存在しても recommendation=inSync なら in sync バナーは出る (新仕様)", () => {
+      // isClean を recommendation.kind === "inSync" に統一したことに伴う仕様変更:
+      // 旧仕様は untracked があれば banner を抑制していたが、
+      // 「Tracked files are in sync」と untracked セクションは直交する情報なので
+      // 両方表示する方が正確 (untracked は whitelist 外であって追跡対象外)。
+      const out = strip(
+        renderStatusLong(
+          model(
+            {
+              buckets: buckets({ inSyncCount: 3 }),
+              untracked: [{ files: [{ path: "draft.md" }] }],
+            },
+            { kind: "inSync" },
+          ),
+        ),
+      );
+      expect(out).toContain("Tracked files are in sync");
+      expect(out).toContain("Untracked");
+    });
+
+    it("recommendation が inSync 以外（実差分あり）なら in sync メッセージを出さない", () => {
+      // isClean を recommendation.kind === "inSync" にした以降の正しい組み合わせ:
+      // 「pull バケツに実体あり = recommendation=pullOnly」が現実の状態。
+      const out = strip(
+        renderStatusLong(
+          model(
+            { buckets: buckets({ pull: [entry("a.txt", "pull", "autoUpdate")] }) },
+            { kind: "pullOnly", pullCount: 1 },
+          ),
         ),
       );
       expect(out).not.toContain("Tracked files are in sync");
