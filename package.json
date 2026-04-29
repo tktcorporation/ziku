@@ -97,6 +97,11 @@
     "vitepress": "^1.6.4",
     "vitest": "^4.1.4"
   },
+  "overrides": {
+    "esbuild": "^0.25.0",
+    "postcss": "^8.5.10",
+    "vite": "^6.4.2"
+  },
   "engines": {
     "node": ">=20.0.0"
   },
@@ -104,6 +109,11 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "@ast-grep/cli"
-    ]
+    ],
+    "overrides": {
+      "vite": "^6.4.2",
+      "esbuild": "^0.25.0",
+      "postcss": "^8.5.10"
+    }
   }
 }
