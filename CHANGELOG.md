@@ -1,5 +1,38 @@
 # @tktco/ziku
 
+## 1.3.0
+
+### Minor Changes
+
+- [#71](https://github.com/tktcorporation/ziku/pull/71) [`c5eb61f`](https://github.com/tktcorporation/ziku/commit/c5eb61f27edca1fb8f09914f5f4a32286bb58d99) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Add `ziku status` command to summarize pending pull/push and recommend the next action.
+
+  `status` performs a 3-way comparison between the local files, `lock.json`'s `baseHashes`, and the current template, then groups changes into three buckets and proposes a single next action:
+
+  - ⬇ **Pull pending** — template has changes (`autoUpdate`, `newFiles`, `deletedFiles`)
+  - ⬆ **Push pending** — local has changes (`localOnly`, `deletedLocally`)
+  - ⚠ **Conflict** — both sides changed (`conflicts`)
+
+  The recommendation engine considers `lock.pendingMerge` first (suggests `ziku pull --continue`), then conflicts (`ziku pull` for 3-way merge), then the pull/push split (`ziku pull` first if both are non-empty), so the user can sync without thinking about ordering.
+
+  `status` is purely observational, mirroring `git status` — no flags beyond the directory argument and always exits 0. CI gating ("require sync before merge") will be addressed by future commands such as `pull --dry-run` or `diff --exit-code` rather than overloading `status`.
+
+  Internally, the shared `analyzeSync` helper consolidates the `hashFiles ×2 → classifyFiles` pattern that `pull` and `push` already use, so the three commands now share a single source of truth for 3-way comparison.
+
+### Patch Changes
+
+- [#69](https://github.com/tktcorporation/ziku/pull/69) [`a09d079`](https://github.com/tktcorporation/ziku/commit/a09d0799d39463c543f3cce7ce99514e3d0ea971) Thanks [@tktcorporation](https://github.com/tktcorporation)! - Fix false "template repository not found" errors caused by GitHub API rate limiting, and tighten the check into a typed discriminated union so each outcome is handled explicitly.
+
+  `checkRepoExists` previously returned `Promise<boolean>`, which conflated "the repo is confirmed missing (404)" with "we couldn't tell" (403 rate-limit, 5xx, network error). When the anonymous 60 req/h quota was exhausted, GitHub returns `403 + x-ratelimit-remaining: 0`, and `ziku init` mistook that for a missing repo.
+
+  The probe now returns a tagged `RepoExistence`:
+
+  - `Exists` — HEAD returned 2xx
+  - `NotFound` — explicit 404
+  - `RateLimited` — 403 with `x-ratelimit-remaining: 0`, including the reset time and whether the call was authenticated, so users get an actionable hint (set `GITHUB_TOKEN` / wait for reset)
+  - `Unknown` — 5xx, unexpected 403, or network error; the init/setup flow logs a warning and keeps going so the download step surfaces the real error if any
+
+  Callers in `init` / `setup` now use `match().exhaustive()` to handle every case explicitly, so future RepoExistence variants will surface as type errors. The probe also sends `Authorization: Bearer <token>` when a GitHub token is available (via `GITHUB_TOKEN`, `GH_TOKEN`, or `gh auth token`), which raises the per-host quota from 60 req/h to 5000 req/h.
+
 ## 1.2.0
 
 ### Minor Changes
