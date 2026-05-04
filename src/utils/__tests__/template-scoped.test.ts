@@ -100,6 +100,29 @@ describe("acquireTempTemplate (Scope ベースのリソース管理)", () => {
     expect(_getTrackedCountForTest()).toBe(0);
   });
 
+  it("downloadTemplateToTemp: download 失敗時に tracker から登録解除される (codex review #74)", async () => {
+    const { downloadTemplateToTemp } = await import("../template");
+    vi.mocked(giget.downloadTemplate).mockRejectedValueOnce(new Error("network"));
+
+    await expect(downloadTemplateToTemp("/work", "gh:foo/bar")).rejects.toThrow("network");
+    // 失敗パスでも tracker から外れていること
+    expect(_getTrackedCountForTest()).toBe(0);
+  });
+
+  it("fetchTemplates: download 失敗時に tracker から登録解除される (codex review #74)", async () => {
+    const { fetchTemplates } = await import("../template");
+    vi.mocked(giget.downloadTemplate).mockRejectedValueOnce(new Error("network"));
+
+    await expect(
+      fetchTemplates({
+        targetDir: "/work",
+        overwriteStrategy: "skip",
+        patterns: { include: [], exclude: [] },
+      }),
+    ).rejects.toThrow("network");
+    expect(_getTrackedCountForTest()).toBe(0);
+  });
+
   it("label を付けると別ディレクトリに展開される", async () => {
     const program = Effect.gen(function* () {
       const a = yield* acquireTempTemplate("/work", "gh:foo/bar");
