@@ -8,14 +8,14 @@
  * isLocalSource/isGitHubSource の分岐もここで吸収し、
  * resolveBaseRef で透過的にベースリビジョンを解決する。
  */
-import { Cause, Context, Effect, Exit, Layer, Option } from "effect";
-import { resolve } from "pathe";
+import { Cause, Context, Effect, Exit, Layer, Option, Scope } from "effect";
 import type { ZikuConfig, LockState, TemplateSource } from "../modules/schemas";
-import { isLocalSource, isGitHubSource } from "../modules/schemas";
-import { FileNotFoundError, ParseError, TemplateError, ZikuError } from "../errors";
+import { isGitHubSource } from "../modules/schemas";
+import { FileNotFoundError, ParseError, ZikuError } from "../errors";
+import type { TemplateError } from "../errors";
 import { loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
 import { loadLock } from "../utils/lock";
-import { downloadTemplateToTemp, buildTemplateSource } from "../utils/template";
+import { resolveTemplateDirScoped } from "../utils/template-resolve";
 import { resolveLatestCommitSha } from "../utils/github";
 
 // ─── Service 定義 ───
@@ -27,10 +27,16 @@ export interface CommandContextShape {
   readonly lock: LockState;
   /** テンプレートの取得元（lock.source のエイリアス） */
   readonly source: TemplateSource;
-  /** 解決済みテンプレ���トディレクトリのパス */
+  /** 解決済みテンプレートディレクトリのパス */
   readonly templateDir: string;
-  /** テンプレートの一時ディレクトリを削除する関数 */
-  readonly cleanup: () => void;
+  /**
+   * テンプレートの一時ディレクトリを削除する関数。
+   *
+   * 内部実装は Effect.Scope の close。Scope に登録された全 finalizer
+   * (acquireTempTemplate の addFinalizer 等) が走るため、
+   * 削除漏れが構造的に防がれる。
+   */
+  readonly cleanup: () => Promise<void>;
   /**
    * テンプレートの最新コミット SHA を解決する。
    *
@@ -101,7 +107,21 @@ export function loadCommandContext(
     });
 
     const source = lock.source;
-    const { templateDir, cleanup } = yield* resolveTemplateDir(source, targetDir);
+
+    // テンプレート取得を Scope に紐づける。
+    //
+    // 設計: Scope を手動で作り、resolveTemplateDirScoped を Scope.extend で接続する。
+    // cleanup は Scope.close を呼ぶラッパー。Scope に登録された全 finalizer
+    // (acquireTempTemplate の addFinalizer など) が必ず実行される。
+    //
+    // 呼び出し側 (各コマンド) は従来どおり withFinally(work, cleanup) で使える。
+    // cleanup を呼び忘れた場合でも、登録された tempDir は temp-tracker の
+    // process.on('exit') で同期削除される (二重防衛)。
+    const scope = yield* Scope.make();
+    const templateDir = yield* resolveTemplateDirScoped(source, targetDir).pipe(
+      Scope.extend(scope),
+    );
+    const cleanup = (): Promise<void> => Effect.runPromise(Scope.close(scope, Exit.void));
 
     // resolveBaseRef: ソース種別の分岐を吸収
     // resolveLatestCommitSha は Promise<string | undefined> を返すため、
@@ -114,30 +134,6 @@ export function loadCommandContext(
       : Effect.succeed(Option.none<string>());
 
     return { config, lock, source, templateDir, cleanup, resolveBaseRef };
-  });
-}
-
-/**
- * TemplateSource からテンプレートディレクトリを解決する Effect。
- */
-function resolveTemplateDir(
-  source: TemplateSource,
-  targetDir: string,
-): Effect.Effect<{ templateDir: string; cleanup: () => void }, TemplateError> {
-  if (isLocalSource(source)) {
-    return Effect.succeed({
-      templateDir: resolve(source.path),
-      cleanup: () => {},
-    });
-  }
-
-  return Effect.tryPromise({
-    try: () => downloadTemplateToTemp(targetDir, buildTemplateSource(source)),
-    catch: (e) =>
-      new TemplateError({
-        message: `Failed to download template from ${source.owner}/${source.repo}`,
-        cause: e,
-      }),
   });
 }
 

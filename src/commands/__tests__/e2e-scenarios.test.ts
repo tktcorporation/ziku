@@ -36,15 +36,27 @@ vi.mock("../../utils/git-remote", () => ({
   DEFAULT_TEMPLATE_REPO: ".ziku",
 }));
 
-vi.mock("../../utils/template", () => ({
-  buildTemplateSource: vi.fn(
-    (source: { owner: string; repo: string }) => `gh:${source.owner}/${source.repo}`,
-  ),
-  downloadTemplateToTemp: vi.fn(),
-  fetchTemplates: vi.fn(),
-  writeFileWithStrategy: vi.fn(),
-  copyFile: vi.fn(),
-}));
+vi.mock("../../utils/template", () => {
+  const downloadTemplateToTemp = vi.fn();
+  return {
+    buildTemplateSource: vi.fn(
+      (source: { owner: string; repo: string }) => `gh:${source.owner}/${source.repo}`,
+    ),
+    downloadTemplateToTemp,
+    // command-context は resolveTemplateDirScoped 経由でこれを呼ぶ。
+    // 既存テストが mockDownloadTemplateToTemp に { templateDir, cleanup } を返すよう
+    // 設定しているので、Effect ラッパーから同じ mock を参照させる。
+    acquireTempTemplate: vi.fn((targetDir: string, source?: string, label?: string) =>
+      Effect.tryPromise(async () => {
+        const result = await downloadTemplateToTemp(targetDir, source, label);
+        return result.templateDir as string;
+      }),
+    ),
+    fetchTemplates: vi.fn(),
+    writeFileWithStrategy: vi.fn(),
+    copyFile: vi.fn(),
+  };
+});
 
 vi.mock("../../utils/hash", () => ({
   hashFiles: vi.fn(),

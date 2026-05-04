@@ -1,20 +1,23 @@
 /**
  * 一時ディレクトリの中断時クリーンアップトラッカー。
  *
- * 背景: downloadTemplateToTemp() が作る .ziku-temp などの一時ディレクトリは、
- * 通常 withFinally (src/effect-helpers.ts) 経由で finally で削除されるが、
- * 以下のケースでは finally が走らずディレクトリが残る:
+ * 役割: 「最終防衛線」としての同期クリーンアップ。
+ * Effect の Scope finalizer (acquireRelease/addFinalizer) で守れない領域、
+ * すなわち process.exit() / SIGINT / SIGTERM の同期終了経路を埋める。
  *
- *   - prompts/file-select の Ctrl+C が process.exit(0) を直接呼ぶ
- *   - トップレベルのエラーハンドラが process.exit(1) を呼ぶ
- *   - SIGINT / SIGTERM のデフォルトハンドラでプロセスが即時終了する
+ * 設計上の責務分担:
+ *   - 通常終了 / 失敗 / Fiber 中断 → Effect の Scope finalizer が削除
+ *   - process.exit() / シグナル        → このトラッカーが同期削除
  *
- * このモジュールはアクティブな temp dir を Set で保持し、process の
- * 'exit' / 'SIGINT' / 'SIGTERM' に同期削除フックを一度だけ登録する。
+ * 二重管理に見えるが、両方が必要:
+ *   - Effect 側だけだと process.exit() で event loop が止まり非同期処理が走らない
+ *   - 同期トラッカーだけだと「型でクリーンアップを強制」できない
  *
- * giget が安定して finally で resource cleanup を保証するようになれば不要になる。
+ * giget が安定して finally で resource cleanup を保証するようになれば、
+ * Effect 側だけで完結する。
  */
 import { existsSync, rmSync } from "node:fs";
+import { Effect } from "effect";
 
 const activeTempDirs = new Set<string>();
 let handlersInstalled = false;
@@ -48,8 +51,10 @@ function installHandlers(): void {
 }
 
 /**
- * 中断時に削除すべき temp dir を登録する。
+ * 中断時に削除すべき temp dir を登録する (同期API)。
  * 初回呼び出し時に process の終了ハンドラを設置する。
+ *
+ * Effect コンテキストからは {@link registerTempDirEffect} を使うこと。
  */
 export function registerTempDir(dir: string): void {
   installHandlers();
@@ -57,11 +62,32 @@ export function registerTempDir(dir: string): void {
 }
 
 /**
- * 通常クリーンアップ完了時に登録解除する。
+ * 通常クリーンアップ完了時に登録解除する (同期API)。
+ *
+ * Effect コンテキストからは {@link unregisterTempDirEffect} を使うこと。
  */
 export function unregisterTempDir(dir: string): void {
   activeTempDirs.delete(dir);
 }
+
+/** Effect ラッパー: Scope finalizer から呼ぶ用途。 */
+export const registerTempDirEffect = (dir: string): Effect.Effect<void> =>
+  Effect.sync(() => registerTempDir(dir));
+
+/** Effect ラッパー: Scope finalizer から呼ぶ用途。 */
+export const unregisterTempDirEffect = (dir: string): Effect.Effect<void> =>
+  Effect.sync(() => unregisterTempDir(dir));
+
+/**
+ * temp dir を物理削除する Effect (sync)。
+ * Scope finalizer に組み込んで使う。存在しない場合は no-op。
+ */
+export const removeTempDirEffect = (dir: string): Effect.Effect<void> =>
+  Effect.sync(() => {
+    if (existsSync(dir)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
 /** テスト用: 内部状態をリセットする。 */
 export function _resetForTest(): void {

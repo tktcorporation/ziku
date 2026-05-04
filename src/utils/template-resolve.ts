@@ -3,49 +3,38 @@
  *
  * 背景: pull/push/diff/init で繰り返される「lock.json から source を読む →
  * ローカル or GitHub からテンプレートを取得 → クリーンアップ」を DRY 化する。
- * 各コマンドは resolveTemplateDir を yield* するだけでテンプレートを取得できる。
+ *
+ * 設計: Effect.Scope を返すことで、呼び出し側は Effect.scoped で囲うだけで
+ * cleanup が型レベルで強制される。withFinally による命令的な cleanup は不要。
  */
 import { Effect } from "effect";
+import type { Scope } from "effect";
 import { resolve } from "pathe";
 import type { TemplateSource } from "../modules/schemas";
 import { isLocalSource } from "../modules/schemas";
-import { TemplateError } from "../errors";
-import { downloadTemplateToTemp, buildTemplateSource } from "./template";
-
-export interface ResolvedTemplate {
-  readonly templateDir: string;
-  readonly cleanup: () => void;
-}
+import type { TemplateError } from "../errors";
+import { acquireTempTemplate, buildTemplateSource } from "./template";
 
 /**
- * TemplateSource からテンプレートディレクトリを解決する。
+ * TemplateSource からテンプレートディレクトリを解決する Scoped Effect。
  *
- * ローカルソースの場合はパスをそのまま返し、
- * GitHub ソースの場合はダウンロードして一時ディレクトリを返す。
- * 呼び出し元は cleanup を finally で呼ぶ責務がある。
+ * - ローカルソース: パスをそのまま返す (Scope は解放処理なしで閉じる)
+ * - GitHub ソース: ダウンロードして一時ディレクトリを Scope に紐づける
  *
- * @param source - テンプレートの取得元
- * @param targetDir - ダウンロード先のベースディレクトリ（GitHub ソースの場合に使���）
- * @param label - 一時ディレクトリを区別するためのラベル
+ * 呼び出し側は `Effect.scoped(...)` で囲うこと。Scope クローズ時 (成功/失敗/中断)
+ * に temp dir が同期削除される。
+ *
+ * @param source テンプレートの取得元
+ * @param targetDir ダウンロード先のベースディレクトリ (GitHub ソースのみ使用)
+ * @param label 一時ディレクトリを区別するためのラベル (例: pull の base 取得時)
  */
-export function resolveTemplateDir(
+export function resolveTemplateDirScoped(
   source: TemplateSource,
   targetDir: string,
   label?: string,
-): Effect.Effect<ResolvedTemplate, TemplateError> {
+): Effect.Effect<string, TemplateError, Scope.Scope> {
   if (isLocalSource(source)) {
-    return Effect.succeed({
-      templateDir: resolve(source.path),
-      cleanup: () => {},
-    });
+    return Effect.succeed(resolve(source.path));
   }
-
-  return Effect.tryPromise({
-    try: () => downloadTemplateToTemp(targetDir, buildTemplateSource(source), label),
-    catch: (e) =>
-      new TemplateError({
-        message: `Failed to download template from ${source.owner}/${source.repo}`,
-        cause: e,
-      }),
-  });
+  return acquireTempTemplate(targetDir, buildTemplateSource(source), label);
 }
