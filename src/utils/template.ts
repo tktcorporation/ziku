@@ -18,6 +18,7 @@ import { log } from "../ui/renderer";
 import { loadMergedGitignore, separateByGitignore } from "./gitignore";
 import type { FlatPatterns } from "./patterns";
 import { resolvePatterns } from "./patterns";
+import { registerTempDir, unregisterTempDir } from "./temp-tracker";
 
 export const TEMPLATE_SOURCE = "gh:tktcorporation/.github";
 
@@ -87,6 +88,10 @@ export async function downloadTemplateToTemp(
 ): Promise<{ templateDir: string; cleanup: () => void }> {
   const tempDir = join(targetDir, label ? `.ziku-temp-${label}` : ".ziku-temp");
 
+  // 中断時 (Ctrl+C / process.exit) でも削除されるよう、ダウンロード前に登録する。
+  // 通常終了は cleanup() 経由で unregister + 削除する。
+  registerTempDir(tempDir);
+
   ensureGigetCacheDir();
   const { dir: templateDir } = await downloadTemplate(source ?? TEMPLATE_SOURCE, {
     dir: tempDir,
@@ -94,6 +99,7 @@ export async function downloadTemplateToTemp(
   });
 
   const cleanup = () => {
+    unregisterTempDir(tempDir);
     if (existsSync(tempDir)) {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -172,6 +178,8 @@ export async function fetchTemplates(options: DownloadOptions): Promise<FileOper
   let templateDir: string;
 
   if (shouldDownload) {
+    // 中断時 (Ctrl+C / process.exit) でも削除されるよう、ダウンロード前に登録する。
+    registerTempDir(tempDir);
     ensureGigetCacheDir();
     const result = await downloadTemplate(TEMPLATE_SOURCE, {
       dir: tempDir,
@@ -223,8 +231,11 @@ export async function fetchTemplates(options: DownloadOptions): Promise<FileOper
   }
 
   // 新規ダウンロードした場合のみ一時ディレクトリを削除
-  if (shouldDownload && existsSync(tempDir)) {
-    rmSync(tempDir, { recursive: true, force: true });
+  if (shouldDownload) {
+    unregisterTempDir(tempDir);
+    if (existsSync(tempDir)) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   }
 
   return allResults;
