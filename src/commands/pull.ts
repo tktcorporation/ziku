@@ -126,7 +126,7 @@ export const pullCommand = defineCommand({
 
     if (include.length === 0) {
       log.warn("No patterns configured");
-      cleanup();
+      await cleanup();
       return;
     }
 

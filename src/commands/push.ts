@@ -363,7 +363,7 @@ export const pushCommand = defineCommand({
     const { config, lock, source, templateDir, cleanup } = ctx;
 
     if (lock.pendingMerge) {
-      cleanup();
+      await cleanup();
       throw new ZikuError(
         "Unresolved merge conflicts from `ziku pull`",
         "Resolve conflicts in these files, then run `ziku pull --continue`:\n" +
@@ -378,7 +378,7 @@ export const pushCommand = defineCommand({
 
     if (patterns.include.length === 0) {
       log.warn("No patterns configured");
-      cleanup();
+      await cleanup();
       return;
     }
 

@@ -12,12 +12,21 @@ import * as p from "@clack/prompts";
 import { downloadTemplate } from "giget";
 import { dirname, join, resolve } from "pathe";
 import { Effect } from "effect";
+import type { Scope } from "effect";
 import { match } from "ts-pattern";
+import { TemplateError } from "../errors";
 import type { FileOperationResult, OverwriteStrategy } from "../modules/schemas";
 import { log } from "../ui/renderer";
 import { loadMergedGitignore, separateByGitignore } from "./gitignore";
 import type { FlatPatterns } from "./patterns";
 import { resolvePatterns } from "./patterns";
+import {
+  registerTempDir,
+  registerTempDirEffect,
+  removeTempDirEffect,
+  unregisterTempDir,
+  unregisterTempDirEffect,
+} from "./temp-tracker";
 
 export const TEMPLATE_SOURCE = "gh:tktcorporation/.github";
 
@@ -80,26 +89,88 @@ export function buildTemplateSource(source: { owner: string; repo: string; ref?:
  *                同一 targetDir で複数回ダウンロードする場合（pull の template と base）、
  *                ラベルを変えないと後のダウンロードが先のディレクトリを上書きする。
  */
-export async function downloadTemplateToTemp(
+/**
+ * テンプレートを一時ディレクトリにダウンロードし、Scope 終了時 (成功/失敗/中断)
+ * に削除する Effect。新規コードはこちらを使うこと。
+ *
+ * 設計:
+ *   - 同期 tracker への register: process.exit() / SIGINT の最終防衛線
+ *   - Effect.addFinalizer: Scope 終了時の構造的クリーンアップ保証
+ *   - 両方を入れることで「型で cleanup を強制」+「同期 exit でも漏れない」
+ *
+ * 使い方:
+ *   const program = Effect.gen(function* () {
+ *     const dir = yield* acquireTempTemplate(targetDir, source);
+ *     // dir を使う処理 (失敗・中断しても dir は自動削除される)
+ *   });
+ *   await Effect.runPromise(Effect.scoped(program));
+ *
+ * @param targetDir ベースディレクトリ (この配下に .ziku-temp[-label] を作る)
+ * @param source giget 形式 ("gh:owner/repo[#ref]"). 未指定は TEMPLATE_SOURCE
+ * @param label 同一 targetDir で複数同時取得する場合の識別子 (例: "base")
+ */
+export function acquireTempTemplate(
+  targetDir: string,
+  source?: string,
+  label?: string,
+): Effect.Effect<string, TemplateError, Scope.Scope> {
+  return Effect.gen(function* () {
+    const tempDir = join(targetDir, label ? `.ziku-temp-${label}` : ".ziku-temp");
+
+    // 順序が重要: register → addFinalizer → download
+    // download が失敗・中断しても、Scope クローズ時に finalizer が走って
+    // unregister + rmSync されるため漏れない。
+    yield* registerTempDirEffect(tempDir);
+    yield* Effect.addFinalizer(() =>
+      unregisterTempDirEffect(tempDir).pipe(Effect.zipRight(removeTempDirEffect(tempDir))),
+    );
+
+    yield* Effect.sync(ensureGigetCacheDir);
+
+    const result = yield* Effect.tryPromise({
+      try: () => downloadTemplate(source ?? TEMPLATE_SOURCE, { dir: tempDir, force: true }),
+      catch: (e) => new TemplateError({ message: "Failed to download template", cause: e }),
+    });
+
+    return result.dir;
+  });
+}
+
+export function downloadTemplateToTemp(
   targetDir: string,
   source?: string,
   label?: string,
 ): Promise<{ templateDir: string; cleanup: () => void }> {
   const tempDir = join(targetDir, label ? `.ziku-temp-${label}` : ".ziku-temp");
 
+  // 中断時 (Ctrl+C / process.exit) でも削除されるよう、ダウンロード前に登録する。
+  // 通常終了は cleanup() 経由で unregister + 削除する。
+  registerTempDir(tempDir);
   ensureGigetCacheDir();
-  const { dir: templateDir } = await downloadTemplate(source ?? TEMPLATE_SOURCE, {
-    dir: tempDir,
-    force: true,
-  });
 
-  const cleanup = () => {
-    if (existsSync(tempDir)) {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  };
-
-  return { templateDir, cleanup };
+  // 失敗時の解放: downloadTemplate が reject すると返り値の cleanup が
+  // 作られないため、tracker に古いエントリが残る (codex review #74)。
+  // 後段で同名 .ziku-temp* が新規作成された場合に process exit で
+  // 誤って削除されうるので、reject 経路でも unregister + rmSync する。
+  // try/catch は ast-grep で禁止のため Promise.then(onFulfilled, onRejected) を使う。
+  return downloadTemplate(source ?? TEMPLATE_SOURCE, { dir: tempDir, force: true }).then(
+    ({ dir: templateDir }) => {
+      const cleanup = () => {
+        unregisterTempDir(tempDir);
+        if (existsSync(tempDir)) {
+          rmSync(tempDir, { recursive: true, force: true });
+        }
+      };
+      return { templateDir, cleanup };
+    },
+    (error: unknown) => {
+      unregisterTempDir(tempDir);
+      if (existsSync(tempDir)) {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+      throw error;
+    },
+  );
 }
 
 export interface DownloadOptions {
@@ -161,73 +232,88 @@ export async function writeFileWithStrategy(
 /**
  * テンプレートを取得してパターンベースでコピー
  */
-export async function fetchTemplates(options: DownloadOptions): Promise<FileOperationResult[]> {
+export function fetchTemplates(options: DownloadOptions): Promise<FileOperationResult[]> {
   const { targetDir, overwriteStrategy, patterns, templateDir: preDownloadedDir } = options;
-  const allResults: FileOperationResult[] = [];
-
   // 事前ダウンロード済みか、新規ダウンロードか
   const shouldDownload = !preDownloadedDir;
   const tempDir = join(targetDir, ".ziku-temp");
 
-  let templateDir: string;
-
   if (shouldDownload) {
+    // 中断時 (Ctrl+C / process.exit) でも削除されるよう、ダウンロード前に登録する。
+    registerTempDir(tempDir);
     ensureGigetCacheDir();
-    const result = await downloadTemplate(TEMPLATE_SOURCE, {
-      dir: tempDir,
-      force: true,
-    });
-    templateDir = result.dir;
-  } else {
-    templateDir = preDownloadedDir;
   }
 
-  // ローカルとテンプレート両方の .gitignore をマージして読み込み
-  const gitignore = await loadMergedGitignore([targetDir, templateDir]);
+  // 実体を IIFE で包み、Promise.finally で cleanup を保証する。
+  // download / コピー処理いずれが失敗しても tracker から外して物理削除する
+  // (codex review #74 — try/finally は ast-grep で禁止のため Promise.finally で対応)。
+  const work = async (): Promise<FileOperationResult[]> => {
+    const allResults: FileOperationResult[] = [];
 
-  // フラットパターンでファイルを解決
-  const resolvedFiles = resolvePatterns(templateDir, patterns.include, patterns.exclude);
-  const { tracked, ignored } = separateByGitignore(resolvedFiles, gitignore);
-
-  if (tracked.length === 0 && ignored.length === 0) {
-    log.warn("No files matched for selected modules");
-  }
-
-  // tracked ファイルは通常通りコピー
-  for (const relativePath of tracked) {
-    const srcPath = join(templateDir, relativePath);
-    const destPath = join(targetDir, relativePath);
-
-    const result = await copyFile(srcPath, destPath, overwriteStrategy, relativePath);
-    allResults.push(result);
-  }
-
-  // ignored ファイルは特別処理:
-  // - ローカルに存在しない場合 → コピー
-  // - ローカルに存在する場合 → スキップ（上書き防止）
-  for (const relativePath of ignored) {
-    const srcPath = join(templateDir, relativePath);
-    const destPath = join(targetDir, relativePath);
-    const destExists = existsSync(destPath);
-
-    if (destExists) {
-      const result: FileOperationResult = {
-        action: "skipped_ignored",
-        path: relativePath,
-      };
-      allResults.push(result);
+    let templateDir: string;
+    if (shouldDownload) {
+      const result = await downloadTemplate(TEMPLATE_SOURCE, {
+        dir: tempDir,
+        force: true,
+      });
+      templateDir = result.dir;
     } else {
+      templateDir = preDownloadedDir;
+    }
+
+    // ローカルとテンプレート両方の .gitignore をマージして読み込み
+    const gitignore = await loadMergedGitignore([targetDir, templateDir]);
+
+    // フラットパターンでファイルを解決
+    const resolvedFiles = resolvePatterns(templateDir, patterns.include, patterns.exclude);
+    const { tracked, ignored } = separateByGitignore(resolvedFiles, gitignore);
+
+    if (tracked.length === 0 && ignored.length === 0) {
+      log.warn("No files matched for selected modules");
+    }
+
+    // tracked ファイルは通常通りコピー
+    for (const relativePath of tracked) {
+      const srcPath = join(templateDir, relativePath);
+      const destPath = join(targetDir, relativePath);
+
       const result = await copyFile(srcPath, destPath, overwriteStrategy, relativePath);
       allResults.push(result);
     }
+
+    // ignored ファイルは特別処理:
+    // - ローカルに存在しない場合 → コピー
+    // - ローカルに存在する場合 → スキップ（上書き防止）
+    for (const relativePath of ignored) {
+      const srcPath = join(templateDir, relativePath);
+      const destPath = join(targetDir, relativePath);
+      const destExists = existsSync(destPath);
+
+      if (destExists) {
+        const result: FileOperationResult = {
+          action: "skipped_ignored",
+          path: relativePath,
+        };
+        allResults.push(result);
+      } else {
+        const result = await copyFile(srcPath, destPath, overwriteStrategy, relativePath);
+        allResults.push(result);
+      }
+    }
+
+    return allResults;
+  };
+
+  if (!shouldDownload) {
+    return work();
   }
 
-  // 新規ダウンロードした場合のみ一時ディレクトリを削除
-  if (shouldDownload && existsSync(tempDir)) {
-    rmSync(tempDir, { recursive: true, force: true });
-  }
-
-  return allResults;
+  return work().finally(() => {
+    unregisterTempDir(tempDir);
+    if (existsSync(tempDir)) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 }
 
 /**
