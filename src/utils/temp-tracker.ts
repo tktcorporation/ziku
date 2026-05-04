@@ -39,14 +39,26 @@ function installHandlers(): void {
   process.on("exit", cleanupAll);
 
   // SIGINT/SIGTERM のデフォルト動作は即時終了で 'exit' も発火しないため、
-  // 明示的に同期クリーンアップ → exit code を立てて終了する。
+  // 明示的に同期クリーンアップを実行してから default 動作に戻す。
+  //
+  // 設計: process.exit() を直接呼ぶと event loop を停止させてしまい、
+  // 同じ signal に登録された後続リスナー (例: interactive prompt の TTY 復元、
+  // 埋め込みホストの graceful shutdown) を skip させてしまう (codex review #74)。
+  // 代わりに self-removal + signal re-raise パターンを使う:
+  //   1. 同期クリーンアップ
+  //   2. 自身を listener から外す
+  //   3. 他のリスナーが残っていればそれに任せる
+  //   4. 他にいなければ process.kill で signal を再送し、default 動作 (terminate
+  //      with exit code 128 + signal number) に戻す
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
-    process.on(signal, () => {
+    const handler = (): void => {
       cleanupAll();
-      // 慣例に従い 128 + signal number を終了コードに使う
-      const code = signal === "SIGINT" ? 130 : 143;
-      process.exit(code);
-    });
+      process.removeListener(signal, handler);
+      if (process.listenerCount(signal) === 0) {
+        process.kill(process.pid, signal);
+      }
+    };
+    process.on(signal, handler);
   }
 }
 
