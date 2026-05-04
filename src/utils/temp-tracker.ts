@@ -20,7 +20,8 @@ import { existsSync, rmSync } from "node:fs";
 import { Effect } from "effect";
 
 const activeTempDirs = new Set<string>();
-let handlersInstalled = false;
+const installedSignals = new Set<"SIGINT" | "SIGTERM">();
+let exitHandlerInstalled = false;
 
 function cleanupAll(): void {
   for (const dir of activeTempDirs) {
@@ -31,45 +32,55 @@ function cleanupAll(): void {
   activeTempDirs.clear();
 }
 
-function installHandlers(): void {
-  if (handlersInstalled) return;
-  handlersInstalled = true;
-
+function ensureExitHandler(): void {
+  if (exitHandlerInstalled) return;
+  exitHandlerInstalled = true;
   // 'exit' は同期処理のみ実行可能。process.exit() / 通常終了の両方で発火する。
   process.on("exit", cleanupAll);
+}
 
-  // SIGINT/SIGTERM のデフォルト動作は即時終了で 'exit' も発火しないため、
-  // 明示的に同期クリーンアップを実行してから default 動作に戻す。
-  //
-  // 設計: process.exit() を直接呼ぶと event loop を停止させてしまい、
-  // 同じ signal に登録された後続リスナー (例: interactive prompt の TTY 復元、
-  // 埋め込みホストの graceful shutdown) を skip させてしまう (codex review #74)。
-  // 代わりに self-removal + signal re-raise パターンを使う:
-  //   1. 同期クリーンアップ
-  //   2. 自身を listener から外す
-  //   3. 他のリスナーが残っていればそれに任せる
-  //   4. 他にいなければ process.kill で signal を再送し、default 動作 (terminate
-  //      with exit code 128 + signal number) に戻す
-  for (const signal of ["SIGINT", "SIGTERM"] as const) {
-    const handler = (): void => {
-      cleanupAll();
-      process.removeListener(signal, handler);
-      if (process.listenerCount(signal) === 0) {
-        process.kill(process.pid, signal);
-      }
-    };
-    process.on(signal, handler);
-  }
+/**
+ * SIGINT/SIGTERM ハンドラを (まだ無ければ) 登録する。
+ *
+ * 設計: signal 別に installed 状態を管理し、register のたびに
+ * ensure を呼ぶことで「delegate 経路で外れた後の再インストール」を保証する。
+ *
+ * self-removal + signal re-raise パターン:
+ *   1. 同期クリーンアップ
+ *   2. 自身を listener から外す + installedSignals からも外す
+ *      → 後続の registerTempDir() で再インストールされる
+ *        (long-lived プロセスで signal を delegate した後の 2 回目以降の
+ *         registerTempDir も保護される — codex review #74)
+ *   3. 他のリスナーが残っていればそれに任せる
+ *   4. 他にいなければ process.kill で signal を再送し、default 動作
+ *      (terminate with exit code 128 + signal number) に戻す
+ */
+function ensureSignalHandler(signal: "SIGINT" | "SIGTERM"): void {
+  if (installedSignals.has(signal)) return;
+  installedSignals.add(signal);
+
+  const handler = (): void => {
+    cleanupAll();
+    process.removeListener(signal, handler);
+    installedSignals.delete(signal);
+    if (process.listenerCount(signal) === 0) {
+      process.kill(process.pid, signal);
+    }
+  };
+  process.on(signal, handler);
 }
 
 /**
  * 中断時に削除すべき temp dir を登録する (同期API)。
- * 初回呼び出し時に process の終了ハンドラを設置する。
+ * 毎回 ensureExitHandler / ensureSignalHandler を呼ぶことで、
+ * delegate 経路で外れた signal handler が次回以降も再登録される。
  *
  * Effect コンテキストからは {@link registerTempDirEffect} を使うこと。
  */
 export function registerTempDir(dir: string): void {
-  installHandlers();
+  ensureExitHandler();
+  ensureSignalHandler("SIGINT");
+  ensureSignalHandler("SIGTERM");
   activeTempDirs.add(dir);
 }
 
@@ -109,4 +120,9 @@ export function _resetForTest(): void {
 /** テスト用: 現在追跡中の temp dir 数を返す。 */
 export function _getTrackedCountForTest(): number {
   return activeTempDirs.size;
+}
+
+/** テスト用: signal handler が installed 状態か返す。 */
+export function _isSignalInstalledForTest(signal: "SIGINT" | "SIGTERM"): boolean {
+  return installedSignals.has(signal);
 }

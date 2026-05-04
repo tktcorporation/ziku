@@ -6,8 +6,13 @@ vi.mock("node:fs", async () => {
   return memfs.fs;
 });
 
-const { registerTempDir, unregisterTempDir, _resetForTest, _getTrackedCountForTest } =
-  await import("../temp-tracker");
+const {
+  registerTempDir,
+  unregisterTempDir,
+  _resetForTest,
+  _getTrackedCountForTest,
+  _isSignalInstalledForTest,
+} = await import("../temp-tracker");
 
 describe("temp-tracker", () => {
   beforeEach(() => {
@@ -68,5 +73,28 @@ describe("temp-tracker", () => {
   it("存在しないディレクトリの cleanup はエラーにならない", () => {
     registerTempDir("/tmp/does-not-exist");
     expect(() => process.emit("exit", 0)).not.toThrow();
+  });
+
+  it("SIGINT delegate 後、次回 registerTempDir で signal handler が再インストールされる (codex review #74)", () => {
+    // 他のリスナーを足して delegate 経路 (process.kill しない) を踏ませる
+    const otherListener = vi.fn();
+    process.on("SIGINT", otherListener);
+
+    registerTempDir("/tmp/x");
+    expect(_isSignalInstalledForTest("SIGINT")).toBe(true);
+
+    // SIGINT を発火 → 我々のハンドラは cleanupAll → self-remove する
+    // (他リスナー otherListener が残っているので process.kill には進まない)
+    process.emit("SIGINT");
+
+    expect(_isSignalInstalledForTest("SIGINT")).toBe(false);
+    expect(otherListener).toHaveBeenCalled();
+
+    // 次回 registerTempDir で再インストールされる必要がある
+    registerTempDir("/tmp/y");
+    expect(_isSignalInstalledForTest("SIGINT")).toBe(true);
+
+    // 後始末
+    process.removeListener("SIGINT", otherListener);
   });
 });
