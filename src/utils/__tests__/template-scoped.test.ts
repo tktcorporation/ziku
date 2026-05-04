@@ -1,5 +1,5 @@
 import { vol } from "memfs";
-import { Effect, Exit } from "effect";
+import { Effect, Exit, Scope } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("node:fs", async () => {
@@ -71,6 +71,32 @@ describe("acquireTempTemplate (Scope ベースのリソース管理)", () => {
     const exit = await Effect.runPromiseExit(Effect.scoped(program));
 
     expect(Exit.isFailure(exit)).toBe(true);
+    expect(_getTrackedCountForTest()).toBe(0);
+  });
+
+  it("手動 Scope + Effect.onError パターンで失敗時に tracker から外れる (command-context の保証)", async () => {
+    // command-context.loadCommandContext と同じパターンを再現:
+    //   const scope = yield* Scope.make();
+    //   const dir = yield* acquireTempTemplate(...).pipe(
+    //     Scope.extend(scope),
+    //     Effect.onError(() => Scope.close(scope, Exit.void)),
+    //   );
+    // resolveTemplateDirScoped が失敗したとき、onError がない場合は
+    // scope が閉じられず tracker に残る (Codex review #74 の指摘)。
+    vi.mocked(giget.downloadTemplate).mockRejectedValueOnce(new Error("network"));
+
+    const program = Effect.gen(function* () {
+      const scope = yield* Scope.make();
+      const dir = yield* acquireTempTemplate("/work", "gh:foo/bar").pipe(
+        Scope.extend(scope),
+        Effect.onError(() => Scope.close(scope, Exit.void)),
+      );
+      return dir;
+    });
+
+    const exit = await Effect.runPromiseExit(program);
+    expect(Exit.isFailure(exit)).toBe(true);
+    // onError がないと count は 1 のまま残る。
     expect(_getTrackedCountForTest()).toBe(0);
   });
 

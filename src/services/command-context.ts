@@ -114,12 +114,18 @@ export function loadCommandContext(
     // cleanup は Scope.close を呼ぶラッパー。Scope に登録された全 finalizer
     // (acquireTempTemplate の addFinalizer など) が必ず実行される。
     //
-    // 呼び出し側 (各コマンド) は従来どおり withFinally(work, cleanup) で使える。
+    // 失敗時の保証: resolveTemplateDirScoped が失敗すると ctx が返らないため
+    // 呼び出し側は cleanup を取得できない。Effect.onError で scope を閉じて
+    // finalizer (tracker 登録解除 + rmSync) を走らせる。これがないと
+    // process exit まで temp dir と tracker 状態が残る。
+    //
+    // 成功時: 呼び出し側 (各コマンド) は従来どおり withFinally(work, cleanup) で使える。
     // cleanup を呼び忘れた場合でも、登録された tempDir は temp-tracker の
     // process.on('exit') で同期削除される (二重防衛)。
     const scope = yield* Scope.make();
     const templateDir = yield* resolveTemplateDirScoped(source, targetDir).pipe(
       Scope.extend(scope),
+      Effect.onError(() => Scope.close(scope, Exit.void)),
     );
     const cleanup = (): Promise<void> => Effect.runPromise(Scope.close(scope, Exit.void));
 
