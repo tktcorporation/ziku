@@ -684,7 +684,7 @@ describe("pushCommand", () => {
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
-    it("baseHashes が存在しコンフリクトがある場合は警告して確認を求める（baseRef なし）", async () => {
+    it("baseHashes が存在しコンフリクトがある場合は確定的に中断する（baseRef なし）", async () => {
       const { effect } = mockContext({
         lock: {
           ...validLock,
@@ -711,24 +711,26 @@ describe("pushCommand", () => {
         unchanged: [],
       });
 
-      // baseRef がないので 3-way マージ不可 → unresolved として確認を求める
-      // ユーザーが続行を拒否
-      mockConfirmAction.mockResolvedValueOnce(false);
-
-      await (pushCommand.run as any)({
-        args: { dir: "/test", dryRun: false, yes: false, edit: false },
-        rawArgs: [],
-        cmd: pushCommand,
+      // baseRef がないので 3-way マージ不可 → unresolved。
+      // Yes/No で迷わせず、確定的に ZikuError で中断する。
+      await expect(
+        (pushCommand.run as any)({
+          args: { dir: "/test", dryRun: false, yes: false, edit: false },
+          rawArgs: [],
+          cmd: pushCommand,
+        }),
+      ).rejects.toMatchObject({
+        name: "ZikuError",
+        message: expect.stringContaining("couldn't be auto-merged"),
       });
 
       expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining("Template updated"));
-      expect(mockLog.info).toHaveBeenCalledWith(
-        "Run `ziku pull` first to sync template changes, then push again.",
-      );
+      // 続行を問うプロンプトは出さない（確定的に中断する）
+      expect(mockConfirmAction).not.toHaveBeenCalled();
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
-    it("コンフリクトがあっても確認で続行を選べばPRを作成", async () => {
+    it("未解決の衝突の中断メッセージに対象ファイル名と解決手順（ziku pull）が含まれる", async () => {
       const { effect } = mockContext({
         lock: {
           ...validLock,
@@ -744,14 +746,7 @@ describe("pushCommand", () => {
         "/tmp/template/file.txt": "template content",
       });
 
-      const pushableFile = {
-        path: "file.txt",
-        type: "modified" as const,
-        localContent: "new content",
-        templateContent: "old content",
-      };
-
-      // classification: conflicts に分類 → pushableFilePaths に追加される
+      // classification: conflicts に分類（baseRef なし → unresolved）
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
@@ -762,32 +757,21 @@ describe("pushCommand", () => {
         unchanged: [],
       });
 
-      // detectDiff: コンテンツを提供
-      mockDetectDiff.mockResolvedValueOnce({
-        files: [pushableFile],
-        summary: { added: 0, modified: 1, deleted: 0, unchanged: 0 },
+      // 確定的に中断し、利用者が次に何をすべきか分かる hint を返す。
+      // hint には対象ファイル名と解決手順（ziku pull）が両方含まれること。
+      await expect(
+        (pushCommand.run as any)({
+          args: { dir: "/test", dryRun: false, yes: false, edit: false },
+          rawArgs: [],
+          cmd: pushCommand,
+        }),
+      ).rejects.toMatchObject({
+        name: "ZikuError",
+        hint: expect.stringMatching(/file\.txt[\s\S]*ziku pull/),
       });
 
-      mockSelectPushFiles.mockResolvedValueOnce([pushableFile]);
-      // コンフリクト確認: 続行（baseRef なし → unresolved → 確認）
-      mockConfirmAction.mockResolvedValueOnce(true);
-      // PR作成確認: 続行
-      mockConfirmAction.mockResolvedValueOnce(true);
-      mockGetGitHubToken.mockReturnValue("ghp_token");
-      mockCreatePullRequest.mockResolvedValueOnce({
-        url: "https://github.com/owner/repo/pull/1",
-        branch: "update-template-123",
-        number: 1,
-      });
-
-      await (pushCommand.run as any)({
-        args: { dir: "/test", dryRun: false, yes: false, edit: false },
-        rawArgs: [],
-        cmd: pushCommand,
-      });
-
-      expect(mockLog.warn).toHaveBeenCalled();
-      expect(mockCreatePullRequest).toHaveBeenCalled();
+      // 中断したので PR は作られない
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
     it("baseRef + baseHashes がある場合に 3-way マージで自動解決", async () => {
@@ -881,7 +865,7 @@ describe("pushCommand", () => {
       );
     });
 
-    it("delete/modify conflict: ローカルで削除されたファイルが conflicts にあっても ENOENT にならない", async () => {
+    it("delete/modify conflict: 未解決の衝突は ENOENT で落ちず ZikuError で確定的に中断する", async () => {
       const { effect } = mockContext({
         lock: {
           ...validLock,
@@ -925,27 +909,21 @@ describe("pushCommand", () => {
         }),
       );
 
-      // unresolved があるので確認ダイアログ → 続行
-      mockConfirmAction
-        .mockResolvedValueOnce(true) // "Continue with unresolved conflicts?"
-        .mockResolvedValueOnce(true); // PR 作成確認
-
-      mockDetectDiff.mockResolvedValueOnce({
-        files: [],
-        summary: { added: 0, modified: 0, deleted: 0, unchanged: 0 },
+      // 未解決の衝突が残る場合は確定的に中断する（Yes/No プロンプトは出さない）。
+      // ローカル内容での暗黙の上書き push を防ぐため ZikuError を throw する。
+      await expect(
+        (pushCommand.run as any)({
+          args: { dir: "/test", dryRun: false, yes: false, edit: false },
+          rawArgs: [],
+          cmd: pushCommand,
+        }),
+      ).rejects.toMatchObject({
+        name: "ZikuError",
+        message: expect.stringContaining("couldn't be auto-merged"),
       });
 
-      // ENOENT で落ちずに正常終了することを検証
-      await (pushCommand.run as any)({
-        args: { dir: "/test", dryRun: false, yes: false, edit: false },
-        rawArgs: [],
-        cmd: pushCommand,
-      });
-
-      // unresolved として報告されること
-      expect(mockLog.warn).toHaveBeenCalledWith(
-        expect.stringContaining("could not be auto-merged"),
-      );
+      // 衝突解決を確認するプロンプトは出さない（確定的に中断する）
+      expect(mockConfirmAction).not.toHaveBeenCalled();
     });
 
     it("baseHashes がない場合でもコンフリクト検出を実行（空の baseHashes で分類）", async () => {
