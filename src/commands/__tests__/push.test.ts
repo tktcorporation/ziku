@@ -926,6 +926,49 @@ describe("pushCommand", () => {
       expect(mockConfirmAction).not.toHaveBeenCalled();
     });
 
+    it("--yes でも未解決の衝突があれば中断する（非対話でも暗黙の上書き push をしない）", async () => {
+      const { effect } = mockContext({
+        lock: {
+          ...validLock,
+          baseHashes: {
+            "file.txt": "abc123",
+          },
+        },
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      vol.fromJSON({
+        "/test/file.txt": "local content",
+        "/tmp/template/file.txt": "template content",
+      });
+
+      // baseRef なし → 3-way マージ不可 → unresolved
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: ["file.txt"],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      // --yes はあくまで対話プロンプトの省略であり、衝突という危険な状態を
+      // 黙って通すフラグではない。CI 等の非対話実行でも確定的に中断する。
+      await expect(
+        (pushCommand.run as any)({
+          args: { dir: "/test", dryRun: false, yes: true, edit: false },
+          rawArgs: [],
+          cmd: pushCommand,
+        }),
+      ).rejects.toMatchObject({
+        name: "ZikuError",
+        message: expect.stringContaining("couldn't be auto-merged"),
+      });
+
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
     it("baseHashes がない場合でもコンフリクト検出を実行（空の baseHashes で分類）", async () => {
       mockGetPushableFiles.mockReturnValue([]);
 
