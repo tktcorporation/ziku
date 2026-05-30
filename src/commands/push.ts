@@ -420,7 +420,6 @@ export const pushCommand = defineCommand({
             source,
             lock,
             mergedContents,
-            args: { yes: args.yes as boolean },
           });
         }
       }
@@ -544,8 +543,12 @@ async function selectFilesToPush(
  * push 時のコンフリクト解決。
  *
  * ファイル読み込み・マージ・ベースダウンロードは conflict-io の共通ユーティリティを使い、
- * push 固有の処理（mergedContents への保存・ユーザー確認）だけをここで行う。
+ * push 固有の処理（mergedContents への保存）だけをここで行う。
  * pull との違い: ローカルに書き込まず、auto-merge 成功分のみ mergedContents に保存する。
+ *
+ * 自動マージできない衝突が 1 つでも残った場合は ZikuError を throw して push 全体を
+ * 確定的に中断する（ローカル内容での暗黙の上書き push を防ぐ）。利用者は `ziku pull` で
+ * 衝突を解決してから push し直す。
  */
 async function resolveConflicts(
   conflicts: string[],
@@ -555,7 +558,6 @@ async function resolveConflicts(
     source: TemplateSource;
     lock: { baseRef?: string };
     mergedContents: Map<string, string>;
-    args: { yes: boolean };
   },
 ): Promise<void> {
   const baseInfo = ctx.lock.baseRef
@@ -612,16 +614,19 @@ async function resolveConflicts(
       }
 
       if (unresolved.length > 0) {
-        log.warn(`${unresolved.length} file(s) could not be auto-merged:`);
-        for (const f of unresolved) log.message(`  ${pc.yellow("!")} ${f}`);
-        if (!ctx.args.yes) {
-          const proceed = await confirmAction("Continue with unresolved conflicts?", {
-            initialValue: true,
-          });
-          if (!proceed) {
-            log.info("Run `ziku pull` first to sync template changes, then push again.");
-          }
-        }
+        // 自動マージできなかった衝突が残っている場合は確定的に中断する。
+        // ここで続行すると、未解決ファイルはマージ結果ではなくローカルの内容が
+        // そのまま push され、テンプレートの更新を黙って上書きしてしまう
+        // （mergedContents に保存されないため push.ts:473 で localContent が使われる）。
+        // Yes/No で判断を委ねるとこの危険な上書きが実行ごとにブレるので、
+        // 「衝突が残る → 必ず止める」という不変条件に固定する。
+        // push 冒頭の pendingMerge チェック（pull 側の未解決衝突を弾く）と同じ思想。
+        throw new ZikuError(
+          `${unresolved.length} file(s) have conflicts that couldn't be auto-merged`,
+          "Resolve these conflicts before pushing:\n" +
+            unresolved.map((f) => `  • ${f}`).join("\n") +
+            "\n\nRun `ziku pull` to bring in the template changes and resolve the conflicts, then push again.",
+        );
       }
     },
     () => baseResult?.cleanup?.(),
