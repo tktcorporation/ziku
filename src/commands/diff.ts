@@ -3,6 +3,7 @@ import { Effect } from "effect";
 import { resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { renderFileDiff } from "../ui/diff-view";
+import { logUntrackedFilesNotice } from "../ui/prompts";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
 import { detectDiff, hasDiff } from "../utils/diff";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked";
@@ -99,7 +100,7 @@ export const diffCommand = defineCommand({
         }
 
         if (untrackedCount > 0) {
-          logUntrackedFiles(untrackedByFolder, untrackedCount);
+          logUntrackedFilesNotice(untrackedByFolder, untrackedCount);
         }
 
         outro("Run 'ziku push' to push changes.");
@@ -120,23 +121,3 @@ export const diffCommand = defineCommand({
     }, cleanup);
   },
 });
-
-function logUntrackedFiles(
-  untrackedByFolder: Array<{ files: Array<{ path: string }> }>,
-  untrackedCount: number,
-): void {
-  log.warn(`${untrackedCount} untracked file(s) found outside the sync whitelist:`);
-  const untrackedLines = untrackedByFolder.flatMap((group) =>
-    group.files.map((file) => `  ${pc.dim("•")} ${file.path}`),
-  );
-  log.message(untrackedLines.join("\n"));
-  log.info(
-    `To include these files in sync, add them to tracking with the ${pc.cyan("track")} command:`,
-  );
-  log.message(pc.dim(`  npx ziku track "<pattern>"`));
-  log.message(
-    pc.dim(
-      `  Example: npx ziku track "${untrackedByFolder[0]?.files[0]?.path || ".cloud/rules/*.md"}"`,
-    ),
-  );
-}

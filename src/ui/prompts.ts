@@ -13,6 +13,7 @@ import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { match } from "ts-pattern";
 import type { FileDiff, OverwriteStrategy } from "../modules/schemas";
+import type { UntrackedFilesByFolder } from "../utils/untracked";
 import { calculateDiffStats, formatStats } from "./diff-view";
 import { selectFilesWithDiffPreview } from "./file-select-with-diff";
 
@@ -254,6 +255,68 @@ export async function selectPushFilesFallback(
   handleCancel(selected);
   const selectedPaths = new Set(selected as string[]);
   return files.filter((f) => selectedPaths.has(f.path));
+}
+
+/**
+ * 監視フォルダ内の未追跡ファイルから、追跡対象（include 追加）にするものを選択させる。
+ *
+ * git の interactive add 相当の体験。push 時に検知した「ホワイトリスト外の新規ファイル」を
+ * その場で追跡対象に取り込めるようにする。デフォルトは全未選択にする（暗黙追加を避け、
+ * ユーザーが明示的に選んだものだけを include へ昇格させるため）。
+ *
+ * @returns 選択されたファイルパスの配列（= include に追加するパターン）。0 件なら何も追跡しない。
+ */
+export async function selectUntrackedToTrack(
+  untrackedByFolder: UntrackedFilesByFolder[],
+): Promise<string[]> {
+  const options = untrackedByFolder.flatMap((group) =>
+    group.files.map((file) => ({
+      value: file.path,
+      label: file.path,
+      hint: group.folder,
+    })),
+  );
+
+  const selected = await p.multiselect({
+    message: "Untracked files found. Select files to track and include in this push:",
+    options,
+    // 明示的に選ばせる（暗黙の include 追加を避ける）
+    initialValues: [],
+    required: false,
+  });
+  handleCancel(selected);
+  return selected as string[];
+}
+
+/**
+ * 未追跡ファイル一覧と `track` コマンドの案内を表示する。
+ *
+ * push の非対話時（--yes / --dry-run）と diff で共用する。対話 push では
+ * selectUntrackedToTrack のプロンプト自体が案内面を兼ねるため、こちらは使わない。
+ *
+ * @param headline 先頭の警告文。push と diff で文脈が異なるため差し替え可能にする。
+ */
+export function logUntrackedFilesNotice(
+  untrackedByFolder: UntrackedFilesByFolder[],
+  untrackedCount: number,
+  opts?: { headline?: string },
+): void {
+  const headline =
+    opts?.headline ?? `${untrackedCount} untracked file(s) found outside the sync whitelist:`;
+  p.log.warn(headline);
+  const untrackedLines = untrackedByFolder.flatMap((group) =>
+    group.files.map((file) => `  ${pc.dim("•")} ${file.path}`),
+  );
+  p.log.message(untrackedLines.join("\n"));
+  p.log.info(
+    `To include these files in sync, add them to tracking with the ${pc.cyan("track")} command:`,
+  );
+  p.log.message(pc.dim(`  npx ziku track "<pattern>"`));
+  p.log.message(
+    pc.dim(
+      `  Example: npx ziku track "${untrackedByFolder[0]?.files[0]?.path || ".cloud/rules/*.md"}"`,
+    ),
+  );
 }
 
 /**

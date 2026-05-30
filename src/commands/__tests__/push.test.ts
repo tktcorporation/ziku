@@ -46,6 +46,9 @@ vi.mock("../../utils/readme", () => ({
 // utils/untracked をモック
 vi.mock("../../utils/untracked", () => ({
   detectUntrackedFiles: vi.fn(() => []),
+  getTotalUntrackedCount: vi.fn((groups: Array<{ files: unknown[] }>) =>
+    groups.reduce((sum, g) => sum + g.files.length, 0),
+  ),
 }));
 
 // utils/hash をモック
@@ -92,6 +95,8 @@ vi.mock("../../ui/prompts", () => ({
   inputPrTitle: vi.fn(),
   inputPrBody: vi.fn(),
   selectPushFiles: vi.fn(),
+  selectUntrackedToTrack: vi.fn(() => []),
+  logUntrackedFilesNotice: vi.fn(),
 }));
 
 // ui/renderer をモック
@@ -123,8 +128,16 @@ const { pushCommand } = await import("../push");
 const { loadCommandContext } = await import("../../services/command-context");
 const { detectDiff, getPushableFiles } = await import("../../utils/diff");
 const { getGitHubToken, createPullRequest } = await import("../../utils/github");
-const { confirmAction, inputGitHubToken, inputPrTitle, inputPrBody, selectPushFiles } =
-  await import("../../ui/prompts");
+const {
+  confirmAction,
+  inputGitHubToken,
+  inputPrTitle,
+  inputPrBody,
+  selectPushFiles,
+  selectUntrackedToTrack,
+  logUntrackedFilesNotice,
+} = await import("../../ui/prompts");
+const { detectUntrackedFiles } = await import("../../utils/untracked");
 const { log } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
 const { classifyFiles, mergeOneFile, downloadBaseForMerge } = await import("../../utils/merge");
@@ -138,6 +151,9 @@ const mockInputGitHubToken = vi.mocked(inputGitHubToken);
 const mockInputPrTitle = vi.mocked(inputPrTitle);
 const mockInputPrBody = vi.mocked(inputPrBody);
 const mockSelectPushFiles = vi.mocked(selectPushFiles);
+const mockSelectUntrackedToTrack = vi.mocked(selectUntrackedToTrack);
+const mockLogUntrackedFilesNotice = vi.mocked(logUntrackedFilesNotice);
+const mockDetectUntrackedFiles = vi.mocked(detectUntrackedFiles);
 const mockLog = vi.mocked(log);
 const mockHashFiles = vi.mocked(hashFiles);
 const mockClassifyFiles = vi.mocked(classifyFiles);
@@ -1081,6 +1097,150 @@ describe("pushCommand", () => {
       // "No changes to push" に到達
       expect(mockLog.info).toHaveBeenCalledWith("No changes to push");
     });
+  });
+});
+
+describe("未追跡ファイルの追跡フロー", () => {
+  beforeEach(() => {
+    vol.reset();
+    vi.clearAllMocks();
+    const { effect } = mockContext();
+    mockLoadCommandContext.mockReturnValue(effect);
+    mockDetectDiff.mockResolvedValue(emptyDiff);
+    mockGetPushableFiles.mockReturnValue([]);
+  });
+
+  /** /test/.ziku/ziku.jsonc を初期 include 付きで memfs に用意する */
+  function seedZikuConfig(include: string[] = [".github/**"]): void {
+    vol.fromJSON({
+      "/test/.ziku/ziku.jsonc": `${JSON.stringify(
+        { $schema: "https://example.com/schema.json", include },
+        null,
+        2,
+      )}\n`,
+    });
+  }
+
+  /** memfs 上の /test/.ziku/ziku.jsonc の include 配列を読み出す */
+  function readTrackedInclude(): string[] {
+    const raw = vol.toJSON()["/test/.ziku/ziku.jsonc"] as string;
+    return JSON.parse(raw).include as string[];
+  }
+
+  const untrackedDocsFile = [{ folder: "docs", files: [{ path: "docs/new.md", folder: "docs" }] }];
+
+  it("対話モードで選択した未追跡ファイルが include に追記され push 対象に乗る", async () => {
+    seedZikuConfig();
+    mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);
+    mockSelectUntrackedToTrack.mockResolvedValueOnce(["docs/new.md"]);
+
+    // 追跡したファイルが localOnly として分類され、diff にも現れる
+    setupPushableFiles([{ path: "docs/new.md", type: "added", localContent: "# New doc" }]);
+    mockSelectPushFiles.mockResolvedValueOnce([
+      { path: "docs/new.md", type: "added", localContent: "# New doc" },
+    ]);
+    mockGetGitHubToken.mockReturnValue("ghp_token");
+    mockConfirmAction.mockResolvedValueOnce(true);
+    mockCreatePullRequest.mockResolvedValueOnce({
+      url: "https://github.com/owner/repo/pull/1",
+      branch: "update-template-123",
+      number: 1,
+    });
+
+    await (pushCommand.run as any)({
+      args: { dir: "/test", dryRun: false, yes: false, edit: false },
+      rawArgs: [],
+      cmd: pushCommand,
+    });
+
+    // 追跡ファイルが PR に含まれる
+    expect(mockCreatePullRequest).toHaveBeenCalledWith(
+      "ghp_token",
+      expect.objectContaining({
+        files: expect.arrayContaining([expect.objectContaining({ path: "docs/new.md" })]),
+      }),
+    );
+    // include に永続化される（push 成功後）
+    expect(readTrackedInclude()).toContain("docs/new.md");
+    expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining("Tracked 1 new file(s)"));
+  });
+
+  it("未追跡を1件も選択しなければ include は変化しない", async () => {
+    seedZikuConfig();
+    mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);
+    mockSelectUntrackedToTrack.mockResolvedValueOnce([]);
+
+    // 別の追跡済みファイルの変更だけを push する
+    setupPushableFiles([{ path: "file.txt", type: "added", localContent: "content" }]);
+    mockSelectPushFiles.mockResolvedValueOnce([
+      { path: "file.txt", type: "added", localContent: "content" },
+    ]);
+    mockGetGitHubToken.mockReturnValue("ghp_token");
+    mockConfirmAction.mockResolvedValueOnce(true);
+    mockCreatePullRequest.mockResolvedValueOnce({
+      url: "https://github.com/owner/repo/pull/1",
+      branch: "update-template-123",
+      number: 1,
+    });
+
+    await (pushCommand.run as any)({
+      args: { dir: "/test", dryRun: false, yes: false, edit: false },
+      rawArgs: [],
+      cmd: pushCommand,
+    });
+
+    expect(readTrackedInclude()).toEqual([".github/**"]);
+    expect(mockLog.success).not.toHaveBeenCalledWith(expect.stringContaining("Tracked"));
+  });
+
+  it("push 失敗時は include を書き換えない（部分適用しない）", async () => {
+    seedZikuConfig();
+    mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);
+    mockSelectUntrackedToTrack.mockResolvedValueOnce(["docs/new.md"]);
+
+    setupPushableFiles([{ path: "docs/new.md", type: "added", localContent: "# New doc" }]);
+    mockSelectPushFiles.mockResolvedValueOnce([
+      { path: "docs/new.md", type: "added", localContent: "# New doc" },
+    ]);
+    mockGetGitHubToken.mockReturnValue("ghp_token");
+    mockConfirmAction.mockResolvedValueOnce(true);
+    // PR 作成が失敗する
+    mockCreatePullRequest.mockRejectedValueOnce(new Error("network error"));
+
+    await expect(
+      (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: false, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      }),
+    ).rejects.toThrow();
+
+    // push が失敗したので include は元のまま
+    expect(readTrackedInclude()).toEqual([".github/**"]);
+  });
+
+  it("--yes では未追跡を追加せず、除外を明示通知する", async () => {
+    seedZikuConfig();
+    mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);
+    // --yes では追跡対象なし → push 対象もなしで終了
+    mockGetPushableFiles.mockReturnValue([]);
+
+    await (pushCommand.run as any)({
+      args: { dir: "/test", dryRun: false, yes: true, edit: false },
+      rawArgs: [],
+      cmd: pushCommand,
+    });
+
+    // 選択プロンプトは出さない
+    expect(mockSelectUntrackedToTrack).not.toHaveBeenCalled();
+    // 除外を通知する
+    expect(mockLogUntrackedFilesNotice).toHaveBeenCalledWith(
+      untrackedDocsFile,
+      1,
+      expect.objectContaining({ headline: expect.stringContaining("excluded from push") }),
+    );
+    // include は変化しない
+    expect(readTrackedInclude()).toEqual([".github/**"]);
   });
 });
 
