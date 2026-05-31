@@ -552,9 +552,12 @@ async function resolveUntrackedTracking(
   }
 
   if (args.yes || args.dryRun) {
-    logUntrackedFilesNotice(untrackedByFolder, untrackedCount, {
-      headline: `${untrackedCount} untracked file(s) excluded from push (outside the sync whitelist):`,
-    });
+    // --dry-run は「除外」ではなくプレビューなので追跡判断をスキップしているだけ。
+    // 恒久的に弾かれたと誤読されないよう headline を分ける。
+    const headline = args.dryRun
+      ? `${untrackedCount} untracked file(s) outside the sync whitelist (dry-run: tracking skipped):`
+      : `${untrackedCount} untracked file(s) excluded from push (outside the sync whitelist):`;
+    logUntrackedFilesNotice(untrackedByFolder, untrackedCount, { headline });
     return { effectivePatterns: patterns, newlyTrackedPaths: [] };
   }
 
@@ -578,6 +581,9 @@ async function resolveUntrackedTracking(
  * 実際に push されたファイルのパターンのみ追記する。これによりファイル選択で外された
  * 追跡候補を除外し、「追跡したのに push していない」状態を作らない。
  * パターン = ファイルパス（個別追跡）の前提。ディレクトリ glob 対応は将来拡張。
+ *
+ * 永続化は addIncludePattern による include キーのみの部分更新（jsonc の modify）で行う。
+ * exclude やコメント等は保持されるため、push 中に外部編集が入っても include 以外は壊さない。
  */
 async function persistNewlyTracked(
   targetDir: string,

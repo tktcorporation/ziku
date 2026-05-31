@@ -869,6 +869,57 @@ describe("pushCommand", () => {
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
+    it("対話で未解決の衝突を選択すると中断する（--files 以外の経路）", async () => {
+      const { effect } = mockContext({
+        lock: {
+          ...validLock,
+          baseHashes: { "file.txt": "abc123" },
+        },
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      vol.fromJSON({
+        "/test/file.txt": "local content",
+        "/tmp/template/file.txt": "template content",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: ["file.txt"],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+      const conflictFile = {
+        path: "file.txt",
+        type: "modified" as const,
+        localContent: "local content",
+        templateContent: "template content",
+      };
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [conflictFile],
+        summary: { added: 0, modified: 1, deleted: 0, unchanged: 0 },
+      });
+      // 既定では未選択だが、ユーザーが対話で衝突ファイルを明示選択したケース
+      mockSelectPushFiles.mockResolvedValueOnce([conflictFile]);
+
+      await expect(
+        (pushCommand.run as any)({
+          args: { dir: "/test", dryRun: false, yes: false, edit: false },
+          rawArgs: [],
+          cmd: pushCommand,
+        }),
+      ).rejects.toMatchObject({
+        name: "ZikuError",
+        message: expect.stringContaining("couldn't be auto-merged"),
+        hint: expect.stringMatching(/file\.txt[\s\S]*ziku pull/),
+      });
+
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
     it("baseRef + baseHashes がある場合に 3-way マージで自動解決", async () => {
       const { effect } = mockContext({
         lock: {
@@ -1329,6 +1380,88 @@ describe("未追跡ファイルの追跡フロー", () => {
       expect.objectContaining({ headline: expect.stringContaining("excluded from push") }),
     );
     // include は変化しない
+    expect(readTrackedInclude()).toEqual([".github/**"]);
+  });
+
+  it("--dry-run では未追跡を追加せず、dry-run 用の通知文言を出す", async () => {
+    seedZikuConfig();
+    mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);
+
+    await (pushCommand.run as any)({
+      args: { dir: "/test", dryRun: true, yes: false, edit: false },
+      rawArgs: [],
+      cmd: pushCommand,
+    });
+
+    // dry-run は「除外」ではなく「追跡判断のスキップ」と伝える
+    expect(mockSelectUntrackedToTrack).not.toHaveBeenCalled();
+    expect(mockLogUntrackedFilesNotice).toHaveBeenCalledWith(
+      untrackedDocsFile,
+      1,
+      expect.objectContaining({ headline: expect.stringContaining("dry-run: tracking skipped") }),
+    );
+    expect(readTrackedInclude()).toEqual([".github/**"]);
+  });
+
+  it("ローカルソースへの push でも、追跡したファイルが include に永続化される", async () => {
+    const { effect } = mockContext({
+      source: { path: "/local/template" },
+      lock: { ...validLock, source: { path: "/local/template" } as any },
+    });
+    mockLoadCommandContext.mockReturnValue(effect);
+    seedZikuConfig();
+    mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);
+    mockSelectUntrackedToTrack.mockResolvedValueOnce(["docs/new.md"]);
+
+    setupPushableFiles([{ path: "docs/new.md", type: "added", localContent: "# New doc" }]);
+    mockSelectPushFiles.mockResolvedValueOnce([
+      { path: "docs/new.md", type: "added", localContent: "# New doc" },
+    ]);
+    // ローカル push の確認プロンプト
+    mockConfirmAction.mockResolvedValueOnce(true);
+
+    await (pushCommand.run as any)({
+      args: { dir: "/test", dryRun: false, yes: false, edit: false },
+      rawArgs: [],
+      cmd: pushCommand,
+    });
+
+    // ローカル push 経路（PR は作らない）でも include に追記される
+    expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    expect(readTrackedInclude()).toContain("docs/new.md");
+  });
+
+  it("追跡を選んでもファイル選択で外したファイルは永続化されない", async () => {
+    seedZikuConfig();
+    mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);
+    mockSelectUntrackedToTrack.mockResolvedValueOnce(["docs/new.md"]);
+
+    // docs/new.md（追跡候補）と safe.txt の両方が push 可能
+    setupPushableFiles([
+      { path: "docs/new.md", type: "added", localContent: "# New doc" },
+      { path: "safe.txt", type: "added", localContent: "safe" },
+    ]);
+    // ユーザーはファイル選択で safe.txt のみ選び、docs/new.md は外す
+    mockSelectPushFiles.mockResolvedValueOnce([
+      { path: "safe.txt", type: "added", localContent: "safe" },
+    ]);
+    mockGetGitHubToken.mockReturnValue("ghp_token");
+    mockConfirmAction.mockResolvedValueOnce(true);
+    mockCreatePullRequest.mockResolvedValueOnce({
+      url: "https://github.com/owner/repo/pull/1",
+      branch: "update-template-123",
+      number: 1,
+    });
+
+    await (pushCommand.run as any)({
+      args: { dir: "/test", dryRun: false, yes: false, edit: false },
+      rawArgs: [],
+      cmd: pushCommand,
+    });
+
+    // 実際に push したのは safe.txt のみ。push していない docs/new.md は追跡されない。
+    const callArgs = mockCreatePullRequest.mock.calls[0][1];
+    expect(callArgs.files.some((f: any) => f.path === "safe.txt")).toBe(true);
     expect(readTrackedInclude()).toEqual([".github/**"]);
   });
 });
