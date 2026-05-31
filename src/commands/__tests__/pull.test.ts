@@ -38,6 +38,8 @@ vi.mock("../../utils/ziku-config", () => ({
   zikuConfigExists: vi.fn(),
   saveZikuConfig: vi.fn(),
   generateZikuJsonc: vi.fn((c: any) => JSON.stringify(c)),
+  withConfigTracked: (include: string[]) =>
+    include.includes(".ziku/ziku.jsonc") ? include : [...include, ".ziku/ziku.jsonc"],
 }));
 
 vi.mock("../../utils/lock", () => ({
@@ -125,7 +127,6 @@ const mockSelectDeletedFiles = vi.mocked(selectDeletedFiles);
 const { downloadTemplateToTemp } = await import("../../utils/template");
 const { zikuConfigExists } = await import("../../utils/ziku-config");
 const { loadLock, saveLock } = await import("../../utils/lock");
-const { saveZikuConfig } = await import("../../utils/ziku-config");
 const { loadTemplateConfig } = await import("../../utils/template-config");
 const { hashFiles } = await import("../../utils/hash");
 const { classifyFiles, mergeOneFile, writeFileEnsureDir, downloadBaseForMerge } =
@@ -143,7 +144,6 @@ const mockMergeOneFile = vi.mocked(mergeOneFile);
 const mockWriteFileEnsureDir = vi.mocked(writeFileEnsureDir);
 const mockDownloadBaseForMerge = vi.mocked(downloadBaseForMerge);
 const mockLog = vi.mocked(log);
-const mockSaveZikuConfig = vi.mocked(saveZikuConfig);
 const mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
 
 const baseZikuConfig = {
@@ -259,13 +259,22 @@ describe("pullCommand", () => {
       expect(mockLog.success).toHaveBeenCalledWith("Already up to date");
     });
 
-    it("ファイル差分ゼロでも patternsUpdated なら ziku.jsonc を上書きし lock を更新する (codex P1 #4)", async () => {
-      // codex review #71 の最後の P1 で指摘されたシナリオの回帰テスト:
-      // テンプレが新パターンを追加しただけ (該当ファイル無し) のときに pull が
-      // 早期 return してしまうと、status が永遠に "pull 必要" を推奨し続ける。
-      vol.fromJSON({ "/test": null });
+    it("テンプレが新パターンを追加 → ziku.jsonc が autoUpdate として同期され lock が更新される", async () => {
+      // codex review #71 P1 #4 の後継テスト。
+      // 旧実装ではテンプレの新パターンを additive な saveZikuConfig で書き戻していたが、
+      // 現在は ziku.jsonc 自体が追跡ファイルとして classify→applyFiles で同期される。
+      // テンプレ側 ziku.jsonc が新パターンを含む状態を memfs に用意し、classifyFiles が
+      // .ziku/ziku.jsonc を autoUpdate に分類するケースを再現する。
+      const newTemplateConfig = JSON.stringify(
+        { include: [".root/**", ".github/**", ".new-pattern/**"] },
+        null,
+        2,
+      );
+      vol.fromJSON({
+        "/test/.ziku/ziku.jsonc": JSON.stringify({ include: [".root/**", ".github/**"] }, null, 2),
+        "/tmp/template/.ziku/ziku.jsonc": newTemplateConfig,
+      });
 
-      // テンプレ側 ziku.jsonc に新規パターンが追加されている状態を再現
       const effectMod = await import("effect");
       mockLoadTemplateConfig.mockReturnValueOnce(
         effectMod.Effect.succeed({
@@ -274,9 +283,9 @@ describe("pullCommand", () => {
           exclude: undefined,
         }),
       );
-      // ファイル差分はゼロ
+      // ziku.jsonc 自体が autoUpdate に分類される（テンプレ側で内容が変わったため）
       mockClassifyFiles.mockReturnValueOnce({
-        autoUpdate: [],
+        autoUpdate: [".ziku/ziku.jsonc"],
         localOnly: [],
         conflicts: [],
         newFiles: [],
@@ -293,8 +302,11 @@ describe("pullCommand", () => {
 
       // 早期 return しない (Already up to date は出ない)
       expect(mockLog.success).not.toHaveBeenCalledWith("Already up to date");
-      // ziku.jsonc が新パターンで上書きされる
-      expect(mockSaveZikuConfig).toHaveBeenCalled();
+      // ziku.jsonc がテンプレ内容で上書きされる（applyFiles 経由）
+      expect(mockWriteFileEnsureDir).toHaveBeenCalledWith(
+        "/test/.ziku/ziku.jsonc",
+        newTemplateConfig,
+      );
       // lock も更新される (新しい baseHashes)
       expect(mockSaveLock).toHaveBeenCalled();
     });

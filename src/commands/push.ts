@@ -8,7 +8,7 @@ import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
 import type { FileDiff, TemplateSource } from "../modules/schemas";
 import { LOCK_FILE, saveLock } from "../utils/lock";
-import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
+import { ZIKU_CONFIG_FILE, withConfigTracked } from "../utils/ziku-config";
 import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
 import { downloadBaseForMerge, mergeOneFile } from "../utils/merge";
 import type { CommandContextShape } from "../services/command-context";
@@ -50,7 +50,16 @@ export const pushLifecycle: CommandLifecycle = {
       op: "update",
       note: "GitHub: PR を作成 / ローカル: ファイルを直接コピー",
     },
+    {
+      file: ZIKU_CONFIG_FILE,
+      location: "template",
+      op: "update",
+      note: "ローカルで追加/変更したパターンをテンプレの ziku.jsonc へ 3-way マージで伝播",
+    },
     { file: LOCK_FILE, location: "local", op: "update", note: "baseHashes を更新" },
+  ],
+  notes: [
+    "`ziku.jsonc` 自体が追跡ファイルとして同期対象に含まれる。`ziku track` で追加したローカルパターンは、push 時にテンプレートの `ziku.jsonc` へ 3-way マージで伝播する（pull と双方向）。",
   ],
 };
 
@@ -205,12 +214,11 @@ function pushToLocal(
         }
       }
 
-      // lock.json の baseHashes を更新（テンプレート側のハッシュを再計算）
-      const patterns = {
-        include: ctx.config.include,
-        exclude: ctx.config.exclude ?? [],
-      };
-      const baseHashes = await hashFiles(localSource.path, patterns.include, patterns.exclude);
+      // lock.json の baseHashes を更新（テンプレート側のハッシュを再計算）。
+      // ziku.jsonc も追跡対象に含めて base を揃える（push 後はテンプレと一致するため）。
+      const include = withConfigTracked(ctx.config.include);
+      const exclude = ctx.config.exclude ?? [];
+      const baseHashes = await hashFiles(localSource.path, include, exclude);
       await saveLock(projectDir, { ...ctx.lock, baseHashes });
 
       const totalCount = target.files.length + target.deletions.length;
@@ -372,11 +380,16 @@ export const pushCommand = defineCommand({
     }
 
     const patterns = {
-      include: config.include,
+      // `.ziku/ziku.jsonc` 自体を追跡対象に含める。これにより `ziku track` で
+      // 追加したローカルパターンが、3-way マージ経由でテンプレートの ziku.jsonc へ
+      // 伝播する（孤児化バグの修正）。
+      include: withConfigTracked(config.include),
       exclude: config.exclude ?? [],
     };
 
-    if (patterns.include.length === 0) {
+    // ガードは生の config.include で判定する（patterns.include は ziku.jsonc を
+    // 常に含むため 0 にならない）。
+    if (config.include.length === 0) {
       log.warn("No patterns configured");
       await cleanup();
       return;

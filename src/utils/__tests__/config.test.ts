@@ -19,6 +19,7 @@ const {
   zikuConfigExists,
   generateZikuJsonc,
   addIncludePattern,
+  withConfigTracked,
   ZIKU_CONFIG_FILE,
 } = await import("../ziku-config");
 
@@ -205,6 +206,31 @@ describe("addIncludePattern", () => {
 
     const parsed = JSON.parse(result);
     expect(parsed.include).toEqual(["a/**", "b/**"]);
+  });
+});
+
+describe("withConfigTracked", () => {
+  it("ziku.jsonc を追跡対象として include 末尾に追加する", () => {
+    const result = withConfigTracked([".claude/**", ".mcp.json"]);
+    expect(result).toEqual([".claude/**", ".mcp.json", ZIKU_CONFIG_FILE]);
+  });
+
+  it("既に ziku.jsonc が含まれていれば重複追加しない", () => {
+    const input = [".claude/**", ZIKU_CONFIG_FILE];
+    const result = withConfigTracked(input);
+    expect(result).toEqual(input);
+    // 重複しないこと
+    expect(result.filter((p) => p === ZIKU_CONFIG_FILE)).toHaveLength(1);
+  });
+
+  it("空配列でも ziku.jsonc だけは追跡対象になる", () => {
+    expect(withConfigTracked([])).toEqual([ZIKU_CONFIG_FILE]);
+  });
+
+  it("元の配列を破壊しない（イミュータブル）", () => {
+    const input = [".claude/**"];
+    withConfigTracked(input);
+    expect(input).toEqual([".claude/**"]);
   });
 });
 

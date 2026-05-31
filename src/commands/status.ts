@@ -12,7 +12,7 @@ import { categorizeForStatus, decideRecommendation, type Recommendation } from "
 import { analyzeSync } from "../utils/sync-analysis";
 import { mergeTemplatePatterns } from "../utils/template-patterns";
 import { detectUntrackedFiles } from "../utils/untracked";
-import { ZIKU_CONFIG_FILE, zikuConfigExists } from "../utils/ziku-config";
+import { ZIKU_CONFIG_FILE, withConfigTracked, zikuConfigExists } from "../utils/ziku-config";
 
 /**
  * status コマンドのファイル操作メタデータ。
@@ -144,7 +144,9 @@ export const statusCommand = defineCommand({
           targetDir,
           templateDir,
           baseHashes: lock.baseHashes,
-          include: mergedInclude,
+          // ziku.jsonc 自体も追跡ファイルとして差分検出に含める（push/pull と一貫させ、
+          // config ドリフトを status に反映する）。
+          include: withConfigTracked(mergedInclude),
           exclude: mergedExclude,
         }),
       );

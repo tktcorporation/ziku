@@ -53,6 +53,8 @@ vi.mock("../../utils/lock", () => ({
 vi.mock("../../utils/ziku-config", () => ({
   zikuConfigExists: vi.fn().mockReturnValue(false),
   ZIKU_CONFIG_FILE: ".ziku/ziku.jsonc",
+  withConfigTracked: (include: string[]) =>
+    include.includes(".ziku/ziku.jsonc") ? include : [...include, ".ziku/ziku.jsonc"],
 }));
 
 // utils/untracked をモック
@@ -469,10 +471,11 @@ describe("statusCommand", () => {
         cmd: statusCommand,
       });
 
-      // analyzeSync がマージ済み include で呼ばれることを確認 (P1 の本質)
+      // analyzeSync がマージ済み include で呼ばれることを確認 (P1 の本質)。
+      // ziku.jsonc 自体も追跡ファイルとして include に含まれる（withConfigTracked）。
       expect(mockAnalyzeSync).toHaveBeenCalledWith(
         expect.objectContaining({
-          include: [".claude/**", ".new-feature/**"],
+          include: [".claude/**", ".new-feature/**", ".ziku/ziku.jsonc"],
         }),
       );
       // ユーザー向けの新パターン通知
