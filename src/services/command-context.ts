@@ -13,8 +13,9 @@ import type { ZikuConfig, LockState, TemplateSource } from "../modules/schemas";
 import { isGitHubSource } from "../modules/schemas";
 import { FileNotFoundError, ParseError, ZikuError } from "../errors";
 import type { TemplateError } from "../errors";
-import { loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
+import { ZIKU_CONFIG_FILE, loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
 import { loadLock } from "../utils/lock";
+import { hashContent } from "../utils/hash";
 import { resolveTemplateDirScoped } from "../utils/template-resolve";
 import { resolveLatestCommitSha } from "../utils/github";
 
@@ -82,6 +83,37 @@ export async function runCommandEffect<A>(effect: Effect.Effect<A, ZikuError>): 
 // ─── Layer 構築 ───
 
 /**
+ * 旧バージョン互換: lock.baseHashes に `.ziku/ziku.jsonc` のエントリをバックフィルする。
+ *
+ * 背景: `ziku.jsonc` を追跡ファイル化する以前に `init` された lock には baseHashes に
+ * ziku.jsonc が記録されていない。そのまま pull/push すると classify が
+ * 「base 無し・local≠template」を conflict と判定し、ユーザーの ziku.jsonc に diff3
+ * 衝突マーカーを注入する（JSON が壊れ、以降のコマンドが ParseError で全滅する）。
+ *
+ * これを防ぐため、baseHashes が既に存在し かつ ziku.jsonc のエントリだけ欠けている場合に
+ * 限り、ローカル ziku.jsonc 内容のハッシュでバックフィルする。base==local となるため、
+ * テンプレ側の差分は conflict ではなく autoUpdate として安全に取り込まれる。
+ *
+ * baseHashes 自体が未定義の lock（同期履歴ゼロの退化状態）は対象外とし、既存挙動を保つ。
+ *
+ * @param lock 読み込んだ lock
+ * @param localConfigContent ローカル `.ziku/ziku.jsonc` の生内容
+ * @returns ziku.jsonc の base を補完した lock（不要なら同一オブジェクト）
+ */
+export function migrateLockConfigBaseHash(lock: LockState, localConfigContent: string): LockState {
+  if (lock.baseHashes === undefined || lock.baseHashes[ZIKU_CONFIG_FILE] !== undefined) {
+    return lock;
+  }
+  return {
+    ...lock,
+    baseHashes: {
+      ...lock.baseHashes,
+      [ZIKU_CONFIG_FILE]: hashContent(localConfigContent),
+    },
+  };
+}
+
+/**
  * targetDir からコマンドコンテキストを構築する Effect。
  *
  * 1. .ziku/ziku.jsonc を読み込み（パターン取得）
@@ -96,15 +128,17 @@ export function loadCommandContext(
     if (!zikuConfigExists(targetDir)) {
       return yield* new FileNotFoundError({ path: ".ziku/ziku.jsonc" });
     }
-    const { config } = yield* Effect.tryPromise({
+    const { config, rawContent } = yield* Effect.tryPromise({
       try: () => loadZikuConfig(targetDir),
       catch: (e) => new ParseError({ path: ".ziku/ziku.jsonc", cause: e }),
     });
 
-    const lock = yield* Effect.tryPromise({
+    const loadedLock = yield* Effect.tryPromise({
       try: () => loadLock(targetDir),
       catch: () => new FileNotFoundError({ path: ".ziku/lock.json" }),
     });
+
+    const lock = migrateLockConfigBaseHash(loadedLock, rawContent);
 
     const source = lock.source;
 
