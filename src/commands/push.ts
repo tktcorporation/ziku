@@ -406,7 +406,6 @@ export const pushCommand = defineCommand({
       // ─── 共通: 差分検出 + ファイル選択 ───
 
       const mergedContents = new Map<string, string>();
-      const pushableFilePaths: Set<string> = new Set();
 
       // ─── 未追跡ファイルの追跡フロー ───
       // 検知・選択・include へのマージは classify より「前」に行う必要がある。
@@ -418,49 +417,15 @@ export const pushCommand = defineCommand({
         { yes: args.yes as boolean, dryRun: args.dryRun as boolean },
       );
 
-      {
-        const { classifyFiles } = await import("../utils/merge");
-
-        const templateHashes = await hashFiles(
-          templateDir,
-          effectivePatterns.include,
-          effectivePatterns.exclude,
-        );
-        const localHashes = await hashFiles(
-          targetDir,
-          effectivePatterns.include,
-          effectivePatterns.exclude,
-        );
-
-        const classification = classifyFiles({
-          baseHashes: lock.baseHashes ?? {},
-          localHashes,
-          templateHashes,
-        });
-
-        for (const file of classification.localOnly) pushableFilePaths.add(file);
-        for (const file of classification.conflicts) pushableFilePaths.add(file);
-        for (const file of classification.deletedLocally) pushableFilePaths.add(file);
-
-        if (classification.autoUpdate.length > 0) {
-          log.info(
-            `Skipping ${classification.autoUpdate.length} file(s) only changed in template (use \`ziku pull\` to sync):`,
-          );
-          for (const file of classification.autoUpdate) {
-            log.message(`  ${pc.dim("↓")} ${pc.dim(file)}`);
-          }
-        }
-
-        if (classification.conflicts.length > 0) {
-          await resolveConflicts(classification.conflicts, {
-            targetDir,
-            templateDir,
-            source,
-            lock,
-            mergedContents,
-          });
-        }
-      }
+      // 分類 + auto-merge。未解決の衝突は控えておき、push 対象に含めようとした時だけ中断する。
+      const { pushableFilePaths, unresolvedConflicts } = await classifyAndResolveConflicts({
+        targetDir,
+        templateDir,
+        source,
+        lock,
+        patterns: effectivePatterns,
+        mergedContents,
+      });
 
       log.step("Detecting changes...");
 
@@ -473,6 +438,18 @@ export const pushCommand = defineCommand({
           (f.type === "added" || f.type === "modified" || f.type === "deleted") &&
           pushableFilePaths.has(f.path),
       );
+
+      // 未解決の衝突は既定では push しない。巻き添えで他ファイルを止めず、明示的に
+      // 選択された場合だけ後段で中断する。ここでは存在を知らせて pull での解決を促す。
+      if (unresolvedConflicts.size > 0) {
+        log.warn(
+          `${unresolvedConflicts.size} file(s) have unresolved conflicts (excluded by default):`,
+        );
+        for (const file of unresolvedConflicts) log.message(`  ${pc.yellow("!")} ${file}`);
+        log.info(
+          "Run `ziku pull` to resolve them, then push. Selecting them here will stop the push.",
+        );
+      }
 
       if (pushableFiles.length === 0) {
         log.info("No changes to push");
@@ -488,12 +465,19 @@ export const pushCommand = defineCommand({
         return;
       }
 
-      // ファイル選択
+      // ファイル選択（未解決の衝突は既定で未選択にし、マークして見せる）
       pushableFiles = await selectFilesToPush(pushableFiles, {
         filesArg: args.files as string | undefined,
         includeDeletions: args.includeDeletions as boolean,
+        conflictedPaths: unresolvedConflicts,
       });
       if (pushableFiles.length === 0) return;
+
+      // 未解決の衝突を含めて push しようとした場合は確定的に中断する（解決してから push）。
+      const selectedConflicts = pushableFiles.filter((f) => unresolvedConflicts.has(f.path));
+      if (selectedConflicts.length > 0) {
+        throw unresolvedConflictError(selectedConflicts.map((f) => f.path));
+      }
 
       const files = pushableFiles
         .filter((f) => f.type !== "deleted")
@@ -620,7 +604,11 @@ async function persistNewlyTracked(
  */
 async function selectFilesToPush(
   candidates: FileDiff[],
-  opts: { filesArg: string | undefined; includeDeletions: boolean },
+  opts: {
+    filesArg: string | undefined;
+    includeDeletions: boolean;
+    conflictedPaths: Set<string>;
+  },
 ): Promise<FileDiff[]> {
   if (opts.filesArg) {
     const requestedPaths = opts.filesArg
@@ -643,6 +631,7 @@ async function selectFilesToPush(
   log.step("Selecting files...");
   const selected = await selectPushFiles(candidates, {
     preselectDeletions: opts.includeDeletions,
+    conflictedPaths: opts.conflictedPaths,
   });
   if (selected.length === 0) {
     log.info("No files selected. Cancelled.");
@@ -650,18 +639,89 @@ async function selectFilesToPush(
   return selected;
 }
 
+// ─── 分類 + コンフリクト解決 ───
+
+/**
+ * ローカル/テンプレート/ベースのハッシュを比較して push 対象を分類し、衝突は auto-merge を試みる。
+ *
+ * - localOnly / conflicts / deletedLocally を push 対象候補（pushableFilePaths）に含める。
+ * - autoUpdate（テンプレートのみ変更）は push 対象外としてスキップ理由を表示する。
+ * - 衝突は auto-merge を試行し、成功分は mergedContents に保存、失敗分は unresolvedConflicts に返す。
+ *
+ * 未解決の衝突があってもここでは中断しない（巻き添えで他ファイルの push を止めないため）。
+ */
+async function classifyAndResolveConflicts(params: {
+  targetDir: string;
+  templateDir: string;
+  source: TemplateSource;
+  lock: { baseHashes?: Record<string, string>; baseRef?: string };
+  patterns: { include: string[]; exclude: string[] };
+  mergedContents: Map<string, string>;
+}): Promise<{ pushableFilePaths: Set<string>; unresolvedConflicts: Set<string> }> {
+  const { classifyFiles } = await import("../utils/merge");
+
+  const templateHashes = await hashFiles(
+    params.templateDir,
+    params.patterns.include,
+    params.patterns.exclude,
+  );
+  const localHashes = await hashFiles(
+    params.targetDir,
+    params.patterns.include,
+    params.patterns.exclude,
+  );
+
+  const classification = classifyFiles({
+    baseHashes: params.lock.baseHashes ?? {},
+    localHashes,
+    templateHashes,
+  });
+
+  const pushableFilePaths = new Set<string>();
+  for (const file of classification.localOnly) pushableFilePaths.add(file);
+  for (const file of classification.conflicts) pushableFilePaths.add(file);
+  for (const file of classification.deletedLocally) pushableFilePaths.add(file);
+
+  if (classification.autoUpdate.length > 0) {
+    log.info(
+      `Skipping ${classification.autoUpdate.length} file(s) only changed in template (use \`ziku pull\` to sync):`,
+    );
+    for (const file of classification.autoUpdate) {
+      log.message(`  ${pc.dim("↓")} ${pc.dim(file)}`);
+    }
+  }
+
+  const unresolvedConflicts = new Set<string>();
+  if (classification.conflicts.length > 0) {
+    const unresolved = await resolveConflicts(classification.conflicts, {
+      targetDir: params.targetDir,
+      templateDir: params.templateDir,
+      source: params.source,
+      lock: params.lock,
+      mergedContents: params.mergedContents,
+    });
+    for (const file of unresolved) unresolvedConflicts.add(file);
+  }
+
+  return { pushableFilePaths, unresolvedConflicts };
+}
+
 // ─── コンフリクト解決 ───
 
 /**
- * push 時のコンフリクト解決。
+ * push 時のコンフリクト解決（auto-merge の試行）。
  *
  * ファイル読み込み・マージ・ベースダウンロードは conflict-io の共通ユーティリティを使い、
  * push 固有の処理（mergedContents への保存）だけをここで行う。
  * pull との違い: ローカルに書き込まず、auto-merge 成功分のみ mergedContents に保存する。
  *
- * 自動マージできない衝突が 1 つでも残った場合は ZikuError を throw して push 全体を
- * 確定的に中断する（ローカル内容での暗黙の上書き push を防ぐ）。利用者は `ziku pull` で
- * 衝突を解決してから push し直す。
+ * 自動マージできなかったファイルのパス一覧を返す。ここでは中断しない。
+ * 「未解決の衝突が 1 つでもあれば push 全体を止める」のではなく、未解決ファイルを
+ * push 対象から外して非衝突ファイルの push は通し、未解決ファイルが実際に push 対象として
+ * 選ばれた場合だけ中断する（呼び出し側の責務）。これによりローカル内容での暗黙の上書きを
+ * 防ぎつつ、衝突に巻き込まれない変更まで止めてしまう問題を回避する。
+ *
+ * @returns auto-merge できなかった未解決ファイルのパス一覧。
  */
 async function resolveConflicts(
   conflicts: string[],
@@ -672,7 +732,7 @@ async function resolveConflicts(
     lock: { baseRef?: string };
     mergedContents: Map<string, string>;
   },
-): Promise<void> {
+): Promise<string[]> {
   const baseInfo = ctx.lock.baseRef
     ? `since ${pc.bold(ctx.lock.baseRef.slice(0, 7))} (your last sync)`
     : "since your last pull/init";
@@ -688,7 +748,7 @@ async function resolveConflicts(
     }),
   );
 
-  await withFinally(
+  return withFinally(
     async () => {
       const autoMerged: string[] = [];
       const unresolved: string[] = [];
@@ -726,22 +786,24 @@ async function resolveConflicts(
         for (const f of autoMerged) log.message(`  ${pc.green("✓")} ${f}`);
       }
 
-      if (unresolved.length > 0) {
-        // 自動マージできなかった衝突が残っている場合は確定的に中断する。
-        // ここで続行すると、未解決ファイルはマージ結果ではなくローカルの内容が
-        // そのまま push され、テンプレートの更新を黙って上書きしてしまう
-        // （mergedContents に保存されないため push.ts:473 で localContent が使われる）。
-        // Yes/No で判断を委ねるとこの危険な上書きが実行ごとにブレるので、
-        // 「衝突が残る → 必ず止める」という不変条件に固定する。
-        // push 冒頭の pendingMerge チェック（pull 側の未解決衝突を弾く）と同じ思想。
-        throw new ZikuError(
-          `${unresolved.length} file(s) have conflicts that couldn't be auto-merged`,
-          "Resolve these conflicts before pushing:\n" +
-            unresolved.map((f) => `  • ${f}`).join("\n") +
-            "\n\nRun `ziku pull` to bring in the template changes and resolve the conflicts, then push again.",
-        );
-      }
+      return unresolved;
     },
     () => baseResult?.cleanup?.(),
+  );
+}
+
+/**
+ * 未解決の衝突を push 対象に含めようとしたときの中断エラーを生成する。
+ *
+ * 未解決ファイルはマージ結果ではなくローカルの内容がそのまま push され、テンプレートの
+ * 更新を黙って上書きしてしまう（mergedContents に保存されないため localContent が使われる）。
+ * これを防ぐため、未解決ファイルが選択された場合は確定的に中断し、`ziku pull` での解決を促す。
+ */
+function unresolvedConflictError(files: string[]): ZikuError {
+  return new ZikuError(
+    `${files.length} selected file(s) have conflicts that couldn't be auto-merged`,
+    "Resolve these conflicts before pushing:\n" +
+      files.map((f) => `  • ${f}`).join("\n") +
+      "\n\nRun `ziku pull` to bring in the template changes and resolve the conflicts, then push again.",
   );
 }

@@ -204,7 +204,7 @@ function fileStatHint(file: FileDiff): string {
  */
 export function selectPushFiles(
   files: FileDiff[],
-  options?: { preselectDeletions?: boolean },
+  options?: { preselectDeletions?: boolean; conflictedPaths?: Set<string> },
 ): Promise<FileDiff[]> {
   // TTY: diff プレビュー付きカスタムセレクタ
   // stdin と stdout の両方が TTY であることを確認する。
@@ -213,6 +213,7 @@ export function selectPushFiles(
   if (process.stdin.isTTY && process.stdout.isTTY) {
     return selectFilesWithDiffPreview(files, {
       preselectDeletions: options?.preselectDeletions,
+      conflictedPaths: options?.conflictedPaths,
     });
   }
 
@@ -227,8 +228,9 @@ export function selectPushFiles(
  */
 export async function selectPushFilesFallback(
   files: FileDiff[],
-  options?: { preselectDeletions?: boolean },
+  options?: { preselectDeletions?: boolean; conflictedPaths?: Set<string> },
 ): Promise<FileDiff[]> {
+  const conflicted = options?.conflictedPaths ?? new Set<string>();
   const typeIcon = (type: string) =>
     match(type)
       .with("added", () => pc.green("+"))
@@ -239,17 +241,22 @@ export async function selectPushFilesFallback(
   const selected = await p.multiselect({
     message: "Select files to include in PR",
     options: files.map((f) => {
-      const hint = fileStatHint(f);
+      const hint = conflicted.has(f.path)
+        ? pc.red("conflict — resolve with ziku pull")
+        : fileStatHint(f);
       return {
         value: f.path,
         label: `${typeIcon(f.type)} ${f.path}`,
         hint: hint || undefined,
       };
     }),
-    // 削除ファイルはデフォルト未選択（安全側）、--include-deletions で全選択
-    initialValues: options?.preselectDeletions
-      ? files.map((f) => f.path)
-      : files.filter((f) => f.type !== "deleted").map((f) => f.path),
+    // 既定で未選択にするもの: 削除ファイル（安全側、--include-deletions で全選択）と
+    // 未解決の衝突ファイル（選ぶと push が中断するため、誤って既定で含めない）。
+    initialValues: files
+      .filter(
+        (f) => !conflicted.has(f.path) && (options?.preselectDeletions || f.type !== "deleted"),
+      )
+      .map((f) => f.path),
     required: false,
   });
   handleCancel(selected);
