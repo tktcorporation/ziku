@@ -13,6 +13,7 @@ import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { match } from "ts-pattern";
 import type { FileDiff, OverwriteStrategy } from "../modules/schemas";
+import type { UntrackedFilesByFolder } from "../utils/untracked";
 import { calculateDiffStats, formatStats } from "./diff-view";
 import { selectFilesWithDiffPreview } from "./file-select-with-diff";
 
@@ -203,7 +204,7 @@ function fileStatHint(file: FileDiff): string {
  */
 export function selectPushFiles(
   files: FileDiff[],
-  options?: { preselectDeletions?: boolean },
+  options?: { preselectDeletions?: boolean; conflictedPaths?: Set<string> },
 ): Promise<FileDiff[]> {
   // TTY: diff プレビュー付きカスタムセレクタ
   // stdin と stdout の両方が TTY であることを確認する。
@@ -212,6 +213,7 @@ export function selectPushFiles(
   if (process.stdin.isTTY && process.stdout.isTTY) {
     return selectFilesWithDiffPreview(files, {
       preselectDeletions: options?.preselectDeletions,
+      conflictedPaths: options?.conflictedPaths,
     });
   }
 
@@ -226,8 +228,9 @@ export function selectPushFiles(
  */
 export async function selectPushFilesFallback(
   files: FileDiff[],
-  options?: { preselectDeletions?: boolean },
+  options?: { preselectDeletions?: boolean; conflictedPaths?: Set<string> },
 ): Promise<FileDiff[]> {
+  const conflicted = options?.conflictedPaths ?? new Set<string>();
   const typeIcon = (type: string) =>
     match(type)
       .with("added", () => pc.green("+"))
@@ -238,22 +241,89 @@ export async function selectPushFilesFallback(
   const selected = await p.multiselect({
     message: "Select files to include in PR",
     options: files.map((f) => {
-      const hint = fileStatHint(f);
+      const hint = conflicted.has(f.path)
+        ? pc.red("conflict — resolve with ziku pull")
+        : fileStatHint(f);
       return {
         value: f.path,
         label: `${typeIcon(f.type)} ${f.path}`,
         hint: hint || undefined,
       };
     }),
-    // 削除ファイルはデフォルト未選択（安全側）、--include-deletions で全選択
-    initialValues: options?.preselectDeletions
-      ? files.map((f) => f.path)
-      : files.filter((f) => f.type !== "deleted").map((f) => f.path),
+    // 既定で未選択にするもの: 削除ファイル（安全側、--include-deletions で全選択）と
+    // 未解決の衝突ファイル（選ぶと push が中断するため、誤って既定で含めない）。
+    initialValues: files
+      .filter(
+        (f) => !conflicted.has(f.path) && (options?.preselectDeletions || f.type !== "deleted"),
+      )
+      .map((f) => f.path),
     required: false,
   });
   handleCancel(selected);
   const selectedPaths = new Set(selected as string[]);
   return files.filter((f) => selectedPaths.has(f.path));
+}
+
+/**
+ * 監視フォルダ内の未追跡ファイルから、追跡対象（include 追加）にするものを選択させる。
+ *
+ * git の interactive add 相当の体験。push 時に検知した「ホワイトリスト外の新規ファイル」を
+ * その場で追跡対象に取り込めるようにする。デフォルトは全未選択にする（暗黙追加を避け、
+ * ユーザーが明示的に選んだものだけを include へ昇格させるため）。
+ *
+ * @returns 選択されたファイルパスの配列（= include に追加するパターン）。0 件なら何も追跡しない。
+ */
+export async function selectUntrackedToTrack(
+  untrackedByFolder: UntrackedFilesByFolder[],
+): Promise<string[]> {
+  const options = untrackedByFolder.flatMap((group) =>
+    group.files.map((file) => ({
+      value: file.path,
+      label: file.path,
+      hint: group.folder,
+    })),
+  );
+
+  const selected = await p.multiselect({
+    message: "Untracked files found. Select files to track and include in this push:",
+    options,
+    // 明示的に選ばせる（暗黙の include 追加を避ける）
+    initialValues: [],
+    required: false,
+  });
+  handleCancel(selected);
+  return selected as string[];
+}
+
+/**
+ * 未追跡ファイル一覧と `track` コマンドの案内を表示する。
+ *
+ * push の非対話時（--yes / --dry-run）と diff で共用する。対話 push では
+ * selectUntrackedToTrack のプロンプト自体が案内面を兼ねるため、こちらは使わない。
+ *
+ * @param headline 先頭の警告文。push と diff で文脈が異なるため差し替え可能にする。
+ */
+export function logUntrackedFilesNotice(
+  untrackedByFolder: UntrackedFilesByFolder[],
+  untrackedCount: number,
+  opts?: { headline?: string },
+): void {
+  const headline =
+    opts?.headline ?? `${untrackedCount} untracked file(s) found outside the sync whitelist:`;
+  p.log.warn(headline);
+  const untrackedLines = untrackedByFolder.flatMap((group) =>
+    group.files.map((file) => `  ${pc.dim("•")} ${file.path}`),
+  );
+  p.log.message(untrackedLines.join("\n"));
+  p.log.info(
+    `To include these files in sync, add them to tracking with the ${pc.cyan("track")} command:`,
+  );
+  p.log.message(pc.dim(`  npx ziku track "<pattern>"`));
+  p.log.message(
+    pc.dim(
+      `  Example: npx ziku track "${untrackedByFolder[0]?.files[0]?.path || ".cloud/rules/*.md"}"`,
+    ),
+  );
 }
 
 /**

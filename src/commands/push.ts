@@ -8,7 +8,12 @@ import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
 import type { FileDiff, TemplateSource } from "../modules/schemas";
 import { LOCK_FILE, saveLock } from "../utils/lock";
-import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
+import {
+  ZIKU_CONFIG_FILE,
+  addIncludePattern,
+  loadZikuConfig,
+  saveZikuConfig,
+} from "../utils/ziku-config";
 import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
 import { downloadBaseForMerge, mergeOneFile } from "../utils/merge";
 import type { CommandContextShape } from "../services/command-context";
@@ -21,7 +26,9 @@ import {
   inputGitHubToken,
   inputPrBody,
   inputPrTitle,
+  logUntrackedFilesNotice,
   selectPushFiles,
+  selectUntrackedToTrack,
 } from "../ui/prompts";
 import { calculateDiffStats, formatStats } from "../ui/diff-view";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
@@ -29,13 +36,19 @@ import { detectDiff } from "../utils/diff";
 import { createPullRequest, getGitHubToken } from "../utils/github";
 import { hashFiles } from "../utils/hash";
 import { detectAndUpdateReadme } from "../utils/readme";
-import { detectUntrackedFiles } from "../utils/untracked";
+import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked";
 
 export const pushLifecycle: CommandLifecycle = {
   name: "push",
   description: "Push local changes to template (GitHub: PR / local: direct copy)",
   ops: [
     { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "patterns を取得" },
+    {
+      file: ZIKU_CONFIG_FILE,
+      location: "local",
+      op: "update",
+      note: "選択した未追跡ファイルを include に追記（push 成功後）",
+    },
     { file: LOCK_FILE, location: "local", op: "read", note: "source, baseRef, baseHashes を取得" },
     { file: SYNCED_FILES, location: "local", op: "read", note: "ローカルの変更を検出" },
     {
@@ -66,13 +79,16 @@ interface PushTarget {
  * GitHub へ push: PR を作成する。
  *
  * トークン取得 → タイトル/本文 → サマリー表示 → 確認 → PR 作成
+ *
+ * @returns PR を作成したら true、確認でキャンセルされたら false。
+ *   呼び出し側はこの結果で「追跡の永続化を行うか」を判断する（push 成功後のみ永続化する）。
  */
 function pushToGitHub(
   ghSource: { owner: string; repo: string; ref?: string },
   target: PushTarget,
   ctx: CommandContextShape,
   args: { message?: string; edit?: boolean; yes?: boolean },
-): Effect.Effect<void, ZikuError> {
+): Effect.Effect<boolean, ZikuError> {
   return Effect.tryPromise({
     try: async () => {
       let token = getGitHubToken();
@@ -119,7 +135,7 @@ function pushToGitHub(
         const confirmed = await confirmAction("Create PR?", { initialValue: true });
         if (!confirmed) {
           log.info("Cancelled.");
-          return;
+          return false;
         }
       }
 
@@ -146,6 +162,7 @@ function pushToGitHub(
         ].join("\n"),
       );
       outro(`Review and merge at ${pc.cyan(result.url)}`);
+      return true;
     },
     catch: (e) => (e instanceof ZikuError ? e : new ZikuError("Push failed", String(e))),
   });
@@ -156,6 +173,10 @@ function pushToGitHub(
  *
  * PR の代わりにテンプレートディレクトリにファイルを書き込み、
  * lock.json の baseHashes を更新する。
+ *
+ * @param patterns baseHashes 再計算に使うパターン。新規追跡ファイルを含む effectivePatterns を
+ *   渡すことで、追跡したファイルが baseHashes に反映され、lock と配置のズレを防ぐ。
+ * @returns push したら true、確認でキャンセルされたら false。
  */
 function pushToLocal(
   localSource: { path: string },
@@ -163,7 +184,8 @@ function pushToLocal(
   ctx: CommandContextShape,
   projectDir: string,
   args: { yes?: boolean },
-): Effect.Effect<void, ZikuError> {
+  patterns: { include: string[]; exclude: string[] },
+): Effect.Effect<boolean, ZikuError> {
   return Effect.tryPromise({
     try: async () => {
       logPushSummary(
@@ -180,7 +202,7 @@ function pushToLocal(
         const confirmed = await confirmAction("Push to local template?", { initialValue: true });
         if (!confirmed) {
           log.info("Cancelled.");
-          return;
+          return false;
         }
       }
 
@@ -205,17 +227,15 @@ function pushToLocal(
         }
       }
 
-      // lock.json の baseHashes を更新（テンプレート側のハッシュを再計算）
-      const patterns = {
-        include: ctx.config.include,
-        exclude: ctx.config.exclude ?? [],
-      };
+      // lock.json の baseHashes を更新（テンプレート側のハッシュを再計算）。
+      // 新規追跡ファイルを含む effectivePatterns で計算するため、追跡したファイルも baseHashes に入る。
       const baseHashes = await hashFiles(localSource.path, patterns.include, patterns.exclude);
       await saveLock(projectDir, { ...ctx.lock, baseHashes });
 
       const totalCount = target.files.length + target.deletions.length;
       log.success(`Pushed ${totalCount} file(s) to ${pc.cyan(localSource.path)}`);
       outro("Push complete");
+      return true;
     },
     catch: (e) => (e instanceof ZikuError ? e : new ZikuError("Push failed", String(e))),
   });
@@ -386,56 +406,31 @@ export const pushCommand = defineCommand({
       // ─── 共通: 差分検出 + ファイル選択 ───
 
       const mergedContents = new Map<string, string>();
-      const pushableFilePaths: Set<string> = new Set();
 
-      {
-        const { classifyFiles } = await import("../utils/merge");
+      // ─── 未追跡ファイルの追跡フロー ───
+      // 検知・選択・include へのマージは classify より「前」に行う必要がある。
+      // classify が pushableFilePaths を確定するため、ここで include を広げておかないと
+      // 新規追跡ファイルが push 対象に乗らない。永続化（saveZikuConfig）は push 成功後に行う。
+      const { effectivePatterns, newlyTrackedPaths } = await resolveUntrackedTracking(
+        targetDir,
+        patterns,
+        { yes: args.yes as boolean, dryRun: args.dryRun as boolean },
+      );
 
-        const templateHashes = await hashFiles(templateDir, patterns.include, patterns.exclude);
-        const localHashes = await hashFiles(targetDir, patterns.include, patterns.exclude);
-
-        const classification = classifyFiles({
-          baseHashes: lock.baseHashes ?? {},
-          localHashes,
-          templateHashes,
-        });
-
-        for (const file of classification.localOnly) pushableFilePaths.add(file);
-        for (const file of classification.conflicts) pushableFilePaths.add(file);
-        for (const file of classification.deletedLocally) pushableFilePaths.add(file);
-
-        if (classification.autoUpdate.length > 0) {
-          log.info(
-            `Skipping ${classification.autoUpdate.length} file(s) only changed in template (use \`ziku pull\` to sync):`,
-          );
-          for (const file of classification.autoUpdate) {
-            log.message(`  ${pc.dim("↓")} ${pc.dim(file)}`);
-          }
-        }
-
-        if (classification.conflicts.length > 0) {
-          await resolveConflicts(classification.conflicts, {
-            targetDir,
-            templateDir,
-            source,
-            lock,
-            mergedContents,
-          });
-        }
-      }
-
-      if (!args.yes) {
-        const untrackedByFolder = await detectUntrackedFiles({ targetDir, patterns });
-        if (untrackedByFolder.length > 0) {
-          const untrackedCount = untrackedByFolder.reduce((sum, f) => sum + f.files.length, 0);
-          log.info(`${untrackedCount} untracked file(s) detected (not included in push)`);
-        }
-      }
+      // 分類 + auto-merge。未解決の衝突は控えておき、push 対象に含めようとした時だけ中断する。
+      const { pushableFilePaths, unresolvedConflicts } = await classifyAndResolveConflicts({
+        targetDir,
+        templateDir,
+        source,
+        lock,
+        patterns: effectivePatterns,
+        mergedContents,
+      });
 
       log.step("Detecting changes...");
 
       const diff = await withSpinner("Analyzing differences...", () =>
-        detectDiff({ targetDir, templateDir, patterns }),
+        detectDiff({ targetDir, templateDir, patterns: effectivePatterns }),
       );
 
       let pushableFiles = diff.files.filter(
@@ -443,6 +438,18 @@ export const pushCommand = defineCommand({
           (f.type === "added" || f.type === "modified" || f.type === "deleted") &&
           pushableFilePaths.has(f.path),
       );
+
+      // 未解決の衝突は既定では push しない。巻き添えで他ファイルを止めず、明示的に
+      // 選択された場合だけ後段で中断する。ここでは存在を知らせて pull での解決を促す。
+      if (unresolvedConflicts.size > 0) {
+        log.warn(
+          `${unresolvedConflicts.size} file(s) have unresolved conflicts (excluded by default):`,
+        );
+        for (const file of unresolvedConflicts) log.message(`  ${pc.yellow("!")} ${file}`);
+        log.info(
+          "Run `ziku pull` to resolve them, then push. Selecting them here will stop the push.",
+        );
+      }
 
       if (pushableFiles.length === 0) {
         log.info("No changes to push");
@@ -458,12 +465,19 @@ export const pushCommand = defineCommand({
         return;
       }
 
-      // ファイル選択
+      // ファイル選択（未解決の衝突は既定で未選択にし、マークして見せる）
       pushableFiles = await selectFilesToPush(pushableFiles, {
         filesArg: args.files as string | undefined,
         includeDeletions: args.includeDeletions as boolean,
+        conflictedPaths: unresolvedConflicts,
       });
       if (pushableFiles.length === 0) return;
+
+      // 未解決の衝突を含めて push しようとした場合は確定的に中断する（解決してから push）。
+      const selectedConflicts = pushableFiles.filter((f) => unresolvedConflicts.has(f.path));
+      if (selectedConflicts.length > 0) {
+        throw unresolvedConflictError(selectedConflicts.map((f) => f.path));
+      }
 
       const files = pushableFiles
         .filter((f) => f.type !== "deleted")
@@ -478,7 +492,7 @@ export const pushCommand = defineCommand({
 
       // ─── 分岐: ソース���別に応じた push 戦略 (ts-pattern + Effect) ───
 
-      await runCommandEffect(
+      const pushed = await runCommandEffect(
         match(source)
           .with({ owner: P.string, repo: P.string }, (ghSource) =>
             pushToGitHub(ghSource, { files, deletions, pushableFiles }, ctx, {
@@ -488,15 +502,104 @@ export const pushCommand = defineCommand({
             }),
           )
           .with({ path: P.string }, (localSource) =>
-            pushToLocal(localSource, { files, deletions, pushableFiles }, ctx, targetDir, {
-              yes: args.yes as boolean,
-            }),
+            pushToLocal(
+              localSource,
+              { files, deletions, pushableFiles },
+              ctx,
+              targetDir,
+              { yes: args.yes as boolean },
+              effectivePatterns,
+            ),
           )
           .exhaustive(),
       );
+
+      // ─── push 成功後に追跡を永続化（M2: 部分適用の回避）───
+      // ziku.jsonc の書き換えは push が実際に成功したときだけ行う。push 失敗（throw）や
+      // 確認キャンセル（pushed=false）では設定を変えない。
+      if (pushed && newlyTrackedPaths.length > 0) {
+        const pushedPaths = new Set([...files.map((f) => f.path), ...deletions.map((d) => d.path)]);
+        await persistNewlyTracked(targetDir, newlyTrackedPaths, pushedPaths);
+      }
     }, cleanup);
   },
 });
+
+// ─── 未追跡ファイルの追跡 ───
+
+/**
+ * 未追跡ファイルを検知し、追跡対象を決定する。
+ *
+ * 対話時はユーザーに追跡対象（include 追加）を選択させ、選択分を含めた effectivePatterns を返す。
+ * 非対話（--yes）/ プレビュー（--dry-run）時は暗黙追加せず、除外されるファイルを通知する。
+ * 暗黙の include 膨張を避けるため、設定変更は人間の明示操作（選択）に限定する。
+ *
+ * @returns effectivePatterns（追跡選択を反映したパターン。以降の hash/classify/diff に使う）と
+ *   newlyTrackedPaths（push 成功後に永続化する候補パス。非対話時は空）。
+ */
+async function resolveUntrackedTracking(
+  targetDir: string,
+  patterns: { include: string[]; exclude: string[] },
+  args: { yes: boolean; dryRun: boolean },
+): Promise<{
+  effectivePatterns: { include: string[]; exclude: string[] };
+  newlyTrackedPaths: string[];
+}> {
+  const untrackedByFolder = await detectUntrackedFiles({ targetDir, patterns });
+  const untrackedCount = getTotalUntrackedCount(untrackedByFolder);
+  if (untrackedCount === 0) {
+    return { effectivePatterns: patterns, newlyTrackedPaths: [] };
+  }
+
+  if (args.yes || args.dryRun) {
+    // --dry-run は「除外」ではなくプレビューなので追跡判断をスキップしているだけ。
+    // 恒久的に弾かれたと誤読されないよう headline を分ける。
+    const headline = args.dryRun
+      ? `${untrackedCount} untracked file(s) outside the sync whitelist (dry-run: tracking skipped):`
+      : `${untrackedCount} untracked file(s) excluded from push (outside the sync whitelist):`;
+    logUntrackedFilesNotice(untrackedByFolder, untrackedCount, { headline });
+    return { effectivePatterns: patterns, newlyTrackedPaths: [] };
+  }
+
+  const selected = await selectUntrackedToTrack(untrackedByFolder);
+  if (selected.length === 0) {
+    return { effectivePatterns: patterns, newlyTrackedPaths: [] };
+  }
+
+  return {
+    effectivePatterns: {
+      include: [...patterns.include, ...selected],
+      exclude: patterns.exclude,
+    },
+    newlyTrackedPaths: selected,
+  };
+}
+
+/**
+ * push 成功後に、新規追跡ファイルを ziku.jsonc の include へ永続化する。
+ *
+ * 実際に push されたファイルのパターンのみ追記する。これによりファイル選択で外された
+ * 追跡候補を除外し、「追跡したのに push していない」状態を作らない。
+ * パターン = ファイルパス（個別追跡）の前提。ディレクトリ glob 対応は将来拡張。
+ *
+ * 永続化は addIncludePattern による include キーのみの部分更新（jsonc の modify）で行う。
+ * exclude やコメント等は保持されるため、push 中に外部編集が入っても include 以外は壊さない。
+ */
+async function persistNewlyTracked(
+  targetDir: string,
+  newlyTrackedPaths: string[],
+  pushedPaths: Set<string>,
+): Promise<void> {
+  const patternsToPersist = newlyTrackedPaths.filter((p) => pushedPaths.has(p));
+  if (patternsToPersist.length === 0) return;
+
+  const { rawContent } = await loadZikuConfig(targetDir);
+  const updated = addIncludePattern(rawContent, patternsToPersist);
+  if (updated === rawContent) return;
+
+  await saveZikuConfig(targetDir, updated);
+  log.success(`Tracked ${patternsToPersist.length} new file(s) in ${ZIKU_CONFIG_FILE}`);
+}
 
 // ─── ファイル選択 ───
 
@@ -507,7 +610,11 @@ export const pushCommand = defineCommand({
  */
 async function selectFilesToPush(
   candidates: FileDiff[],
-  opts: { filesArg: string | undefined; includeDeletions: boolean },
+  opts: {
+    filesArg: string | undefined;
+    includeDeletions: boolean;
+    conflictedPaths: Set<string>;
+  },
 ): Promise<FileDiff[]> {
   if (opts.filesArg) {
     const requestedPaths = opts.filesArg
@@ -530,6 +637,7 @@ async function selectFilesToPush(
   log.step("Selecting files...");
   const selected = await selectPushFiles(candidates, {
     preselectDeletions: opts.includeDeletions,
+    conflictedPaths: opts.conflictedPaths,
   });
   if (selected.length === 0) {
     log.info("No files selected. Cancelled.");
@@ -537,18 +645,89 @@ async function selectFilesToPush(
   return selected;
 }
 
+// ─── 分類 + コンフリクト解決 ───
+
+/**
+ * ローカル/テンプレート/ベースのハッシュを比較して push 対象を分類し、衝突は auto-merge を試みる。
+ *
+ * - localOnly / conflicts / deletedLocally を push 対象候補（pushableFilePaths）に含める。
+ * - autoUpdate（テンプレートのみ変更）は push 対象外としてスキップ理由を表示する。
+ * - 衝突は auto-merge を試行し、成功分は mergedContents に保存、失敗分は unresolvedConflicts に返す。
+ *
+ * 未解決の衝突があってもここでは中断しない（巻き添えで他ファイルの push を止めないため）。
+ */
+async function classifyAndResolveConflicts(params: {
+  targetDir: string;
+  templateDir: string;
+  source: TemplateSource;
+  lock: { baseHashes?: Record<string, string>; baseRef?: string };
+  patterns: { include: string[]; exclude: string[] };
+  mergedContents: Map<string, string>;
+}): Promise<{ pushableFilePaths: Set<string>; unresolvedConflicts: Set<string> }> {
+  const { classifyFiles } = await import("../utils/merge");
+
+  const templateHashes = await hashFiles(
+    params.templateDir,
+    params.patterns.include,
+    params.patterns.exclude,
+  );
+  const localHashes = await hashFiles(
+    params.targetDir,
+    params.patterns.include,
+    params.patterns.exclude,
+  );
+
+  const classification = classifyFiles({
+    baseHashes: params.lock.baseHashes ?? {},
+    localHashes,
+    templateHashes,
+  });
+
+  const pushableFilePaths = new Set<string>();
+  for (const file of classification.localOnly) pushableFilePaths.add(file);
+  for (const file of classification.conflicts) pushableFilePaths.add(file);
+  for (const file of classification.deletedLocally) pushableFilePaths.add(file);
+
+  if (classification.autoUpdate.length > 0) {
+    log.info(
+      `Skipping ${classification.autoUpdate.length} file(s) only changed in template (use \`ziku pull\` to sync):`,
+    );
+    for (const file of classification.autoUpdate) {
+      log.message(`  ${pc.dim("↓")} ${pc.dim(file)}`);
+    }
+  }
+
+  const unresolvedConflicts = new Set<string>();
+  if (classification.conflicts.length > 0) {
+    const unresolved = await resolveConflicts(classification.conflicts, {
+      targetDir: params.targetDir,
+      templateDir: params.templateDir,
+      source: params.source,
+      lock: params.lock,
+      mergedContents: params.mergedContents,
+    });
+    for (const file of unresolved) unresolvedConflicts.add(file);
+  }
+
+  return { pushableFilePaths, unresolvedConflicts };
+}
+
 // ─── コンフリクト解決 ───
 
 /**
- * push 時のコンフリクト解決。
+ * push 時のコンフリクト解決（auto-merge の試行）。
  *
  * ファイル読み込み・マージ・ベースダウンロードは conflict-io の共通ユーティリティを使い、
  * push 固有の処理（mergedContents への保存）だけをここで行う。
  * pull との違い: ローカルに書き込まず、auto-merge 成功分のみ mergedContents に保存する。
  *
- * 自動マージできない衝突が 1 つでも残った場合は ZikuError を throw して push 全体を
- * 確定的に中断する（ローカル内容での暗黙の上書き push を防ぐ）。利用者は `ziku pull` で
- * 衝突を解決してから push し直す。
+ * 自動マージできなかったファイルのパス一覧を返す。ここでは中断しない。
+ * 「未解決の衝突が 1 つでもあれば push 全体を止める」のではなく、未解決ファイルを
+ * push 対象から外して非衝突ファイルの push は通し、未解決ファイルが実際に push 対象として
+ * 選ばれた場合だけ中断する（呼び出し側の責務）。これによりローカル内容での暗黙の上書きを
+ * 防ぎつつ、衝突に巻き込まれない変更まで止めてしまう問題を回避する。
+ *
+ * @returns auto-merge できなかった未解決ファイルのパス一覧。
  */
 async function resolveConflicts(
   conflicts: string[],
@@ -559,7 +738,7 @@ async function resolveConflicts(
     lock: { baseRef?: string };
     mergedContents: Map<string, string>;
   },
-): Promise<void> {
+): Promise<string[]> {
   const baseInfo = ctx.lock.baseRef
     ? `since ${pc.bold(ctx.lock.baseRef.slice(0, 7))} (your last sync)`
     : "since your last pull/init";
@@ -575,7 +754,7 @@ async function resolveConflicts(
     }),
   );
 
-  await withFinally(
+  return withFinally(
     async () => {
       const autoMerged: string[] = [];
       const unresolved: string[] = [];
@@ -613,22 +792,24 @@ async function resolveConflicts(
         for (const f of autoMerged) log.message(`  ${pc.green("✓")} ${f}`);
       }
 
-      if (unresolved.length > 0) {
-        // 自動マージできなかった衝突が残っている場合は確定的に中断する。
-        // ここで続行すると、未解決ファイルはマージ結果ではなくローカルの内容が
-        // そのまま push され、テンプレートの更新を黙って上書きしてしまう
-        // （mergedContents に保存されないため push.ts:473 で localContent が使われる）。
-        // Yes/No で判断を委ねるとこの危険な上書きが実行ごとにブレるので、
-        // 「衝突が残る → 必ず止める」という不変条件に固定する。
-        // push 冒頭の pendingMerge チェック（pull 側の未解決衝突を弾く）と同じ思想。
-        throw new ZikuError(
-          `${unresolved.length} file(s) have conflicts that couldn't be auto-merged`,
-          "Resolve these conflicts before pushing:\n" +
-            unresolved.map((f) => `  • ${f}`).join("\n") +
-            "\n\nRun `ziku pull` to bring in the template changes and resolve the conflicts, then push again.",
-        );
-      }
+      return unresolved;
     },
     () => baseResult?.cleanup?.(),
+  );
+}
+
+/**
+ * 未解決の衝突を push 対象に含めようとしたときの中断エラーを生成する。
+ *
+ * 未解決ファイルはマージ結果ではなくローカルの内容がそのまま push され、テンプレートの
+ * 更新を黙って上書きしてしまう（mergedContents に保存されないため localContent が使われる）。
+ * これを防ぐため、未解決ファイルが選択された場合は確定的に中断し、`ziku pull` での解決を促す。
+ */
+function unresolvedConflictError(files: string[]): ZikuError {
+  return new ZikuError(
+    `${files.length} selected file(s) have conflicts that couldn't be auto-merged`,
+    "Resolve these conflicts before pushing:\n" +
+      files.map((f) => `  • ${f}`).join("\n") +
+      "\n\nRun `ziku pull` to bring in the template changes and resolve the conflicts, then push again.",
   );
 }
