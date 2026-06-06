@@ -55,12 +55,12 @@ export const pushLifecycle: CommandLifecycle = {
       file: ZIKU_CONFIG_FILE,
       location: "template",
       op: "update",
-      note: "ローカルで追加/変更したパターンをテンプレの ziku.jsonc へ 3-way マージで伝播",
+      note: "ローカルで追加したパターンをテンプレの ziku.jsonc へ加法 union マージで伝播",
     },
     { file: LOCK_FILE, location: "local", op: "update", note: "baseHashes を更新" },
   ],
   notes: [
-    "`ziku.jsonc` 自体が追跡ファイルとして同期対象に含まれる。`ziku track` で追加したローカルパターンは、push 時にテンプレートの `ziku.jsonc` へ 3-way マージで伝播する（pull と双方向）。",
+    "`ziku.jsonc` 自体が追跡ファイルとして同期対象に含まれる。`ziku track` で追加したローカルパターンは、push 時にテンプレートの `ziku.jsonc` へ加法 union マージで伝播する（pull と双方向）。パターンの削除は自動伝播しない。",
   ],
 };
 
@@ -394,7 +394,7 @@ export const pushCommand = defineCommand({
 
     const patterns = {
       // `.ziku/ziku.jsonc` 自体を追跡対象に含める。これにより `ziku track` で
-      // 追加したローカルパターンが、3-way マージ経由でテンプレートの ziku.jsonc へ
+      // 追加したローカルパターンが、加法 union マージ経由でテンプレートの ziku.jsonc へ
       // 伝播する（孤児化バグの修正）。
       include: withConfigTracked(config.include),
       exclude: config.exclude ?? [],
@@ -608,8 +608,7 @@ async function resolveConflicts(
 
       for (const file of conflicts) {
         // ziku.jsonc はパターン定義なので、汎用テキスト diff3 ではなく要素レベルの
-        // 3-way マージで解決する。常に解決可能なため unresolved には入らない。
-        // base が取れない場合（baseResult なし）でも 2-way 和集合で安全にマージする。
+        // 加法 union マージで解決する。常に解決可能なため unresolved には入らない。
         if (file === ZIKU_CONFIG_FILE) {
           const merged = await computeMergedZikuConfig({
             targetDir: ctx.targetDir,

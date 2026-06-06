@@ -50,7 +50,7 @@ export const pullLifecycle: CommandLifecycle = {
       file: ZIKU_CONFIG_FILE,
       location: "local",
       op: "update",
-      note: "他ファイルと同様に 3-way マージで同期（テンプレ更新の取り込み）",
+      note: "加法 union マージで同期（テンプレの追加を取り込む。削除は伝播しない）",
     },
     {
       file: LOCK_FILE,
@@ -60,7 +60,7 @@ export const pullLifecycle: CommandLifecycle = {
     },
   ],
   notes: [
-    "`ziku.jsonc` 自体が追跡ファイルとして 3-way マージされる。テンプレ側でパターンが追加/変更された場合、その差分がユーザーの `ziku.jsonc` へ取り込まれる（push と双方向に同期）。",
+    "`ziku.jsonc` 自体が追跡ファイルとして加法 union マージされる。テンプレ側で追加されたパターンはユーザーの `ziku.jsonc` へ取り込まれる（push と双方向に同期）。パターンの削除は自動伝播しない（安全側）。",
     "テンプレートで削除されたファイルは `--force` で自動削除、またはユーザーが選択的に削除できる。",
   ],
 };
@@ -158,28 +158,35 @@ export const pullCommand = defineCommand({
 
       const classification = classifyFiles({ baseHashes, localHashes, templateHashes });
 
-      const totalChanges =
-        classification.autoUpdate.length +
-        classification.newFiles.length +
-        classification.conflicts.length +
-        classification.deletedFiles.length;
+      // ziku.jsonc は常に加法 union で同期する（autoUpdate も conflict も）。
+      // 汎用の applyFiles（テンプレ丸ごとコピー）や diff3 マージに乗せると、テンプレ側で
+      // 削除されたパターンがローカルへ伝播し「削除は自動伝播しない」方針に反する（codex P2）。
+      // よって autoUpdate / conflict から ziku.jsonc を抜き出し、専用の union マージで扱う。
+      const configNeedsMerge =
+        classification.autoUpdate.includes(ZIKU_CONFIG_FILE) ||
+        classification.conflicts.includes(ZIKU_CONFIG_FILE);
+      const autoUpdate = classification.autoUpdate.filter((f) => f !== ZIKU_CONFIG_FILE);
+      const conflicts = classification.conflicts.filter((f) => f !== ZIKU_CONFIG_FILE);
 
-      // テンプレが新パターンを追加しただけのケースでも、ziku.jsonc 自体が
-      // 追跡ファイルとして classification に含まれるため totalChanges に計上される
-      // （ziku.jsonc が autoUpdate / conflict に分類される）。よって専用の
-      // patternsUpdated 分岐は不要になった。
+      const totalChanges =
+        autoUpdate.length +
+        classification.newFiles.length +
+        conflicts.length +
+        classification.deletedFiles.length +
+        (configNeedsMerge ? 1 : 0);
+
       if (totalChanges === 0) {
         log.success("Already up to date");
         outro("No changes needed");
         return;
       }
 
-      logPullSummary(classification);
+      logPullSummary({ ...classification, autoUpdate, conflicts });
 
       // 自動更新ファイルを適用
-      await applyFiles(classification.autoUpdate, templateDir, targetDir);
-      if (classification.autoUpdate.length > 0) {
-        log.success(`Updated ${classification.autoUpdate.length} file(s)`);
+      await applyFiles(autoUpdate, templateDir, targetDir);
+      if (autoUpdate.length > 0) {
+        log.success(`Updated ${autoUpdate.length} file(s)`);
       }
 
       // 新規ファイルを追加
@@ -188,8 +195,15 @@ export const pullCommand = defineCommand({
         log.success(`Added ${classification.newFiles.length} new file(s)`);
       }
 
+      // ziku.jsonc を加法 union で同期（テンプレの追加は取り込み、削除は伝播しない）。
+      if (configNeedsMerge) {
+        const merged = await computeMergedZikuConfig({ targetDir, templateDir });
+        await Effect.runPromise(writeFileEnsureDir(join(targetDir, ZIKU_CONFIG_FILE), merged));
+        log.success(`Merged ${pc.cyan(ZIKU_CONFIG_FILE)}`);
+      }
+
       // コンフリクト解決
-      const unresolvedConflicts = await resolveConflicts(classification.conflicts, {
+      const unresolvedConflicts = await resolveConflicts(conflicts, {
         targetDir,
         templateDir,
         source,
@@ -276,19 +290,6 @@ async function resolveConflicts(
   await withFinally(
     async () => {
       for (const file of conflicts) {
-        // ziku.jsonc はパターン定義なので、汎用テキスト diff3 ではなく要素レベルの
-        // 3-way マージで解決する（JSON 配列の隣接行編集が衝突マーカーになるのを防ぐ）。
-        // 常に解決可能なので unresolved には入らない。
-        if (file === ZIKU_CONFIG_FILE) {
-          const merged = await computeMergedZikuConfig({
-            targetDir: ctx.targetDir,
-            templateDir: ctx.templateDir,
-          });
-          await Effect.runPromise(writeFileEnsureDir(join(ctx.targetDir, file), merged));
-          log.success(`Auto-merged: ${pc.cyan(file)}`);
-          continue;
-        }
-
         const result = await Effect.runPromise(
           mergeOneFile({
             file,
