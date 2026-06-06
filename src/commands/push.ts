@@ -439,8 +439,19 @@ export const pushCommand = defineCommand({
           }
         }
 
-        if (classification.conflicts.length > 0) {
-          await resolveConflicts(classification.conflicts, {
+        // ziku.jsonc が push 対象なら、常に加法 union を送る（localOnly でも生のローカル
+        // 内容を送らない）。生のローカルを送ると、ローカルがパターンを削除していた場合に
+        // テンプレ側のパターンも消してしまい「削除は自動伝播しない」方針に反する（codex P2）。
+        // union 内容を mergedContents に入れておくと、後段の files 構築で採用される。
+        // ここで先に処理するため、diff3（mergeOneFile）に ziku.jsonc を渡さない。
+        if (pushableFilePaths.has(ZIKU_CONFIG_FILE)) {
+          const merged = await computeMergedZikuConfig({ targetDir, templateDir });
+          mergedContents.set(ZIKU_CONFIG_FILE, merged);
+        }
+
+        const conflictsToResolve = classification.conflicts.filter((f) => f !== ZIKU_CONFIG_FILE);
+        if (conflictsToResolve.length > 0) {
+          await resolveConflicts(conflictsToResolve, {
             targetDir,
             templateDir,
             source,
@@ -607,18 +618,6 @@ async function resolveConflicts(
       const unresolved: string[] = [];
 
       for (const file of conflicts) {
-        // ziku.jsonc はパターン定義なので、汎用テキスト diff3 ではなく要素レベルの
-        // 加法 union マージで解決する。常に解決可能なため unresolved には入らない。
-        if (file === ZIKU_CONFIG_FILE) {
-          const merged = await computeMergedZikuConfig({
-            targetDir: ctx.targetDir,
-            templateDir: ctx.templateDir,
-          });
-          ctx.mergedContents.set(file, merged);
-          autoMerged.push(file);
-          continue;
-        }
-
         // ベースがない場合は 3-way マージ不可 → unresolved
         // 旧実装ではファイル単位で baseContent の truthy チェックをしていたが、
         // mergeOneFile 内で readFileSafe が空文字列を返すため、ベースに

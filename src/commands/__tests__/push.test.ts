@@ -684,6 +684,70 @@ describe("pushCommand", () => {
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
+    it("localOnly で ziku.jsonc がローカル削除されていてもテンプレのパターンは消さない（codex P2）", async () => {
+      // ローカルが .github/** を削除しただけ（localOnly）。push は生のローカルではなく
+      // union を送るので、テンプレ側の .github/** は保持される（削除は自動伝播しない）。
+      const { effect } = mockContext({
+        lock: {
+          ...validLock,
+          baseHashes: { ".ziku/ziku.jsonc": "oldhash" },
+        },
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      const localConfig = JSON.stringify({ include: [".claude/**"] }, null, 2);
+      const templateConfig = JSON.stringify({ include: [".claude/**", ".github/**"] }, null, 2);
+      vol.fromJSON({
+        "/test/.ziku/ziku.jsonc": localConfig,
+        "/tmp/template/.ziku/ziku.jsonc": templateConfig,
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [".ziku/ziku.jsonc"],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      const pushableFile = {
+        path: ".ziku/ziku.jsonc",
+        type: "modified" as const,
+        localContent: localConfig,
+        templateContent: templateConfig,
+      };
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [pushableFile],
+        summary: { added: 0, modified: 1, deleted: 0, unchanged: 0 },
+      });
+      mockSelectPushFiles.mockResolvedValueOnce([pushableFile]);
+      mockConfirmAction.mockResolvedValueOnce(true);
+      mockGetGitHubToken.mockReturnValue("ghp_token");
+      mockCreatePullRequest.mockResolvedValueOnce({
+        url: "https://github.com/owner/repo/pull/1",
+        branch: "b",
+        number: 1,
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: false, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      const prArg = mockCreatePullRequest.mock.calls[0]?.[1] as {
+        files: { path: string; content: string }[];
+      };
+      const configFile = prArg.files.find((f) => f.path === ".ziku/ziku.jsonc");
+      expect(configFile).toBeDefined();
+      const pushed = JSON.parse(configFile?.content as string);
+      // 生のローカル（.github/** 削除済み）ではなく union が送られ、.github/** は残る
+      expect(pushed.include).toContain(".github/**");
+      expect(pushed.include).toContain(".claude/**");
+    });
+
     it("ローカルテンプレへの push: ziku.jsonc の union 結果をローカルにも書き戻す（codex P2）", async () => {
       const { effect } = mockContext({
         source: { path: "/local/template" },
