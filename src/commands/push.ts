@@ -602,7 +602,6 @@ async function resolveConflicts(
           const merged = await computeMergedZikuConfig({
             targetDir: ctx.targetDir,
             templateDir: ctx.templateDir,
-            baseTemplateDir: baseResult?.templateDir,
           });
           ctx.mergedContents.set(file, merged);
           autoMerged.push(file);

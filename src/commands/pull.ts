@@ -283,7 +283,6 @@ async function resolveConflicts(
           const merged = await computeMergedZikuConfig({
             targetDir: ctx.targetDir,
             templateDir: ctx.templateDir,
-            baseTemplateDir: baseResult?.templateDir,
           });
           await Effect.runPromise(writeFileEnsureDir(join(ctx.targetDir, file), merged));
           log.success(`Auto-merged: ${pc.cyan(file)}`);

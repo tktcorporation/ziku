@@ -1,16 +1,24 @@
 /**
- * `.ziku/ziku.jsonc`（include/exclude パターン）専用の要素レベル 3-way マージ。
+ * `.ziku/ziku.jsonc`（include/exclude パターン）専用の要素レベル加法マージ（和集合）。
  *
  * 背景: `ziku.jsonc` を双方向同期の追跡ファイルにすると、ローカルとテンプレートの双方が
  * パターンを編集したケース（conflict）が発生する。これを汎用のテキスト diff3 マージに
  * かけると、JSON 配列の隣接行編集が衝突マーカーになり JSON が壊れる。代わりにパターンを
- * 「集合」として扱い、要素単位で 3-way マージすることで、常に解決可能（衝突マーカーなし）で
+ * 「集合」として扱い、要素単位でマージすることで、常に解決可能（衝突マーカーなし）で
  * 決定的な結果を得る。
  *
- * 真の共通祖先（base = 前回同期時のテンプレート `ziku.jsonc`）が得られる場合は、両者の
- * 追加を足し・両者の削除を引く完全な 3-way（削除も双方向に伝播）。base が無い場合
- * （baseRef 未取得・旧 lock 等）は削除を判定できないため、安全側に倒して 2-way 和集合
- * （additive、削除は伝播しない）にフォールバックする。
+ * マージは「和集合（additive）」に固定する。理由:
+ * - 真の共通祖先で 3-way 差分を取れば削除も双方向に伝播できるが、`ziku.jsonc` の base は
+ *   信頼できない。特に `init` で「テンプレートのパターンの部分集合」を選んで導入した
+ *   プロジェクトでは、lock に記録される base は合成された部分集合である一方、履歴テンプレ
+ *   （baseRef のダウンロード）は full なので両者が矛盾する。この矛盾下で削除を伝播させると、
+ *   ユーザーが未選択にしただけのテンプレ側パターンを「削除」とみなして push で消してしまう
+ *   （全下流に波及する事故 / codex review P1）。
+ * - 和集合なら、ローカルの追加もテンプレの追加も保持し、いかなるパターンも削除しないため、
+ *   テンプレートを壊さず・ローカルの追加も失わない。
+ *
+ * トレードオフ: パターンの「削除」は自動伝播しない（明示的に各 ziku.jsonc を編集する必要が
+ * ある）。これは安全性とのトレードオフとして受け入れる。
  */
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -27,7 +35,7 @@ export interface ConfigPatterns {
 const EMPTY_PATTERNS: ConfigPatterns = { include: [], exclude: [] };
 
 /**
- * 配列を出現順を保ったまま重複除去して結合する（base → local → template の順）。
+ * 配列を出現順を保ったまま重複除去して結合する（local → template の順）。
  */
 function unionOrdered(...lists: string[][]): string[] {
   const seen = new Set<string>();
@@ -44,39 +52,18 @@ function unionOrdered(...lists: string[][]): string[] {
 }
 
 /**
- * 1 つのパターン配列（include または exclude）を 3-way マージする。
+ * include / exclude を要素レベルで加法マージ（和集合）する純粋関数。
  *
- * - base あり: `(base ∪ localAdded ∪ templateAdded) \ (localRemoved ∪ templateRemoved)`。
- *   どちらかが削除したパターンは結果から消える（削除の双方向伝播）。
- * - base なし: `local ∪ template`（削除を判定できないため和集合）。
- */
-function mergePatternList(
-  base: string[] | undefined,
-  local: string[],
-  template: string[],
-): string[] {
-  if (base === undefined) {
-    return unionOrdered(local, template);
-  }
-  const localSet = new Set(local);
-  const templateSet = new Set(template);
-  // base にあったが、どちらかの側で消えたパターン → 削除されたとみなす。
-  const removed = new Set(base.filter((p) => !localSet.has(p) || !templateSet.has(p)));
-  const candidates = unionOrdered(base, local, template);
-  return candidates.filter((p) => !removed.has(p));
-}
-
-/**
- * include / exclude を要素レベルで 3-way マージする純粋関数。
+ * ローカル優先の出現順で、ローカルにもテンプレにもあるパターンを保持する。
+ * いずれの側のパターンも削除しない（削除は伝播しない）。
  */
 export function mergeConfigPatterns(opts: {
-  base: ConfigPatterns | undefined;
   local: ConfigPatterns;
   template: ConfigPatterns;
 }): ConfigPatterns {
   return {
-    include: mergePatternList(opts.base?.include, opts.local.include, opts.template.include),
-    exclude: mergePatternList(opts.base?.exclude, opts.local.exclude, opts.template.exclude),
+    include: unionOrdered(opts.local.include, opts.template.include),
+    exclude: unionOrdered(opts.local.exclude, opts.template.exclude),
   };
 }
 
@@ -96,27 +83,22 @@ async function readPatternsAt(dir: string): Promise<ConfigPatterns | undefined> 
 }
 
 /**
- * ローカル / テンプレート / （あれば）履歴 base の `ziku.jsonc` を読み、要素レベル
- * 3-way マージした結果を `ziku.jsonc` 文字列として返す。
+ * ローカルとテンプレートの `ziku.jsonc` を読み、要素レベルの和集合マージ結果を
+ * `ziku.jsonc` 文字列として返す。
  *
  * pull / push の conflict 解決で `ziku.jsonc` をテキスト diff3 ではなくこれで解決する。
- *
- * @param opts.baseTemplateDir 履歴 base（template@baseRef）のディレクトリ。無ければ
- *   2-way 和集合にフォールバック。
+ * 和集合なので削除は伝播しないが、テンプレートのパターンもローカルの追加も失われない。
  */
 export async function computeMergedZikuConfig(opts: {
   targetDir: string;
   templateDir: string;
-  baseTemplateDir: string | undefined;
 }): Promise<string> {
-  const [local, template, base] = await Promise.all([
+  const [local, template] = await Promise.all([
     readPatternsAt(opts.targetDir),
     readPatternsAt(opts.templateDir),
-    opts.baseTemplateDir ? readPatternsAt(opts.baseTemplateDir) : Promise.resolve(undefined),
   ]);
 
   const merged = mergeConfigPatterns({
-    base,
     local: local ?? EMPTY_PATTERNS,
     template: template ?? EMPTY_PATTERNS,
   });
