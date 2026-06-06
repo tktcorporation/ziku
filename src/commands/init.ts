@@ -251,18 +251,26 @@ export const initCommand = defineCommand({
         flatPatterns.exclude,
       );
 
-      // ziku.jsonc の 3-way マージ共通祖先（base）を決める。init は「テンプレートの
-      // パターンの部分集合」だけを選んで導入できるため、ローカル ziku.jsonc はテンプレより
-      // 少ないことがある。base をどちらに置くかで初回 push/pull の安全性が決まる →
-      // resolveConfigBaseHash がそのポリシーを担う（テンプレートを壊さないための安全装置）。
-      const localConfigContent = generateZikuJsonc({
-        include: flatPatterns.include,
-        exclude: flatPatterns.exclude,
-      });
-      baseHashes[ZIKU_CONFIG_FILE] = resolveConfigBaseHash({
-        localConfigContent,
-        templateConfigHash: baseHashes[ZIKU_CONFIG_FILE],
-      });
+      // ziku.jsonc の base（共通祖先）を決める。init は「テンプレートのパターンの部分集合」
+      // だけを選んで導入できるため、ローカル ziku.jsonc はテンプレより少ないことがある。
+      // base をどちらに置くかで初回 push/pull の安全性が決まる → resolveConfigBaseHash が
+      // そのポリシーを担う（テンプレートを壊さないための安全装置）。
+      //
+      // ただしテンプレートに ziku.jsonc が存在する場合（= hashFiles が値を返した場合）のみ
+      // base を記録する。テンプレに無いのに base を記録すると、次回 pull で
+      // {base 有・local 有・template 無} → deletedFiles と判定され、ローカルの制御ファイル
+      // ziku.jsonc が削除されてしまう（codex P1）。テンプレに無い場合は base 未記録のまま
+      // にしておき、ziku.jsonc は localOnly 扱いになる。
+      if (baseHashes[ZIKU_CONFIG_FILE] !== undefined) {
+        const localConfigContent = generateZikuJsonc({
+          include: flatPatterns.include,
+          exclude: flatPatterns.exclude,
+        });
+        baseHashes[ZIKU_CONFIG_FILE] = resolveConfigBaseHash({
+          localConfigContent,
+          templateConfigHash: baseHashes[ZIKU_CONFIG_FILE],
+        });
+      }
 
       // baseRef: GitHub ソースの場合のみコミット SHA を取得
       const baseRef = await match(source)

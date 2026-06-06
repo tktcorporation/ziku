@@ -770,12 +770,37 @@ describe("initCommand", () => {
       expect(lockContent.baseHashes).toEqual(expectedHashes);
     });
 
-    it("テンプレートに他のマッチファイルがなくても baseHashes に ziku.jsonc が記録される", async () => {
+    it("テンプレに ziku.jsonc があれば baseHashes に ziku.jsonc の base が記録される", async () => {
       vol.fromJSON({
         "/test": null,
       });
 
-      // 空のハッシュマップを返す（同期ファイルがない場合）
+      // テンプレに ziku.jsonc が存在する状況（hashFiles が ziku.jsonc を返す）
+      mockHashFiles.mockResolvedValueOnce({ ".ziku/ziku.jsonc": "template-config-hash" });
+
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(vol.existsSync("/test/.ziku/lock.json")).toBe(true);
+      const lockContent = JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string);
+      // base はローカル subset 由来のハッシュで記録される（テンプレ保護のため）
+      expect(lockContent.baseHashes).toBeDefined();
+      expect(lockContent.baseHashes[".ziku/ziku.jsonc"]).toEqual(expect.any(String));
+      // テンプレ側ハッシュではなくローカル内容のハッシュ
+      expect(lockContent.baseHashes[".ziku/ziku.jsonc"]).not.toBe("template-config-hash");
+    });
+
+    it("テンプレに ziku.jsonc が無ければ baseHashes に ziku.jsonc を記録しない（誤削除防止 / codex P1）", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      // テンプレに ziku.jsonc が無い状況（hashFiles が ziku.jsonc を返さない）
       mockHashFiles.mockResolvedValueOnce({});
 
       mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
@@ -786,14 +811,9 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
-      // saveLock により .ziku/lock.json がファイルシステムに書き出される
-      expect(vol.existsSync("/test/.ziku/lock.json")).toBe(true);
       const lockContent = JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string);
-      // ziku.jsonc 自体が追跡ファイルになったため、他にマッチファイルがなくても
-      // baseHashes には ziku.jsonc の base ハッシュが含まれる（テンプレ保護のため
-      // ローカル subset 由来のハッシュ）。
-      expect(lockContent.baseHashes).toBeDefined();
-      expect(lockContent.baseHashes[".ziku/ziku.jsonc"]).toEqual(expect.any(String));
+      // base を記録しない（記録すると次回 pull で deletedFiles 判定→制御ファイル削除になる）
+      expect(lockContent.baseHashes?.[".ziku/ziku.jsonc"]).toBeUndefined();
     });
   });
 });
