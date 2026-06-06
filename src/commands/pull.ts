@@ -12,7 +12,7 @@ import { ZIKU_CONFIG_FILE, withConfigTracked, zikuConfigExists } from "../utils/
 import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
-import { hashFiles } from "../utils/hash";
+import { hashContent, hashFiles } from "../utils/hash";
 import {
   classifyFiles,
   downloadBaseForMerge,
@@ -162,18 +162,24 @@ export const pullCommand = defineCommand({
       // 汎用の applyFiles（テンプレ丸ごとコピー）や diff3 マージに乗せると、テンプレ側で
       // 削除されたパターンがローカルへ伝播し「削除は自動伝播しない」方針に反する（codex P2）。
       // よって autoUpdate / conflict から ziku.jsonc を抜き出し、専用の union マージで扱う。
-      const configNeedsMerge =
-        classification.autoUpdate.includes(ZIKU_CONFIG_FILE) ||
-        classification.conflicts.includes(ZIKU_CONFIG_FILE);
+      const configSync = await resolveConfigMerge(targetDir, templateDir, classification);
       const autoUpdate = classification.autoUpdate.filter((f) => f !== ZIKU_CONFIG_FILE);
       const conflicts = classification.conflicts.filter((f) => f !== ZIKU_CONFIG_FILE);
+
+      // configInPlay のとき lock の base[ziku.jsonc] をローカル最終内容（union）に揃える。
+      // templateHashes 側に寄せると、テンプレが削除したパターンを後続 push が localOnly として
+      // 再追加してしまう（codex P2）。
+      const baseHashesForLock: Record<string, string> =
+        configSync.baseHash !== undefined
+          ? { ...templateHashes, [ZIKU_CONFIG_FILE]: configSync.baseHash }
+          : templateHashes;
 
       const totalChanges =
         autoUpdate.length +
         classification.newFiles.length +
         conflicts.length +
         classification.deletedFiles.length +
-        (configNeedsMerge ? 1 : 0);
+        (configSync.write !== undefined ? 1 : 0);
 
       if (totalChanges === 0) {
         log.success("Already up to date");
@@ -196,9 +202,10 @@ export const pullCommand = defineCommand({
       }
 
       // ziku.jsonc を加法 union で同期（テンプレの追加は取り込み、削除は伝播しない）。
-      if (configNeedsMerge) {
-        const merged = await computeMergedZikuConfig({ targetDir, templateDir });
-        await Effect.runPromise(writeFileEnsureDir(join(targetDir, ZIKU_CONFIG_FILE), merged));
+      if (configSync.write !== undefined) {
+        await Effect.runPromise(
+          writeFileEnsureDir(join(targetDir, ZIKU_CONFIG_FILE), configSync.write),
+        );
         log.success(`Merged ${pc.cyan(ZIKU_CONFIG_FILE)}`);
       }
 
@@ -216,7 +223,7 @@ export const pullCommand = defineCommand({
           ...lock,
           pendingMerge: {
             conflicts: unresolvedConflicts,
-            templateHashes,
+            templateHashes: baseHashesForLock,
             ...(Option.isSome(latestRefOption) ? { latestRef: latestRefOption.value } : {}),
           },
         });
@@ -237,7 +244,7 @@ export const pullCommand = defineCommand({
 
       await saveLock(targetDir, {
         ...lock,
-        baseHashes: templateHashes,
+        baseHashes: baseHashesForLock,
         ...(Option.isSome(latestRefOption) ? { baseRef: latestRefOption.value } : {}),
       });
 
@@ -247,6 +254,33 @@ export const pullCommand = defineCommand({
 });
 
 // ─── ヘルパー関数 ───
+
+/**
+ * pull における `ziku.jsonc` の加法 union 同期を計算する。
+ *
+ * - `baseHash`: lock に記録すべき base ハッシュ（= ローカル最終内容 = union）。
+ *   ziku.jsonc が classification に関与する場合のみ定義される。base をローカル最終内容に
+ *   揃えることで、テンプレ削除パターンを後続 push が再追加するのを防ぐ（codex P2）。
+ * - `write`: 実際に書き込む内容。union が現在のローカルと一致する場合（テンプレ削除のみ等）は
+ *   undefined（no-op）。これにより再検出ノイズを防ぐ。
+ */
+async function resolveConfigMerge(
+  targetDir: string,
+  templateDir: string,
+  classification: { autoUpdate: string[]; conflicts: string[] },
+): Promise<{ baseHash?: string; write?: string }> {
+  const inPlay =
+    classification.autoUpdate.includes(ZIKU_CONFIG_FILE) ||
+    classification.conflicts.includes(ZIKU_CONFIG_FILE);
+  if (!inPlay) return {};
+
+  const merged = await computeMergedZikuConfig({ targetDir, templateDir });
+  const currentLocal = await readFile(join(targetDir, ZIKU_CONFIG_FILE), "utf-8");
+  return {
+    baseHash: hashContent(merged),
+    write: merged !== currentLocal ? merged : undefined,
+  };
+}
 
 /**
  * テンプレートからファイルをコピーする共通処理。

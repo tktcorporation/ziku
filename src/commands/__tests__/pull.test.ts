@@ -48,7 +48,8 @@ vi.mock("../../utils/lock", () => ({
   saveLock: vi.fn(),
 }));
 
-vi.mock("../../utils/hash", () => ({
+vi.mock("../../utils/hash", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../utils/hash")>()),
   hashFiles: vi.fn(),
 }));
 
@@ -334,19 +335,51 @@ describe("pullCommand", () => {
         cmd: pullCommand,
       });
 
-      const writeCall = mockWriteFileEnsureDir.mock.calls.find(
-        ([p]) => p === "/test/.ziku/ziku.jsonc",
-      );
-      expect(writeCall).toBeDefined();
-      const written = JSON.parse(writeCall?.[1] as string);
-      // テンプレが削除した .github/** はローカルに残る（削除は自動伝播しない）
-      expect(written.include).toContain(".github/**");
-      expect(written.include).toContain(".root/**");
-      // ziku.jsonc は丸ごとコピー（applyFiles）されない
+      // union == local（テンプレ削除のみ）なので no-op: ローカルは書き換えられない。
+      // テンプレの縮小版（[.root/**] のみ）で上書きされないことを確認（削除は伝播しない）。
       expect(mockWriteFileEnsureDir).not.toHaveBeenCalledWith(
         "/test/.ziku/ziku.jsonc",
         JSON.stringify({ include: [".root/**"] }, null, 2),
       );
+      // ローカル ziku.jsonc は .github/** を保持したまま（縮小されない）
+      const local = JSON.parse(vol.readFileSync("/test/.ziku/ziku.jsonc", "utf8") as string);
+      expect(local.include).toContain(".github/**");
+      expect(local.include).toContain(".root/**");
+    });
+
+    it("テンプレ削除+追加の混在: lock の base[ziku.jsonc] は union 内容に揃う（push 再追加を防ぐ / codex P2）", async () => {
+      // テンプレが .b/** を削除し .c/** を追加。union=[.a,.b,.c]。base はテンプレ([.a,.c])
+      // ではなく union([.a,.b,.c]) のハッシュで記録され、後続 push が .b/** を再追加しない。
+      vol.fromJSON({
+        "/test/.ziku/ziku.jsonc": JSON.stringify({ include: [".a/**", ".b/**"] }, null, 2),
+        "/tmp/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".a/**", ".c/**"] }, null, 2),
+      });
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [".ziku/ziku.jsonc"],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      const writeCall = mockWriteFileEnsureDir.mock.calls.find(
+        ([p]) => p === "/test/.ziku/ziku.jsonc",
+      );
+      const written = writeCall?.[1] as string;
+      expect(JSON.parse(written).include).toEqual([".a/**", ".b/**", ".c/**"]);
+
+      // lock の base[ziku.jsonc] は書き込んだ union のハッシュと一致する（テンプレ縮小版ではない）
+      const { hashContent } = await import("../../utils/hash");
+      const saveArg = mockSaveLock.mock.calls.at(-1)?.[1] as any;
+      expect(saveArg.baseHashes[".ziku/ziku.jsonc"]).toBe(hashContent(written));
     });
 
     it("自動更新ファイルをコピー", async () => {
