@@ -185,33 +185,31 @@ export const pullCommand = defineCommand({
         deletedFiles.length +
         (configSync.write !== undefined ? 1 : 0);
 
-      if (totalChanges === 0) {
+      // ファイル変更が無くても、ziku.jsonc の base を union に揃える必要がある場合
+      // （例: conflict だが union==local で書き込み不要）は lock を更新しないと、
+      // 古い base が残って status/push が誤判定する（codex P2）。その場合は early-return しない。
+      const configBaseChanged =
+        configSync.baseHash !== undefined &&
+        configSync.baseHash !== lock.baseHashes?.[ZIKU_CONFIG_FILE];
+
+      if (totalChanges === 0 && !configBaseChanged) {
         log.success("Already up to date");
         outro("No changes needed");
         return;
       }
 
-      logPullSummary({ ...classification, autoUpdate, conflicts, deletedFiles });
-
-      // 自動更新ファイルを適用
-      await applyFiles(autoUpdate, templateDir, targetDir);
-      if (autoUpdate.length > 0) {
-        log.success(`Updated ${autoUpdate.length} file(s)`);
+      if (totalChanges > 0) {
+        logPullSummary({ ...classification, autoUpdate, conflicts, deletedFiles });
       }
 
-      // 新規ファイルを追加
-      await applyFiles(classification.newFiles, templateDir, targetDir);
-      if (classification.newFiles.length > 0) {
-        log.success(`Added ${classification.newFiles.length} new file(s)`);
-      }
-
-      // ziku.jsonc を加法 union で同期（テンプレの追加は取り込み、削除は伝播しない）。
-      if (configSync.write !== undefined) {
-        await Effect.runPromise(
-          writeFileEnsureDir(join(targetDir, ZIKU_CONFIG_FILE), configSync.write),
-        );
-        log.success(`Merged ${pc.cyan(ZIKU_CONFIG_FILE)}`);
-      }
+      // 自動更新・新規追加・ziku.jsonc union 同期をまとめて適用
+      await applyPullUpdates({
+        autoUpdate,
+        newFiles: classification.newFiles,
+        configWrite: configSync.write,
+        targetDir,
+        templateDir,
+      });
 
       // コンフリクト解決
       const unresolvedConflicts = await resolveConflicts(conflicts, {
@@ -284,6 +282,36 @@ async function resolveConfigMerge(
     baseHash: hashContent(merged),
     write: merged !== currentLocal ? merged : undefined,
   };
+}
+
+/**
+ * pull の適用フェーズ（autoUpdate コピー・newFiles 追加・ziku.jsonc の union 書き込み）を
+ * まとめて実行する。run() 本体の分岐数（複雑度）を抑えるために切り出す。
+ */
+async function applyPullUpdates(opts: {
+  autoUpdate: string[];
+  newFiles: string[];
+  configWrite: string | undefined;
+  targetDir: string;
+  templateDir: string;
+}): Promise<void> {
+  await applyFiles(opts.autoUpdate, opts.templateDir, opts.targetDir);
+  if (opts.autoUpdate.length > 0) {
+    log.success(`Updated ${opts.autoUpdate.length} file(s)`);
+  }
+
+  await applyFiles(opts.newFiles, opts.templateDir, opts.targetDir);
+  if (opts.newFiles.length > 0) {
+    log.success(`Added ${opts.newFiles.length} new file(s)`);
+  }
+
+  // ziku.jsonc を加法 union で同期（テンプレの追加は取り込み、削除は伝播しない）。
+  if (opts.configWrite !== undefined) {
+    await Effect.runPromise(
+      writeFileEnsureDir(join(opts.targetDir, ZIKU_CONFIG_FILE), opts.configWrite),
+    );
+    log.success(`Merged ${pc.cyan(ZIKU_CONFIG_FILE)}`);
+  }
 }
 
 /**

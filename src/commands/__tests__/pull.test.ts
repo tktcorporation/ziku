@@ -411,6 +411,43 @@ describe("pullCommand", () => {
       expect(vol.existsSync("/test/.ziku/ziku.jsonc")).toBe(true);
     });
 
+    it("ファイル書き込みが無くても config の base 更新が必要なら lock を保存する（codex P2）", async () => {
+      // union==local で write 不要だが、lock の base が古い場合は base を揃えるため
+      // early-return せず saveLock を通す必要がある（さもないと status/push が誤判定）。
+      const localConfig = JSON.stringify({ include: ["A"], exclude: [] });
+      vol.fromJSON({
+        "/test/.ziku/ziku.jsonc": localConfig,
+        "/tmp/template/.ziku/ziku.jsonc": localConfig,
+      });
+      const { effect } = mockContext({
+        // biome-ignore lint/suspicious/noExplicitAny: テスト用に baseHashes のキーを差し替える
+        lock: { ...baseLock, baseHashes: { ".ziku/ziku.jsonc": "stale-old-hash" } as any },
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [".ziku/ziku.jsonc"],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // early-return せず lock を保存する（base を union に揃える）
+      expect(mockLog.success).not.toHaveBeenCalledWith("Already up to date");
+      expect(mockSaveLock).toHaveBeenCalled();
+      const saveArg = mockSaveLock.mock.calls.at(-1)?.[1] as any;
+      expect(saveArg.baseHashes[".ziku/ziku.jsonc"]).not.toBe("stale-old-hash");
+    });
+
     it("自動更新ファイルをコピー", async () => {
       vol.fromJSON({
         "/test/.mcp.json": '{"old": true}',
