@@ -11,6 +11,7 @@ import { LOCK_FILE, saveLock } from "../utils/lock";
 import { ZIKU_CONFIG_FILE, withConfigTracked } from "../utils/ziku-config";
 import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
 import { downloadBaseForMerge, mergeOneFile } from "../utils/merge";
+import { computeMergedZikuConfig } from "../utils/config-merge";
 import type { CommandContextShape } from "../services/command-context";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
@@ -594,6 +595,20 @@ async function resolveConflicts(
       const unresolved: string[] = [];
 
       for (const file of conflicts) {
+        // ziku.jsonc はパターン定義なので、汎用テキスト diff3 ではなく要素レベルの
+        // 3-way マージで解決する。常に解決可能なため unresolved には入らない。
+        // base が取れない場合（baseResult なし）でも 2-way 和集合で安全にマージする。
+        if (file === ZIKU_CONFIG_FILE) {
+          const merged = await computeMergedZikuConfig({
+            targetDir: ctx.targetDir,
+            templateDir: ctx.templateDir,
+            baseTemplateDir: baseResult?.templateDir,
+          });
+          ctx.mergedContents.set(file, merged);
+          autoMerged.push(file);
+          continue;
+        }
+
         // ベースがない場合は 3-way マージ不可 → unresolved
         // 旧実装ではファイル単位で baseContent の truthy チェックをしていたが、
         // mergeOneFile 内で readFileSafe が空文字列を返すため、ベースに

@@ -22,6 +22,7 @@ import {
   writeFileEnsureDir,
 } from "../utils/merge";
 import { mergeTemplatePatterns } from "../utils/template-patterns";
+import { computeMergedZikuConfig } from "../utils/config-merge";
 
 /**
  * pull コマンドのファイル操作メタデータ。
@@ -275,6 +276,20 @@ async function resolveConflicts(
   await withFinally(
     async () => {
       for (const file of conflicts) {
+        // ziku.jsonc はパターン定義なので、汎用テキスト diff3 ではなく要素レベルの
+        // 3-way マージで解決する（JSON 配列の隣接行編集が衝突マーカーになるのを防ぐ）。
+        // 常に解決可能なので unresolved には入らない。
+        if (file === ZIKU_CONFIG_FILE) {
+          const merged = await computeMergedZikuConfig({
+            targetDir: ctx.targetDir,
+            templateDir: ctx.templateDir,
+            baseTemplateDir: baseResult?.templateDir,
+          });
+          await Effect.runPromise(writeFileEnsureDir(join(ctx.targetDir, file), merged));
+          log.success(`Auto-merged: ${pc.cyan(file)}`);
+          continue;
+        }
+
         const result = await Effect.runPromise(
           mergeOneFile({
             file,

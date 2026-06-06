@@ -865,6 +865,74 @@ describe("pushCommand", () => {
       );
     });
 
+    it("ziku.jsonc の conflict は中断せず要素レベルマージで PR に統合される（base なし → 和集合）", async () => {
+      const { effect } = mockContext({
+        lock: {
+          ...validLock,
+          baseHashes: {
+            ".ziku/ziku.jsonc": "oldhash",
+          },
+        },
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      const localConfig = JSON.stringify({ include: [".claude/**", ".eslintrc.json"] }, null, 2);
+      const templateConfig = JSON.stringify({ include: [".claude/**", ".github/**"] }, null, 2);
+      vol.fromJSON({
+        "/test/.ziku/ziku.jsonc": localConfig,
+        "/tmp/template/.ziku/ziku.jsonc": templateConfig,
+      });
+
+      // ziku.jsonc が conflict に分類される（両側がパターンを編集）
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [".ziku/ziku.jsonc"],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      // base が取れない（downloadBaseForMerge→null, デフォルト）→ 2-way 和集合
+
+      const pushableFile = {
+        path: ".ziku/ziku.jsonc",
+        type: "modified" as const,
+        localContent: localConfig,
+        templateContent: templateConfig,
+      };
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [pushableFile],
+        summary: { added: 0, modified: 1, deleted: 0, unchanged: 0 },
+      });
+      mockSelectPushFiles.mockResolvedValueOnce([pushableFile]);
+      mockConfirmAction.mockResolvedValueOnce(true);
+      mockGetGitHubToken.mockReturnValue("ghp_token");
+      mockCreatePullRequest.mockResolvedValueOnce({
+        url: "https://github.com/owner/repo/pull/1",
+        branch: "update-template-123",
+        number: 1,
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: false, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      // ziku.jsonc には diff3 の mergeOneFile を使わない
+      expect(mockMergeOneFile).not.toHaveBeenCalled();
+      // 中断せず PR が作られ、要素マージ（和集合）結果が含まれる
+      const prArg = mockCreatePullRequest.mock.calls[0]?.[1] as {
+        files: { path: string; content: string }[];
+      };
+      const configFile = prArg.files.find((f) => f.path === ".ziku/ziku.jsonc");
+      expect(configFile).toBeDefined();
+      const merged = JSON.parse(configFile?.content as string);
+      expect(merged.include).toEqual([".claude/**", ".eslintrc.json", ".github/**"]);
+    });
+
     it("delete/modify conflict: 未解決の衝突は ENOENT で落ちず ZikuError で確定的に中断する", async () => {
       const { effect } = mockContext({
         lock: {

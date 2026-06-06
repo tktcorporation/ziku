@@ -419,6 +419,50 @@ describe("pullCommand", () => {
       });
     });
 
+    it("ziku.jsonc の conflict は diff3 ではなく要素レベルマージで解決する", async () => {
+      // ローカルとテンプレ双方が ziku.jsonc を編集 → conflict。
+      // base が取れない（downloadBaseForMerge→null）ので 2-way 和集合になる。
+      vol.fromJSON({
+        "/test/.ziku/ziku.jsonc": JSON.stringify(
+          { include: [".claude/**", ".eslintrc.json"] },
+          null,
+          2,
+        ),
+        "/tmp/template/.ziku/ziku.jsonc": JSON.stringify(
+          { include: [".claude/**", ".github/**"] },
+          null,
+          2,
+        ),
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [".ziku/ziku.jsonc"],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // ziku.jsonc には diff3 の mergeOneFile を使わない
+      expect(mockMergeOneFile).not.toHaveBeenCalled();
+      // 要素レベルマージ結果（和集合）が書き込まれる
+      const writeCall = mockWriteFileEnsureDir.mock.calls.find(
+        ([p]) => p === "/test/.ziku/ziku.jsonc",
+      );
+      expect(writeCall).toBeDefined();
+      const writtenConfig = JSON.parse(writeCall?.[1] as string);
+      expect(writtenConfig.include).toEqual([".claude/**", ".eslintrc.json", ".github/**"]);
+      expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining("Auto-merged"));
+    });
+
     it("--force で selectDeletedFiles プロンプトをスキップ", async () => {
       vol.fromJSON({ "/test": null });
 
