@@ -684,6 +684,65 @@ describe("pushCommand", () => {
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
+    it("ローカルテンプレへの push: ziku.jsonc の union 結果をローカルにも書き戻す（codex P2）", async () => {
+      const { effect } = mockContext({
+        source: { path: "/local/template" },
+        // ローカルソースでは templateDir は localSource.path に解決される
+        templateDir: "/local/template",
+        lock: {
+          ...validLock,
+          source: { path: "/local/template" } as any,
+          baseHashes: { ".ziku/ziku.jsonc": "oldhash" },
+        },
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      const localConfig = JSON.stringify({ include: [".claude/**", ".foo"] }, null, 2);
+      const templateConfig = JSON.stringify({ include: [".claude/**", ".bar"] }, null, 2);
+      vol.fromJSON({
+        "/test/.ziku/ziku.jsonc": localConfig,
+        "/local/template/.ziku/ziku.jsonc": templateConfig,
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [".ziku/ziku.jsonc"],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      const pushableFile = {
+        path: ".ziku/ziku.jsonc",
+        type: "modified" as const,
+        localContent: localConfig,
+        templateContent: templateConfig,
+      };
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [pushableFile],
+        summary: { added: 0, modified: 1, deleted: 0, unchanged: 0 },
+      });
+      mockSelectPushFiles.mockResolvedValueOnce([pushableFile]);
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: true, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      const expectedUnion = [".claude/**", ".foo", ".bar"];
+      // テンプレートに union が書かれる
+      const templateWritten = JSON.parse(
+        vol.readFileSync("/local/template/.ziku/ziku.jsonc", "utf8") as string,
+      );
+      expect(templateWritten.include).toEqual(expectedUnion);
+      // ローカルにも同じ union が書き戻される（local==template で次回 push の取りこぼしを防ぐ）
+      const localWritten = JSON.parse(vol.readFileSync("/test/.ziku/ziku.jsonc", "utf8") as string);
+      expect(localWritten.include).toEqual(expectedUnion);
+    });
+
     it("baseHashes が存在しコンフリクトがある場合は確定的に中断する（baseRef なし）", async () => {
       const { effect } = mockContext({
         lock: {

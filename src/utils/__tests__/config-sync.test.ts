@@ -17,6 +17,7 @@ import { join } from "pathe";
 import { afterEach, describe, expect, it } from "vitest";
 import { hashFiles } from "../hash";
 import { classifyFiles } from "../merge";
+import { detectDiff } from "../diff";
 import { ZIKU_CONFIG_FILE, withConfigTracked } from "../ziku-config";
 
 async function createTempDir(label: string): Promise<string> {
@@ -115,5 +116,31 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
 
     // ziku.jsonc は「テンプレだけが変更」= autoUpdate → pull で取り込まれる
     expect(classification.autoUpdate).toContain(ZIKU_CONFIG_FILE);
+  });
+
+  it("detectDiff: `.ziku/` を gitignore していても ziku.jsonc は差分対象に含まれる", async () => {
+    const templateDir = await createTempDir("gi-tpl");
+    const projectDir = await createTempDir("gi-prj");
+    tempDirs.push(templateDir, projectDir);
+
+    // 双方が `.ziku/` を gitignore していても、ziku.jsonc は push 候補から落ちてはいけない
+    await writeFiles(templateDir, {
+      ".gitignore": ".ziku/\n",
+      ".ziku/ziku.jsonc": JSON.stringify({ include: [".claude/**"] }, null, 2),
+    });
+    await writeFiles(projectDir, {
+      ".gitignore": ".ziku/\n",
+      ".ziku/ziku.jsonc": JSON.stringify({ include: [".claude/**", ".eslintrc.json"] }, null, 2),
+    });
+
+    const diff = await detectDiff({
+      targetDir: projectDir,
+      templateDir,
+      patterns: { include: withConfigTracked([".claude/**"]), exclude: [] },
+    });
+
+    const configDiff = diff.files.find((f) => f.path === ZIKU_CONFIG_FILE);
+    expect(configDiff).toBeDefined();
+    expect(configDiff?.type).toBe("modified");
   });
 });

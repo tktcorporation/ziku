@@ -215,6 +215,18 @@ function pushToLocal(
         }
       }
 
+      // ziku.jsonc が衝突解決で union マージされた場合、push される内容はローカルの生
+      // 内容ではなく union 結果になる。ローカルを更新しないと、テンプレ・ローカルが
+      // 乖離したまま baseHashes をテンプレ（union）へ進めてしまい、次回 push で
+      // ローカルが localOnly 判定 → テンプレ側の追加分を上書きで落とす（codex P2）。
+      // ローカルにも merged 内容を書き戻して local==template==base を保つ。
+      const mergedConfig = target.files.find((f) => f.path === ZIKU_CONFIG_FILE);
+      if (mergedConfig) {
+        const localConfigPath = join(projectDir, ZIKU_CONFIG_FILE);
+        await mkdir(dirname(localConfigPath), { recursive: true });
+        await writeFile(localConfigPath, mergedConfig.content, "utf-8");
+      }
+
       // lock.json の baseHashes を更新（テンプレート側のハッシュを再計算）。
       // ziku.jsonc も追跡対象に含めて base を揃える（push 後はテンプレと一致するため）。
       const include = withConfigTracked(ctx.config.include);
