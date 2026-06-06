@@ -165,6 +165,10 @@ export const pullCommand = defineCommand({
       const configSync = await resolveConfigMerge(targetDir, templateDir, classification);
       const autoUpdate = classification.autoUpdate.filter((f) => f !== ZIKU_CONFIG_FILE);
       const conflicts = classification.conflicts.filter((f) => f !== ZIKU_CONFIG_FILE);
+      // ziku.jsonc は ziku 自身の制御ファイル。テンプレが ziku.jsonc を削除しても、ローカルの
+      // 制御ファイルを消すと以降プロジェクトが壊れる（loadCommandContext が未初期化扱いにする）。
+      // deletedFiles からも除外し、削除は伝播させない（codex P2）。
+      const deletedFiles = classification.deletedFiles.filter((f) => f !== ZIKU_CONFIG_FILE);
 
       // configInPlay のとき lock の base[ziku.jsonc] をローカル最終内容（union）に揃える。
       // templateHashes 側に寄せると、テンプレが削除したパターンを後続 push が localOnly として
@@ -178,7 +182,7 @@ export const pullCommand = defineCommand({
         autoUpdate.length +
         classification.newFiles.length +
         conflicts.length +
-        classification.deletedFiles.length +
+        deletedFiles.length +
         (configSync.write !== undefined ? 1 : 0);
 
       if (totalChanges === 0) {
@@ -187,7 +191,7 @@ export const pullCommand = defineCommand({
         return;
       }
 
-      logPullSummary({ ...classification, autoUpdate, conflicts });
+      logPullSummary({ ...classification, autoUpdate, conflicts, deletedFiles });
 
       // 自動更新ファイルを適用
       await applyFiles(autoUpdate, templateDir, targetDir);
@@ -231,9 +235,9 @@ export const pullCommand = defineCommand({
         return;
       }
 
-      // 削除されたファイルを処理
-      if (classification.deletedFiles.length > 0) {
-        await handleDeletedFiles(classification.deletedFiles, targetDir, args.force as boolean);
+      // 削除されたファイルを処理（ziku.jsonc は除外済み）
+      if (deletedFiles.length > 0) {
+        await handleDeletedFiles(deletedFiles, targetDir, args.force as boolean);
       }
 
       // ziku.jsonc は上の classification で他ファイルと同様に同期済み

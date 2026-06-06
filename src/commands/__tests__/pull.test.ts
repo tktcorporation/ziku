@@ -382,6 +382,35 @@ describe("pullCommand", () => {
       expect(saveArg.baseHashes[".ziku/ziku.jsonc"]).toBe(hashContent(written));
     });
 
+    it("テンプレが ziku.jsonc ファイル自体を削除しても、ローカルの制御ファイルは消さない（codex P2）", async () => {
+      vol.fromJSON({
+        "/test/.ziku/ziku.jsonc": JSON.stringify({ include: [".root/**"] }, null, 2),
+        "/test/.mcp.json": "x",
+        "/tmp/template/.mcp.json": "x",
+      });
+
+      // classify が ziku.jsonc を deletedFiles に入れる（テンプレからファイルが消えた）
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [".ziku/ziku.jsonc"],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // 制御ファイルは削除されない（deletedFiles から除外されている）
+      expect(mockSelectDeletedFiles).not.toHaveBeenCalled();
+      expect(vol.existsSync("/test/.ziku/ziku.jsonc")).toBe(true);
+    });
+
     it("自動更新ファイルをコピー", async () => {
       vol.fromJSON({
         "/test/.mcp.json": '{"old": true}',

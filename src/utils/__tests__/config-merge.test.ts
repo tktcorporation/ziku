@@ -4,7 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("node:fs", async () => (await import("memfs")).fs);
 vi.mock("node:fs/promises", async () => (await import("memfs")).fs.promises);
 
-const { mergeConfigPatterns, computeMergedZikuConfig } = await import("../config-merge");
+const { mergeConfigPatterns, computeMergedZikuConfig, analyzeConfigDrift } =
+  await import("../config-merge");
 
 describe("mergeConfigPatterns（要素レベル加法マージ＝和集合）", () => {
   it("ローカルとテンプレ双方の追加を保持する", () => {
@@ -109,5 +110,47 @@ describe("computeMergedZikuConfig（ファイル読み込み + 和集合マー�
     });
     const parsed = JSON.parse(merged);
     expect(parsed.include).toEqual([".claude/**"]);
+  });
+});
+
+describe("analyzeConfigDrift（union 観点の実差分判定）", () => {
+  beforeEach(() => {
+    vol.reset();
+  });
+
+  const write = (local: string[], template: string[]) =>
+    vol.fromJSON({
+      "/local/.ziku/ziku.jsonc": JSON.stringify({ include: local }, null, 2),
+      "/template/.ziku/ziku.jsonc": JSON.stringify({ include: template }, null, 2),
+    });
+
+  it("完全一致なら pull も push も不要", async () => {
+    write([".a/**"], [".a/**"]);
+    expect(await analyzeConfigDrift("/local", "/template")).toEqual({
+      pullRelevant: false,
+      pushRelevant: false,
+    });
+  });
+
+  it("テンプレに追加分がある → pullRelevant", async () => {
+    write([".a/**"], [".a/**", ".b/**"]);
+    const d = await analyzeConfigDrift("/local", "/template");
+    expect(d.pullRelevant).toBe(true);
+    expect(d.pushRelevant).toBe(false);
+  });
+
+  it("ローカルに追加分がある → pushRelevant", async () => {
+    write([".a/**", ".b/**"], [".a/**"]);
+    const d = await analyzeConfigDrift("/local", "/template");
+    expect(d.pullRelevant).toBe(false);
+    expect(d.pushRelevant).toBe(true);
+  });
+
+  it("テンプレ側だけがパターン削除（ローカルが保持）→ pull 不要・push のみ（no-op ループにならない）", async () => {
+    // local=[a,b], template=[a]（b を削除）。union=[a,b]==local → pull 不要。
+    // union≠template → push 観点では「ローカルに余分」= pushRelevant。
+    write([".a/**", ".b/**"], [".a/**"]);
+    const d = await analyzeConfigDrift("/local", "/template");
+    expect(d.pullRelevant).toBe(false);
   });
 });

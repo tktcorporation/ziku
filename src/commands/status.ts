@@ -9,7 +9,9 @@ import { intro, log, outro, pc, withSpinner } from "../ui/renderer";
 import { recommendationLine, renderStatusLong, type StatusViewModel } from "../ui/status-view";
 import { LOCK_FILE, loadLock } from "../utils/lock";
 import { categorizeForStatus, decideRecommendation, type Recommendation } from "../utils/status";
+import type { FileClassification } from "../utils/merge";
 import { analyzeSync } from "../utils/sync-analysis";
+import { analyzeConfigDrift } from "../utils/config-merge";
 import { mergeTemplatePatterns } from "../utils/template-patterns";
 import { detectUntrackedFiles } from "../utils/untracked";
 import { ZIKU_CONFIG_FILE, withConfigTracked, zikuConfigExists } from "../utils/ziku-config";
@@ -47,6 +49,40 @@ export const statusLifecycle: CommandLifecycle = {
     "`status` は git status と同じく常に exit 0 で終了する（観察コマンドの責務）。CI でゲートしたい場合は将来 `pull --dry-run` や `diff --exit-code` 等の専用コマンドに任せる予定。",
   ],
 };
+
+/**
+ * classification 内の `ziku.jsonc` を、union 観点の実差分（drift）で再分類する。
+ *
+ * 生の classify は `ziku.jsonc` を autoUpdate/localOnly 等に振り分けるが、加法 union 同期では
+ * 「片側だけの削除」はアクション不要。drift に基づき pull/push どちら向きに実差分があるかで
+ * バケツを決め直すことで、status の推奨を pull/push の実挙動と一致させる（codex P2）。
+ */
+function applyConfigDrift(
+  classification: FileClassification,
+  drift: { pullRelevant: boolean; pushRelevant: boolean },
+): FileClassification {
+  const strip = (arr: string[]): string[] => arr.filter((f) => f !== ZIKU_CONFIG_FILE);
+  const adjusted: FileClassification = {
+    autoUpdate: strip(classification.autoUpdate),
+    localOnly: strip(classification.localOnly),
+    conflicts: strip(classification.conflicts),
+    newFiles: strip(classification.newFiles),
+    deletedFiles: strip(classification.deletedFiles),
+    deletedLocally: strip(classification.deletedLocally),
+    unchanged: strip(classification.unchanged),
+  };
+
+  if (drift.pullRelevant && drift.pushRelevant) {
+    adjusted.conflicts.push(ZIKU_CONFIG_FILE);
+  } else if (drift.pullRelevant) {
+    adjusted.autoUpdate.push(ZIKU_CONFIG_FILE);
+  } else if (drift.pushRelevant) {
+    adjusted.localOnly.push(ZIKU_CONFIG_FILE);
+  } else {
+    adjusted.unchanged.push(ZIKU_CONFIG_FILE);
+  }
+  return adjusted;
+}
 
 export const statusCommand = defineCommand({
   meta: {
@@ -151,7 +187,11 @@ export const statusCommand = defineCommand({
         }),
       );
 
-      const buckets = categorizeForStatus(classification);
+      // ziku.jsonc は加法 union で同期されるため、生の classify（autoUpdate/localOnly 等）
+      // ではなく union 観点の実差分で再分類する。これをしないと、テンプレ側のパターン削除だけの
+      // ケースで status が pull を推奨し続ける一方 pull は no-op、という無限ループになる（codex P2）。
+      const drift = await analyzeConfigDrift(targetDir, templateDir);
+      const buckets = categorizeForStatus(applyConfigDrift(classification, drift));
       const untracked = await detectUntrackedFiles({
         targetDir,
         patterns: { include: mergedInclude, exclude: mergedExclude },

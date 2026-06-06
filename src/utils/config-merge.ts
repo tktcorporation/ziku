@@ -82,6 +82,44 @@ async function readPatternsAt(dir: string): Promise<ConfigPatterns | undefined> 
   };
 }
 
+/** 2 つのパターン配列が集合として等しいか（順序・重複を無視）。 */
+function sameSet(a: string[], b: string[]): boolean {
+  const sa = new Set(a);
+  const sb = new Set(b);
+  if (sa.size !== sb.size) return false;
+  for (const x of sa) if (!sb.has(x)) return false;
+  return true;
+}
+
+/**
+ * `ziku.jsonc` の「実際に同期アクションが必要か」を union 観点で判定する。
+ *
+ * - `pullRelevant`: テンプレにあってローカルに無いパターンがある（pull で取り込む価値あり）。
+ * - `pushRelevant`: ローカルにあってテンプレに無いパターンがある（push で伝播する価値あり）。
+ *
+ * 加法 union モデルでは「片側だけのパターン削除」は同期アクションにならない（union==その側）。
+ * これを status の推奨判定に使うことで、テンプレ側のパターン削除だけのケースで pull を
+ * 無限に推奨してしまう no-op ループを防ぐ（codex P2）。
+ */
+export async function analyzeConfigDrift(
+  targetDir: string,
+  templateDir: string,
+): Promise<{ pullRelevant: boolean; pushRelevant: boolean }> {
+  const [local, template] = await Promise.all([
+    readPatternsAt(targetDir),
+    readPatternsAt(templateDir),
+  ]);
+  const l = local ?? EMPTY_PATTERNS;
+  const t = template ?? EMPTY_PATTERNS;
+  const union = mergeConfigPatterns({ local: l, template: t });
+  const eq = (a: ConfigPatterns, b: ConfigPatterns): boolean =>
+    sameSet(a.include, b.include) && sameSet(a.exclude, b.exclude);
+  return {
+    pullRelevant: !eq(union, l),
+    pushRelevant: !eq(union, t),
+  };
+}
+
 /**
  * ローカルとテンプレートの `ziku.jsonc` を読み、要素レベルの和集合マージ結果を
  * `ziku.jsonc` 文字列として返す。
