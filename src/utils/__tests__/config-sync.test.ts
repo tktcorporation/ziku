@@ -143,4 +143,22 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
     expect(configDiff).toBeDefined();
     expect(configDiff?.type).toBe("modified");
   });
+
+  it("hashFiles: exclude が ziku.jsonc にマッチしても include 明示なら必ずハッシュされる", async () => {
+    const dir = await createTempDir("excl");
+    tempDirs.push(dir);
+    await writeFiles(dir, {
+      ".ziku/ziku.jsonc": JSON.stringify({ include: [".claude/**"] }, null, 2),
+      ".claude/rules.md": "rule",
+    });
+
+    // exclude が `.ziku/**` と `**/*.jsonc` で ziku.jsonc を消そうとするケース
+    const hashes = await hashFiles(dir, withConfigTracked([".claude/**"]), [
+      ".ziku/**",
+      "**/*.jsonc",
+    ]);
+
+    // include の明示指定が exclude より優先され、ziku.jsonc はハッシュされる
+    expect(hashes[ZIKU_CONFIG_FILE]).toEqual(expect.any(String));
+  });
 });
