@@ -49,12 +49,38 @@ export const log = {
 
 /** スピナー付きで非同期タスクを実行 */
 export function withSpinner<T>(message: string, task: () => Promise<T>): Promise<T> {
+  // 非 TTY（パイプ・ログリダイレクト・--yes での非対話実行）ではスピナーの
+  // アニメーションを使わない。@clack の spinner は `process.env.CI === "true"`
+  // のときだけフレーム描画を抑制するため、CI 環境変数が無いままパイプに流すと
+  // フレーム（◒◐◓◑ + CR）を 80ms 間隔で書き続け、数百行分の制御文字でログを
+  // 埋めてしまう（#84）。非 TTY では開始メッセージを 1 行だけ出し、失敗時のみ
+  // 失敗行を足す。
+  if (!process.stdout.isTTY) {
+    return runWithoutSpinner(message, task);
+  }
+
   const s = p.spinner();
   s.start(message);
   return Effect.runPromise(
     Effect.tryPromise({ try: () => task(), catch: (e) => e }).pipe(
       Effect.tap(() => Effect.sync(() => s.stop(message))),
       Effect.tapError(() => Effect.sync(() => s.stop(pc.red(`Failed: ${message}`)))),
+    ),
+  );
+}
+
+/**
+ * 非 TTY 環境向けのスピナー代替。
+ *
+ * アニメーションせず、開始メッセージを 1 行だけ出力する。タスク失敗時のみ
+ * 失敗行を追加し、エラーはそのまま伝播させる（TTY 版の s.stop(Failed) と同等の
+ * 振る舞いを単一行で再現する）。成功時の完了表示は呼び出し側のログに委ねる。
+ */
+function runWithoutSpinner<T>(message: string, task: () => Promise<T>): Promise<T> {
+  log.step(message);
+  return Effect.runPromise(
+    Effect.tryPromise({ try: () => task(), catch: (e) => e }).pipe(
+      Effect.tapError(() => Effect.sync(() => log.error(`Failed: ${message}`))),
     ),
   );
 }
