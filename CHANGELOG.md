@@ -1,5 +1,31 @@
 # @tktco/ziku
 
+## 1.4.0
+
+### Minor Changes
+
+- [#78](https://github.com/tktcorporation/ziku/pull/78) [`c21f408`](https://github.com/tktcorporation/ziku/commit/c21f40807266ef43cf147fa41b8efad2e0f0ba07) Thanks [@tktcorporation](https://github.com/tktcorporation)! - `ziku push` 時に、監視フォルダ内の未追跡ファイル（ホワイトリスト外の新規ファイル）を検知したら、その場で追跡対象に取り込めるようにした。
+
+  これまでは未追跡ファイルを検知しても警告ログを出すだけで push 対象に含めず、`--yes` 時は警告すら出なかった。そのため「ファイルを追加したのに同期されない」状態に気づきにくかった。
+
+  - 対話モード: 未追跡ファイルを一覧から選択でき、選んだファイルは `ziku.jsonc` の `include` に追記された上で同じ push に含まれる（git の interactive add 相当）。include への永続化は push が成功した後にのみ行い、push 失敗・キャンセル時には設定を変更しない。
+  - 非対話モード（`--yes`）/ プレビュー（`--dry-run`）: 暗黙の追加はせず、除外された未追跡ファイルと `ziku track` の案内を必ず表示する。設定変更は人間の明示操作に限定し、レビューされない `include` の自動膨張を防ぐ。
+
+### Patch Changes
+
+- [#76](https://github.com/tktcorporation/ziku/pull/76) [`4ffa2df`](https://github.com/tktcorporation/ziku/commit/4ffa2df3344ef9fdf72b0a6bfd1c716cd66945de) Thanks [@tktcorporation](https://github.com/tktcorporation)! - `ziku push` の未解決コンフリクトの扱いを見直した。
+
+  これまでは「未解決の衝突があるけど続ける？」という曖昧な Yes/No を出し、「No」を選んでも実際には止まらず、未解決ファイルがマージ結果ではなくローカルの内容のまま push され、テンプレートの更新を黙って上書きしてしまう挙動になっていた。
+
+  新しい挙動:
+
+  - 自動マージできる衝突はこれまで通り auto-merge して push する。
+  - 自動マージできなかった未解決の衝突は、**既定では push 対象から除外**する。衝突が 1 つでもあると無関係なファイルの push まで止めてしまう問題を避け、コンフリクトに巻き込まれていない変更はそのまま push できる。
+  - 未解決の衝突は警告で一覧表示し、`ziku pull` での解決を促す。対話選択では既定で未選択にし、`conflict — resolve with ziku pull` とマークして見せる。
+  - 未解決の衝突を**明示的に push 対象へ含めた場合のみ**（対話で選択、または `--files` で指定）、ローカル内容での暗黙の上書きを防ぐため確定的に中断し、対象ファイル名と `ziku pull` での解決手順を hint として提示する。
+
+  `--yes`（非対話）でも未解決の衝突は push されない（暗黙の上書きをしない）安全性は維持している。
+
 ## 1.3.1
 
 ### Patch Changes
