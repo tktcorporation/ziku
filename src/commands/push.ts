@@ -460,8 +460,43 @@ export const pushCommand = defineCommand({
 
       if (args.dryRun) {
         log.info("Dry run mode");
+
+        // #81: dry-run プレビューを実 push と一致させる。
+        // 旧実装は `--files` 適用前の全 diff を表示していたため、実際に push される
+        // 集合とプレビューが食い違っていた。実 push と同じフィルタ規則
+        // （--files 指定・未解決衝突の除外・削除の既定除外）を適用して
+        // 「実際に push される集合」を表示する。対話選択は dry-run では行わない。
+        const filesArg = args.files as string | undefined;
+        let previewFiles: FileDiff[];
+        if (filesArg) {
+          const { filtered, notFound } = filterByFilesArg(pushableFiles, filesArg);
+          if (notFound.length > 0) log.warn(`Files not found: ${notFound.join(", ")}`);
+          previewFiles = filtered;
+        } else {
+          // --files 未指定時は対話選択の既定集合（selectPushFiles の initialValues と
+          // 同じ規則）を非対話で再現する。
+          previewFiles = defaultPushSelection(pushableFiles, {
+            includeDeletions: args.includeDeletions as boolean,
+            conflictedPaths: unresolvedConflicts,
+          });
+        }
+
         log.step("Files that would be pushed:");
-        logDiffSummary(diff.files);
+        if (previewFiles.length === 0) {
+          log.info("No files match the current selection — nothing would be pushed.");
+        } else {
+          logDiffSummary(previewFiles);
+        }
+
+        // 未解決の衝突を --files で明示選択した場合、実 push は中断する（unresolvedConflictError）。
+        // dry-run でも同じ予告を出して挙動を一致させる。
+        const selectedConflicts = previewFiles.filter((f) => unresolvedConflicts.has(f.path));
+        if (selectedConflicts.length > 0) {
+          log.warn(
+            `${selectedConflicts.length} selected file(s) have unresolved conflicts and would block the push:`,
+          );
+          for (const f of selectedConflicts) log.message(`  ${pc.yellow("!")} ${f.path}`);
+        }
         return;
       }
 
@@ -604,6 +639,46 @@ async function persistNewlyTracked(
 // ─── ファイル選択 ───
 
 /**
+ * `--files` 引数で push 対象を絞り込む純粋関数。
+ *
+ * dry-run プレビューと実 push の両方で同じフィルタ規則を使うために共有する。
+ * 共有しないと「プレビューに出た集合」と「実際に push される集合」が
+ * 食い違う（#81 の不具合の原因）。
+ *
+ * @returns filtered: 指定パスに一致した候補、notFound: 候補に存在しなかった指定パス。
+ */
+function filterByFilesArg(
+  candidates: FileDiff[],
+  filesArg: string,
+): { filtered: FileDiff[]; notFound: string[] } {
+  const requestedPaths = filesArg
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const availablePaths = new Set(candidates.map((f) => f.path));
+  const notFound = requestedPaths.filter((p) => !availablePaths.has(p));
+  const requestedSet = new Set(requestedPaths);
+  const filtered = candidates.filter((f) => requestedSet.has(f.path));
+  return { filtered, notFound };
+}
+
+/**
+ * 対話選択を経由せずに push 対象の既定集合を算出する（dry-run プレビュー用）。
+ *
+ * selectPushFiles の initialValues と同じ規則: 未解決の衝突と、
+ * --include-deletions でない削除を既定で除外する。実 push の既定選択と
+ * プレビューを一致させるために同一の規則を共有する。
+ */
+function defaultPushSelection(
+  candidates: FileDiff[],
+  opts: { includeDeletions: boolean; conflictedPaths: Set<string> },
+): FileDiff[] {
+  return candidates.filter(
+    (f) => !opts.conflictedPaths.has(f.path) && (opts.includeDeletions || f.type !== "deleted"),
+  );
+}
+
+/**
  * push 対象ファイルを選択する。
  * --files 指定時はフィルタリング、未指定時はインタラクティブ選択。
  * 選択結果が空の場合はログを出力して空配列を返す。
@@ -617,15 +692,8 @@ async function selectFilesToPush(
   },
 ): Promise<FileDiff[]> {
   if (opts.filesArg) {
-    const requestedPaths = opts.filesArg
-      .split(",")
-      .map((p) => p.trim())
-      .filter(Boolean);
-    const availablePaths = new Set(candidates.map((f) => f.path));
-    const notFound = requestedPaths.filter((p) => !availablePaths.has(p));
+    const { filtered, notFound } = filterByFilesArg(candidates, opts.filesArg);
     if (notFound.length > 0) log.warn(`Files not found: ${notFound.join(", ")}`);
-    const requestedSet = new Set(requestedPaths);
-    const filtered = candidates.filter((f) => requestedSet.has(f.path));
     if (filtered.length === 0) {
       log.info("No matching files. Cancelled.");
       return [];
