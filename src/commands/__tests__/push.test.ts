@@ -138,7 +138,7 @@ const {
   logUntrackedFilesNotice,
 } = await import("../../ui/prompts");
 const { detectUntrackedFiles } = await import("../../utils/untracked");
-const { log } = await import("../../ui/renderer");
+const { log, logDiffSummary } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
 const { classifyFiles, mergeOneFile, downloadBaseForMerge } = await import("../../utils/merge");
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
@@ -155,6 +155,7 @@ const mockSelectUntrackedToTrack = vi.mocked(selectUntrackedToTrack);
 const mockLogUntrackedFilesNotice = vi.mocked(logUntrackedFilesNotice);
 const mockDetectUntrackedFiles = vi.mocked(detectUntrackedFiles);
 const mockLog = vi.mocked(log);
+const mockLogDiffSummary = vi.mocked(logDiffSummary);
 const mockHashFiles = vi.mocked(hashFiles);
 const mockClassifyFiles = vi.mocked(classifyFiles);
 const mockMergeOneFile = vi.mocked(mergeOneFile);
@@ -373,6 +374,180 @@ describe("pushCommand", () => {
       expect(mockLog.info).toHaveBeenCalledWith("Dry run mode");
       // dry-run ではファイルリストを表示して終了
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
+    it("--dry-run + --files はプレビューを指定ファイルだけに絞る（#81）", async () => {
+      // push 候補を複数用意し、--files で 1 つだけ指定する
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: ["a.txt", "b.txt"],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [
+          { path: "a.txt", type: "added", localContent: "a" },
+          { path: "b.txt", type: "added", localContent: "b" },
+        ],
+        summary: { added: 2, modified: 0, deleted: 0, unchanged: 0 },
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: true, yes: false, edit: false, files: "a.txt" },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      // プレビューは --files で絞った集合のみ（実 push と一致）
+      const previewArg = mockLogDiffSummary.mock.calls.at(-1)?.[0] as Array<{ path: string }>;
+      expect(previewArg.map((f) => f.path)).toEqual(["a.txt"]);
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
+    it("--dry-run + --files で存在しないファイルは not found を警告する（#81）", async () => {
+      setupPushableFiles([{ path: "a.txt", type: "added", localContent: "a" }]);
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: true, yes: false, edit: false, files: "missing.txt" },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      expect(mockLog.warn).toHaveBeenCalledWith("Files not found: missing.txt");
+      expect(mockLog.info).toHaveBeenCalledWith(
+        "No files match the current selection — nothing would be pushed.",
+      );
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
+    it("--dry-run は未解決の衝突を既定でプレビューから除外する（#81）", async () => {
+      const { effect } = mockContext({
+        lock: { ...validLock, baseHashes: { "conflict.txt": "abc123" } },
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: ["normal.txt"],
+        conflicts: ["conflict.txt"],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [
+          { path: "normal.txt", type: "modified", localContent: "n", templateContent: "nt" },
+          { path: "conflict.txt", type: "modified", localContent: "c", templateContent: "ct" },
+        ],
+        summary: { added: 0, modified: 2, deleted: 0, unchanged: 0 },
+      });
+      // downloadBaseForMerge は既定で null を返すため conflict.txt は auto-merge 不可 → unresolved
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: true, yes: false, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      // 未解決の衝突 conflict.txt はプレビューに含めない
+      const previewArg = mockLogDiffSummary.mock.calls.at(-1)?.[0] as Array<{ path: string }>;
+      expect(previewArg.map((f) => f.path)).toEqual(["normal.txt"]);
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
+    it("--dry-run + --files で衝突ファイルを指定すると push が中断する旨を警告する（#81）", async () => {
+      const { effect } = mockContext({
+        lock: { ...validLock, baseHashes: { "conflict.txt": "abc123" } },
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: ["conflict.txt"],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [
+          { path: "conflict.txt", type: "modified", localContent: "c", templateContent: "ct" },
+        ],
+        summary: { added: 0, modified: 1, deleted: 0, unchanged: 0 },
+      });
+      // downloadBaseForMerge は既定で null を返すため conflict.txt は unresolved
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: true, yes: false, edit: false, files: "conflict.txt" },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      // dry-run でも「実 push なら中断する」ことを予告する（実挙動と一致）
+      expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining("would block the push"));
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
+    it("--dry-run は --include-deletions なしでは削除ファイルをプレビューから除外する（#81）", async () => {
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: ["keep.txt"],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: ["gone.txt"],
+        unchanged: [],
+      });
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [
+          { path: "keep.txt", type: "added", localContent: "k" },
+          { path: "gone.txt", type: "deleted", templateContent: "g" },
+        ],
+        summary: { added: 1, modified: 0, deleted: 1, unchanged: 0 },
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: true, yes: false, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      // 削除ファイルは既定で除外（実 push の既定選択と一致）
+      const previewArg = mockLogDiffSummary.mock.calls.at(-1)?.[0] as Array<{ path: string }>;
+      expect(previewArg.map((f) => f.path)).toEqual(["keep.txt"]);
+    });
+
+    it("--dry-run --include-deletions は削除ファイルもプレビューに含める（#81）", async () => {
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: ["keep.txt"],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: ["gone.txt"],
+        unchanged: [],
+      });
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [
+          { path: "keep.txt", type: "added", localContent: "k" },
+          { path: "gone.txt", type: "deleted", templateContent: "g" },
+        ],
+        summary: { added: 1, modified: 0, deleted: 1, unchanged: 0 },
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: true, yes: false, edit: false, includeDeletions: true },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      const previewArg = mockLogDiffSummary.mock.calls.at(-1)?.[0] as Array<{ path: string }>;
+      expect(previewArg.map((f) => f.path).toSorted()).toEqual(["gone.txt", "keep.txt"]);
     });
 
     it("ファイル選択をキャンセルすると PR を作成しない", async () => {
