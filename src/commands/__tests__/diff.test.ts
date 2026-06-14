@@ -36,6 +36,19 @@ vi.mock("../../utils/untracked", () => ({
   getTotalUntrackedCount: vi.fn().mockReturnValue(0),
 }));
 
+// utils/template-patterns をモック (デフォルトはマージ無し = テンプレ側に追加パターン無し)
+// status と同じく diff でもテンプレ追加パターンを取り込むため、ここをモックして
+// mergedInclude/mergedExclude が detectDiff / detectUntrackedFiles に渡ることを検証する。
+vi.mock("../../utils/template-patterns", () => ({
+  mergeTemplatePatterns: vi.fn().mockResolvedValue({
+    mergedInclude: [".root/**", ".github/**"],
+    mergedExclude: [],
+    newInclude: [],
+    newExclude: [],
+    patternsUpdated: false,
+  }),
+}));
+
 // ui/diff-view をモック
 vi.mock("../../ui/diff-view", () => ({
   renderFileDiff: vi.fn(),
@@ -58,6 +71,7 @@ vi.mock("../../ui/renderer", () => ({
   pc: {
     cyan: vi.fn((s: string) => s),
     dim: vi.fn((s: string) => s),
+    green: vi.fn((s: string) => s),
   },
 }));
 
@@ -65,12 +79,16 @@ vi.mock("../../ui/renderer", () => ({
 const { diffCommand } = await import("../diff");
 const { loadCommandContext } = await import("../../services/command-context");
 const { detectDiff, hasDiff } = await import("../../utils/diff");
+const { detectUntrackedFiles } = await import("../../utils/untracked");
+const { mergeTemplatePatterns } = await import("../../utils/template-patterns");
 const { log, outro, logDiffSummary } = await import("../../ui/renderer");
 const { renderFileDiff } = await import("../../ui/diff-view");
 
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
 const mockDetectDiff = vi.mocked(detectDiff);
 const mockHasDiff = vi.mocked(hasDiff);
+const mockDetectUntrackedFiles = vi.mocked(detectUntrackedFiles);
+const mockMergeTemplatePatterns = vi.mocked(mergeTemplatePatterns);
 const mockLog = vi.mocked(log);
 const mockOutro = vi.mocked(outro);
 const mockLogDiffSummary = vi.mocked(logDiffSummary);
@@ -114,6 +132,14 @@ describe("diffCommand", () => {
   beforeEach(() => {
     vol.reset();
     vi.clearAllMocks();
+    // clearAllMocks は実装も消すため、デフォルトのパススルー (テンプレ追加パターン無し) を再設定する
+    mockMergeTemplatePatterns.mockResolvedValue({
+      mergedInclude: [".root/**", ".github/**"],
+      mergedExclude: [],
+      newInclude: [],
+      newExclude: [],
+      patternsUpdated: false,
+    });
   });
 
   describe("meta", () => {
@@ -269,6 +295,77 @@ describe("diffCommand", () => {
       });
 
       expect(mockRenderFileDiff).toHaveBeenCalledWith(diffWithChanges.files[0]);
+    });
+
+    it("テンプレ追加 wildcard を取り込んで detectDiff / detectUntrackedFiles に渡す (status と分類を統一)", async () => {
+      const { effect } = mockContext({ include: [".github/**"] });
+      mockLoadCommandContext.mockReturnValue(effect);
+      // テンプレ側が .claude/rules/*.md を追加した状況を再現する
+      mockMergeTemplatePatterns.mockResolvedValueOnce({
+        mergedInclude: [".github/**", ".claude/rules/*.md"],
+        mergedExclude: [],
+        newInclude: [".claude/rules/*.md"],
+        newExclude: [],
+        patternsUpdated: true,
+      });
+      mockDetectDiff.mockResolvedValueOnce(emptyDiff);
+      mockHasDiff.mockReturnValueOnce(false);
+
+      await (diffCommand.run as any)({
+        args: { dir: "/test", verbose: false },
+        rawArgs: [],
+        cmd: diffCommand,
+      });
+
+      // detectDiff と detectUntrackedFiles の双方が mergedInclude を受け取る
+      expect(mockDetectDiff).toHaveBeenCalledWith(
+        expect.objectContaining({
+          patterns: { include: [".github/**", ".claude/rules/*.md"], exclude: [] },
+        }),
+      );
+      expect(mockDetectUntrackedFiles).toHaveBeenCalledWith(
+        expect.objectContaining({
+          patterns: { include: [".github/**", ".claude/rules/*.md"], exclude: [] },
+        }),
+      );
+    });
+
+    it("テンプレが新パターンを追加したとき newInclude を通知する", async () => {
+      const { effect } = mockContext({ include: [".github/**"] });
+      mockLoadCommandContext.mockReturnValue(effect);
+      mockMergeTemplatePatterns.mockResolvedValueOnce({
+        mergedInclude: [".github/**", ".claude/rules/*.md"],
+        mergedExclude: [],
+        newInclude: [".claude/rules/*.md"],
+        newExclude: [],
+        patternsUpdated: true,
+      });
+      mockDetectDiff.mockResolvedValueOnce(emptyDiff);
+      mockHasDiff.mockReturnValueOnce(false);
+
+      await (diffCommand.run as any)({
+        args: { dir: "/test", verbose: false },
+        rawArgs: [],
+        cmd: diffCommand,
+      });
+
+      expect(mockLog.info).toHaveBeenCalledWith(expect.stringContaining("1 new pattern"));
+      expect(mockLog.message).toHaveBeenCalledWith(expect.stringContaining(".claude/rules/*.md"));
+    });
+
+    it("テンプレに追加パターンが無いときは newInclude 通知を出さない", async () => {
+      const { effect } = mockContext();
+      mockLoadCommandContext.mockReturnValue(effect);
+      mockDetectDiff.mockResolvedValueOnce(emptyDiff);
+      mockHasDiff.mockReturnValueOnce(false);
+
+      await (diffCommand.run as any)({
+        args: { dir: "/test", verbose: false },
+        rawArgs: [],
+        cmd: diffCommand,
+      });
+
+      expect(mockLog.info).not.toHaveBeenCalledWith(expect.stringContaining("new pattern"));
     });
 
     it("--verbose なしのとき renderFileDiff を呼ばない", async () => {

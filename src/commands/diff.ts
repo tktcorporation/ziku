@@ -6,6 +6,7 @@ import { renderFileDiff } from "../ui/diff-view";
 import { logUntrackedFilesNotice } from "../ui/prompts";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
 import { detectDiff, hasDiff } from "../utils/diff";
+import { mergeTemplatePatterns } from "../utils/template-patterns";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked";
 import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
 import { LOCK_FILE } from "../utils/lock";
@@ -71,15 +72,37 @@ export const diffCommand = defineCommand({
     log.info(`Template: ${pc.cyan(templateDir)}${"path" in source ? " (local)" : ""}`);
 
     await withFinally(async () => {
-      const patterns = {
-        include: config.include,
-        exclude: config.exclude ?? [],
-      };
+      const include = config.include;
+      const exclude = config.exclude ?? [];
 
-      if (patterns.include.length === 0) {
+      if (include.length === 0) {
         log.warn("No patterns configured");
         return;
       }
+
+      // テンプレ側で追加された include/exclude パターンを取り込んでから比較する。
+      // これをしないと、テンプレに追加された wildcard にのみマッチするファイルが
+      // diff では untracked、status では modified と分類が食い違う (issue #83)。
+      // status と同じ mergeTemplatePatterns を通すことで両コマンドの分類を統一する。
+      const { mergedInclude, mergedExclude, newInclude } = await mergeTemplatePatterns(
+        templateDir,
+        include,
+        exclude,
+      );
+
+      if (newInclude.length > 0) {
+        log.info(
+          `Template added ${newInclude.length} new pattern(s) — files matching these appear in the diff below:`,
+        );
+        for (const p of newInclude) {
+          log.message(`  ${pc.green("+")} ${p}`);
+        }
+      }
+
+      const patterns = {
+        include: mergedInclude,
+        exclude: mergedExclude,
+      };
 
       log.step("Detecting changes...");
 
