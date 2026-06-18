@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@clack/prompts", () => ({
   intro: vi.fn(),
@@ -27,6 +27,11 @@ import {
   outro,
   withSpinner,
 } from "../renderer";
+
+/** テスト中に process.stdout.isTTY を切り替えるヘルパー（#84 の分岐検証用） */
+function setIsTTY(value: boolean): void {
+  Object.defineProperty(process.stdout, "isTTY", { value, configurable: true });
+}
 
 describe("renderer", () => {
   beforeEach(() => {
@@ -75,7 +80,23 @@ describe("renderer", () => {
   });
 
   describe("withSpinner", () => {
-    it("should start and stop spinner on success", async () => {
+    // withSpinner は process.stdout.isTTY で挙動を分岐する（#84）。
+    // TTY 経路（アニメーション）を検証するため、各テストで isTTY を明示的に切り替える。
+    let originalIsTTY: boolean | undefined;
+
+    beforeEach(() => {
+      originalIsTTY = process.stdout.isTTY;
+    });
+
+    afterEach(() => {
+      Object.defineProperty(process.stdout, "isTTY", {
+        value: originalIsTTY,
+        configurable: true,
+      });
+    });
+
+    it("should start and stop spinner on success (TTY)", async () => {
+      setIsTTY(true);
       const mockSpinner = {
         start: vi.fn(),
         stop: vi.fn(),
@@ -94,7 +115,8 @@ describe("renderer", () => {
       expect(mockSpinner.stop).toHaveBeenCalledWith("loading...");
     });
 
-    it("should stop spinner on error", async () => {
+    it("should stop spinner on error (TTY)", async () => {
+      setIsTTY(true);
       const mockSpinner = {
         start: vi.fn(),
         stop: vi.fn(),
@@ -114,6 +136,32 @@ describe("renderer", () => {
 
       expect(mockSpinner.start).toHaveBeenCalled();
       expect(mockSpinner.stop).toHaveBeenCalled();
+    });
+
+    it("非 TTY ではスピナーを使わず単一行で開始メッセージを出す（#84）", async () => {
+      setIsTTY(false);
+
+      const result = await withSpinner("loading...", async () => 42);
+
+      expect(result).toBe(42);
+      // アニメーションするスピナーは生成しない
+      expect(p.spinner).not.toHaveBeenCalled();
+      // 開始メッセージは 1 回だけ
+      expect(p.log.step).toHaveBeenCalledTimes(1);
+      expect(p.log.step).toHaveBeenCalledWith("loading...");
+    });
+
+    it("非 TTY でタスク失敗時は失敗行を出しエラーを伝播する（#84）", async () => {
+      setIsTTY(false);
+
+      await expect(
+        withSpinner("loading...", async () => {
+          throw new Error("fail");
+        }),
+      ).rejects.toThrow("fail");
+
+      expect(p.spinner).not.toHaveBeenCalled();
+      expect(p.log.error).toHaveBeenCalledWith("Failed: loading...");
     });
   });
 
