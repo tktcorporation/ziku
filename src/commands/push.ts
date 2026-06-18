@@ -621,7 +621,16 @@ async function resolveUntrackedTracking(
   effectivePatterns: { include: string[]; exclude: string[] };
   newlyTrackedPaths: string[];
 }> {
-  const untrackedByFolder = await detectUntrackedFiles({ targetDir, patterns });
+  // 未追跡探索には config-tracked の合成エントリ（`.ziku/ziku.jsonc`）を含めない。
+  // これを含めると detectUntrackedFiles が `.ziku` をスコープ基点とみなして `.ziku/**` を
+  // 走査し、同期対象外の `.ziku/lock.json`（取得元 source を含むローカル専用ファイル）まで
+  // 「未追跡」として追跡候補に出してしまう（codex P2）。`ziku.jsonc` 自体は常に追跡される
+  // SSOT なので、未追跡探索の対象から外しても追跡漏れは起きない。
+  const discoveryPatterns = {
+    include: patterns.include.filter((p) => p !== ZIKU_CONFIG_FILE),
+    exclude: patterns.exclude,
+  };
+  const untrackedByFolder = await detectUntrackedFiles({ targetDir, patterns: discoveryPatterns });
   const untrackedCount = getTotalUntrackedCount(untrackedByFolder);
   if (untrackedCount === 0) {
     return { effectivePatterns: patterns, newlyTrackedPaths: [] };

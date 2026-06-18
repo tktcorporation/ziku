@@ -18,6 +18,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { hashFiles } from "../hash";
 import { classifyFiles } from "../merge";
 import { detectDiff } from "../diff";
+import { detectUntrackedFiles, getTotalUntrackedCount } from "../untracked";
 import { ZIKU_CONFIG_FILE, withConfigTracked } from "../ziku-config";
 
 async function createTempDir(label: string): Promise<string> {
@@ -160,5 +161,47 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
 
     // include の明示指定が exclude より優先され、ziku.jsonc はハッシュされる
     expect(hashes[ZIKU_CONFIG_FILE]).toEqual(expect.any(String));
+  });
+
+  it("未追跡探索: ziku.jsonc を含めると `.ziku/lock.json` を追跡候補として拾ってしまう（バグの再現）", async () => {
+    const dir = await createTempDir("untracked-bug");
+    tempDirs.push(dir);
+    await writeFiles(dir, {
+      ".ziku/ziku.jsonc": JSON.stringify({ include: [".claude/**"] }, null, 2),
+      ".ziku/lock.json": JSON.stringify({ source: { owner: "o", repo: "r" } }, null, 2),
+      ".claude/rules.md": "rule",
+    });
+
+    // withConfigTracked をそのまま渡すと `.ziku` がスコープ基点になり lock.json が拾われる
+    const untracked = await detectUntrackedFiles({
+      targetDir: dir,
+      patterns: { include: withConfigTracked([".claude/**"]), exclude: [] },
+    });
+    const paths = untracked.flatMap((g) => g.files.map((f) => f.path));
+    expect(paths).toContain(".ziku/lock.json");
+  });
+
+  it("未追跡探索: 合成エントリ ziku.jsonc を除けば `.ziku/lock.json` は追跡候補に出ない（修正）", async () => {
+    const dir = await createTempDir("untracked-fix");
+    tempDirs.push(dir);
+    await writeFiles(dir, {
+      ".ziku/ziku.jsonc": JSON.stringify({ include: [".claude/**"] }, null, 2),
+      ".ziku/lock.json": JSON.stringify({ source: { owner: "o", repo: "r" } }, null, 2),
+      ".claude/rules.md": "rule",
+    });
+
+    // push の resolveUntrackedTracking が行うのと同じく、探索 include から ziku.jsonc を除く
+    const discoveryInclude = withConfigTracked([".claude/**"]).filter(
+      (p) => p !== ZIKU_CONFIG_FILE,
+    );
+    const untracked = await detectUntrackedFiles({
+      targetDir: dir,
+      patterns: { include: discoveryInclude, exclude: [] },
+    });
+    const paths = untracked.flatMap((g) => g.files.map((f) => f.path));
+    // lock.json も ziku.jsonc も追跡候補に出ない（`.ziku` がスコープ基点にならない）
+    expect(paths).not.toContain(".ziku/lock.json");
+    expect(paths).not.toContain(ZIKU_CONFIG_FILE);
+    expect(getTotalUntrackedCount(untracked)).toBe(0);
   });
 });
