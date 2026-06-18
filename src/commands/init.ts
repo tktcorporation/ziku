@@ -38,9 +38,14 @@ import {
   unauthorizedError,
 } from "../utils/github";
 import type { RepoExistence } from "../utils/github";
-import { hashFiles } from "../utils/hash";
+import { hashContent, hashFiles } from "../utils/hash";
 import { LOCK_FILE, saveLock } from "../utils/lock";
-import { ZIKU_CONFIG_FILE, generateZikuJsonc, zikuConfigExists } from "../utils/ziku-config";
+import {
+  ZIKU_CONFIG_FILE,
+  generateZikuJsonc,
+  withConfigTracked,
+  zikuConfigExists,
+} from "../utils/ziku-config";
 import { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy } from "../utils/template";
 import type { FlatPatterns } from "../utils/patterns";
 import { intro, log, logFileResults, outro, pc, withSpinner } from "../ui/renderer";
@@ -238,8 +243,34 @@ export const initCommand = defineCommand({
         allResults.push(envResult);
       }
 
-      // テンプレートファイルのハッシュを計算（pull 時の差分検出用）
-      const baseHashes = await hashFiles(templateDir, flatPatterns.include, flatPatterns.exclude);
+      // テンプレートファイルのハッシュを計算（pull 時の差分検出用）。
+      // ziku.jsonc 自体も追跡ファイルになったため withConfigTracked で含める。
+      const baseHashes = await hashFiles(
+        templateDir,
+        withConfigTracked(flatPatterns.include),
+        flatPatterns.exclude,
+      );
+
+      // ziku.jsonc の base（共通祖先）を決める。init は「テンプレートのパターンの部分集合」
+      // だけを選んで導入できるため、ローカル ziku.jsonc はテンプレより少ないことがある。
+      // base をどちらに置くかで初回 push/pull の安全性が決まる → resolveConfigBaseHash が
+      // そのポリシーを担う（テンプレートを壊さないための安全装置）。
+      //
+      // ただしテンプレートに ziku.jsonc が存在する場合（= hashFiles が値を返した場合）のみ
+      // base を記録する。テンプレに無いのに base を記録すると、次回 pull で
+      // {base 有・local 有・template 無} → deletedFiles と判定され、ローカルの制御ファイル
+      // ziku.jsonc が削除されてしまう（codex P1）。テンプレに無い場合は base 未記録のまま
+      // にしておき、ziku.jsonc は localOnly 扱いになる。
+      if (baseHashes[ZIKU_CONFIG_FILE] !== undefined) {
+        const localConfigContent = generateZikuJsonc({
+          include: flatPatterns.include,
+          exclude: flatPatterns.exclude,
+        });
+        baseHashes[ZIKU_CONFIG_FILE] = resolveConfigBaseHash({
+          localConfigContent,
+          templateConfigHash: baseHashes[ZIKU_CONFIG_FILE],
+        });
+      }
 
       // baseRef: GitHub ソースの場合のみコミット SHA を取得
       const baseRef = await match(source)
@@ -308,6 +339,36 @@ function createEnvExample(
     strategy,
     relativePath: ".devcontainer/devcontainer.env.example",
   });
+}
+
+/**
+ * init 時に `lock.baseHashes[".ziku/ziku.jsonc"]` へ記録するベースハッシュを決める。
+ *
+ * ## なぜ専用ロジックが必要か
+ * `ziku.jsonc` を「他の追跡ファイルと同じ 3-way マージ対象」にしたことで、共通祖先
+ * （base）を何にするかが初回 push/pull の挙動を左右する。init はテンプレートのパターンの
+ * **部分集合**だけを選んで導入できる（ユーザーが dir を選択）ため、ローカル `ziku.jsonc`
+ * はテンプレより少ないことがある。
+ *
+ * ## トレードオフ（2 つの妥当なポリシー）
+ * - base = テンプレートの ziku.jsonc ハッシュ:
+ *     local(部分集合) != base(full) == template → push が「local がパターンを削除した」と
+ *     解釈し、**テンプレートからパターンを削ってしまう**（全下流プロジェクトに波及する事故）。
+ * - base = ローカル(部分集合) の ziku.jsonc ハッシュ:
+ *     local == base → push 対象外（テンプレート安全）。
+ *     pull 時は template != base==local → autoUpdate でテンプレの full 設定が降りてくる。
+ *
+ * @param opts.localConfigContent  init で書き出すローカル ziku.jsonc の中身
+ * @param opts.templateConfigHash  テンプレートの ziku.jsonc のハッシュ（無い場合 undefined）
+ * @returns lock.baseHashes[".ziku/ziku.jsonc"] に入れるハッシュ値
+ */
+export function resolveConfigBaseHash(opts: {
+  localConfigContent: string;
+  templateConfigHash: string | undefined;
+}): string {
+  // テンプレート保護のため base はローカル（部分集合）側に置く。
+  // これにより local == base となり、初回 push でテンプレのパターンを削らない。
+  return hashContent(opts.localConfigContent);
 }
 
 /**

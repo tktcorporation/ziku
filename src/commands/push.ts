@@ -13,9 +13,11 @@ import {
   addIncludePattern,
   loadZikuConfig,
   saveZikuConfig,
+  withConfigTracked,
 } from "../utils/ziku-config";
 import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
 import { downloadBaseForMerge, mergeOneFile } from "../utils/merge";
+import { computeMergedZikuConfig } from "../utils/config-merge";
 import type { CommandContextShape } from "../services/command-context";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
@@ -63,7 +65,16 @@ export const pushLifecycle: CommandLifecycle = {
       op: "update",
       note: "GitHub: PR を作成 / ローカル: ファイルを直接コピー",
     },
+    {
+      file: ZIKU_CONFIG_FILE,
+      location: "template",
+      op: "update",
+      note: "ローカルで追加したパターンをテンプレの ziku.jsonc へ加法 union マージで伝播",
+    },
     { file: LOCK_FILE, location: "local", op: "update", note: "baseHashes を更新" },
+  ],
+  notes: [
+    "`ziku.jsonc` 自体が追跡ファイルとして同期対象に含まれる。`ziku track` で追加したローカルパターンは、push 時にテンプレートの `ziku.jsonc` へ加法 union マージで伝播する（pull と双方向）。パターンの削除は自動伝播しない。",
   ],
 };
 
@@ -227,8 +238,21 @@ function pushToLocal(
         }
       }
 
+      // ziku.jsonc が衝突解決で union マージされた場合、push される内容はローカルの生
+      // 内容ではなく union 結果になる。ローカルを更新しないと、テンプレ・ローカルが
+      // 乖離したまま baseHashes をテンプレ（union）へ進めてしまい、次回 push で
+      // ローカルが localOnly 判定 → テンプレ側の追加分を上書きで落とす（codex P2）。
+      // ローカルにも merged 内容を書き戻して local==template==base を保つ。
+      const mergedConfig = target.files.find((f) => f.path === ZIKU_CONFIG_FILE);
+      if (mergedConfig) {
+        const localConfigPath = join(projectDir, ZIKU_CONFIG_FILE);
+        await mkdir(dirname(localConfigPath), { recursive: true });
+        await writeFile(localConfigPath, mergedConfig.content, "utf-8");
+      }
+
       // lock.json の baseHashes を更新（テンプレート側のハッシュを再計算）。
-      // 新規追跡ファイルを含む effectivePatterns で計算するため、追跡したファイルも baseHashes に入る。
+      // 新規追跡ファイルと ziku.jsonc を含む effectivePatterns で計算するため、
+      // 追跡したファイルも ziku.jsonc も baseHashes に入る（push 後はテンプレと一致する）。
       const baseHashes = await hashFiles(localSource.path, patterns.include, patterns.exclude);
       await saveLock(projectDir, { ...ctx.lock, baseHashes });
 
@@ -392,11 +416,16 @@ export const pushCommand = defineCommand({
     }
 
     const patterns = {
-      include: config.include,
+      // `.ziku/ziku.jsonc` 自体を追跡対象に含める。これにより `ziku track` で
+      // 追加したローカルパターンが、加法 union マージ経由でテンプレートの ziku.jsonc へ
+      // 伝播する（孤児化バグの修正）。
+      include: withConfigTracked(config.include),
       exclude: config.exclude ?? [],
     };
 
-    if (patterns.include.length === 0) {
+    // ガードは生の config.include で判定する（patterns.include は ziku.jsonc を
+    // 常に含むため 0 にならない）。
+    if (config.include.length === 0) {
       log.warn("No patterns configured");
       await cleanup();
       return;
@@ -418,6 +447,7 @@ export const pushCommand = defineCommand({
       );
 
       // 分類 + auto-merge。未解決の衝突は控えておき、push 対象に含めようとした時だけ中断する。
+      // ziku.jsonc の加法 union マージは classifyAndResolveConflicts 内で処理する。
       const { pushableFilePaths, unresolvedConflicts } = await classifyAndResolveConflicts({
         targetDir,
         templateDir,
@@ -514,6 +544,17 @@ export const pushCommand = defineCommand({
         throw unresolvedConflictError(selectedConflicts.map((f) => f.path));
       }
 
+      // 対話 push で新規追跡したファイルの include パターンを、ファイル本体と同じ push で
+      // テンプレの ziku.jsonc にも反映する（codex P2）。
+      pushableFiles = await applyNewlyTrackedConfigToPush({
+        targetDir,
+        templateDir,
+        newlyTrackedPaths,
+        pushableFiles,
+        diffFiles: diff.files,
+        mergedContents,
+      });
+
       const files = pushableFiles
         .filter((f) => f.type !== "deleted")
         .map((f) => ({
@@ -580,7 +621,16 @@ async function resolveUntrackedTracking(
   effectivePatterns: { include: string[]; exclude: string[] };
   newlyTrackedPaths: string[];
 }> {
-  const untrackedByFolder = await detectUntrackedFiles({ targetDir, patterns });
+  // 未追跡探索には config-tracked の合成エントリ（`.ziku/ziku.jsonc`）を含めない。
+  // これを含めると detectUntrackedFiles が `.ziku` をスコープ基点とみなして `.ziku/**` を
+  // 走査し、同期対象外の `.ziku/lock.json`（取得元 source を含むローカル専用ファイル）まで
+  // 「未追跡」として追跡候補に出してしまう（codex P2）。`ziku.jsonc` 自体は常に追跡される
+  // SSOT なので、未追跡探索の対象から外しても追跡漏れは起きない。
+  const discoveryPatterns = {
+    include: patterns.include.filter((p) => p !== ZIKU_CONFIG_FILE),
+    exclude: patterns.exclude,
+  };
+  const untrackedByFolder = await detectUntrackedFiles({ targetDir, patterns: discoveryPatterns });
   const untrackedCount = getTotalUntrackedCount(untrackedByFolder);
   if (untrackedCount === 0) {
     return { effectivePatterns: patterns, newlyTrackedPaths: [] };
@@ -634,6 +684,61 @@ async function persistNewlyTracked(
 
   await saveZikuConfig(targetDir, updated);
   log.success(`Tracked ${patternsToPersist.length} new file(s) in ${ZIKU_CONFIG_FILE}`);
+}
+
+/**
+ * 対話 push で新規追跡したファイルの include パターンを、ファイル本体と同じ push で
+ * テンプレの `ziku.jsonc` にも届けるよう調整する（codex P2）。
+ *
+ * 背景: ディスク上の `ziku.jsonc` は push 成功後（`persistNewlyTracked`）まで更新されない。
+ * そのため classify / detectDiff は旧内容を見て `ziku.jsonc` を「変更なし」と判定し、push 対象から
+ * 漏らし得る。これを放置すると、テンプレにファイル本体だけ届いて include パターンが届かず、
+ * 他プロジェクトの `init` / `pull` が拾えるのが 2 回目の push 後になる。
+ *
+ * 「実際に push される」新規追跡分だけを union に乗せ（`persistNewlyTracked` の pushed-only
+ * セマンティクスと一致させる）、必要なら `ziku.jsonc` を push 候補へ注入する。
+ *
+ * @returns ziku.jsonc を補完した push 対象 FileDiff 配列（変更不要なら入力をそのまま返す）。
+ */
+async function applyNewlyTrackedConfigToPush(params: {
+  targetDir: string;
+  templateDir: string;
+  newlyTrackedPaths: string[];
+  pushableFiles: FileDiff[];
+  diffFiles: FileDiff[];
+  mergedContents: Map<string, string>;
+}): Promise<FileDiff[]> {
+  const { targetDir, templateDir, newlyTrackedPaths, pushableFiles, diffFiles, mergedContents } =
+    params;
+
+  const selectedPaths = new Set(pushableFiles.map((f) => f.path));
+  const trackedAndPushed = newlyTrackedPaths.filter((p) => selectedPaths.has(p));
+  if (trackedAndPushed.length === 0) return pushableFiles;
+
+  const mergedConfig = await computeMergedZikuConfig({
+    targetDir,
+    templateDir,
+    extraIncludes: trackedAndPushed,
+  });
+  mergedContents.set(ZIKU_CONFIG_FILE, mergedConfig);
+
+  // ziku.jsonc が既に push 候補にあれば content は mergedContents が採用されるので注入不要。
+  if (pushableFiles.some((f) => f.path === ZIKU_CONFIG_FILE)) return pushableFiles;
+
+  // union がテンプレと同一なら伝える追加パターンは無い（注入しない）。
+  const configDiff = diffFiles.find((f) => f.path === ZIKU_CONFIG_FILE);
+  if (mergedConfig === configDiff?.templateContent) return pushableFiles;
+
+  // detectDiff が unchanged 判定で漏らしたケース → union を内容とする差分を注入する。
+  return [
+    ...pushableFiles,
+    {
+      path: ZIKU_CONFIG_FILE,
+      type: configDiff?.templateContent === undefined ? "added" : "modified",
+      localContent: mergedConfig,
+      templateContent: configDiff?.templateContent,
+    },
+  ];
 }
 
 // ─── ファイル選択 ───
@@ -765,9 +870,24 @@ async function classifyAndResolveConflicts(params: {
     }
   }
 
+  // ziku.jsonc が push 対象なら、常に加法 union を送る（localOnly でも生のローカル
+  // 内容を送らない）。生のローカルを送ると、ローカルがパターンを削除していた場合に
+  // テンプレ側のパターンも消してしまい「削除は自動伝播しない」方針に反する（codex P2）。
+  // union 内容を mergedContents に入れておくと、後段の files 構築で採用される。
+  // ここで先に処理し、diff3（mergeOneFile）には ziku.jsonc を渡さない。
+  if (pushableFilePaths.has(ZIKU_CONFIG_FILE)) {
+    const merged = await computeMergedZikuConfig({
+      targetDir: params.targetDir,
+      templateDir: params.templateDir,
+    });
+    params.mergedContents.set(ZIKU_CONFIG_FILE, merged);
+  }
+
   const unresolvedConflicts = new Set<string>();
-  if (classification.conflicts.length > 0) {
-    const unresolved = await resolveConflicts(classification.conflicts, {
+  // ziku.jsonc は上で union 解決済みなので diff3 の対象から外す。
+  const conflictsToResolve = classification.conflicts.filter((f) => f !== ZIKU_CONFIG_FILE);
+  if (conflictsToResolve.length > 0) {
+    const unresolved = await resolveConflicts(conflictsToResolve, {
       targetDir: params.targetDir,
       templateDir: params.templateDir,
       source: params.source,

@@ -134,7 +134,8 @@ vi.mock("../../utils/readme", () => ({
   detectAndUpdateReadme: vi.fn(() => Promise.resolve({ updated: false, path: null })),
 }));
 
-vi.mock("../../utils/hash", () => ({
+vi.mock("../../utils/hash", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../utils/hash")>()),
   hashFiles: vi.fn(() => Promise.resolve({})),
 }));
 
@@ -551,7 +552,10 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
     // ═══════════════════════════════════════════════════════════
 
     mockClassifyFiles.mockReturnValueOnce({
-      autoUpdate: [".claude/rules/testing.md", ".eslintrc.json"],
+      // ziku.jsonc 自体が追跡ファイルとして autoUpdate に分類される（テンプレ側で
+      // パターンが追加されたため）。applyFiles がテンプレの ziku.jsonc をコピーし、
+      // 新パターンがローカルへ伝播する。
+      autoUpdate: [".claude/rules/testing.md", ".eslintrc.json", ".ziku/ziku.jsonc"],
       localOnly: [],
       conflicts: [],
       newFiles: [],
@@ -806,7 +810,8 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
     // ─── Step 8: プロジェクトB で pull → A の変更が反映される ───
 
     mockClassifyFiles.mockReturnValueOnce({
-      autoUpdate: [".claude/rules/testing.md", ".eslintrc.json"],
+      // ziku.jsonc も追跡ファイルとして autoUpdate に分類され、テンプレの新パターンが伝播する。
+      autoUpdate: [".claude/rules/testing.md", ".eslintrc.json", ".ziku/ziku.jsonc"],
       localOnly: [],
       conflicts: [],
       newFiles: [],

@@ -8,16 +8,11 @@ import type { LockState, TemplateSource } from "../modules/schemas";
 import { selectDeletedFiles } from "../ui/prompts";
 import { intro, log, outro, pc } from "../ui/renderer";
 import { LOCK_FILE, loadLock, saveLock } from "../utils/lock";
-import {
-  ZIKU_CONFIG_FILE,
-  saveZikuConfig,
-  generateZikuJsonc,
-  zikuConfigExists,
-} from "../utils/ziku-config";
+import { ZIKU_CONFIG_FILE, withConfigTracked, zikuConfigExists } from "../utils/ziku-config";
 import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
-import { hashFiles } from "../utils/hash";
+import { hashContent, hashFiles } from "../utils/hash";
 import {
   classifyFiles,
   downloadBaseForMerge,
@@ -27,6 +22,7 @@ import {
   writeFileEnsureDir,
 } from "../utils/merge";
 import { mergeTemplatePatterns } from "../utils/template-patterns";
+import { computeMergedZikuConfig } from "../utils/config-merge";
 
 /**
  * pull コマンドのファイル操作メタデータ。
@@ -54,7 +50,7 @@ export const pullLifecycle: CommandLifecycle = {
       file: ZIKU_CONFIG_FILE,
       location: "local",
       op: "update",
-      note: "テンプレートの新パターンをマージ",
+      note: "加法 union マージで同期（テンプレの追加を取り込む。削除は伝播しない）",
     },
     {
       file: LOCK_FILE,
@@ -64,7 +60,7 @@ export const pullLifecycle: CommandLifecycle = {
     },
   ],
   notes: [
-    "テンプレートの `ziku.jsonc` に新しいパターンが追加された場合、pull 時にユーザーの `ziku.jsonc` へ自動マージされる。既存パターンはそのまま維持される。",
+    "`ziku.jsonc` 自体が追跡ファイルとして加法 union マージされる。テンプレ側で追加されたパターンはユーザーの `ziku.jsonc` へ取り込まれる（push と双方向に同期）。パターンの削除は自動伝播しない（安全側）。",
     "テンプレートで削除されたファイルは `--force` で自動削除、またはユーザーが選択的に削除できる。",
   ],
 };
@@ -131,8 +127,15 @@ export const pullCommand = defineCommand({
     }
 
     await withFinally(async () => {
-      const { mergedInclude, mergedExclude, newInclude, patternsUpdated } =
-        await mergeTemplatePatterns(templateDir, include, exclude);
+      // mergeTemplatePatterns は「テンプレ側で追加されたパターン配下のファイルも
+      // 差分検出の対象に含める」ための include 和集合（discovery 用）を計算する。
+      // ziku.jsonc 自体の内容同期は、下で ziku.jsonc を追跡ファイルとして
+      // classify→3-way マージに乗せることで行う（加法的な上書きは廃止）。
+      const { mergedInclude, mergedExclude, newInclude } = await mergeTemplatePatterns(
+        templateDir,
+        include,
+        exclude,
+      );
 
       // テンプレ側で追加された include パターンをユーザー向けに通知。
       // mergeTemplatePatterns 自体は副作用フリーなので、ログはここで行う。
@@ -145,51 +148,71 @@ export const pullCommand = defineCommand({
 
       log.step("Analyzing changes...");
 
+      // ziku.jsonc 自体を追跡対象に含め、他ファイルと同じ 3-way マージで同期する。
+      const effectiveInclude = withConfigTracked(mergedInclude);
       const [templateHashes, localHashes] = await Promise.all([
-        hashFiles(templateDir, mergedInclude, mergedExclude),
-        hashFiles(targetDir, mergedInclude, mergedExclude),
+        hashFiles(templateDir, effectiveInclude, mergedExclude),
+        hashFiles(targetDir, effectiveInclude, mergedExclude),
       ]);
       const baseHashes = lock.baseHashes ?? {};
 
       const classification = classifyFiles({ baseHashes, localHashes, templateHashes });
 
-      const totalChanges =
-        classification.autoUpdate.length +
-        classification.newFiles.length +
-        classification.conflicts.length +
-        classification.deletedFiles.length;
+      // ziku.jsonc は常に加法 union で同期する（autoUpdate も conflict も）。
+      // 汎用の applyFiles（テンプレ丸ごとコピー）や diff3 マージに乗せると、テンプレ側で
+      // 削除されたパターンがローカルへ伝播し「削除は自動伝播しない」方針に反する（codex P2）。
+      // よって autoUpdate / conflict から ziku.jsonc を抜き出し、専用の union マージで扱う。
+      const configSync = await resolveConfigMerge(targetDir, templateDir, classification);
+      const autoUpdate = classification.autoUpdate.filter((f) => f !== ZIKU_CONFIG_FILE);
+      const conflicts = classification.conflicts.filter((f) => f !== ZIKU_CONFIG_FILE);
+      // ziku.jsonc は ziku 自身の制御ファイル。テンプレが ziku.jsonc を削除しても、ローカルの
+      // 制御ファイルを消すと以降プロジェクトが壊れる（loadCommandContext が未初期化扱いにする）。
+      // deletedFiles からも除外し、削除は伝播させない（codex P2）。
+      const deletedFiles = classification.deletedFiles.filter((f) => f !== ZIKU_CONFIG_FILE);
 
-      // ファイル差分ゼロでも patternsUpdated なら処理を続行する。
-      // テンプレが新パターンを追加しただけ (該当ファイルなし) のケースでは
-      // ziku.jsonc の上書き + lock.json baseHashes 更新を実行する必要がある。
-      // ここで早期 return すると status の "pull が必要" 推奨が永遠に解消されない
-      // (codex review #71 P1)。
-      if (totalChanges === 0 && !patternsUpdated) {
+      // configInPlay のとき lock の base[ziku.jsonc] をローカル最終内容（union）に揃える。
+      // templateHashes 側に寄せると、テンプレが削除したパターンを後続 push が localOnly として
+      // 再追加してしまう（codex P2）。
+      const baseHashesForLock: Record<string, string> =
+        configSync.baseHash !== undefined
+          ? { ...templateHashes, [ZIKU_CONFIG_FILE]: configSync.baseHash }
+          : templateHashes;
+
+      const totalChanges =
+        autoUpdate.length +
+        classification.newFiles.length +
+        conflicts.length +
+        deletedFiles.length +
+        (configSync.write !== undefined ? 1 : 0);
+
+      // ファイル変更が無くても、ziku.jsonc の base を union に揃える必要がある場合
+      // （例: conflict だが union==local で書き込み不要）は lock を更新しないと、
+      // 古い base が残って status/push が誤判定する（codex P2）。その場合は early-return しない。
+      const configBaseChanged =
+        configSync.baseHash !== undefined &&
+        configSync.baseHash !== lock.baseHashes?.[ZIKU_CONFIG_FILE];
+
+      if (totalChanges === 0 && !configBaseChanged) {
         log.success("Already up to date");
         outro("No changes needed");
         return;
       }
 
-      if (totalChanges === 0 && patternsUpdated) {
-        log.info("No file-level changes — applying template pattern additions only");
-      } else {
-        logPullSummary(classification);
+      if (totalChanges > 0) {
+        logPullSummary({ ...classification, autoUpdate, conflicts, deletedFiles });
       }
 
-      // 自動更新ファイルを適用
-      await applyFiles(classification.autoUpdate, templateDir, targetDir);
-      if (classification.autoUpdate.length > 0) {
-        log.success(`Updated ${classification.autoUpdate.length} file(s)`);
-      }
-
-      // 新規ファイルを追加
-      await applyFiles(classification.newFiles, templateDir, targetDir);
-      if (classification.newFiles.length > 0) {
-        log.success(`Added ${classification.newFiles.length} new file(s)`);
-      }
+      // 自動更新・新規追加・ziku.jsonc union 同期をまとめて適用
+      await applyPullUpdates({
+        autoUpdate,
+        newFiles: classification.newFiles,
+        configWrite: configSync.write,
+        targetDir,
+        templateDir,
+      });
 
       // コンフリクト解決
-      const unresolvedConflicts = await resolveConflicts(classification.conflicts, {
+      const unresolvedConflicts = await resolveConflicts(conflicts, {
         targetDir,
         templateDir,
         source,
@@ -202,7 +225,7 @@ export const pullCommand = defineCommand({
           ...lock,
           pendingMerge: {
             conflicts: unresolvedConflicts,
-            templateHashes,
+            templateHashes: baseHashesForLock,
             ...(Option.isSome(latestRefOption) ? { latestRef: latestRefOption.value } : {}),
           },
         });
@@ -210,26 +233,20 @@ export const pullCommand = defineCommand({
         return;
       }
 
-      // 削除されたファイルを処理
-      if (classification.deletedFiles.length > 0) {
-        await handleDeletedFiles(classification.deletedFiles, targetDir, args.force as boolean);
+      // 削除されたファイルを処理（ziku.jsonc は除外済み）
+      if (deletedFiles.length > 0) {
+        await handleDeletedFiles(deletedFiles, targetDir, args.force as boolean);
       }
 
-      // パターンが更新された場合、ユーザーの ziku.jsonc を上書き
-      if (patternsUpdated) {
-        const updatedContent = generateZikuJsonc({
-          include: mergedInclude,
-          exclude: mergedExclude,
-        });
-        await saveZikuConfig(targetDir, updatedContent);
-        log.success(`Updated ${ZIKU_CONFIG_FILE} with new patterns from template`);
-      }
+      // ziku.jsonc は上の classification で他ファイルと同様に同期済み
+      // （autoUpdate: テンプレ内容で上書き / conflict: 3-way マージ）。
+      // 旧来の generateZikuJsonc による加法的上書きは廃止した。
 
       const latestRefOption = await Effect.runPromise(resolveBaseRef);
 
       await saveLock(targetDir, {
         ...lock,
-        baseHashes: templateHashes,
+        baseHashes: baseHashesForLock,
         ...(Option.isSome(latestRefOption) ? { baseRef: latestRefOption.value } : {}),
       });
 
@@ -239,6 +256,63 @@ export const pullCommand = defineCommand({
 });
 
 // ─── ヘルパー関数 ───
+
+/**
+ * pull における `ziku.jsonc` の加法 union 同期を計算する。
+ *
+ * - `baseHash`: lock に記録すべき base ハッシュ（= ローカル最終内容 = union）。
+ *   ziku.jsonc が classification に関与する場合のみ定義される。base をローカル最終内容に
+ *   揃えることで、テンプレ削除パターンを後続 push が再追加するのを防ぐ（codex P2）。
+ * - `write`: 実際に書き込む内容。union が現在のローカルと一致する場合（テンプレ削除のみ等）は
+ *   undefined（no-op）。これにより再検出ノイズを防ぐ。
+ */
+async function resolveConfigMerge(
+  targetDir: string,
+  templateDir: string,
+  classification: { autoUpdate: string[]; conflicts: string[] },
+): Promise<{ baseHash?: string; write?: string }> {
+  const inPlay =
+    classification.autoUpdate.includes(ZIKU_CONFIG_FILE) ||
+    classification.conflicts.includes(ZIKU_CONFIG_FILE);
+  if (!inPlay) return {};
+
+  const merged = await computeMergedZikuConfig({ targetDir, templateDir });
+  const currentLocal = await readFile(join(targetDir, ZIKU_CONFIG_FILE), "utf-8");
+  return {
+    baseHash: hashContent(merged),
+    write: merged !== currentLocal ? merged : undefined,
+  };
+}
+
+/**
+ * pull の適用フェーズ（autoUpdate コピー・newFiles 追加・ziku.jsonc の union 書き込み）を
+ * まとめて実行する。run() 本体の分岐数（複雑度）を抑えるために切り出す。
+ */
+async function applyPullUpdates(opts: {
+  autoUpdate: string[];
+  newFiles: string[];
+  configWrite: string | undefined;
+  targetDir: string;
+  templateDir: string;
+}): Promise<void> {
+  await applyFiles(opts.autoUpdate, opts.templateDir, opts.targetDir);
+  if (opts.autoUpdate.length > 0) {
+    log.success(`Updated ${opts.autoUpdate.length} file(s)`);
+  }
+
+  await applyFiles(opts.newFiles, opts.templateDir, opts.targetDir);
+  if (opts.newFiles.length > 0) {
+    log.success(`Added ${opts.newFiles.length} new file(s)`);
+  }
+
+  // ziku.jsonc を加法 union で同期（テンプレの追加は取り込み、削除は伝播しない）。
+  if (opts.configWrite !== undefined) {
+    await Effect.runPromise(
+      writeFileEnsureDir(join(opts.targetDir, ZIKU_CONFIG_FILE), opts.configWrite),
+    );
+    log.success(`Merged ${pc.cyan(ZIKU_CONFIG_FILE)}`);
+  }
+}
 
 /**
  * テンプレートからファイルをコピーする共通処理。

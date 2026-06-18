@@ -7,6 +7,26 @@ import { zikuConfigSchema } from "../modules/schemas";
 
 export const ZIKU_CONFIG_FILE = ".ziku/ziku.jsonc";
 
+/**
+ * `.ziku/ziku.jsonc` 自体を常に同期対象に含めた include パターンを返す。
+ *
+ * 背景: `ziku.jsonc`（include/exclude パターン定義）は、これまで pull の片方向
+ * 加法マージでしか同期されず、`ziku track` でローカルに追加したパターンが
+ * `ziku push` でテンプレートへ伝播しなかった（テンプレ側 ziku.jsonc が更新されず、
+ * 新規ファイルが他プロジェクトの init/pull に降りてこない孤児化バグ）。
+ *
+ * これを解消するため、push/pull/status の差分検出（hashFiles / detectDiff /
+ * analyzeSync）で `ziku.jsonc` を「他の追跡ファイルと同じ 1 ファイル」として扱い、
+ * 既存の classify→3-way マージ機構に乗せる。そのための SSOT がこの関数。
+ *
+ * 注意: `.ziku/**` ではなく `.ziku/ziku.jsonc` のリテラルパス 1 本だけを足す。
+ * `.ziku/lock.json`（テンプレート取得元 source を含むローカル専用ファイル）を
+ * 同期対象に巻き込まないため。
+ */
+export function withConfigTracked(include: string[]): string[] {
+  return include.includes(ZIKU_CONFIG_FILE) ? include : [...include, ZIKU_CONFIG_FILE];
+}
+
 export const ZIKU_CONFIG_SCHEMA_URL =
   "https://raw.githubusercontent.com/tktcorporation/ziku/main/schema/ziku.json";
 

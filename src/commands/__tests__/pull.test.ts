@@ -38,6 +38,8 @@ vi.mock("../../utils/ziku-config", () => ({
   zikuConfigExists: vi.fn(),
   saveZikuConfig: vi.fn(),
   generateZikuJsonc: vi.fn((c: any) => JSON.stringify(c)),
+  withConfigTracked: (include: string[]) =>
+    include.includes(".ziku/ziku.jsonc") ? include : [...include, ".ziku/ziku.jsonc"],
 }));
 
 vi.mock("../../utils/lock", () => ({
@@ -46,7 +48,8 @@ vi.mock("../../utils/lock", () => ({
   saveLock: vi.fn(),
 }));
 
-vi.mock("../../utils/hash", () => ({
+vi.mock("../../utils/hash", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../utils/hash")>()),
   hashFiles: vi.fn(),
 }));
 
@@ -125,7 +128,6 @@ const mockSelectDeletedFiles = vi.mocked(selectDeletedFiles);
 const { downloadTemplateToTemp } = await import("../../utils/template");
 const { zikuConfigExists } = await import("../../utils/ziku-config");
 const { loadLock, saveLock } = await import("../../utils/lock");
-const { saveZikuConfig } = await import("../../utils/ziku-config");
 const { loadTemplateConfig } = await import("../../utils/template-config");
 const { hashFiles } = await import("../../utils/hash");
 const { classifyFiles, mergeOneFile, writeFileEnsureDir, downloadBaseForMerge } =
@@ -143,7 +145,6 @@ const mockMergeOneFile = vi.mocked(mergeOneFile);
 const mockWriteFileEnsureDir = vi.mocked(writeFileEnsureDir);
 const mockDownloadBaseForMerge = vi.mocked(downloadBaseForMerge);
 const mockLog = vi.mocked(log);
-const mockSaveZikuConfig = vi.mocked(saveZikuConfig);
 const mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
 
 const baseZikuConfig = {
@@ -259,13 +260,19 @@ describe("pullCommand", () => {
       expect(mockLog.success).toHaveBeenCalledWith("Already up to date");
     });
 
-    it("ファイル差分ゼロでも patternsUpdated なら ziku.jsonc を上書きし lock を更新する (codex P1 #4)", async () => {
-      // codex review #71 の最後の P1 で指摘されたシナリオの回帰テスト:
-      // テンプレが新パターンを追加しただけ (該当ファイル無し) のときに pull が
-      // 早期 return してしまうと、status が永遠に "pull 必要" を推奨し続ける。
-      vol.fromJSON({ "/test": null });
+    it("テンプレが新パターンを追加 → ziku.jsonc が union マージで同期され lock が更新される", async () => {
+      // テンプレ側 ziku.jsonc が新パターンを含む状態を memfs に用意し、classifyFiles が
+      // .ziku/ziku.jsonc を autoUpdate に分類するケースを再現する。
+      // ziku.jsonc は丸ごとコピーではなく加法 union で同期される（テンプレ追加は取り込み）。
+      vol.fromJSON({
+        "/test/.ziku/ziku.jsonc": JSON.stringify({ include: [".root/**", ".github/**"] }, null, 2),
+        "/tmp/template/.ziku/ziku.jsonc": JSON.stringify(
+          { include: [".root/**", ".github/**", ".new-pattern/**"] },
+          null,
+          2,
+        ),
+      });
 
-      // テンプレ側 ziku.jsonc に新規パターンが追加されている状態を再現
       const effectMod = await import("effect");
       mockLoadTemplateConfig.mockReturnValueOnce(
         effectMod.Effect.succeed({
@@ -274,9 +281,9 @@ describe("pullCommand", () => {
           exclude: undefined,
         }),
       );
-      // ファイル差分はゼロ
+      // ziku.jsonc 自体が autoUpdate に分類される（テンプレ側で内容が変わったため）
       mockClassifyFiles.mockReturnValueOnce({
-        autoUpdate: [],
+        autoUpdate: [".ziku/ziku.jsonc"],
         localOnly: [],
         conflicts: [],
         newFiles: [],
@@ -293,10 +300,152 @@ describe("pullCommand", () => {
 
       // 早期 return しない (Already up to date は出ない)
       expect(mockLog.success).not.toHaveBeenCalledWith("Already up to date");
-      // ziku.jsonc が新パターンで上書きされる
-      expect(mockSaveZikuConfig).toHaveBeenCalled();
+      // ziku.jsonc が union マージ結果で書き込まれる（テンプレの新パターンを取り込む）
+      const writeCall = mockWriteFileEnsureDir.mock.calls.find(
+        ([p]) => p === "/test/.ziku/ziku.jsonc",
+      );
+      expect(writeCall).toBeDefined();
+      const written = JSON.parse(writeCall?.[1] as string);
+      expect(written.include).toEqual([".root/**", ".github/**", ".new-pattern/**"]);
       // lock も更新される (新しい baseHashes)
       expect(mockSaveLock).toHaveBeenCalled();
+    });
+
+    it("テンプレ側だけがパターンを削除しても（autoUpdate）ローカルからは消さない（codex P2）", async () => {
+      // テンプレが .github/** を削除。ziku.jsonc は autoUpdate に分類されるが、
+      // 丸ごとコピーではなく union マージなので、削除は伝播せずローカルに残る。
+      vol.fromJSON({
+        "/test/.ziku/ziku.jsonc": JSON.stringify({ include: [".root/**", ".github/**"] }, null, 2),
+        "/tmp/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".root/**"] }, null, 2),
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [".ziku/ziku.jsonc"],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // union == local（テンプレ削除のみ）なので no-op: ローカルは書き換えられない。
+      // テンプレの縮小版（[.root/**] のみ）で上書きされないことを確認（削除は伝播しない）。
+      expect(mockWriteFileEnsureDir).not.toHaveBeenCalledWith(
+        "/test/.ziku/ziku.jsonc",
+        JSON.stringify({ include: [".root/**"] }, null, 2),
+      );
+      // ローカル ziku.jsonc は .github/** を保持したまま（縮小されない）
+      const local = JSON.parse(vol.readFileSync("/test/.ziku/ziku.jsonc", "utf8") as string);
+      expect(local.include).toContain(".github/**");
+      expect(local.include).toContain(".root/**");
+    });
+
+    it("テンプレ削除+追加の混在: lock の base[ziku.jsonc] は union 内容に揃う（push 再追加を防ぐ / codex P2）", async () => {
+      // テンプレが .b/** を削除し .c/** を追加。union=[.a,.b,.c]。base はテンプレ([.a,.c])
+      // ではなく union([.a,.b,.c]) のハッシュで記録され、後続 push が .b/** を再追加しない。
+      vol.fromJSON({
+        "/test/.ziku/ziku.jsonc": JSON.stringify({ include: [".a/**", ".b/**"] }, null, 2),
+        "/tmp/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".a/**", ".c/**"] }, null, 2),
+      });
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [".ziku/ziku.jsonc"],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      const writeCall = mockWriteFileEnsureDir.mock.calls.find(
+        ([p]) => p === "/test/.ziku/ziku.jsonc",
+      );
+      const written = writeCall?.[1] as string;
+      expect(JSON.parse(written).include).toEqual([".a/**", ".b/**", ".c/**"]);
+
+      // lock の base[ziku.jsonc] は書き込んだ union のハッシュと一致する（テンプレ縮小版ではない）
+      const { hashContent } = await import("../../utils/hash");
+      const saveArg = mockSaveLock.mock.calls.at(-1)?.[1] as any;
+      expect(saveArg.baseHashes[".ziku/ziku.jsonc"]).toBe(hashContent(written));
+    });
+
+    it("テンプレが ziku.jsonc ファイル自体を削除しても、ローカルの制御ファイルは消さない（codex P2）", async () => {
+      vol.fromJSON({
+        "/test/.ziku/ziku.jsonc": JSON.stringify({ include: [".root/**"] }, null, 2),
+        "/test/.mcp.json": "x",
+        "/tmp/template/.mcp.json": "x",
+      });
+
+      // classify が ziku.jsonc を deletedFiles に入れる（テンプレからファイルが消えた）
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [".ziku/ziku.jsonc"],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // 制御ファイルは削除されない（deletedFiles から除外されている）
+      expect(mockSelectDeletedFiles).not.toHaveBeenCalled();
+      expect(vol.existsSync("/test/.ziku/ziku.jsonc")).toBe(true);
+    });
+
+    it("ファイル書き込みが無くても config の base 更新が必要なら lock を保存する（codex P2）", async () => {
+      // union==local で write 不要だが、lock の base が古い場合は base を揃えるため
+      // early-return せず saveLock を通す必要がある（さもないと status/push が誤判定）。
+      const localConfig = JSON.stringify({ include: ["A"], exclude: [] });
+      vol.fromJSON({
+        "/test/.ziku/ziku.jsonc": localConfig,
+        "/tmp/template/.ziku/ziku.jsonc": localConfig,
+      });
+      const { effect } = mockContext({
+        // biome-ignore lint/suspicious/noExplicitAny: テスト用に baseHashes のキーを差し替える
+        lock: { ...baseLock, baseHashes: { ".ziku/ziku.jsonc": "stale-old-hash" } as any },
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [".ziku/ziku.jsonc"],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // early-return せず lock を保存する（base を union に揃える）
+      expect(mockLog.success).not.toHaveBeenCalledWith("Already up to date");
+      expect(mockSaveLock).toHaveBeenCalled();
+      const saveArg = mockSaveLock.mock.calls.at(-1)?.[1] as any;
+      expect(saveArg.baseHashes[".ziku/ziku.jsonc"]).not.toBe("stale-old-hash");
     });
 
     it("自動更新ファイルをコピー", async () => {
@@ -405,6 +554,50 @@ describe("pullCommand", () => {
         templateDir: "/tmp/template",
         baseTemplateDir: undefined,
       });
+    });
+
+    it("ziku.jsonc の conflict は diff3 ではなく要素レベルマージで解決する", async () => {
+      // ローカルとテンプレ双方が ziku.jsonc を編集 → conflict。
+      // base が取れない（downloadBaseForMerge→null）ので 2-way 和集合になる。
+      vol.fromJSON({
+        "/test/.ziku/ziku.jsonc": JSON.stringify(
+          { include: [".claude/**", ".eslintrc.json"] },
+          null,
+          2,
+        ),
+        "/tmp/template/.ziku/ziku.jsonc": JSON.stringify(
+          { include: [".claude/**", ".github/**"] },
+          null,
+          2,
+        ),
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [".ziku/ziku.jsonc"],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // ziku.jsonc には diff3 の mergeOneFile を使わない
+      expect(mockMergeOneFile).not.toHaveBeenCalled();
+      // 要素レベルマージ結果（和集合）が書き込まれる
+      const writeCall = mockWriteFileEnsureDir.mock.calls.find(
+        ([p]) => p === "/test/.ziku/ziku.jsonc",
+      );
+      expect(writeCall).toBeDefined();
+      const writtenConfig = JSON.parse(writeCall?.[1] as string);
+      expect(writtenConfig.include).toEqual([".claude/**", ".eslintrc.json", ".github/**"]);
+      expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining("Merged"));
     });
 
     it("--force で selectDeletedFiles プロンプトをスキップ", async () => {

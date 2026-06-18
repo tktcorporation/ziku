@@ -97,28 +97,29 @@ Initialize user project from template
 
 Pull latest template updates to local project
 
-| 操作     | ファイル           | 場所     | 詳細                                   |
-| -------- | ------------------ | -------- | -------------------------------------- |
-| 読み取り | `.ziku/ziku.jsonc` | local    | patterns を取得                        |
-| 読み取り | `.ziku/lock.json`  | local    | source, baseHashes, baseRef を取得     |
-| 読み取り | synced files       | template | テンプレートをダウンロードして差分比較 |
-| 更新     | synced files       | local    | 自動更新・新規追加・3-way マージ・削除 |
-| 更新     | `.ziku/ziku.jsonc` | local    | テンプレートの新パターンをマージ       |
-| 更新     | `.ziku/lock.json`  | local    | 新しい baseHashes, baseRef で上書き    |
+| 操作     | ファイル           | 場所     | 詳細                                                                  |
+| -------- | ------------------ | -------- | --------------------------------------------------------------------- |
+| 読み取り | `.ziku/ziku.jsonc` | local    | patterns を取得                                                       |
+| 読み取り | `.ziku/lock.json`  | local    | source, baseHashes, baseRef を取得                                    |
+| 読み取り | synced files       | template | テンプレートをダウンロードして差分比較                                |
+| 更新     | synced files       | local    | 自動更新・新規追加・3-way マージ・削除                                |
+| 更新     | `.ziku/ziku.jsonc` | local    | 加法 union マージで同期（テンプレの追加を取り込む。削除は伝播しない） |
+| 更新     | `.ziku/lock.json`  | local    | 新しい baseHashes, baseRef で上書き                                   |
 
 ### `push`
 
 Push local changes to template (GitHub: PR / local: direct copy)
 
-| 操作     | ファイル           | 場所     | 詳細                                                   |
-| -------- | ------------------ | -------- | ------------------------------------------------------ |
-| 読み取り | `.ziku/ziku.jsonc` | local    | patterns を取得                                        |
-| 更新     | `.ziku/ziku.jsonc` | local    | 選択した未追跡ファイルを include に追記（push 成功後） |
-| 読み取り | `.ziku/lock.json`  | local    | source, baseRef, baseHashes を取得                     |
-| 読み取り | synced files       | local    | ローカルの変更を検出                                   |
-| 読み取り | synced files       | template | テンプレートと差分検出・3-way マージ                   |
-| 更新     | synced files       | template | GitHub: PR を作成 / ローカル: ファイルを直接コピー     |
-| 更新     | `.ziku/lock.json`  | local    | baseHashes を更新                                      |
+| 操作     | ファイル           | 場所     | 詳細                                                                        |
+| -------- | ------------------ | -------- | --------------------------------------------------------------------------- |
+| 読み取り | `.ziku/ziku.jsonc` | local    | patterns を取得                                                             |
+| 更新     | `.ziku/ziku.jsonc` | local    | 選択した未追跡ファイルを include に追記（push 成功後）                      |
+| 読み取り | `.ziku/lock.json`  | local    | source, baseRef, baseHashes を取得                                          |
+| 読み取り | synced files       | local    | ローカルの変更を検出                                                        |
+| 読み取り | synced files       | template | テンプレートと差分検出・3-way マージ                                        |
+| 更新     | synced files       | template | GitHub: PR を作成 / ローカル: ファイルを直接コピー                          |
+| 更新     | `.ziku/ziku.jsonc` | template | ローカルで追加したパターンをテンプレの ziku.jsonc へ加法 union マージで伝播 |
+| 更新     | `.ziku/lock.json`  | local    | baseHashes を更新                                                           |
 
 ### `diff`
 
@@ -161,9 +162,13 @@ Add file patterns to the sync whitelist
 
 ### pull
 
-テンプレートの `ziku.jsonc` に新しいパターンが追加された場合、pull 時にユーザーの `ziku.jsonc` へ自動マージされる。既存パターンはそのまま維持される。
+`ziku.jsonc` 自体が追跡ファイルとして加法 union マージされる。テンプレ側で追加されたパターンはユーザーの `ziku.jsonc` へ取り込まれる（push と双方向に同期）。パターンの削除は自動伝播しない（安全側）。
 
 テンプレートで削除されたファイルは `--force` で自動削除、またはユーザーが選択的に削除できる。
+
+### push
+
+`ziku.jsonc` 自体が追跡ファイルとして同期対象に含まれる。`ziku track` で追加したローカルパターンは、push 時にテンプレートの `ziku.jsonc` へ加法 union マージで伝播する（pull と双方向）。パターンの削除は自動伝播しない。
 
 ### status
 

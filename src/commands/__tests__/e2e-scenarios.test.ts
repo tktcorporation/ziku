@@ -58,7 +58,8 @@ vi.mock("../../utils/template", () => {
   };
 });
 
-vi.mock("../../utils/hash", () => ({
+vi.mock("../../utils/hash", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../utils/hash")>()),
   hashFiles: vi.fn(),
 }));
 

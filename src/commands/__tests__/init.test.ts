@@ -32,7 +32,8 @@ vi.mock("../../utils/template", () => ({
   copyFile: vi.fn(),
 }));
 
-vi.mock("../../utils/hash", () => ({
+vi.mock("../../utils/hash", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../utils/hash")>()),
   hashFiles: vi.fn(),
 }));
 
@@ -115,8 +116,9 @@ vi.mock("../../utils/template-config", () => ({
 }));
 
 // モック後にインポート
-const { initCommand } = await import("../init");
+const { initCommand, resolveConfigBaseHash } = await import("../init");
 const { generateZikuJsonc } = await import("../../utils/ziku-config");
+const { hashContent } = await import("../../utils/hash");
 const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy, copyFile } =
   await import("../../utils/template");
 const { detectGitHubOwner, detectGitHubRepo } = await import("../../utils/git-remote");
@@ -768,12 +770,37 @@ describe("initCommand", () => {
       expect(lockContent.baseHashes).toEqual(expectedHashes);
     });
 
-    it("テンプレートにマッチするファイルがない場合は baseHashes が省略される", async () => {
+    it("テンプレに ziku.jsonc があれば baseHashes に ziku.jsonc の base が記録される", async () => {
       vol.fromJSON({
         "/test": null,
       });
 
-      // 空のハッシュマップを返す（パターンにマッチするファイルがない場合）
+      // テンプレに ziku.jsonc が存在する状況（hashFiles が ziku.jsonc を返す）
+      mockHashFiles.mockResolvedValueOnce({ ".ziku/ziku.jsonc": "template-config-hash" });
+
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(vol.existsSync("/test/.ziku/lock.json")).toBe(true);
+      const lockContent = JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string);
+      // base はローカル subset 由来のハッシュで記録される（テンプレ保護のため）
+      expect(lockContent.baseHashes).toBeDefined();
+      expect(lockContent.baseHashes[".ziku/ziku.jsonc"]).toEqual(expect.any(String));
+      // テンプレ側ハッシュではなくローカル内容のハッシュ
+      expect(lockContent.baseHashes[".ziku/ziku.jsonc"]).not.toBe("template-config-hash");
+    });
+
+    it("テンプレに ziku.jsonc が無ければ baseHashes に ziku.jsonc を記録しない（誤削除防止 / codex P1）", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      // テンプレに ziku.jsonc が無い状況（hashFiles が ziku.jsonc を返さない）
       mockHashFiles.mockResolvedValueOnce({});
 
       mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
@@ -784,11 +811,9 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
-      // saveLock により .ziku/lock.json がファイルシステムに書き出される
-      expect(vol.existsSync("/test/.ziku/lock.json")).toBe(true);
       const lockContent = JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string);
-      // 空のハッシュマップの場合は baseHashes キーが省略される
-      expect(lockContent.baseHashes).toBeUndefined();
+      // base を記録しない（記録すると次回 pull で deletedFiles 判定→制御ファイル削除になる）
+      expect(lockContent.baseHashes?.[".ziku/ziku.jsonc"]).toBeUndefined();
     });
   });
 });
@@ -808,5 +833,37 @@ describe("generateZikuJsonc", () => {
     const parsed = JSON.parse(content);
     expect(Array.isArray(parsed.include)).toBe(true);
     expect(parsed.include.length).toBeGreaterThan(0);
+  });
+});
+
+describe("resolveConfigBaseHash（テンプレ保護の安全装置）", () => {
+  it("ローカル(部分集合) の内容ハッシュを base にする（テンプレを削らないため）", () => {
+    const localContent = generateZikuJsonc({ include: [".claude/**"], exclude: [] });
+    const result = resolveConfigBaseHash({
+      localConfigContent: localContent,
+      templateConfigHash: hashContent("different-template-content"),
+    });
+    // base = ローカル内容のハッシュ（テンプレ側のハッシュではない）
+    expect(result).toBe(hashContent(localContent));
+  });
+
+  it("テンプレ側ハッシュが undefined でもローカル内容から base を決められる", () => {
+    const localContent = generateZikuJsonc({ include: [".mcp.json"], exclude: [] });
+    const result = resolveConfigBaseHash({
+      localConfigContent: localContent,
+      templateConfigHash: undefined,
+    });
+    expect(result).toBe(hashContent(localContent));
+  });
+
+  it("ローカルが完全集合（テンプレと同一）なら base はテンプレと一致する", () => {
+    const content = generateZikuJsonc({ include: [".claude/**", ".mcp.json"], exclude: [] });
+    const templateHash = hashContent(content);
+    const result = resolveConfigBaseHash({
+      localConfigContent: content,
+      templateConfigHash: templateHash,
+    });
+    // local == template のときは base も一致 → push/pull とも no-op
+    expect(result).toBe(templateHash);
   });
 });
