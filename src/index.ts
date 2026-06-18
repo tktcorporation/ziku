@@ -10,6 +10,7 @@ import { pushCommand } from "./commands/push";
 import { setupCommand } from "./commands/setup";
 import { statusCommand } from "./commands/status";
 import { trackCommand } from "./commands/track";
+import { untrackCommand } from "./commands/untrack";
 import { ZikuError } from "./errors";
 import { intro, logZikuError, pc } from "./ui/renderer";
 
@@ -27,6 +28,7 @@ const main = defineCommand({
     diff: diffCommand,
     status: statusCommand,
     track: trackCommand,
+    untrack: untrackCommand,
   },
 });
 
@@ -116,6 +118,7 @@ async function run(): Promise<void> {
           "diff",
           "status",
           "track",
+          "untrack",
           "--help",
           "-h",
           "--version",

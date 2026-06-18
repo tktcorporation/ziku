@@ -32,6 +32,7 @@ import { setupLifecycle } from "../commands/setup";
 import { diffLifecycle } from "../commands/diff";
 import { statusLifecycle } from "../commands/status";
 import { trackLifecycle } from "../commands/track";
+import { untrackLifecycle } from "../commands/untrack";
 
 export const lifecycle: readonly CommandLifecycle[] = [
   setupLifecycle,
@@ -41,6 +42,7 @@ export const lifecycle: readonly CommandLifecycle[] = [
   diffLifecycle,
   statusLifecycle,
   trackLifecycle,
+  untrackLifecycle,
 ];
 
 // ──────────────────────────────────────────────
@@ -91,6 +93,7 @@ export function generateComponentDiagram(): string {
     "  diff([diff]) -.->|read| ZIKU & LOCK & U_FILES",
     "  status([status]) -.->|read| ZIKU & LOCK & U_FILES",
     "  track([track]) -.->|update| ZIKU",
+    "  untrack([untrack]) -.->|update| ZIKU",
     "",
     "```",
   ];
@@ -122,6 +125,7 @@ function generateFileLifecycleTable(): string {
           detail: "`pull` / `push` / `diff` でパターンを取得",
         },
         { phase: "更新", detail: "`ziku track` で新しいパターンを追加" },
+        { phase: "更新", detail: "`ziku untrack` でパターンを削除" },
       ],
     },
     {

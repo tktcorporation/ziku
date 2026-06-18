@@ -20,6 +20,7 @@ import type { FileOp } from "../lifecycle-types";
 
 import { diffLifecycle } from "../../commands/diff";
 import { trackLifecycle } from "../../commands/track";
+import { untrackLifecycle } from "../../commands/untrack";
 import { pullLifecycle } from "../../commands/pull";
 import { pushLifecycle } from "../../commands/push";
 import { initUserLifecycle } from "../../commands/init";
@@ -88,6 +89,7 @@ function hasOp(ops: readonly FileOp[], file: string, opCandidates: string[]): bo
 const COMMANDS = [
   { name: "diff", lifecycle: diffLifecycle, src: "src/commands/diff.ts" },
   { name: "track", lifecycle: trackLifecycle, src: "src/commands/track.ts" },
+  { name: "untrack", lifecycle: untrackLifecycle, src: "src/commands/untrack.ts" },
   { name: "pull", lifecycle: pullLifecycle, src: "src/commands/pull.ts" },
   { name: "push", lifecycle: pushLifecycle, src: "src/commands/push.ts" },
   {

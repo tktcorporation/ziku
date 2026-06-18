@@ -76,3 +76,30 @@ export function addIncludePattern(rawContent: string, patterns: string[]): strin
 
   return applyEdits(rawContent, edits);
 }
+
+/**
+ * ziku.jsonc の include からパターンを削除する。
+ *
+ * `addIncludePattern` の逆操作（`ziku untrack` から使用）。include キーのみを
+ * jsonc の modify で部分更新するため、exclude やコメント等は保持される。
+ *
+ * @returns 更新後の JSONC 文字列。削除対象が 1 つも無ければ rawContent をそのまま返す
+ *   （呼び出し側は文字列同一性で「変更なし」を判定できる）。
+ */
+export function removeIncludePattern(rawContent: string, patterns: string[]): string {
+  const parsed = parse(rawContent) as ZikuConfig;
+  const existing = parsed.include ?? [];
+  const toRemove = new Set(patterns);
+  const updatedInclude = existing.filter((p) => !toRemove.has(p));
+
+  // 1 件も減っていなければ編集しない（jsonc の無駄な再フォーマットを避ける）
+  if (updatedInclude.length === existing.length) {
+    return rawContent;
+  }
+
+  const edits = modify(rawContent, ["include"], updatedInclude, {
+    formattingOptions: { tabSize: 2, insertSpaces: true },
+  });
+
+  return applyEdits(rawContent, edits);
+}
