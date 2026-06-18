@@ -117,6 +117,26 @@ describe("prompts", () => {
       const result = await selectPushFiles(files);
       expect(result).toHaveLength(0);
     });
+
+    it("conflictedPaths のファイルは初期選択から除外され conflict と表示される", async () => {
+      const files = [
+        { path: "a.ts", type: "modified" as const },
+        { path: "bad.ts", type: "modified" as const },
+      ];
+      vi.mocked(p.multiselect).mockResolvedValue([]);
+      await selectPushFiles(files, { conflictedPaths: new Set(["bad.ts"]) });
+
+      const callArg = vi.mocked(p.multiselect).mock.calls[0][0] as {
+        initialValues: string[];
+        options: Array<{ value: string; hint?: string }>;
+      };
+      // 衝突ファイルは既定で未選択（選ぶと push が中断するため）
+      expect(callArg.initialValues).toContain("a.ts");
+      expect(callArg.initialValues).not.toContain("bad.ts");
+      // 衝突ファイルは hint で明示される
+      const badOption = callArg.options.find((o) => o.value === "bad.ts");
+      expect(badOption?.hint).toContain("conflict");
+    });
   });
 
   describe("inputPrTitle", () => {

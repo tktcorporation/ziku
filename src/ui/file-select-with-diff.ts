@@ -96,7 +96,8 @@ export interface FileItem {
   readonly diffLines: string[];
 }
 
-export function buildFileItems(files: FileDiff[]): FileItem[] {
+export function buildFileItems(files: FileDiff[], conflictedPaths?: Set<string>): FileItem[] {
+  const conflicted = conflictedPaths ?? new Set<string>();
   return files.map((file) => {
     const icon = match(file.type)
       .with("added", () => pc.green("+"))
@@ -105,7 +106,9 @@ export function buildFileItems(files: FileDiff[]): FileItem[] {
       .otherwise(() => " ");
 
     const stats = calculateDiffStats(file);
-    const hint = stats.additions === 0 && stats.deletions === 0 ? "" : formatStats(stats);
+    const statHint = stats.additions === 0 && stats.deletions === 0 ? "" : formatStats(stats);
+    // 未解決の衝突は hint で明示する。選ぶと push が中断する（要 ziku pull）ことを伝える。
+    const hint = conflicted.has(file.path) ? pc.red("conflict — resolve with ziku pull") : statHint;
 
     return {
       file,
@@ -366,6 +369,8 @@ export function applyAction(state: RenderState, action: KeyAction, termRows: num
 export interface FileSelectWithDiffOptions {
   /** 削除ファイルをデフォルトで選択するか */
   preselectDeletions?: boolean;
+  /** 未解決の衝突ファイル。マーク表示し、デフォルト未選択にする。 */
+  conflictedPaths?: Set<string>;
 }
 
 /**
@@ -383,12 +388,18 @@ export function selectFilesWithDiffPreview(
 ): Promise<FileDiff[]> {
   if (files.length === 0) return Promise.resolve([]);
 
-  const items = buildFileItems(files);
+  const conflicted = options?.conflictedPaths ?? new Set<string>();
+  const items = buildFileItems(files, conflicted);
 
+  // 既定で未選択にするもの: 削除ファイル（--include-deletions で全選択）と
+  // 未解決の衝突ファイル（選ぶと push が中断するため、誤って既定で含めない）。
   const initialSelected = new Set<string>(
-    options?.preselectDeletions === true
-      ? files.map((f) => f.path)
-      : files.filter((f) => f.type !== "deleted").map((f) => f.path),
+    files
+      .filter(
+        (f) =>
+          !conflicted.has(f.path) && (options?.preselectDeletions === true || f.type !== "deleted"),
+      )
+      .map((f) => f.path),
   );
 
   const state: RenderState = {

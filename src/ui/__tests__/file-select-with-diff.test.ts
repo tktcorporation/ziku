@@ -197,6 +197,19 @@ describe("file-select-with-diff", () => {
       expect(plain).toContain("a.ts");
     });
 
+    it("conflictedPaths のファイルは hint で conflict と表示される", () => {
+      const files: FileDiff[] = [
+        { path: "ok.ts", type: "modified", localContent: "new\n", templateContent: "old\n" },
+        { path: "bad.ts", type: "modified", localContent: "new\n", templateContent: "old\n" },
+      ];
+      const items = buildFileItems(files, new Set(["bad.ts"]));
+      const okHint = stripAnsi(items[0].hint);
+      const badHint = stripAnsi(items[1].hint);
+      // 衝突ファイルだけ conflict 表示、それ以外は通常の統計 hint
+      expect(badHint).toContain("conflict");
+      expect(okHint).not.toContain("conflict");
+    });
+
     it("should show modified icon for modified files", () => {
       const files: FileDiff[] = [
         { path: "m.ts", type: "modified", localContent: "new\n", templateContent: "old\n" },

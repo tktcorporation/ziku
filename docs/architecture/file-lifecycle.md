@@ -113,6 +113,7 @@ Push local changes to template (GitHub: PR / local: direct copy)
 | 操作     | ファイル           | 場所     | 詳細                                                                        |
 | -------- | ------------------ | -------- | --------------------------------------------------------------------------- |
 | 読み取り | `.ziku/ziku.jsonc` | local    | patterns を取得                                                             |
+| 更新     | `.ziku/ziku.jsonc` | local    | 選択した未追跡ファイルを include に追記（push 成功後）                      |
 | 読み取り | `.ziku/lock.json`  | local    | source, baseRef, baseHashes を取得                                          |
 | 読み取り | synced files       | local    | ローカルの変更を検出                                                        |
 | 読み取り | synced files       | template | テンプレートと差分検出・3-way マージ                                        |
