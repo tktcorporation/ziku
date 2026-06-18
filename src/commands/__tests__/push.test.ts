@@ -1671,6 +1671,44 @@ describe("未追跡ファイルの追跡フロー", () => {
     expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining("Tracked 1 new file(s)"));
   });
 
+  it("新規追跡パターンが同一 push でテンプレの ziku.jsonc にも届く（codex P2）", async () => {
+    // ディスク上の ziku.jsonc は旧 include のまま（push 成功後に persistNewlyTracked が書く）。
+    // detectDiff には ziku.jsonc が現れない（unchanged 相当で push 対象から漏れるケース）。
+    // それでも新規追跡パターン docs/new.md を含む union が同じ push でテンプレに届くこと。
+    seedZikuConfig([".github/**"]);
+    mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);
+    mockSelectUntrackedToTrack.mockResolvedValueOnce(["docs/new.md"]);
+
+    setupPushableFiles([{ path: "docs/new.md", type: "added", localContent: "# New doc" }]);
+    mockSelectPushFiles.mockResolvedValueOnce([
+      { path: "docs/new.md", type: "added", localContent: "# New doc" },
+    ]);
+    mockGetGitHubToken.mockReturnValue("ghp_token");
+    mockConfirmAction.mockResolvedValueOnce(true);
+    mockCreatePullRequest.mockResolvedValueOnce({
+      url: "https://github.com/owner/repo/pull/1",
+      branch: "update-template-123",
+      number: 1,
+    });
+
+    await (pushCommand.run as any)({
+      args: { dir: "/test", dryRun: false, yes: false, edit: false },
+      rawArgs: [],
+      cmd: pushCommand,
+    });
+
+    const prArg = mockCreatePullRequest.mock.calls[0]?.[1] as {
+      files: { path: string; content: string }[];
+    };
+    // ファイル本体だけでなく ziku.jsonc も push される
+    const configFile = prArg.files.find((f) => f.path === ".ziku/ziku.jsonc");
+    expect(configFile).toBeDefined();
+    const pushed = JSON.parse(configFile?.content as string);
+    // 新規追跡パターンと既存パターンの両方が含まれる（union）
+    expect(pushed.include).toContain("docs/new.md");
+    expect(pushed.include).toContain(".github/**");
+  });
+
   it("未追跡を1件も選択しなければ include は変化しない", async () => {
     seedZikuConfig();
     mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);

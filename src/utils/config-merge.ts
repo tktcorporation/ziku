@@ -126,18 +126,32 @@ export async function analyzeConfigDrift(
  *
  * pull / push の conflict 解決で `ziku.jsonc` をテキスト diff3 ではなくこれで解決する。
  * 和集合なので削除は伝播しないが、テンプレートのパターンもローカルの追加も失われない。
+ *
+ * `extraIncludes` は、ディスク上の `ziku.jsonc` にはまだ書かれていないが今回の push で
+ * 反映したい include パターン（対話 push で新規追跡選択したファイルのパス）を渡すために使う。
+ * 追跡選択の永続化（`persistNewlyTracked`）は push 成功後に走るため、ディスク内容だけを
+ * 読むと新規パターンが union から漏れ、テンプレにファイル本体だけ届いて include が届かない
+ * （他プロジェクトの init/pull が拾えるのが 2 回目の push 後になる）。これを防ぐため、
+ * 確定した新規追跡パターンをローカル側へ加えてから union を取る（codex P2）。
  */
 export async function computeMergedZikuConfig(opts: {
   targetDir: string;
   templateDir: string;
+  extraIncludes?: string[];
 }): Promise<string> {
   const [local, template] = await Promise.all([
     readPatternsAt(opts.targetDir),
     readPatternsAt(opts.templateDir),
   ]);
 
+  const localBase = local ?? EMPTY_PATTERNS;
+  const localWithExtra: ConfigPatterns = {
+    include: [...localBase.include, ...(opts.extraIncludes ?? [])],
+    exclude: localBase.exclude,
+  };
+
   const merged = mergeConfigPatterns({
-    local: local ?? EMPTY_PATTERNS,
+    local: localWithExtra,
     template: template ?? EMPTY_PATTERNS,
   });
 

@@ -544,6 +544,17 @@ export const pushCommand = defineCommand({
         throw unresolvedConflictError(selectedConflicts.map((f) => f.path));
       }
 
+      // 対話 push で新規追跡したファイルの include パターンを、ファイル本体と同じ push で
+      // テンプレの ziku.jsonc にも反映する（codex P2）。
+      pushableFiles = await applyNewlyTrackedConfigToPush({
+        targetDir,
+        templateDir,
+        newlyTrackedPaths,
+        pushableFiles,
+        diffFiles: diff.files,
+        mergedContents,
+      });
+
       const files = pushableFiles
         .filter((f) => f.type !== "deleted")
         .map((f) => ({
@@ -664,6 +675,61 @@ async function persistNewlyTracked(
 
   await saveZikuConfig(targetDir, updated);
   log.success(`Tracked ${patternsToPersist.length} new file(s) in ${ZIKU_CONFIG_FILE}`);
+}
+
+/**
+ * 対話 push で新規追跡したファイルの include パターンを、ファイル本体と同じ push で
+ * テンプレの `ziku.jsonc` にも届けるよう調整する（codex P2）。
+ *
+ * 背景: ディスク上の `ziku.jsonc` は push 成功後（`persistNewlyTracked`）まで更新されない。
+ * そのため classify / detectDiff は旧内容を見て `ziku.jsonc` を「変更なし」と判定し、push 対象から
+ * 漏らし得る。これを放置すると、テンプレにファイル本体だけ届いて include パターンが届かず、
+ * 他プロジェクトの `init` / `pull` が拾えるのが 2 回目の push 後になる。
+ *
+ * 「実際に push される」新規追跡分だけを union に乗せ（`persistNewlyTracked` の pushed-only
+ * セマンティクスと一致させる）、必要なら `ziku.jsonc` を push 候補へ注入する。
+ *
+ * @returns ziku.jsonc を補完した push 対象 FileDiff 配列（変更不要なら入力をそのまま返す）。
+ */
+async function applyNewlyTrackedConfigToPush(params: {
+  targetDir: string;
+  templateDir: string;
+  newlyTrackedPaths: string[];
+  pushableFiles: FileDiff[];
+  diffFiles: FileDiff[];
+  mergedContents: Map<string, string>;
+}): Promise<FileDiff[]> {
+  const { targetDir, templateDir, newlyTrackedPaths, pushableFiles, diffFiles, mergedContents } =
+    params;
+
+  const selectedPaths = new Set(pushableFiles.map((f) => f.path));
+  const trackedAndPushed = newlyTrackedPaths.filter((p) => selectedPaths.has(p));
+  if (trackedAndPushed.length === 0) return pushableFiles;
+
+  const mergedConfig = await computeMergedZikuConfig({
+    targetDir,
+    templateDir,
+    extraIncludes: trackedAndPushed,
+  });
+  mergedContents.set(ZIKU_CONFIG_FILE, mergedConfig);
+
+  // ziku.jsonc が既に push 候補にあれば content は mergedContents が採用されるので注入不要。
+  if (pushableFiles.some((f) => f.path === ZIKU_CONFIG_FILE)) return pushableFiles;
+
+  // union がテンプレと同一なら伝える追加パターンは無い（注入しない）。
+  const configDiff = diffFiles.find((f) => f.path === ZIKU_CONFIG_FILE);
+  if (mergedConfig === configDiff?.templateContent) return pushableFiles;
+
+  // detectDiff が unchanged 判定で漏らしたケース → union を内容とする差分を注入する。
+  return [
+    ...pushableFiles,
+    {
+      path: ZIKU_CONFIG_FILE,
+      type: configDiff?.templateContent === undefined ? "added" : "modified",
+      localContent: mergedConfig,
+      templateContent: configDiff?.templateContent,
+    },
+  ];
 }
 
 // ─── ファイル選択 ───
