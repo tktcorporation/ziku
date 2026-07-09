@@ -1,5 +1,35 @@
 # @tktco/ziku
 
+## 1.5.0
+
+### Minor Changes
+
+- [#79](https://github.com/tktcorporation/ziku/pull/79) [`de7242f`](https://github.com/tktcorporation/ziku/commit/de7242fc81a2b82680ead42601e5ddf8bc2a1960) Thanks [@tktcorporation](https://github.com/tktcorporation)! - `ziku.jsonc`（include/exclude パターン定義）自体を双方向同期の対象にした。
+
+  これまで `ziku track` でローカルの `ziku.jsonc` にパターンを追加して `ziku push` しても、`ziku.jsonc` 自体は同期対象に含まれず、テンプレートの `ziku.jsonc` にパターンが伝播しなかった。その結果、新しく追跡対象にしたファイルがテンプレートに物理的にはコピーされても、テンプレートの `ziku.jsonc` がパターンを知らないため、他プロジェクトの `init` / `pull` でそのファイルが取り込まれない「孤児化」が発生していた。パターン同期が pull の片方向（テンプレ → ローカルの加法マージ）にしか存在しなかったのが原因。
+
+  `.ziku/ziku.jsonc` を「他の追跡ファイルと同じ 1 ファイル」として push / pull / status の差分検出（hashFiles / classify）に含めることで、ローカルで追加したパターンが push でテンプレートへ、テンプレートの追加が pull でローカルへ、双方向に同期されるようにした。
+
+  `ziku.jsonc` の衝突（双方が編集）は、JSON が壊れる汎用テキスト diff3 ではなく、include/exclude を集合として扱う要素レベルの **加法マージ（和集合）** で解決する。ローカルの追加もテンプレートのパターンも失わず、いかなるパターンも削除しないため、テンプレートを壊さない。トレードオフとして、パターンの「削除」は自動伝播しない（各 `ziku.jsonc` を明示的に編集する必要がある）。
+
+  `init` 時は、テンプレートのパターンの部分集合だけを選んで導入できる仕様を壊さないよう、`ziku.jsonc` のベースハッシュをローカル（書き出した部分集合）側で記録する。
+
+### Patch Changes
+
+- [#86](https://github.com/tktcorporation/ziku/pull/86) [`c813200`](https://github.com/tktcorporation/ziku/commit/c81320014cfbc6541ef748c1333a3f6deb73e5cf) Thanks [@tktcorporation](https://github.com/tktcorporation)! - `ziku push --dryRun` のプレビューが `--files` を反映しない不具合を修正した。
+
+  これまで dry-run の「Files that would be pushed」は `--files` で絞る前の全候補を表示しており、実 push（`--files` で正しく絞られる）とプレビューが食い違っていた。スコープの事前確認が機能せず、誤 push の温床になっていた。
+
+  - dry-run プレビューでも実 push と同じフィルタ規則を適用し、**実際に push される集合**を表示するようにした（`--files` 指定・未解決の衝突の除外・削除の既定除外）。
+  - `--files` 指定時は存在しないパスを `Files not found` として警告し、絞り込み後の集合を表示する。
+  - `--files` で未解決の衝突を明示指定した場合は、実 push が中断することを dry-run でも予告する。
+
+- [#88](https://github.com/tktcorporation/ziku/pull/88) [`8ffe097`](https://github.com/tktcorporation/ziku/commit/8ffe097aed4f13483d5249b8f718413d58a3d43e) Thanks [@tktcorporation](https://github.com/tktcorporation)! - 非 TTY 環境（パイプ・ログリダイレクト・`--yes` での非対話実行）でスピナーが大量の制御文字を出力する不具合を修正した。
+
+  `@clack/prompts` のスピナーは `process.env.CI === "true"` のときだけアニメーション描画を抑制するため、CI 環境変数が無いままパイプへ出力すると、フレーム（`◒◐◓◑` + CR）を 80ms 間隔で書き続け、数百行分の制御文字でログを埋めていた。
+
+  `process.stdout.isTTY` で分岐し、非 TTY では開始メッセージを 1 行だけ出力する（失敗時のみ失敗行を追加）ようにした。TTY 環境でのアニメーション表示は従来どおり。
+
 ## 1.4.0
 
 ### Minor Changes
