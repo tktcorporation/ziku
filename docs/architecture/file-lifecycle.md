@@ -32,6 +32,7 @@ graph TB
   diff([diff]) -.->|read| ZIKU & LOCK & U_FILES
   status([status]) -.->|read| ZIKU & LOCK & U_FILES
   track([track]) -.->|update| ZIKU
+  untrack([untrack]) -.->|update| ZIKU
 
 ```
 
@@ -49,6 +50,7 @@ graph TB
 | 生成     | `ziku init` で選択結果をユーザープロジェクトに保存                                 |
 | 読み取り | `pull` / `push` / `diff` でパターンを取得                                          |
 | 更新     | `ziku track` で新しいパターンを追加                                                |
+| 更新     | `ziku untrack` でパターンを削除                                                    |
 
 ### `.ziku/lock.json`
 
@@ -152,6 +154,15 @@ Add file patterns to the sync whitelist
 | 読み取り | `.ziku/ziku.jsonc` | local | 現在の include パターンを取得   |
 | 更新     | `.ziku/ziku.jsonc` | local | 新しいパターンを include に追加 |
 
+### `untrack`
+
+Remove file patterns from the sync whitelist
+
+| 操作     | ファイル           | 場所  | 詳細                            |
+| -------- | ------------------ | ----- | ------------------------------- |
+| 読み取り | `.ziku/ziku.jsonc` | local | 現在の include パターンを取得   |
+| 更新     | `.ziku/ziku.jsonc` | local | 指定パターンを include から削除 |
+
 ## 補足
 
 ### init (user project)
@@ -179,5 +190,9 @@ Add file patterns to the sync whitelist
 ### track
 
 `ziku track` で追加したパターンはローカルの `ziku.jsonc` にのみ反映される。テンプレートに反映するには `ziku push` でテンプレートの `ziku.jsonc` を更新する。
+
+### untrack
+
+`ziku untrack` は `ziku track` の逆操作。ローカルの `ziku.jsonc` の include からパターンを削除する。テンプレートには影響しない（反映するには `ziku push` でテンプレートの `ziku.jsonc` を更新する）。
 
 <!-- LIFECYCLE:END -->

@@ -35,6 +35,7 @@ import { pushCommand } from "../src/commands/push";
 import { setupCommand } from "../src/commands/setup";
 import { statusCommand } from "../src/commands/status";
 import { trackCommand } from "../src/commands/track";
+import { untrackCommand } from "../src/commands/untrack";
 import { zikuConfigSchema } from "../src/modules/schemas";
 import {
   generateLifecycleDocument,
@@ -249,6 +250,7 @@ async function generateCommandsSection(): Promise<string> {
     ...(await commandSection("diff", diffCommand)),
     ...(await commandSection("status", statusCommand)),
     ...(await commandSection("track", trackCommand)),
+    ...(await commandSection("untrack", untrackCommand)),
   ];
 
   return sections.join("\n");

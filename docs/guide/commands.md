@@ -139,6 +139,24 @@ OPTIONS
        -l, --list    List all currently tracked patterns (Default: false)
 ```
 
+## `untrack`
+
+Remove file patterns from the tracking whitelist in ziku.jsonc
+
+```
+Remove file patterns from the tracking whitelist in ziku.jsonc (untrack)
+
+USAGE untrack [OPTIONS] [PATTERNS]
+
+ARGUMENTS
+
+  PATTERNS    File paths or glob patterns to untrack (e.g., .cloud/rules/*.md)
+
+OPTIONS
+
+  -d, --dir=<dir>    Project directory (default: current directory) (Default: .)
+```
+
 # What You Get
 
 The files you get depend on the patterns configured in your template's `.ziku/ziku.jsonc`. After running `ziku init`, your selected patterns are saved in your own `.ziku/ziku.jsonc` — you can customize them anytime with `ziku track`.
