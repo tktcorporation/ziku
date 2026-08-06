@@ -2060,6 +2060,55 @@ describe("--files でファイル本体だけを指定した場合の ziku.jsonc
     const pushed = JSON.parse(configFile?.content as string);
     expect(pushed.include).toContain(".claude/rules/unrelated.md");
   });
+
+  it("ローカルソースへの push でも、自動同梱はテンプレのみに書かれ、ローカルの他パターンは消えない", async () => {
+    // レビュー指摘: スコープ限定 union（テンプレ + 関連パターンのみ）をそのまま
+    // ローカルの ziku.jsonc へ書き戻すと、今回の push と無関係な docs/a.md が
+    // ローカルの追跡対象から消えてしまう（union は削除しないという原則に反する）。
+    const { effect } = mockContext({
+      source: { path: "/local/template" },
+      lock: { ...validLock, source: { path: "/local/template" } as any },
+    });
+    mockLoadCommandContext.mockReturnValue(effect);
+
+    // docs/a.md, docs/b.md ともに事前に ziku track 済み。今回の push は docs/b.md のみ。
+    seedZikuConfig([".github/**", "docs/a.md", "docs/b.md"]);
+    vol.fromJSON({
+      "/local/template/.ziku/ziku.jsonc": `${JSON.stringify({ include: [".github/**"] }, null, 2)}\n`,
+    });
+
+    setupPushableFiles([
+      { path: "docs/b.md", type: "added", localContent: "# doc b" },
+      {
+        path: ".ziku/ziku.jsonc",
+        type: "modified",
+        localContent: JSON.stringify(
+          { include: [".github/**", "docs/a.md", "docs/b.md"] },
+          null,
+          2,
+        ),
+        templateContent: JSON.stringify({ include: [".github/**"] }, null, 2),
+      },
+    ]);
+
+    mockConfirmAction.mockResolvedValueOnce(true);
+
+    await (pushCommand.run as any)({
+      args: { dir: "/test", dryRun: false, yes: false, edit: false, files: "docs/b.md" },
+      rawArgs: [],
+      cmd: pushCommand,
+    });
+
+    // テンプレ側には関連パターンだけが届く（docs/a.md は含めない）
+    const templateConfig = JSON.parse(vol.toJSON()["/local/template/.ziku/ziku.jsonc"] as string);
+    expect(templateConfig.include).toContain("docs/b.md");
+    expect(templateConfig.include).not.toContain("docs/a.md");
+
+    // ローカルの ziku.jsonc は書き換えられず、docs/a.md の追跡が失われない
+    const localConfig = JSON.parse(vol.toJSON()["/test/.ziku/ziku.jsonc"] as string);
+    expect(localConfig.include).toContain("docs/a.md");
+    expect(localConfig.include).toContain("docs/b.md");
+  });
 });
 
 describe("pushCommand args", () => {

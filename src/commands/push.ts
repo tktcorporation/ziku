@@ -191,6 +191,9 @@ function pushToGitHub(
  *
  * @param patterns baseHashes 再計算に使うパターン。新規追跡ファイルを含む effectivePatterns を
  *   渡すことで、追跡したファイルが baseHashes に反映され、lock と配置のズレを防ぐ。
+ * @param configWriteBackSafe push される ziku.jsonc の内容をローカルへそのまま書き戻して
+ *   よいか。`applyNewlyTrackedConfigToPush` がスコープ限定 union（#90）を使った場合は
+ *   false になり、書き戻しをスキップする（詳細は同関数の JSDoc を参照）。
  * @returns push したら true、確認でキャンセルされたら false。
  */
 function pushToLocal(
@@ -200,6 +203,7 @@ function pushToLocal(
   projectDir: string,
   args: { yes?: boolean },
   patterns: { include: string[]; exclude: string[] },
+  configWriteBackSafe: boolean,
 ): Effect.Effect<boolean, ZikuError> {
   return Effect.tryPromise({
     try: async () => {
@@ -247,8 +251,14 @@ function pushToLocal(
       // 乖離したまま baseHashes をテンプレ（union）へ進めてしまい、次回 push で
       // ローカルが localOnly 判定 → テンプレ側の追加分を上書きで落とす（codex P2）。
       // ローカルにも merged 内容を書き戻して local==template==base を保つ。
+      //
+      // ただし #90 のスコープ限定 union（computeScopedZikuConfig）はテンプレ + 関連
+      // パターンのみで、ローカルの他の未 push パターンを含まない部分集合になり得る。
+      // これをそのままローカルへ書き戻すと、無関係なローカル限定パターンを消してしまう
+      // （union は削除しないという原則違反）。configWriteBackSafe=false のときは
+      // 書き戻しをスキップする（ローカルは元々正しい内容を保持しているので何もしなくてよい）。
       const mergedConfig = target.files.find((f) => f.path === ZIKU_CONFIG_FILE);
-      if (mergedConfig) {
+      if (mergedConfig && configWriteBackSafe) {
         const localConfigPath = join(projectDir, ZIKU_CONFIG_FILE);
         await mkdir(dirname(localConfigPath), { recursive: true });
         await writeFile(localConfigPath, mergedConfig.content, "utf-8");
@@ -555,8 +565,8 @@ export const pushCommand = defineCommand({
       }
 
       // 対話 push で新規追跡したファイルの include パターンを、ファイル本体と同じ push で
-      // テンプレの ziku.jsonc にも反映する（codex P2）。
-      pushableFiles = await applyNewlyTrackedConfigToPush({
+      // テンプレの ziku.jsonc にも反映する（codex P2 / #90）。
+      const configResult = await applyNewlyTrackedConfigToPush({
         targetDir,
         templateDir,
         newlyTrackedPaths,
@@ -564,6 +574,7 @@ export const pushCommand = defineCommand({
         diffFiles: diff.files,
         mergedContents,
       });
+      pushableFiles = configResult.pushableFiles;
 
       const files = pushableFiles
         .filter((f) => f.type !== "deleted")
@@ -595,6 +606,7 @@ export const pushCommand = defineCommand({
               targetDir,
               { yes: args.yes as boolean },
               effectivePatterns,
+              configResult.configWriteBackSafe,
             ),
           )
           .exhaustive(),
@@ -717,7 +729,12 @@ async function persistNewlyTracked(
  * 「実際に push される」パスに関連するパターンだけを union に乗せ（無関係なローカル限定
  * パターンまで巻き込まない）、必要なら `ziku.jsonc` を push 候補へ注入する。
  *
- * @returns ziku.jsonc を補完した push 対象 FileDiff 配列（変更不要なら入力をそのまま返す）。
+ * @returns ziku.jsonc を補完した push 対象 FileDiff 配列と、その内容をローカルの
+ *   `ziku.jsonc` へそのまま書き戻してよいか（`configWriteBackSafe`）。スコープ限定
+ *   union（テンプレ + 関連パターンのみ）はローカルの他パターンを含まない部分集合になり
+ *   得るため、`pushToLocal` の書き戻しにそのまま使うと無関係なローカル限定パターンを
+ *   消してしまう。ローカル全体を和集合した場合（`configAlreadySelected` あるいは注入
+ *   なし）だけ `true` を返す。
  */
 async function applyNewlyTrackedConfigToPush(params: {
   targetDir: string;
@@ -726,7 +743,7 @@ async function applyNewlyTrackedConfigToPush(params: {
   pushableFiles: FileDiff[];
   diffFiles: FileDiff[];
   mergedContents: Map<string, string>;
-}): Promise<FileDiff[]> {
+}): Promise<{ pushableFiles: FileDiff[]; configWriteBackSafe: boolean }> {
   const { targetDir, templateDir, newlyTrackedPaths, pushableFiles, diffFiles, mergedContents } =
     params;
 
@@ -743,11 +760,14 @@ async function applyNewlyTrackedConfigToPush(params: {
     ? []
     : await findLocalOnlyPatternsForPaths({ targetDir, templateDir, paths: selectedPaths });
 
-  if (trackedAndPushed.length === 0 && preexistingRelevant.length === 0) return pushableFiles;
+  if (trackedAndPushed.length === 0 && preexistingRelevant.length === 0) {
+    return { pushableFiles, configWriteBackSafe: true };
+  }
 
   // ziku.jsonc が既に明示選択済みなら、ユーザーの意図が明確なのでローカル全体を
-  // 通常どおり和集合する。未選択のまま自動同梱する場合は、無関係なローカル限定
-  // パターンを漏らさないよう、テンプレ + 関連パターンだけに絞った和集合にする（#90）。
+  // 通常どおり和集合する（書き戻しも安全）。未選択のまま自動同梱する場合は、無関係な
+  // ローカル限定パターンを漏らさないよう、テンプレ + 関連パターンだけに絞った和集合に
+  // する（#90）。この部分集合はローカルへの書き戻しには使えない。
   const mergedConfig = configAlreadySelected
     ? await computeMergedZikuConfig({ targetDir, templateDir, extraIncludes: trackedAndPushed })
     : await computeScopedZikuConfig({
@@ -757,11 +777,13 @@ async function applyNewlyTrackedConfigToPush(params: {
   mergedContents.set(ZIKU_CONFIG_FILE, mergedConfig);
 
   // ziku.jsonc が既に push 候補にあれば content は mergedContents が採用されるので注入不要。
-  if (configAlreadySelected) return pushableFiles;
+  if (configAlreadySelected) return { pushableFiles, configWriteBackSafe: true };
 
   // union がテンプレと同一なら伝える追加パターンは無い（注入しない）。
   const configDiff = diffFiles.find((f) => f.path === ZIKU_CONFIG_FILE);
-  if (mergedConfig === configDiff?.templateContent) return pushableFiles;
+  if (mergedConfig === configDiff?.templateContent) {
+    return { pushableFiles, configWriteBackSafe: true };
+  }
 
   if (preexistingRelevant.length > 0) {
     log.info(
@@ -771,15 +793,18 @@ async function applyNewlyTrackedConfigToPush(params: {
   }
 
   // detectDiff が unchanged 判定で漏らしたケース → union を内容とする差分を注入する。
-  return [
-    ...pushableFiles,
-    {
-      path: ZIKU_CONFIG_FILE,
-      type: configDiff?.templateContent === undefined ? "added" : "modified",
-      localContent: mergedConfig,
-      templateContent: configDiff?.templateContent,
-    },
-  ];
+  return {
+    pushableFiles: [
+      ...pushableFiles,
+      {
+        path: ZIKU_CONFIG_FILE,
+        type: configDiff?.templateContent === undefined ? "added" : "modified",
+        localContent: mergedConfig,
+        templateContent: configDiff?.templateContent,
+      },
+    ],
+    configWriteBackSafe: false,
+  };
 }
 
 /**
