@@ -157,3 +157,59 @@ export async function computeMergedZikuConfig(opts: {
 
   return generateZikuJsonc(merged);
 }
+
+/**
+ * ローカルの `ziku.jsonc` にのみ存在する include パターンのうち、指定パス集合に
+ * 一致するものだけを返す。
+ *
+ * 背景（#90）: `ziku track <path>` は即座にディスクの `ziku.jsonc` にパターンを
+ * 書き込む。その後 `ziku push --files=<path>` のようにファイル本体だけを指定すると、
+ * `ziku.jsonc` 自体は `--files` に含まれず push 候補から漏れ、パターンがテンプレへ
+ * 伝播しない（本体だけテンプレに存在し、他プロジェクトの `pull` が検出できない）。
+ *
+ * パターン = ファイルパス（個別追跡）の前提で、push されるパスと厳密一致するものだけを
+ * 「関連パターン」として返す。無関係なローカル限定パターン（今回の push が触れていない
+ * ファイルのもの）まで巻き込まないためのスコープ計算に使う。glob パターンの一致判定は
+ * 将来拡張。
+ */
+export async function findLocalOnlyPatternsForPaths(opts: {
+  targetDir: string;
+  templateDir: string;
+  paths: string[];
+}): Promise<string[]> {
+  if (opts.paths.length === 0) return [];
+
+  const [local, template] = await Promise.all([
+    readPatternsAt(opts.targetDir),
+    readPatternsAt(opts.templateDir),
+  ]);
+
+  const templateInclude = new Set((template ?? EMPTY_PATTERNS).include);
+  const pathSet = new Set(opts.paths);
+
+  return (local ?? EMPTY_PATTERNS).include.filter(
+    (pattern) => !templateInclude.has(pattern) && pathSet.has(pattern),
+  );
+}
+
+/**
+ * テンプレート側の `ziku.jsonc` に、指定した追加パターンだけを和集合で加えた
+ * `ziku.jsonc` 文字列を返す。ローカルの `ziku.jsonc` の他のパターンは一切参照しない。
+ *
+ * `computeMergedZikuConfig` はローカルの `ziku.jsonc` 全体をテンプレと和集合するため、
+ * ユーザーが `--files` で明示していないのに ziku.jsonc を自動同梱する場面（#90）で使うと、
+ * 今回の push と無関係なローカル限定パターンまで一緒にテンプレへ漏れてしまう
+ * （issue #90 で懸念されていたリスク）。この関数はテンプレの内容 + 明示的に渡した
+ * 追加分だけを union するため、無関係なパターンを一切巻き込まない。
+ */
+export async function computeScopedZikuConfig(opts: {
+  templateDir: string;
+  additionalIncludes: string[];
+}): Promise<string> {
+  const template = (await readPatternsAt(opts.templateDir)) ?? EMPTY_PATTERNS;
+  const merged = mergeConfigPatterns({
+    local: { include: opts.additionalIncludes, exclude: [] },
+    template,
+  });
+  return generateZikuJsonc(merged);
+}

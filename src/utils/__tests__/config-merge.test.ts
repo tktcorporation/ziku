@@ -4,8 +4,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("node:fs", async () => (await import("memfs")).fs);
 vi.mock("node:fs/promises", async () => (await import("memfs")).fs.promises);
 
-const { mergeConfigPatterns, computeMergedZikuConfig, analyzeConfigDrift } =
-  await import("../config-merge");
+const {
+  mergeConfigPatterns,
+  computeMergedZikuConfig,
+  analyzeConfigDrift,
+  findLocalOnlyPatternsForPaths,
+} = await import("../config-merge");
 
 describe("mergeConfigPatterns（要素レベル加法マージ＝和集合）", () => {
   it("ローカルとテンプレ双方の追加を保持する", () => {
@@ -152,5 +156,65 @@ describe("analyzeConfigDrift（union 観点の実差分判定）", () => {
     write([".a/**", ".b/**"], [".a/**"]);
     const d = await analyzeConfigDrift("/local", "/template");
     expect(d.pullRelevant).toBe(false);
+  });
+});
+
+describe("findLocalOnlyPatternsForPaths（#90: 事前追跡パターンの関連性スコープ計算）", () => {
+  beforeEach(() => {
+    vol.reset();
+  });
+
+  const write = (local: string[], template: string[]) =>
+    vol.fromJSON({
+      "/local/.ziku/ziku.jsonc": JSON.stringify({ include: local }, null, 2),
+      "/template/.ziku/ziku.jsonc": JSON.stringify({ include: template }, null, 2),
+    });
+
+  it("push されるパスと一致するローカル限定パターンだけを返す", async () => {
+    write([".github/**", ".claude/skills/new-skill/SKILL.md"], [".github/**"]);
+
+    const result = await findLocalOnlyPatternsForPaths({
+      targetDir: "/local",
+      templateDir: "/template",
+      paths: [".claude/skills/new-skill/SKILL.md"],
+    });
+    expect(result).toEqual([".claude/skills/new-skill/SKILL.md"]);
+  });
+
+  it("push されるパスに無関係なローカル限定パターンは含めない（leak しない）", async () => {
+    write(
+      [".github/**", ".claude/skills/new-skill/SKILL.md", ".claude/rules/unrelated.md"],
+      [".github/**"],
+    );
+
+    const result = await findLocalOnlyPatternsForPaths({
+      targetDir: "/local",
+      templateDir: "/template",
+      paths: [".claude/skills/new-skill/SKILL.md"],
+    });
+    expect(result).toEqual([".claude/skills/new-skill/SKILL.md"]);
+    expect(result).not.toContain(".claude/rules/unrelated.md");
+  });
+
+  it("テンプレに既にあるパターンは対象外", async () => {
+    write([".github/**", "already-synced.md"], [".github/**", "already-synced.md"]);
+
+    const result = await findLocalOnlyPatternsForPaths({
+      targetDir: "/local",
+      templateDir: "/template",
+      paths: ["already-synced.md"],
+    });
+    expect(result).toEqual([]);
+  });
+
+  it("paths が空なら空を返す", async () => {
+    write([".github/**", "new-file.md"], [".github/**"]);
+
+    const result = await findLocalOnlyPatternsForPaths({
+      targetDir: "/local",
+      templateDir: "/template",
+      paths: [],
+    });
+    expect(result).toEqual([]);
   });
 });

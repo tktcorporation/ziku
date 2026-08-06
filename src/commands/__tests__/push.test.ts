@@ -1674,8 +1674,12 @@ describe("未追跡ファイルの追跡フロー", () => {
   it("新規追跡パターンが同一 push でテンプレの ziku.jsonc にも届く（codex P2）", async () => {
     // ディスク上の ziku.jsonc は旧 include のまま（push 成功後に persistNewlyTracked が書く）。
     // detectDiff には ziku.jsonc が現れない（unchanged 相当で push 対象から漏れるケース）。
+    // ローカル・テンプレともに .github/** を既に持つ（だから classify は差分なしと判定した）。
     // それでも新規追跡パターン docs/new.md を含む union が同じ push でテンプレに届くこと。
     seedZikuConfig([".github/**"]);
+    vol.fromJSON({
+      "/tmp/template/.ziku/ziku.jsonc": `${JSON.stringify({ include: [".github/**"] }, null, 2)}\n`,
+    });
     mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);
     mockSelectUntrackedToTrack.mockResolvedValueOnce(["docs/new.md"]);
 
@@ -1867,6 +1871,194 @@ describe("未追跡ファイルの追跡フロー", () => {
     const callArgs = mockCreatePullRequest.mock.calls[0][1];
     expect(callArgs.files.some((f: any) => f.path === "safe.txt")).toBe(true);
     expect(readTrackedInclude()).toEqual([".github/**"]);
+  });
+});
+
+describe("--files でファイル本体だけを指定した場合の ziku.jsonc 自動同梱（#90）", () => {
+  beforeEach(() => {
+    vol.reset();
+    vi.clearAllMocks();
+    const { effect } = mockContext();
+    mockLoadCommandContext.mockReturnValue(effect);
+    mockDetectDiff.mockResolvedValue(emptyDiff);
+    mockGetPushableFiles.mockReturnValue([]);
+  });
+
+  /** /test/.ziku/ziku.jsonc を指定 include 付きで memfs に用意する（`ziku track` 済み想定） */
+  function seedZikuConfig(include: string[]): void {
+    vol.fromJSON({
+      "/test/.ziku/ziku.jsonc": `${JSON.stringify(
+        { $schema: "https://example.com/schema.json", include },
+        null,
+        2,
+      )}\n`,
+    });
+  }
+
+  it("事前に `ziku track` 済みのパターンが --files で本体だけ指定しても push される", async () => {
+    // .claude/skills/new-skill/SKILL.md は「ziku track」済みでローカルの
+    // ziku.jsonc には既に反映されている（テンプレにはまだ無い）。
+    seedZikuConfig([".github/**", ".claude/skills/new-skill/SKILL.md"]);
+    vol.fromJSON({
+      "/tmp/template/.ziku/ziku.jsonc": `${JSON.stringify({ include: [".github/**"] }, null, 2)}\n`,
+    });
+
+    setupPushableFiles([
+      { path: ".claude/skills/new-skill/SKILL.md", type: "added", localContent: "# skill" },
+      {
+        path: ".ziku/ziku.jsonc",
+        type: "modified",
+        localContent: JSON.stringify(
+          { include: [".github/**", ".claude/skills/new-skill/SKILL.md"] },
+          null,
+          2,
+        ),
+        templateContent: JSON.stringify({ include: [".github/**"] }, null, 2),
+      },
+    ]);
+
+    mockGetGitHubToken.mockReturnValue("ghp_token");
+    mockConfirmAction.mockResolvedValueOnce(true);
+    mockCreatePullRequest.mockResolvedValueOnce({
+      url: "https://github.com/owner/repo/pull/1",
+      branch: "update-template-123",
+      number: 1,
+    });
+
+    // --files はスキル本体だけを指定し、ziku.jsonc は含めない（issue #90 の再現手順）。
+    await (pushCommand.run as any)({
+      args: {
+        dir: "/test",
+        dryRun: false,
+        yes: false,
+        edit: false,
+        files: ".claude/skills/new-skill/SKILL.md",
+      },
+      rawArgs: [],
+      cmd: pushCommand,
+    });
+
+    const prArg = mockCreatePullRequest.mock.calls[0]?.[1] as {
+      files: { path: string; content: string }[];
+    };
+    expect(prArg.files.some((f) => f.path === ".claude/skills/new-skill/SKILL.md")).toBe(true);
+
+    // ファイル本体だけでなく ziku.jsonc も push される（#90 の修正）
+    const configFile = prArg.files.find((f) => f.path === ".ziku/ziku.jsonc");
+    expect(configFile).toBeDefined();
+    const pushed = JSON.parse(configFile?.content as string);
+    expect(pushed.include).toContain(".claude/skills/new-skill/SKILL.md");
+    expect(pushed.include).toContain(".github/**");
+
+    // ユーザーに自動同梱したことを通知する
+    expect(mockLog.info).toHaveBeenCalledWith(expect.stringContaining("Also pushing"));
+  });
+
+  it("--files で指定したファイルに無関係なローカル限定パターンは巻き込まない", async () => {
+    // .claude/rules/unrelated.md は別件で ziku track 済みだが、今回の push には無関係。
+    seedZikuConfig([
+      ".github/**",
+      ".claude/skills/new-skill/SKILL.md",
+      ".claude/rules/unrelated.md",
+    ]);
+
+    setupPushableFiles([
+      { path: ".claude/skills/new-skill/SKILL.md", type: "added", localContent: "# skill" },
+      {
+        path: ".ziku/ziku.jsonc",
+        type: "modified",
+        localContent: JSON.stringify(
+          {
+            include: [
+              ".github/**",
+              ".claude/skills/new-skill/SKILL.md",
+              ".claude/rules/unrelated.md",
+            ],
+          },
+          null,
+          2,
+        ),
+        templateContent: JSON.stringify({ include: [".github/**"] }, null, 2),
+      },
+    ]);
+
+    mockGetGitHubToken.mockReturnValue("ghp_token");
+    mockConfirmAction.mockResolvedValueOnce(true);
+    mockCreatePullRequest.mockResolvedValueOnce({
+      url: "https://github.com/owner/repo/pull/1",
+      branch: "update-template-123",
+      number: 1,
+    });
+
+    await (pushCommand.run as any)({
+      args: {
+        dir: "/test",
+        dryRun: false,
+        yes: false,
+        edit: false,
+        files: ".claude/skills/new-skill/SKILL.md",
+      },
+      rawArgs: [],
+      cmd: pushCommand,
+    });
+
+    const prArg = mockCreatePullRequest.mock.calls[0]?.[1] as {
+      files: { path: string; content: string }[];
+    };
+    const configFile = prArg.files.find((f) => f.path === ".ziku/ziku.jsonc");
+    expect(configFile).toBeDefined();
+    const pushed = JSON.parse(configFile?.content as string);
+    expect(pushed.include).toContain(".claude/skills/new-skill/SKILL.md");
+    // 今回の push に無関係なパターンは含まれない
+    expect(pushed.include).not.toContain(".claude/rules/unrelated.md");
+  });
+
+  it("ziku.jsonc 自体を --files で明示指定した場合は全パターンが union される（挙動を変えない）", async () => {
+    seedZikuConfig([
+      ".github/**",
+      ".claude/skills/new-skill/SKILL.md",
+      ".claude/rules/unrelated.md",
+    ]);
+
+    setupPushableFiles([
+      {
+        path: ".ziku/ziku.jsonc",
+        type: "modified",
+        localContent: JSON.stringify(
+          {
+            include: [
+              ".github/**",
+              ".claude/skills/new-skill/SKILL.md",
+              ".claude/rules/unrelated.md",
+            ],
+          },
+          null,
+          2,
+        ),
+        templateContent: JSON.stringify({ include: [".github/**"] }, null, 2),
+      },
+    ]);
+
+    mockGetGitHubToken.mockReturnValue("ghp_token");
+    mockConfirmAction.mockResolvedValueOnce(true);
+    mockCreatePullRequest.mockResolvedValueOnce({
+      url: "https://github.com/owner/repo/pull/1",
+      branch: "update-template-123",
+      number: 1,
+    });
+
+    await (pushCommand.run as any)({
+      args: { dir: "/test", dryRun: false, yes: false, edit: false, files: ".ziku/ziku.jsonc" },
+      rawArgs: [],
+      cmd: pushCommand,
+    });
+
+    const prArg = mockCreatePullRequest.mock.calls[0]?.[1] as {
+      files: { path: string; content: string }[];
+    };
+    const configFile = prArg.files.find((f) => f.path === ".ziku/ziku.jsonc");
+    const pushed = JSON.parse(configFile?.content as string);
+    expect(pushed.include).toContain(".claude/rules/unrelated.md");
   });
 });
 

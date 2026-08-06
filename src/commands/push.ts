@@ -17,7 +17,11 @@ import {
 } from "../utils/ziku-config";
 import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
 import { downloadBaseForMerge, mergeOneFile } from "../utils/merge";
-import { computeMergedZikuConfig } from "../utils/config-merge";
+import {
+  computeMergedZikuConfig,
+  computeScopedZikuConfig,
+  findLocalOnlyPatternsForPaths,
+} from "../utils/config-merge";
 import type { CommandContextShape } from "../services/command-context";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
@@ -518,6 +522,12 @@ export const pushCommand = defineCommand({
           logDiffSummary(previewFiles);
         }
 
+        // #90: --files でファイル本体だけを指定すると、事前に `ziku track` 済みの
+        // パターンが ziku.jsonc 除外により push 候補から漏れうる。実 push では
+        // applyNewlyTrackedConfigToPush が自動的に注入するので、dry-run でも
+        // 同じ注意書きを出して挙動を一致させる（プレビュー自体への注入はしない）。
+        await warnIfConfigWouldBeAutoIncluded({ targetDir, templateDir, previewFiles });
+
         // 未解決の衝突を --files で明示選択した場合、実 push は中断する（unresolvedConflictError）。
         // dry-run でも同じ予告を出して挙動を一致させる。
         const selectedConflicts = previewFiles.filter((f) => unresolvedConflicts.has(f.path));
@@ -687,16 +697,25 @@ async function persistNewlyTracked(
 }
 
 /**
- * 対話 push で新規追跡したファイルの include パターンを、ファイル本体と同じ push で
- * テンプレの `ziku.jsonc` にも届けるよう調整する（codex P2）。
+ * 対話 push で新規追跡したファイル、および事前に `ziku track` 済みのファイルの
+ * include パターンを、ファイル本体と同じ push でテンプレの `ziku.jsonc` にも
+ * 届くよう調整する（codex P2 / #90）。
  *
- * 背景: ディスク上の `ziku.jsonc` は push 成功後（`persistNewlyTracked`）まで更新されない。
- * そのため classify / detectDiff は旧内容を見て `ziku.jsonc` を「変更なし」と判定し、push 対象から
- * 漏らし得る。これを放置すると、テンプレにファイル本体だけ届いて include パターンが届かず、
+ * 背景（新規追跡分）: ディスク上の `ziku.jsonc` は push 成功後（`persistNewlyTracked`）まで
+ * 更新されない。そのため classify / detectDiff は旧内容を見て `ziku.jsonc` を
+ * 「変更なし」と判定し、push 対象から漏らし得る。
+ *
+ * 背景（事前追跡分・#90）: `ziku track <path>` は即座にディスクの `ziku.jsonc` を更新するため
+ * classify / detectDiff は `ziku.jsonc` の変更を正しく検出する。しかし `ziku push --files=<path>`
+ * のようにファイル本体だけを `--files` に指定すると、`ziku.jsonc` は候補一覧に残っていても
+ * `filterByFilesArg` で除外され、push 対象から漏れる。この場合ファイル本体だけがテンプレに
+ * 届き、include パターンが届かないため、他プロジェクトの `pull` がそのファイルを検出できない。
+ *
+ * どちらの場合も放置すると、テンプレにファイル本体だけ届いて include パターンが届かず、
  * 他プロジェクトの `init` / `pull` が拾えるのが 2 回目の push 後になる。
  *
- * 「実際に push される」新規追跡分だけを union に乗せ（`persistNewlyTracked` の pushed-only
- * セマンティクスと一致させる）、必要なら `ziku.jsonc` を push 候補へ注入する。
+ * 「実際に push される」パスに関連するパターンだけを union に乗せ（無関係なローカル限定
+ * パターンまで巻き込まない）、必要なら `ziku.jsonc` を push 候補へ注入する。
  *
  * @returns ziku.jsonc を補完した push 対象 FileDiff 配列（変更不要なら入力をそのまま返す）。
  */
@@ -711,23 +730,45 @@ async function applyNewlyTrackedConfigToPush(params: {
   const { targetDir, templateDir, newlyTrackedPaths, pushableFiles, diffFiles, mergedContents } =
     params;
 
-  const selectedPaths = new Set(pushableFiles.map((f) => f.path));
-  const trackedAndPushed = newlyTrackedPaths.filter((p) => selectedPaths.has(p));
-  if (trackedAndPushed.length === 0) return pushableFiles;
+  const configAlreadySelected = pushableFiles.some((f) => f.path === ZIKU_CONFIG_FILE);
 
-  const mergedConfig = await computeMergedZikuConfig({
-    targetDir,
-    templateDir,
-    extraIncludes: trackedAndPushed,
-  });
+  const selectedPaths = pushableFiles.map((f) => f.path);
+  const selectedPathSet = new Set(selectedPaths);
+  const trackedAndPushed = newlyTrackedPaths.filter((p) => selectedPathSet.has(p));
+
+  // `--files` でファイル本体だけが指定され、事前に `ziku track` 済みのパターンが
+  // ziku.jsonc の push 候補から漏れているケースを検出する（#90）。ziku.jsonc が既に
+  // 選択済みなら classifyAndResolveConflicts が全パターンを union 済みなので不要。
+  const preexistingRelevant = configAlreadySelected
+    ? []
+    : await findLocalOnlyPatternsForPaths({ targetDir, templateDir, paths: selectedPaths });
+
+  if (trackedAndPushed.length === 0 && preexistingRelevant.length === 0) return pushableFiles;
+
+  // ziku.jsonc が既に明示選択済みなら、ユーザーの意図が明確なのでローカル全体を
+  // 通常どおり和集合する。未選択のまま自動同梱する場合は、無関係なローカル限定
+  // パターンを漏らさないよう、テンプレ + 関連パターンだけに絞った和集合にする（#90）。
+  const mergedConfig = configAlreadySelected
+    ? await computeMergedZikuConfig({ targetDir, templateDir, extraIncludes: trackedAndPushed })
+    : await computeScopedZikuConfig({
+        templateDir,
+        additionalIncludes: [...trackedAndPushed, ...preexistingRelevant],
+      });
   mergedContents.set(ZIKU_CONFIG_FILE, mergedConfig);
 
   // ziku.jsonc が既に push 候補にあれば content は mergedContents が採用されるので注入不要。
-  if (pushableFiles.some((f) => f.path === ZIKU_CONFIG_FILE)) return pushableFiles;
+  if (configAlreadySelected) return pushableFiles;
 
   // union がテンプレと同一なら伝える追加パターンは無い（注入しない）。
   const configDiff = diffFiles.find((f) => f.path === ZIKU_CONFIG_FILE);
   if (mergedConfig === configDiff?.templateContent) return pushableFiles;
+
+  if (preexistingRelevant.length > 0) {
+    log.info(
+      `Also pushing ${ZIKU_CONFIG_FILE} — it registers ${preexistingRelevant.length} pattern(s) needed by the file(s) in this push (#90):`,
+    );
+    for (const p of preexistingRelevant) log.message(`  ${pc.dim("+")} ${p}`);
+  }
 
   // detectDiff が unchanged 判定で漏らしたケース → union を内容とする差分を注入する。
   return [
@@ -739,6 +780,32 @@ async function applyNewlyTrackedConfigToPush(params: {
       templateContent: configDiff?.templateContent,
     },
   ];
+}
+
+/**
+ * dry-run プレビューで、実 push なら `applyNewlyTrackedConfigToPush` が自動同梱する
+ * `ziku.jsonc` をあらかじめ知らせる（#90）。プレビュー自体への注入は行わない
+ * （dry-run は「実際に push される集合」を見せる方針を保つ）。
+ */
+async function warnIfConfigWouldBeAutoIncluded(params: {
+  targetDir: string;
+  templateDir: string;
+  previewFiles: FileDiff[];
+}): Promise<void> {
+  const { targetDir, templateDir, previewFiles } = params;
+  if (previewFiles.some((f) => f.path === ZIKU_CONFIG_FILE)) return;
+
+  const relevantPatterns = await findLocalOnlyPatternsForPaths({
+    targetDir,
+    templateDir,
+    paths: previewFiles.map((f) => f.path),
+  });
+  if (relevantPatterns.length === 0) return;
+
+  log.warn(
+    `${ZIKU_CONFIG_FILE} would also be pushed — it registers ${relevantPatterns.length} pattern(s) needed by the file(s) above (#90):`,
+  );
+  for (const p of relevantPatterns) log.message(`  ${pc.dim("+")} ${p}`);
 }
 
 // ─── ファイル選択 ───
