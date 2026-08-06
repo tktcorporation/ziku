@@ -768,6 +768,11 @@ async function applyNewlyTrackedConfigToPush(params: {
   // 通常どおり和集合する（書き戻しも安全）。未選択のまま自動同梱する場合は、無関係な
   // ローカル限定パターンを漏らさないよう、テンプレ + 関連パターンだけに絞った和集合に
   // する（#90）。この部分集合はローカルへの書き戻しには使えない。
+  //
+  // configWriteBackSafe は「実際に使った merge 関数」と 1:1 で決まる値なので、
+  // どの return 経路でも configAlreadySelected からその都度導出する（分岐ごとに
+  // 別々の真偽値をハードコードすると、将来の変更でここだけ更新漏れが起きうる）。
+  const configWriteBackSafe = configAlreadySelected;
   const mergedConfig = configAlreadySelected
     ? await computeMergedZikuConfig({ targetDir, templateDir, extraIncludes: trackedAndPushed })
     : await computeScopedZikuConfig({
@@ -777,12 +782,12 @@ async function applyNewlyTrackedConfigToPush(params: {
   mergedContents.set(ZIKU_CONFIG_FILE, mergedConfig);
 
   // ziku.jsonc が既に push 候補にあれば content は mergedContents が採用されるので注入不要。
-  if (configAlreadySelected) return { pushableFiles, configWriteBackSafe: true };
+  if (configAlreadySelected) return { pushableFiles, configWriteBackSafe };
 
   // union がテンプレと同一なら伝える追加パターンは無い（注入しない）。
   const configDiff = diffFiles.find((f) => f.path === ZIKU_CONFIG_FILE);
   if (mergedConfig === configDiff?.templateContent) {
-    return { pushableFiles, configWriteBackSafe: true };
+    return { pushableFiles, configWriteBackSafe };
   }
 
   if (preexistingRelevant.length > 0) {
@@ -803,7 +808,7 @@ async function applyNewlyTrackedConfigToPush(params: {
         templateContent: configDiff?.templateContent,
       },
     ],
-    configWriteBackSafe: false,
+    configWriteBackSafe,
   };
 }
 
