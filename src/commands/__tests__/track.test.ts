@@ -239,5 +239,33 @@ describe("trackCommand", () => {
       const parsed = JSON.parse(saved);
       expect(parsed.include).toContain(".cloud/rules/*.md");
     });
+
+    it("既存パターンと新規パターンが混在する場合、プレビューには新規分だけを表示する", async () => {
+      vol.fromJSON({
+        "/project/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"], exclude: [] }),
+      });
+
+      await runTrack("/project", [".mcp.json", ".env.example"], { dryRun: true });
+
+      const messageCall = mockLog.message.mock.calls.find(
+        (c) => typeof c[0] === "string" && c[0].includes("Would add:"),
+      );
+      expect(messageCall?.[0]).toContain(".env.example");
+      expect(messageCall?.[0]).not.toContain(".mcp.json");
+    });
+
+    it("既存パターンと新規パターンが混在する場合、実行時ログにも新規分だけを表示する", async () => {
+      vol.fromJSON({
+        "/project/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"], exclude: [] }),
+      });
+
+      await runTrack("/project", [".mcp.json", ".env.example"]);
+
+      const messageCall = mockLog.message.mock.calls.find(
+        (c) => typeof c[0] === "string" && c[0].includes("Added:"),
+      );
+      expect(messageCall?.[0]).toContain(".env.example");
+      expect(messageCall?.[0]).not.toContain(".mcp.json");
+    });
   });
 });

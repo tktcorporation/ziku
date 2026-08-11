@@ -864,6 +864,23 @@ describe("initCommand", () => {
       expect(dryRunLogOrder).toBeLessThan(fetchTemplatesCallOrder);
     });
 
+    it("存在しないターゲットディレクトリを作成しない", async () => {
+      vol.fromJSON({});
+
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/nonexistent-target", force: false, yes: true, dryRun: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(vol.existsSync("/nonexistent-target")).toBe(false);
+      expect(mockLog.message).toHaveBeenCalledWith(
+        expect.stringContaining("Would create directory"),
+      );
+    });
+
     it(".ziku/lock.json を書き出さない（実書き込みは saveLock 経由）", async () => {
       vol.fromJSON({
         "/test": null,

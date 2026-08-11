@@ -148,13 +148,23 @@ export const initCommand = defineCommand({
     // "init" という引数は無視して現在のディレクトリを使用
     const dir = args.dir === "init" ? "." : args.dir;
     const targetDir = resolve(dir);
+    const dryRun = args.dryRun as boolean;
 
     log.info(`Target: ${pc.cyan(targetDir)}`);
+    if (dryRun) {
+      log.info("Dry run mode");
+    }
 
-    // ディレクトリ作成
+    // ディレクトリ作成。dryRun 中は作成しない — giget や writeFileWithStrategy は
+    // 書き込み時に親ディレクトリを自動作成するため targetDir の事前存在は不要で、
+    // ここで作成すると「何も書き込まなかった」という dryRun の保証に反してしまう。
     if (!existsSync(targetDir)) {
-      mkdirSync(targetDir, { recursive: true });
-      log.message(pc.dim(`Created directory: ${targetDir}`));
+      if (dryRun) {
+        log.message(pc.dim(`Would create directory: ${targetDir}`));
+      } else {
+        mkdirSync(targetDir, { recursive: true });
+        log.message(pc.dim(`Created directory: ${targetDir}`));
+      }
     }
 
     // ─── 入り口: テンプレートソースの解決 ───
@@ -229,11 +239,6 @@ export const initCommand = defineCommand({
         args.yes as boolean,
         zikuConfigExists(targetDir),
       );
-
-      const dryRun = args.dryRun as boolean;
-      if (dryRun) {
-        log.info("Dry run mode");
-      }
 
       // Step 2: ファイルをコピー
       log.step("Applying templates...");

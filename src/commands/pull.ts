@@ -110,7 +110,7 @@ export const pullCommand = defineCommand({
       if (Option.isNone(lockOption)) {
         throw new ZikuError("No .ziku/lock.json found", "Run `ziku init` first");
       }
-      await runContinue(targetDir, lockOption.value);
+      await runContinue(targetDir, lockOption.value, args.dryRun as boolean);
       return;
     }
 
@@ -487,7 +487,7 @@ async function handleDeletedFiles(
   }
 }
 
-async function runContinue(targetDir: string, lock: LockState): Promise<void> {
+async function runContinue(targetDir: string, lock: LockState, dryRun: boolean): Promise<void> {
   if (!lock.pendingMerge) {
     throw new ZikuError("No pending merge found", "Run `ziku pull` first to start a merge");
   }
@@ -512,6 +512,15 @@ async function runContinue(targetDir: string, lock: LockState): Promise<void> {
       "Unresolved conflicts remain",
       "Resolve all conflict markers then run `ziku pull --continue` again",
     );
+  }
+
+  // dryRun: --continue は pendingMerge の確定（lock 更新・baseHashes 前進）が本体の
+  // 副作用なので、書き込みだけ省略する。conflict マーカーの残存チェックは読み取りのみ
+  // なので dryRun でも実行してよい（他の dryRun 分岐と同じくプレビュー精度を保つため）。
+  if (dryRun) {
+    log.info("Dry run mode");
+    outro("Dry run complete — no changes were made. Conflicts are resolved and ready to finalize.");
+    return;
   }
 
   await saveLock(targetDir, {

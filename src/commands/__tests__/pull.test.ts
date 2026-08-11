@@ -944,6 +944,30 @@ describe("pullCommand", () => {
       expect(mockLog.success).toHaveBeenCalledWith("All conflicts resolved");
     });
 
+    it("--continue --dryRun: 全解決済みでも saveLock を呼ばず pendingMerge を確定しない", async () => {
+      vol.fromJSON({
+        "/test/.mcp.json": "resolved content (no conflict markers)",
+      });
+
+      mockLoadLock.mockResolvedValueOnce({
+        ...baseLock,
+        pendingMerge: {
+          conflicts: [".mcp.json"],
+          templateHashes: { ".mcp.json": "newhash" },
+          latestRef: "newref123",
+        },
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, continue: true, dryRun: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockSaveLock).not.toHaveBeenCalled();
+      expect(mockLog.info).toHaveBeenCalledWith("Dry run mode");
+    });
+
     it("downloadBaseForMerge が baseRef 付きで呼ばれる", async () => {
       vol.fromJSON({
         "/test/settings.json": '{"local": true}',

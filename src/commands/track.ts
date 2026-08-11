@@ -6,6 +6,7 @@ import {
   ZIKU_CONFIG_FILE,
   addIncludePattern,
   loadZikuConfig,
+  newIncludePatterns,
   saveZikuConfig,
   zikuConfigExists,
 } from "../utils/ziku-config";
@@ -93,7 +94,7 @@ export const trackCommand = defineCommand({
       );
     }
 
-    const { rawContent } = await loadZikuConfig(targetDir);
+    const { config, rawContent } = await loadZikuConfig(targetDir);
 
     const updatedContent = addIncludePattern(rawContent, patterns);
 
@@ -102,9 +103,13 @@ export const trackCommand = defineCommand({
       return;
     }
 
+    // 指定パターンに既存追跡済みのものが混ざっていても、実際に書き込まれる
+    // 新規パターンだけを表示する（addIncludePattern と同じ差分を使う）。
+    const newPatterns = newIncludePatterns(config.include, patterns);
+
     if (args.dryRun) {
       log.info("Dry run mode");
-      const details = ["Would add:", ...patterns.map((p) => `  ${pc.green("+")} ${p}`)];
+      const details = ["Would add:", ...newPatterns.map((p) => `  ${pc.green("+")} ${p}`)];
       log.message(details.join("\n"));
       outro("Dry run complete — .ziku/ziku.jsonc was not written");
       return;
@@ -113,7 +118,7 @@ export const trackCommand = defineCommand({
     await saveZikuConfig(targetDir, updatedContent);
 
     log.success("Patterns added!");
-    const details = ["Added:", ...patterns.map((p) => `  ${pc.green("+")} ${p}`)];
+    const details = ["Added:", ...newPatterns.map((p) => `  ${pc.green("+")} ${p}`)];
     log.message(details.join("\n"));
     outro("Updated .ziku/ziku.jsonc");
   },

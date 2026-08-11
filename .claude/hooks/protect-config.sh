@@ -56,9 +56,11 @@ DENY_JSON
   fi
 done
 
-# ast-grep ルールファイルも保護（rules/*.yml）
+# ast-grep ルールファイルも保護（sgconfig.yml の ruleDirs: .ast-grep/rules 配下のみ。
+# */rules/*.yml だと無関係な "rules" ディレクトリ（例: 業務ドメインの rules/*.yml）まで
+# 誤検知してブロックしてしまうため、実際のルール置き場だけに絞る）。
 case "$file" in
-  */rules/*.yml|rules/*.yml)
+  */.ast-grep/rules/*.yml|.ast-grep/rules/*.yml)
     cat <<DENY_JSON
 {
   "hookSpecificOutput": {
