@@ -178,6 +178,7 @@ export interface DownloadOptions {
   overwriteStrategy: OverwriteStrategy;
   patterns: FlatPatterns; // フラットな include/exclude パターン
   templateDir?: string; // 事前にダウンロードしたテンプレートディレクトリ
+  dryRun?: boolean; // true の場合、ファイルへの書き込みを行わずプレビューのみ行う
 }
 
 export interface WriteFileOptions {
@@ -185,31 +186,39 @@ export interface WriteFileOptions {
   content: string;
   strategy: OverwriteStrategy;
   relativePath: string;
+  dryRun?: boolean; // true の場合、判定結果は返すがディスクへは書き込まない
 }
 
 /**
- * 上書き戦略に従ってファイルを書き込む
+ * 上書き戦略に従ってファイルを書き込む。
+ *
+ * dryRun: true の場合、実際に書き込むかどうかの判定（新規作成/上書き/スキップ、
+ * および prompt 戦略での確認）は通常どおり行うが、fs への書き込みだけを省略する。
+ * 判定ロジックを複製せず単一の経路で「実行結果」と「プレビュー結果」を一致させる
+ * ための実装なので、判定分岐自体は変更しないこと。
  */
 export async function writeFileWithStrategy(
   options: WriteFileOptions,
 ): Promise<FileOperationResult> {
-  const { destPath, content, strategy, relativePath } = options;
+  const { destPath, content, strategy, relativePath, dryRun = false } = options;
   const destExists = existsSync(destPath);
 
   // ファイルが存在しない場合は常に作成
   if (!destExists) {
-    const destDir = dirname(destPath);
-    if (!existsSync(destDir)) {
-      mkdirSync(destDir, { recursive: true });
+    if (!dryRun) {
+      const destDir = dirname(destPath);
+      if (!existsSync(destDir)) {
+        mkdirSync(destDir, { recursive: true });
+      }
+      writeFileSync(destPath, content);
     }
-    writeFileSync(destPath, content);
     return { action: "created", path: relativePath };
   }
 
   // 既存ファイルの処理 - ts-pattern で網羅的にマッチ
   return await match(strategy)
     .with("overwrite", () => {
-      writeFileSync(destPath, content);
+      if (!dryRun) writeFileSync(destPath, content);
       return { action: "overwritten" as const, path: relativePath };
     })
     .with("skip", () => {
@@ -223,7 +232,7 @@ export async function writeFileWithStrategy(
       if (p.isCancel(shouldOverwrite) || !shouldOverwrite) {
         return { action: "skipped" as const, path: relativePath };
       }
-      writeFileSync(destPath, content);
+      if (!dryRun) writeFileSync(destPath, content);
       return { action: "overwritten" as const, path: relativePath };
     })
     .exhaustive();
@@ -233,7 +242,13 @@ export async function writeFileWithStrategy(
  * テンプレートを取得してパターンベースでコピー
  */
 export function fetchTemplates(options: DownloadOptions): Promise<FileOperationResult[]> {
-  const { targetDir, overwriteStrategy, patterns, templateDir: preDownloadedDir } = options;
+  const {
+    targetDir,
+    overwriteStrategy,
+    patterns,
+    templateDir: preDownloadedDir,
+    dryRun = false,
+  } = options;
   // 事前ダウンロード済みか、新規ダウンロードか
   const shouldDownload = !preDownloadedDir;
   const tempDir = join(targetDir, ".ziku-temp");
@@ -277,7 +292,7 @@ export function fetchTemplates(options: DownloadOptions): Promise<FileOperationR
       const srcPath = join(templateDir, relativePath);
       const destPath = join(targetDir, relativePath);
 
-      const result = await copyFile(srcPath, destPath, overwriteStrategy, relativePath);
+      const result = await copyFile(srcPath, destPath, overwriteStrategy, relativePath, dryRun);
       allResults.push(result);
     }
 
@@ -296,7 +311,7 @@ export function fetchTemplates(options: DownloadOptions): Promise<FileOperationR
         };
         allResults.push(result);
       } else {
-        const result = await copyFile(srcPath, destPath, overwriteStrategy, relativePath);
+        const result = await copyFile(srcPath, destPath, overwriteStrategy, relativePath, dryRun);
         allResults.push(result);
       }
     }
@@ -317,30 +332,37 @@ export function fetchTemplates(options: DownloadOptions): Promise<FileOperationR
 }
 
 /**
- * 単一ファイルをコピー
+ * 単一ファイルをコピー。
+ *
+ * dryRun: true では判定分岐（新規/上書き/スキップ、prompt の確認）は通常どおり行い、
+ * 実際のコピー（mkdirSync/copyFileSync）だけを省略する。writeFileWithStrategy と同じ理由で
+ * 判定ロジックは複製しない。
  */
 export async function copyFile(
   srcPath: string,
   destPath: string,
   strategy: OverwriteStrategy,
   relativePath: string,
+  dryRun = false,
 ): Promise<CopyResult> {
   const destExists = existsSync(destPath);
 
   if (!destExists) {
     // 新規ファイル: 常にコピー
-    const destDir = dirname(destPath);
-    if (!existsSync(destDir)) {
-      mkdirSync(destDir, { recursive: true });
+    if (!dryRun) {
+      const destDir = dirname(destPath);
+      if (!existsSync(destDir)) {
+        mkdirSync(destDir, { recursive: true });
+      }
+      copyFileSync(srcPath, destPath);
     }
-    copyFileSync(srcPath, destPath);
     return { action: "copied", path: relativePath };
   }
 
   // 既存ファイルの処理
   switch (strategy) {
     case "overwrite":
-      copyFileSync(srcPath, destPath);
+      if (!dryRun) copyFileSync(srcPath, destPath);
       return { action: "overwritten", path: relativePath };
 
     case "skip":
@@ -354,7 +376,7 @@ export async function copyFile(
       if (p.isCancel(shouldOverwrite) || !shouldOverwrite) {
         return { action: "skipped", path: relativePath };
       }
-      copyFileSync(srcPath, destPath);
+      if (!dryRun) copyFileSync(srcPath, destPath);
       return { action: "overwritten", path: relativePath };
     }
 

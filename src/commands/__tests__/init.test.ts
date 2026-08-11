@@ -124,7 +124,7 @@ const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy, copyFile 
 const { detectGitHubOwner, detectGitHubRepo } = await import("../../utils/git-remote");
 const { selectDirectories, selectOverwriteStrategy, selectTemplateCandidate } =
   await import("../../ui/prompts");
-const { log } = await import("../../ui/renderer");
+const { log, outro } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
 const { loadTemplateConfig } = await import("../../utils/template-config");
 const { checkRepoExists, checkRepoSetup } = await import("../../utils/github");
@@ -138,6 +138,7 @@ const _mockDetectGitHubRepo = vi.mocked(detectGitHubRepo);
 const mockSelectDirectories = vi.mocked(selectDirectories);
 const mockSelectOverwriteStrategy = vi.mocked(selectOverwriteStrategy);
 const mockLog = vi.mocked(log);
+const mockOutro = vi.mocked(outro);
 const mockHashFiles = vi.mocked(hashFiles);
 const _mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
 const mockCheckRepoExists = vi.mocked(checkRepoExists);
@@ -188,6 +189,11 @@ describe("initCommand", () => {
     it("yes 引数のデフォルト値は false", () => {
       const args = initCommand.args as { yes: { default: boolean } };
       expect(args.yes.default).toBe(false);
+    });
+
+    it("dryRun 引数のデフォルト値は false", () => {
+      const args = initCommand.args as { dryRun: { default: boolean } };
+      expect(args.dryRun.default).toBe(false);
     });
   });
 
@@ -814,6 +820,83 @@ describe("initCommand", () => {
       const lockContent = JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string);
       // base を記録しない（記録すると次回 pull で deletedFiles 判定→制御ファイル削除になる）
       expect(lockContent.baseHashes?.[".ziku/ziku.jsonc"]).toBeUndefined();
+    });
+  });
+
+  describe("dry run (--dryRun)", () => {
+    it("fetchTemplates / writeFileWithStrategy に dryRun: true を渡す", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true, dryRun: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(mockFetchTemplates).toHaveBeenCalledWith(expect.objectContaining({ dryRun: true }));
+      expect(mockWriteFileWithStrategy).toHaveBeenCalledWith(
+        expect.objectContaining({ relativePath: ".ziku/ziku.jsonc", dryRun: true }),
+      );
+    });
+
+    it(".ziku/lock.json を書き出さない（実書き込みは saveLock 経由）", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true, dryRun: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(vol.existsSync("/test/.ziku/lock.json")).toBe(false);
+    });
+
+    it("プレビュー用の outro メッセージを表示する（'Setup complete!' ではない）", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true, dryRun: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(mockOutro).toHaveBeenCalledWith(expect.stringContaining("Dry run complete"));
+      expect(mockOutro).not.toHaveBeenCalledWith(expect.stringContaining("Setup complete!"));
+    });
+
+    it("devcontainer.env.example の作成にも dryRun: true を伝える", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      mockSelectDirectories.mockResolvedValueOnce([".devcontainer/**"]);
+      mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
+      mockFetchTemplates.mockResolvedValue([]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false, dryRun: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(mockWriteFileWithStrategy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          relativePath: ".devcontainer/devcontainer.env.example",
+          dryRun: true,
+        }),
+      );
     });
   });
 });

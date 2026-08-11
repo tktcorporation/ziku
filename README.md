@@ -222,6 +222,7 @@ OPTIONS
   -s, --overwrite-strategy=<overwrite_strategy>    Overwrite strategy: overwrite, skip, or prompt
                                   --from=<from>    Template source as owner/repo (e.g., my-org/my-templates)
                           --from-dir=<from_dir>    Local directory to use as template source (skips GitHub download)
+                                   -n, --dryRun    Preview which files would be created/overwritten, without writing them (Default: false)
 ```
 
 ### `push`
@@ -262,8 +263,9 @@ ARGUMENTS
 
 OPTIONS
 
-  -f, --force    Skip confirmations (Default: false)
-   --continue    Continue after resolving merge conflicts (Default: false)
+   -f, --force    Skip confirmations (Default: false)
+    --continue    Continue after resolving merge conflicts (Default: false)
+  -n, --dryRun    Preview changes without applying them (Default: false)
 ```
 
 ### `diff`
@@ -315,6 +317,7 @@ OPTIONS
 
   -d, --dir=<dir>    Project directory (default: current directory) (Default: .)
        -l, --list    List all currently tracked patterns (Default: false)
+     -n, --dryRun    Preview patterns that would be tracked, without writing (Default: false)
 ```
 
 <!-- COMMANDS:END -->

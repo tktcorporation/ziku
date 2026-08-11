@@ -87,6 +87,12 @@ export const pullCommand = defineCommand({
       description: "Continue after resolving merge conflicts",
       default: false,
     },
+    dryRun: {
+      type: "boolean",
+      alias: "n",
+      description: "Preview changes without applying them",
+      default: false,
+    },
   },
   async run({ args }) {
     intro("pull");
@@ -139,12 +145,7 @@ export const pullCommand = defineCommand({
 
       // テンプレ側で追加された include パターンをユーザー向けに通知。
       // mergeTemplatePatterns 自体は副作用フリーなので、ログはここで行う。
-      if (newInclude.length > 0) {
-        log.info(`Template added ${newInclude.length} new pattern(s):`);
-        for (const p of newInclude) {
-          log.message(`  ${pc.green("+")} ${p}`);
-        }
-      }
+      logNewIncludeNotice(newInclude);
 
       log.step("Analyzing changes...");
 
@@ -202,6 +203,19 @@ export const pullCommand = defineCommand({
         logPullSummary({ ...classification, autoUpdate, conflicts, deletedFiles });
       }
 
+      if (args.dryRun) {
+        await previewPull({
+          targetDir,
+          templateDir,
+          source,
+          lock,
+          conflicts,
+          deletedFiles,
+          configWrite: configSync.write,
+        });
+        return;
+      }
+
       // 自動更新・新規追加・ziku.jsonc union 同期をまとめて適用
       await applyPullUpdates({
         autoUpdate,
@@ -256,6 +270,18 @@ export const pullCommand = defineCommand({
 });
 
 // ─── ヘルパー関数 ───
+
+/**
+ * テンプレ側で追加された include パターンをユーザーへ通知する。
+ * mergeTemplatePatterns 自体は副作用フリーなので、ログ出力はここで行う。
+ */
+function logNewIncludeNotice(newInclude: string[]): void {
+  if (newInclude.length === 0) return;
+  log.info(`Template added ${newInclude.length} new pattern(s):`);
+  for (const p of newInclude) {
+    log.message(`  ${pc.green("+")} ${p}`);
+  }
+}
 
 /**
  * pull における `ziku.jsonc` の加法 union 同期を計算する。
@@ -315,6 +341,47 @@ async function applyPullUpdates(opts: {
 }
 
 /**
+ * `--dryRun` のプレビュー出力。
+ *
+ * 実 pull と同じ auto-merge（resolveConflicts に dryRun: true）を試すことで、
+ * 「実際に conflict が残るのはどのファイルか」まで実挙動と一致させてプレビューする。
+ * ファイルへの書き込みや lock.json の更新は行わない。
+ */
+async function previewPull(params: {
+  targetDir: string;
+  templateDir: string;
+  source: TemplateSource;
+  lock: LockState;
+  conflicts: string[];
+  deletedFiles: string[];
+  configWrite: string | undefined;
+}): Promise<void> {
+  log.info("Dry run mode");
+
+  if (params.configWrite !== undefined) {
+    log.message(`  ${pc.cyan("~")} ${pc.cyan(ZIKU_CONFIG_FILE)} ${pc.dim("(would be merged)")}`);
+  }
+
+  const previewUnresolved = await resolveConflicts(params.conflicts, {
+    targetDir: params.targetDir,
+    templateDir: params.templateDir,
+    source: params.source,
+    lock: params.lock,
+    dryRun: true,
+  });
+
+  if (previewUnresolved.length > 0) {
+    log.warn("Pull would pause here — resolve these conflicts, then run `ziku pull --continue`.");
+  } else if (params.deletedFiles.length > 0) {
+    log.info(
+      `${params.deletedFiles.length} file(s) removed from the template would be candidates for deletion.`,
+    );
+  }
+
+  outro("Dry run complete — no changes were made");
+}
+
+/**
  * テンプレートからファイルをコピーする共通処理。
  * autoUpdate と newFiles で同じロジックを使う（DRY）。
  */
@@ -339,10 +406,12 @@ async function resolveConflicts(
     templateDir: string;
     source: TemplateSource;
     lock: LockState;
+    dryRun?: boolean;
   },
 ): Promise<string[]> {
   if (conflicts.length === 0) return [];
 
+  const dryRun = ctx.dryRun ?? false;
   const unresolvedConflicts: string[] = [];
 
   const baseResult = await Effect.runPromise(
@@ -365,17 +434,24 @@ async function resolveConflicts(
           }),
         );
 
-        await Effect.runPromise(writeFileEnsureDir(join(ctx.targetDir, file), result.content));
+        // dry-run ではマージ結果をディスクへ書かない（プレビューのみ）。
+        if (!dryRun) {
+          await Effect.runPromise(writeFileEnsureDir(join(ctx.targetDir, file), result.content));
+        }
 
         if (result.hasConflicts) {
           unresolvedConflicts.push(file);
-          log.warn(`Conflict in ${pc.cyan(file)} — manual resolution needed`);
+          log.warn(
+            dryRun
+              ? `Conflict in ${pc.cyan(file)} — would need manual resolution`
+              : `Conflict in ${pc.cyan(file)} — manual resolution needed`,
+          );
         } else {
-          log.success(`Auto-merged: ${pc.cyan(file)}`);
+          log.success(`${dryRun ? "Would auto-merge" : "Auto-merged"}: ${pc.cyan(file)}`);
         }
       }
 
-      if (unresolvedConflicts.length > 0) {
+      if (unresolvedConflicts.length > 0 && !dryRun) {
         log.warn("Some files have conflicts. Resolve them, then run `ziku pull --continue`");
       }
     },

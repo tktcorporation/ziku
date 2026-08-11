@@ -159,6 +159,50 @@ describe("copyFile", () => {
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("old content");
     });
   });
+
+  describe("dryRun: true", () => {
+    it("新規ファイルでも実際にはコピーしない（action は copied のまま）", async () => {
+      vol.fromJSON({
+        "/src/file.txt": "source content",
+      });
+
+      const result = await copyFile("/src/file.txt", "/dest/file.txt", "skip", "file.txt", true);
+
+      expect(result).toEqual<CopyResult>({ action: "copied", path: "file.txt" });
+      expect(vol.existsSync("/dest/file.txt")).toBe(false);
+    });
+
+    it("overwrite 戦略でも既存ファイルを書き換えない", async () => {
+      vol.fromJSON({
+        "/src/file.txt": "new content",
+        "/dest/file.txt": "old content",
+      });
+
+      const result = await copyFile(
+        "/src/file.txt",
+        "/dest/file.txt",
+        "overwrite",
+        "file.txt",
+        true,
+      );
+
+      expect(result).toEqual<CopyResult>({ action: "overwritten", path: "file.txt" });
+      expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("old content");
+    });
+
+    it("prompt 戦略は確認自体は行うが、Yes でも実際には書き換えない", async () => {
+      vol.fromJSON({
+        "/src/file.txt": "new content",
+        "/dest/file.txt": "old content",
+      });
+      mockConfirm.mockResolvedValueOnce(true);
+
+      const result = await copyFile("/src/file.txt", "/dest/file.txt", "prompt", "file.txt", true);
+
+      expect(result).toEqual<CopyResult>({ action: "overwritten", path: "file.txt" });
+      expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("old content");
+    });
+  });
 });
 
 describe("writeFileWithStrategy", () => {
@@ -286,6 +330,58 @@ describe("writeFileWithStrategy", () => {
         action: "skipped",
         path: "file.txt",
       });
+      expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("old content");
+    });
+  });
+
+  describe("dryRun: true", () => {
+    it("新規ファイルでも実際には作成しない（action は created のまま）", async () => {
+      vol.fromJSON({});
+
+      const result = await writeFileWithStrategy({
+        destPath: "/dest/file.txt",
+        content: "new content",
+        strategy: "skip",
+        relativePath: "file.txt",
+        dryRun: true,
+      });
+
+      expect(result).toEqual<FileOperationResult>({ action: "created", path: "file.txt" });
+      expect(vol.existsSync("/dest/file.txt")).toBe(false);
+    });
+
+    it("overwrite 戦略でも既存ファイルを書き換えない", async () => {
+      vol.fromJSON({
+        "/dest/file.txt": "old content",
+      });
+
+      const result = await writeFileWithStrategy({
+        destPath: "/dest/file.txt",
+        content: "new content",
+        strategy: "overwrite",
+        relativePath: "file.txt",
+        dryRun: true,
+      });
+
+      expect(result).toEqual<FileOperationResult>({ action: "overwritten", path: "file.txt" });
+      expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("old content");
+    });
+
+    it("prompt 戦略は確認自体は行うが、Yes でも実際には書き換えない", async () => {
+      vol.fromJSON({
+        "/dest/file.txt": "old content",
+      });
+      mockConfirm.mockResolvedValueOnce(true);
+
+      const result = await writeFileWithStrategy({
+        destPath: "/dest/file.txt",
+        content: "new content",
+        strategy: "prompt",
+        relativePath: "file.txt",
+        dryRun: true,
+      });
+
+      expect(result).toEqual<FileOperationResult>({ action: "overwritten", path: "file.txt" });
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("old content");
     });
   });

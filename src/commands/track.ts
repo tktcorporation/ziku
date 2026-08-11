@@ -60,6 +60,12 @@ export const trackCommand = defineCommand({
       description: "List all currently tracked patterns",
       default: false,
     },
+    dryRun: {
+      type: "boolean",
+      alias: "n",
+      description: "Preview patterns that would be tracked, without writing",
+      default: false,
+    },
   },
   async run({ args }) {
     intro("track");
@@ -93,6 +99,14 @@ export const trackCommand = defineCommand({
 
     if (updatedContent === rawContent) {
       log.info("All patterns are already tracked. No changes needed.");
+      return;
+    }
+
+    if (args.dryRun) {
+      log.info("Dry run mode");
+      const details = ["Would add:", ...patterns.map((p) => `  ${pc.green("+")} ${p}`)];
+      log.message(details.join("\n"));
+      outro("Dry run complete — .ziku/ziku.jsonc was not written");
       return;
     }
 
@@ -137,7 +151,14 @@ function parsePatternArgs(): string[] {
   let i = 0;
   while (i < argsAfterTrack.length) {
     const arg = argsAfterTrack[i];
-    if (arg === "--list" || arg === "-l" || arg === "--help" || arg === "-h") {
+    if (
+      arg === "--list" ||
+      arg === "-l" ||
+      arg === "--help" ||
+      arg === "-h" ||
+      arg === "--dryRun" ||
+      arg === "-n"
+    ) {
       i++;
       continue;
     }

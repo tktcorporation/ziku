@@ -134,6 +134,12 @@ export const initCommand = defineCommand({
       type: "string",
       description: "Local directory to use as template source (skips GitHub download)",
     },
+    dryRun: {
+      type: "boolean",
+      alias: "n",
+      description: "Preview which files would be created/overwritten, without writing them",
+      default: false,
+    },
   },
   async run({ args }) {
     // ヘッダー表示
@@ -227,11 +233,14 @@ export const initCommand = defineCommand({
       // Step 2: ファイルをコピー
       log.step("Applying templates...");
 
+      const dryRun = args.dryRun as boolean;
+
       const templateResults = await fetchTemplates({
         targetDir,
         overwriteStrategy: effectiveStrategy,
         patterns: flatPatterns,
         templateDir,
+        dryRun,
       });
 
       const allResults: FileOperationResult[] = [...templateResults];
@@ -239,7 +248,7 @@ export const initCommand = defineCommand({
       // devcontainer.env.example を戦略に従って作成
       const hasDevcontainer = flatPatterns.include.some((p) => p.startsWith(".devcontainer/"));
       if (hasDevcontainer) {
-        const envResult = await createEnvExample(targetDir, effectiveStrategy);
+        const envResult = await createEnvExample(targetDir, effectiveStrategy, dryRun);
         allResults.push(envResult);
       }
 
@@ -282,11 +291,12 @@ export const initCommand = defineCommand({
       const zikuJsoncResult = await writeZikuJsonc(targetDir, {
         patterns: flatPatterns,
         strategy: effectiveStrategy,
+        dryRun,
       });
       allResults.push(zikuJsoncResult);
 
       // .ziku/lock.json を書き出し（source + 同期状態）
-      const lockResult = await writeLockFile(targetDir, { source, baseHashes, baseRef });
+      const lockResult = await writeLockFile(targetDir, { source, baseHashes, baseRef, dryRun });
       allResults.push(lockResult);
 
       // ファイル操作結果を表示（サマリー含む）
@@ -295,6 +305,17 @@ export const initCommand = defineCommand({
       // 変更がない場合
       if (summary.added === 0 && summary.updated === 0) {
         log.info("No changes were made");
+        return;
+      }
+
+      if (dryRun) {
+        outro(
+          [
+            "Dry run complete — no files were written.",
+            "",
+            pc.dim("Run the same command without --dryRun to apply these changes."),
+          ].join("\n"),
+        );
         return;
       }
 
@@ -332,12 +353,14 @@ WAKATIME_API_KEY=
 function createEnvExample(
   targetDir: string,
   strategy: OverwriteStrategy,
+  dryRun = false,
 ): Promise<FileOperationResult> {
   return writeFileWithStrategy({
     destPath: resolve(targetDir, ".devcontainer/devcontainer.env.example"),
     content: ENV_EXAMPLE_CONTENT,
     strategy,
     relativePath: ".devcontainer/devcontainer.env.example",
+    dryRun,
   });
 }
 
@@ -379,6 +402,7 @@ function writeZikuJsonc(
   opts: {
     patterns: FlatPatterns;
     strategy: OverwriteStrategy;
+    dryRun?: boolean;
   },
 ): Promise<FileOperationResult> {
   const content = generateZikuJsonc({
@@ -391,11 +415,15 @@ function writeZikuJsonc(
     content,
     strategy: opts.strategy,
     relativePath: ZIKU_CONFIG_FILE,
+    dryRun: opts.dryRun,
   });
 }
 
 /**
- * .ziku/lock.json を書き出す（source + 同期状態: 常に上書き）
+ * .ziku/lock.json を書き出す（source + 同期状態: 常に上書き）。
+ *
+ * lock.json は overwrite-strategy を持たず常に上書きするため、writeFileWithStrategy を
+ * 経由しない。dryRun: true の場合は判定結果（created/overwritten）だけ返し、saveLock は呼ばない。
  */
 async function writeLockFile(
   targetDir: string,
@@ -403,6 +431,7 @@ async function writeLockFile(
     source: TemplateSource;
     baseHashes?: Record<string, string>;
     baseRef?: string;
+    dryRun?: boolean;
   },
 ): Promise<FileOperationResult> {
   const lock: LockState = {
@@ -416,7 +445,9 @@ async function writeLockFile(
   };
 
   const isNew = !existsSync(join(targetDir, LOCK_FILE));
-  await saveLock(targetDir, lock);
+  if (!opts.dryRun) {
+    await saveLock(targetDir, lock);
+  }
 
   return {
     action: isNew ? "created" : "overwritten",
