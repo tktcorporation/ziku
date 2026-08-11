@@ -190,16 +190,16 @@ describe("copyFile", () => {
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("old content");
     });
 
-    it("prompt 戦略は確認自体は行うが、Yes でも実際には書き換えない", async () => {
+    it("prompt 戦略は confirm() を呼ばず、initialValue と同じ「上書きしない」を既定値にする", async () => {
       vol.fromJSON({
         "/src/file.txt": "new content",
         "/dest/file.txt": "old content",
       });
-      mockConfirm.mockResolvedValueOnce(true);
 
       const result = await copyFile("/src/file.txt", "/dest/file.txt", "prompt", "file.txt", true);
 
-      expect(result).toEqual<CopyResult>({ action: "overwritten", path: "file.txt" });
+      expect(result).toEqual<CopyResult>({ action: "skipped", path: "file.txt" });
+      expect(mockConfirm).not.toHaveBeenCalled();
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("old content");
     });
   });
@@ -367,11 +367,10 @@ describe("writeFileWithStrategy", () => {
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("old content");
     });
 
-    it("prompt 戦略は確認自体は行うが、Yes でも実際には書き換えない", async () => {
+    it("prompt 戦略は confirm() を呼ばず、initialValue と同じ「上書きしない」を既定値にする", async () => {
       vol.fromJSON({
         "/dest/file.txt": "old content",
       });
-      mockConfirm.mockResolvedValueOnce(true);
 
       const result = await writeFileWithStrategy({
         destPath: "/dest/file.txt",
@@ -381,7 +380,8 @@ describe("writeFileWithStrategy", () => {
         dryRun: true,
       });
 
-      expect(result).toEqual<FileOperationResult>({ action: "overwritten", path: "file.txt" });
+      expect(result).toEqual<FileOperationResult>({ action: "skipped", path: "file.txt" });
+      expect(mockConfirm).not.toHaveBeenCalled();
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("old content");
     });
   });

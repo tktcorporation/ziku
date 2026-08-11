@@ -192,10 +192,13 @@ export interface WriteFileOptions {
 /**
  * 上書き戦略に従ってファイルを書き込む。
  *
- * dryRun: true の場合、実際に書き込むかどうかの判定（新規作成/上書き/スキップ、
- * および prompt 戦略での確認）は通常どおり行うが、fs への書き込みだけを省略する。
- * 判定ロジックを複製せず単一の経路で「実行結果」と「プレビュー結果」を一致させる
- * ための実装なので、判定分岐自体は変更しないこと。
+ * dryRun: true の場合、新規作成/上書き/スキップの判定は通常どおり行うが、fs への
+ * 書き込みだけを省略する。判定ロジックを複製せず単一の経路で「実行結果」と
+ * 「プレビュー結果」を一致させるための実装なので、判定分岐自体は変更しないこと。
+ * ただし prompt 戦略は例外で、dryRun 中は confirm() を呼ばずに `p.confirm` の
+ * `initialValue: false` と同じ既定値（上書きしない）を採用する。push の
+ * dry-run（対話選択を行わず既定選択をそのまま使う）と同じ方針で、プレビューが
+ * 対話入力をブロックしないようにするため。
  */
 export async function writeFileWithStrategy(
   options: WriteFileOptions,
@@ -225,6 +228,9 @@ export async function writeFileWithStrategy(
       return { action: "skipped" as const, path: relativePath };
     })
     .with("prompt", async () => {
+      if (dryRun) {
+        return { action: "skipped" as const, path: relativePath };
+      }
       const shouldOverwrite = await p.confirm({
         message: `${relativePath} already exists. Overwrite?`,
         initialValue: false,
@@ -232,7 +238,7 @@ export async function writeFileWithStrategy(
       if (p.isCancel(shouldOverwrite) || !shouldOverwrite) {
         return { action: "skipped" as const, path: relativePath };
       }
-      if (!dryRun) writeFileSync(destPath, content);
+      writeFileSync(destPath, content);
       return { action: "overwritten" as const, path: relativePath };
     })
     .exhaustive();
@@ -334,9 +340,10 @@ export function fetchTemplates(options: DownloadOptions): Promise<FileOperationR
 /**
  * 単一ファイルをコピー。
  *
- * dryRun: true では判定分岐（新規/上書き/スキップ、prompt の確認）は通常どおり行い、
- * 実際のコピー（mkdirSync/copyFileSync）だけを省略する。writeFileWithStrategy と同じ理由で
- * 判定ロジックは複製しない。
+ * dryRun: true では新規/上書き/スキップの判定は通常どおり行い、実際のコピー
+ * （mkdirSync/copyFileSync）だけを省略する。writeFileWithStrategy と同じ理由で
+ * 判定ロジックは複製しない。prompt 戦略の dryRun 時の扱いも同関数と同じ
+ * （confirm() を呼ばず `initialValue: false` 相当の「上書きしない」を既定値にする）。
  */
 export async function copyFile(
   srcPath: string,
@@ -369,6 +376,9 @@ export async function copyFile(
       return { action: "skipped", path: relativePath };
 
     case "prompt": {
+      if (dryRun) {
+        return { action: "skipped", path: relativePath };
+      }
       const shouldOverwrite = await p.confirm({
         message: `${relativePath} already exists. Overwrite?`,
         initialValue: false,
@@ -376,7 +386,7 @@ export async function copyFile(
       if (p.isCancel(shouldOverwrite) || !shouldOverwrite) {
         return { action: "skipped", path: relativePath };
       }
-      if (!dryRun) copyFileSync(srcPath, destPath);
+      copyFileSync(srcPath, destPath);
       return { action: "overwritten", path: relativePath };
     }
 
