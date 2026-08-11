@@ -168,6 +168,10 @@ jobs:
   release-dry-run:
     name: Release Dry Run
     runs-on: ubuntu-latest
+    # changeset version 経由の @changesets/changelog-github が GitHub API 呼び出しで
+    # ハングすると、タイムアウトが無いためジョブが無期限に張り付く（実際に約80分ハングした
+    # 事例を確認済み）。job 全体に上限を設け、無応答時は失敗として気づけるようにする。
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
