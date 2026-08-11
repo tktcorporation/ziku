@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmdirSync } from "node:fs";
 import { defineCommand } from "citty";
 import { Effect } from "effect";
 import { join, resolve } from "pathe";
@@ -149,6 +149,9 @@ export const initCommand = defineCommand({
     const dir = args.dir === "init" ? "." : args.dir;
     const targetDir = resolve(dir);
     const dryRun = args.dryRun as boolean;
+    // dryRun 中に targetDir が新規作成された場合、後始末の判断に使う
+    // （既存ディレクトリなら dryRun でも消してはいけない）。
+    const targetDirPreexisted = existsSync(targetDir);
 
     log.info(`Target: ${pc.cyan(targetDir)}`);
     if (dryRun) {
@@ -158,7 +161,7 @@ export const initCommand = defineCommand({
     // ディレクトリ作成。dryRun 中は作成しない — giget や writeFileWithStrategy は
     // 書き込み時に親ディレクトリを自動作成するため targetDir の事前存在は不要で、
     // ここで作成すると「何も書き込まなかった」という dryRun の保証に反してしまう。
-    if (!existsSync(targetDir)) {
+    if (!targetDirPreexisted) {
       if (dryRun) {
         log.message(pc.dim(`Would create directory: ${targetDir}`));
       } else {
@@ -185,18 +188,40 @@ export const initCommand = defineCommand({
       const resolved = await resolveTemplateSourceWithCheck(
         args.from as string | undefined,
         args.yes as boolean,
+        dryRun,
       );
       source = { owner: resolved.sourceOwner, repo: resolved.sourceRepo };
 
       log.info(`Template: ${pc.cyan(`${resolved.sourceOwner}/${resolved.sourceRepo}`)}`);
 
       log.step("Fetching template...");
+      // giget は tempDir (targetDir/.ziku-temp) の親ディレクトリも再帰的に作成するため、
+      // dryRun かつ targetDir が未作成だった場合、ここで targetDir 自体が
+      // 副作用的に作られてしまう。cleanup 合成でこの分も後始末する
+      // （下の finally 相当の cleanup 差し替えを参照）。
       const downloaded = await withSpinner("Downloading template from GitHub...", () =>
         downloadTemplateToTemp(targetDir, `gh:${resolved.sourceOwner}/${resolved.sourceRepo}`),
       );
       templateDir = downloaded.templateDir;
       cleanup = downloaded.cleanup;
     }
+
+    // dryRun で targetDir が存在しなかった場合、giget のダウンロード（tempDir 作成）が
+    // targetDir 自体を副作用的に作ってしまうことがある。テンプレート側の cleanup
+    // （tempDir 削除）の後に、targetDir が空のままなら削除して
+    // 「dryRun は何も書き込まない」という保証を守る。既存ディレクトリだった場合や、
+    // 中身が残っている場合（何らかの理由で書き込みが発生した場合）は削除しない。
+    const cleanupWithTargetDir = (): void => {
+      cleanup();
+      if (
+        dryRun &&
+        !targetDirPreexisted &&
+        existsSync(targetDir) &&
+        readdirSync(targetDir).length === 0
+      ) {
+        rmdirSync(targetDir);
+      }
+    };
 
     // ─── 共通処理: テンプレート適用 ───
     await withFinally(async () => {
@@ -339,7 +364,7 @@ export const initCommand = defineCommand({
           `  ${pc.dim("Check for updates from upstream")}`,
         ].join("\n"),
       );
-    }, cleanup);
+    }, cleanupWithTargetDir);
   },
 });
 
@@ -565,6 +590,7 @@ async function resolveEffectiveStrategy(
 async function resolveTemplateSourceWithCheck(
   from: string | undefined,
   nonInteractive: boolean,
+  dryRun: boolean,
 ): Promise<{
   sourceOwner: string;
   sourceRepo: string;
@@ -584,17 +610,17 @@ async function resolveTemplateSourceWithCheck(
 
   if (existingCandidates.length > 0) {
     const selected = await selectTemplateCandidate(existingCandidates);
-    if (selected === "specify-other") return promptTemplateSource();
+    if (selected === "specify-other") return promptTemplateSource(dryRun);
     return { sourceOwner: selected.owner, sourceRepo: selected.repo };
   }
 
   if (candidateEntries.length > 0) {
     const firstCandidate = candidateEntries[0];
-    return handleMissingTemplate(firstCandidate.owner, firstCandidate.repo);
+    return handleMissingTemplate(firstCandidate.owner, firstCandidate.repo, dryRun);
   }
 
   log.warn("Could not detect template source from git remote.");
-  return promptTemplateSource();
+  return promptTemplateSource(dryRun);
 }
 
 /**
@@ -836,7 +862,9 @@ function resolveNonInteractive(
 /**
  * ユーザーにテンプレートソースを入力させ、存在チェックを行う
  */
-async function promptTemplateSource(): Promise<{ sourceOwner: string; sourceRepo: string }> {
+async function promptTemplateSource(
+  dryRun: boolean,
+): Promise<{ sourceOwner: string; sourceRepo: string }> {
   const source = await inputTemplateSource();
   const slashIndex = source.indexOf("/");
   const owner = source.slice(0, slashIndex);
@@ -849,7 +877,7 @@ async function promptTemplateSource(): Promise<{ sourceOwner: string; sourceRepo
       warnUnknownRepo(owner, repo, u);
       return { sourceOwner: owner, sourceRepo: repo };
     })
-    .with({ _tag: "NotFound" }, () => handleMissingTemplate(owner, repo))
+    .with({ _tag: "NotFound" }, () => handleMissingTemplate(owner, repo, dryRun))
     .with({ _tag: "RateLimited" }, (r): never => {
       throw rateLimitedError(r);
     })
@@ -860,16 +888,29 @@ async function promptTemplateSource(): Promise<{ sourceOwner: string; sourceRepo
 }
 
 /**
- * テンプレートリポジトリが見つからない場合のインタラクティブハンドリング
+ * テンプレートリポジトリが見つからない場合のインタラクティブハンドリング。
+ *
+ * dryRun: true では "create-repo" を選んでも実際には作成しない。リポジトリ作成は
+ * ローカルの取り消し不能な変更ではなく GitHub 上への実書き込みで、他の dryRun 分岐
+ * （ファイル書き込みの省略）と違って「実行したふり」ができない。プレビューを続行
+ * するための有効なソースを作れないため、ここで中断してユーザーに選択肢を示す。
  */
 async function handleMissingTemplate(
   owner: string,
   repo: string,
+  dryRun: boolean,
 ): Promise<{ sourceOwner: string; sourceRepo: string }> {
   const action = await selectMissingTemplateAction(owner, repo);
 
   return match(action)
     .with("create-repo", async () => {
+      if (dryRun) {
+        throw new ZikuError(
+          `Would create template repository ${owner}/${repo}, but --dryRun prevents remote changes`,
+          "Run without --dryRun to create it, or specify an existing template with --from",
+        );
+      }
+
       const token = getGitHubToken();
       if (!token) {
         throw new ZikuError(
@@ -888,7 +929,7 @@ async function handleMissingTemplate(
 
       return { sourceOwner: owner, sourceRepo: repo };
     })
-    .with("specify-source", () => promptTemplateSource())
+    .with("specify-source", () => promptTemplateSource(dryRun))
     .exhaustive();
 }
 

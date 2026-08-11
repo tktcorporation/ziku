@@ -881,6 +881,57 @@ describe("initCommand", () => {
       );
     });
 
+    it("リモートダウンロードが targetDir を副作用的に作成しても、空なら後始末する", async () => {
+      vol.fromJSON({});
+
+      // giget は tempDir (targetDir/.ziku-temp) 作成時に targetDir 自体も
+      // 再帰的に作成する。この副作用をモックで再現する。
+      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: string) => {
+        vol.mkdirSync(`${targetDir}/.ziku-temp`, { recursive: true });
+        return {
+          templateDir: `${targetDir}/.ziku-temp`,
+          cleanup: () => {
+            vol.rmSync(`${targetDir}/.ziku-temp`, { recursive: true, force: true });
+          },
+        };
+      });
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/nonexistent-remote-target", force: false, yes: true, dryRun: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(vol.existsSync("/nonexistent-remote-target")).toBe(false);
+    });
+
+    it("ターゲットディレクトリが元々存在していた場合は dryRun でも削除しない", async () => {
+      vol.fromJSON({
+        "/existing-target/.gitkeep": "",
+      });
+
+      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: string) => {
+        vol.mkdirSync(`${targetDir}/.ziku-temp`, { recursive: true });
+        return {
+          templateDir: `${targetDir}/.ziku-temp`,
+          cleanup: () => {
+            vol.rmSync(`${targetDir}/.ziku-temp`, { recursive: true, force: true });
+          },
+        };
+      });
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/existing-target", force: false, yes: true, dryRun: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(vol.existsSync("/existing-target")).toBe(true);
+      expect(vol.existsSync("/existing-target/.gitkeep")).toBe(true);
+    });
+
     it(".ziku/lock.json を書き出さない（実書き込みは saveLock 経由）", async () => {
       vol.fromJSON({
         "/test": null,

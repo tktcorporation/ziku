@@ -263,6 +263,17 @@ describe("init: セットアップ UX", () => {
       );
     });
 
+    it("--dryRun ではリポジトリ作成を選択しても実際には作成しない", async () => {
+      mockCheckRepoExists
+        .mockResolvedValueOnce({ _tag: "NotFound" })
+        .mockResolvedValueOnce({ _tag: "NotFound" });
+      mockSelectMissingTemplateAction.mockResolvedValueOnce("create-repo");
+      mockGetGitHubToken.mockReturnValue("ghp_test_token");
+
+      await expect(runInit({ dryRun: true })).rejects.toThrow("--dryRun prevents remote changes");
+      expect(mockScaffoldTemplateRepo).not.toHaveBeenCalled();
+    });
+
     it("リポジトリ作成時に GitHub トークンがなければエラー", async () => {
       mockCheckRepoExists
         .mockResolvedValueOnce({ _tag: "NotFound" })
