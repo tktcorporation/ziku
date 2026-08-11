@@ -77,13 +77,23 @@ export function generateZikuJsonc(opts: { include: string[]; exclude: string[] }
 }
 
 /**
+ * patterns のうち、まだ existing に含まれていない新規パターンだけを返す。
+ * addIncludePattern の判定基準と呼び出し元（track コマンドのプレビュー等）の表示を
+ * 同じ差分に揃えるための共有ヘルパー。ここを分けないと「実際に追加される集合」と
+ * 「表示される集合」が別々の判定になり、既存パターンを混ぜて指定したときにズレる。
+ */
+export function newIncludePatterns(existing: string[], patterns: string[]): string[] {
+  return patterns.filter((p) => !existing.includes(p));
+}
+
+/**
  * ziku.jsonc の include にパターンを追加
  * @returns 更新後の JSONC 文字列
  */
 export function addIncludePattern(rawContent: string, patterns: string[]): string {
   const parsed = parse(rawContent) as ZikuConfig;
   const existing = parsed.include ?? [];
-  const newPatterns = patterns.filter((p) => !existing.includes(p));
+  const newPatterns = newIncludePatterns(existing, patterns);
 
   if (newPatterns.length === 0) {
     return rawContent;

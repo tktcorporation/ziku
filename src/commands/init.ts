@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmdirSync } from "node:fs";
 import { defineCommand } from "citty";
 import { Effect } from "effect";
-import { join, resolve } from "pathe";
+import { dirname, join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { loadTemplateConfig, extractDirectoryEntries } from "../utils/template-config";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
@@ -134,6 +134,12 @@ export const initCommand = defineCommand({
       type: "string",
       description: "Local directory to use as template source (skips GitHub download)",
     },
+    dryRun: {
+      type: "boolean",
+      alias: "n",
+      description: "Preview which files would be created/overwritten, without writing them",
+      default: false,
+    },
   },
   async run({ args }) {
     // ヘッダー表示
@@ -142,13 +148,29 @@ export const initCommand = defineCommand({
     // "init" という引数は無視して現在のディレクトリを使用
     const dir = args.dir === "init" ? "." : args.dir;
     const targetDir = resolve(dir);
+    const dryRun = args.dryRun as boolean;
+    // targetDir 自身だけでなく、存在しない祖先ディレクトリも giget が recursive:true で
+    // まとめて作ってしまう（例: targetDir が /tmp/new-parent/project で new-parent も
+    // 未作成の場合、両方が副作用で作られる）。dryRun 終了後にどこまで後始末してよいかの
+    // 基準点として、実行前から存在していた最も近い祖先を記録しておく。
+    const existingAncestor = findExistingAncestor(targetDir);
+    const targetDirPreexisted = existingAncestor === targetDir;
 
     log.info(`Target: ${pc.cyan(targetDir)}`);
+    if (dryRun) {
+      log.info("Dry run mode");
+    }
 
-    // ディレクトリ作成
-    if (!existsSync(targetDir)) {
-      mkdirSync(targetDir, { recursive: true });
-      log.message(pc.dim(`Created directory: ${targetDir}`));
+    // ディレクトリ作成。dryRun 中は作成しない — giget や writeFileWithStrategy は
+    // 書き込み時に親ディレクトリを自動作成するため targetDir の事前存在は不要で、
+    // ここで作成すると「何も書き込まなかった」という dryRun の保証に反してしまう。
+    if (!targetDirPreexisted) {
+      if (dryRun) {
+        log.message(pc.dim(`Would create directory: ${targetDir}`));
+      } else {
+        mkdirSync(targetDir, { recursive: true });
+        log.message(pc.dim(`Created directory: ${targetDir}`));
+      }
     }
 
     // ─── 入り口: テンプレートソースの解決 ───
@@ -169,18 +191,40 @@ export const initCommand = defineCommand({
       const resolved = await resolveTemplateSourceWithCheck(
         args.from as string | undefined,
         args.yes as boolean,
+        dryRun,
       );
       source = { owner: resolved.sourceOwner, repo: resolved.sourceRepo };
 
       log.info(`Template: ${pc.cyan(`${resolved.sourceOwner}/${resolved.sourceRepo}`)}`);
 
       log.step("Fetching template...");
+      // giget は tempDir (targetDir/.ziku-temp) の親ディレクトリも再帰的に作成するため、
+      // dryRun かつ targetDir が未作成だった場合、ここで targetDir 自体が副作用的に
+      // 作られてしまう。ダウンロードが失敗した場合も同じ副作用は起きているのに、
+      // 失敗時は cleanupWithTargetDir の構築（このブロックの外）まで到達せず後始末が
+      // 漏れるため、ここでも失敗経路を捕まえて同じ後始末を行う（try/catch は
+      // ast-grep で禁止のため Promise.then(onFulfilled, onRejected) を使う）。
       const downloaded = await withSpinner("Downloading template from GitHub...", () =>
         downloadTemplateToTemp(targetDir, `gh:${resolved.sourceOwner}/${resolved.sourceRepo}`),
+      ).then(
+        (result) => result,
+        (error: unknown) => {
+          removeEmptyDryRunDirs(targetDir, dryRun, existingAncestor);
+          throw error;
+        },
       );
       templateDir = downloaded.templateDir;
       cleanup = downloaded.cleanup;
     }
+
+    // dryRun で targetDir やその祖先が存在しなかった場合、giget のダウンロード
+    // （tempDir 作成）がそれらを副作用的に作ってしまうことがある。テンプレート側の
+    // cleanup（tempDir 削除）の後に、existingAncestor に達するまで空のディレクトリを
+    // 削除する。
+    const cleanupWithTargetDir = (): void => {
+      cleanup();
+      removeEmptyDryRunDirs(targetDir, dryRun, existingAncestor);
+    };
 
     // ─── 共通処理: テンプレート適用 ───
     await withFinally(async () => {
@@ -232,6 +276,7 @@ export const initCommand = defineCommand({
         overwriteStrategy: effectiveStrategy,
         patterns: flatPatterns,
         templateDir,
+        dryRun,
       });
 
       const allResults: FileOperationResult[] = [...templateResults];
@@ -239,7 +284,7 @@ export const initCommand = defineCommand({
       // devcontainer.env.example を戦略に従って作成
       const hasDevcontainer = flatPatterns.include.some((p) => p.startsWith(".devcontainer/"));
       if (hasDevcontainer) {
-        const envResult = await createEnvExample(targetDir, effectiveStrategy);
+        const envResult = await createEnvExample(targetDir, effectiveStrategy, dryRun);
         allResults.push(envResult);
       }
 
@@ -282,11 +327,12 @@ export const initCommand = defineCommand({
       const zikuJsoncResult = await writeZikuJsonc(targetDir, {
         patterns: flatPatterns,
         strategy: effectiveStrategy,
+        dryRun,
       });
       allResults.push(zikuJsoncResult);
 
       // .ziku/lock.json を書き出し（source + 同期状態）
-      const lockResult = await writeLockFile(targetDir, { source, baseHashes, baseRef });
+      const lockResult = await writeLockFile(targetDir, { source, baseHashes, baseRef, dryRun });
       allResults.push(lockResult);
 
       // ファイル操作結果を表示（サマリー含む）
@@ -295,6 +341,17 @@ export const initCommand = defineCommand({
       // 変更がない場合
       if (summary.added === 0 && summary.updated === 0) {
         log.info("No changes were made");
+        return;
+      }
+
+      if (dryRun) {
+        outro(
+          [
+            "Dry run complete — no files were written.",
+            "",
+            pc.dim("Run the same command without --dryRun to apply these changes."),
+          ].join("\n"),
+        );
         return;
       }
 
@@ -310,7 +367,7 @@ export const initCommand = defineCommand({
           `  ${pc.dim("Check for updates from upstream")}`,
         ].join("\n"),
       );
-    }, cleanup);
+    }, cleanupWithTargetDir);
   },
 });
 
@@ -329,15 +386,52 @@ AWS_DEFAULT_REGION=ap-northeast-1
 WAKATIME_API_KEY=
 `;
 
+/**
+ * dir から見て、実行前から存在していた最も近い祖先ディレクトリを返す。dir 自身が
+ * 既に存在する場合は dir 自身を返す。dryRun 終了後の後始末で「どこまで削除して
+ * よいか」の基準点として使う。
+ */
+function findExistingAncestor(dir: string): string {
+  let current = dir;
+  while (!existsSync(current)) {
+    const parent = dirname(current);
+    if (parent === current) return current; // ルートに到達（通常は起きない）
+    current = parent;
+  }
+  return current;
+}
+
+/**
+ * dryRun 中に targetDir、あるいはその祖先ディレクトリが副作用（giget の
+ * recursive:true な tempDir 作成等）で新規作成された場合、空のままなら
+ * existingAncestor に達するまで削除して「dryRun は何も書き込まない」という
+ * 保証を守る。existingAncestor より上（実行前から存在した部分）や、中身が
+ * 残っているディレクトリ（何らかの理由で書き込みが発生した場合）は削除しない。
+ * ダウンロード成功時・失敗時の両方から呼ばれる（失敗時に呼ばないと、途中まで
+ * 作られたディレクトリが残ってしまう）。
+ */
+function removeEmptyDryRunDirs(targetDir: string, dryRun: boolean, existingAncestor: string): void {
+  if (!dryRun) return;
+
+  let current = targetDir;
+  while (current !== existingAncestor) {
+    if (!existsSync(current) || readdirSync(current).length > 0) return;
+    rmdirSync(current);
+    current = dirname(current);
+  }
+}
+
 function createEnvExample(
   targetDir: string,
   strategy: OverwriteStrategy,
+  dryRun = false,
 ): Promise<FileOperationResult> {
   return writeFileWithStrategy({
     destPath: resolve(targetDir, ".devcontainer/devcontainer.env.example"),
     content: ENV_EXAMPLE_CONTENT,
     strategy,
     relativePath: ".devcontainer/devcontainer.env.example",
+    dryRun,
   });
 }
 
@@ -379,6 +473,7 @@ function writeZikuJsonc(
   opts: {
     patterns: FlatPatterns;
     strategy: OverwriteStrategy;
+    dryRun?: boolean;
   },
 ): Promise<FileOperationResult> {
   const content = generateZikuJsonc({
@@ -391,11 +486,15 @@ function writeZikuJsonc(
     content,
     strategy: opts.strategy,
     relativePath: ZIKU_CONFIG_FILE,
+    dryRun: opts.dryRun,
   });
 }
 
 /**
- * .ziku/lock.json を書き出す（source + 同期状態: 常に上書き）
+ * .ziku/lock.json を書き出す（source + 同期状態: 常に上書き）。
+ *
+ * lock.json は overwrite-strategy を持たず常に上書きするため、writeFileWithStrategy を
+ * 経由しない。dryRun: true の場合は判定結果（created/overwritten）だけ返し、saveLock は呼ばない。
  */
 async function writeLockFile(
   targetDir: string,
@@ -403,6 +502,7 @@ async function writeLockFile(
     source: TemplateSource;
     baseHashes?: Record<string, string>;
     baseRef?: string;
+    dryRun?: boolean;
   },
 ): Promise<FileOperationResult> {
   const lock: LockState = {
@@ -416,7 +516,9 @@ async function writeLockFile(
   };
 
   const isNew = !existsSync(join(targetDir, LOCK_FILE));
-  await saveLock(targetDir, lock);
+  if (!opts.dryRun) {
+    await saveLock(targetDir, lock);
+  }
 
   return {
     action: isNew ? "created" : "overwritten",
@@ -526,6 +628,7 @@ async function resolveEffectiveStrategy(
 async function resolveTemplateSourceWithCheck(
   from: string | undefined,
   nonInteractive: boolean,
+  dryRun: boolean,
 ): Promise<{
   sourceOwner: string;
   sourceRepo: string;
@@ -545,17 +648,17 @@ async function resolveTemplateSourceWithCheck(
 
   if (existingCandidates.length > 0) {
     const selected = await selectTemplateCandidate(existingCandidates);
-    if (selected === "specify-other") return promptTemplateSource();
+    if (selected === "specify-other") return promptTemplateSource(dryRun);
     return { sourceOwner: selected.owner, sourceRepo: selected.repo };
   }
 
   if (candidateEntries.length > 0) {
     const firstCandidate = candidateEntries[0];
-    return handleMissingTemplate(firstCandidate.owner, firstCandidate.repo);
+    return handleMissingTemplate(firstCandidate.owner, firstCandidate.repo, dryRun);
   }
 
   log.warn("Could not detect template source from git remote.");
-  return promptTemplateSource();
+  return promptTemplateSource(dryRun);
 }
 
 /**
@@ -797,7 +900,9 @@ function resolveNonInteractive(
 /**
  * ユーザーにテンプレートソースを入力させ、存在チェックを行う
  */
-async function promptTemplateSource(): Promise<{ sourceOwner: string; sourceRepo: string }> {
+async function promptTemplateSource(
+  dryRun: boolean,
+): Promise<{ sourceOwner: string; sourceRepo: string }> {
   const source = await inputTemplateSource();
   const slashIndex = source.indexOf("/");
   const owner = source.slice(0, slashIndex);
@@ -810,7 +915,7 @@ async function promptTemplateSource(): Promise<{ sourceOwner: string; sourceRepo
       warnUnknownRepo(owner, repo, u);
       return { sourceOwner: owner, sourceRepo: repo };
     })
-    .with({ _tag: "NotFound" }, () => handleMissingTemplate(owner, repo))
+    .with({ _tag: "NotFound" }, () => handleMissingTemplate(owner, repo, dryRun))
     .with({ _tag: "RateLimited" }, (r): never => {
       throw rateLimitedError(r);
     })
@@ -821,16 +926,29 @@ async function promptTemplateSource(): Promise<{ sourceOwner: string; sourceRepo
 }
 
 /**
- * テンプレートリポジトリが見つからない場合のインタラクティブハンドリング
+ * テンプレートリポジトリが見つからない場合のインタラクティブハンドリング。
+ *
+ * dryRun: true では "create-repo" を選んでも実際には作成しない。リポジトリ作成は
+ * ローカルの取り消し不能な変更ではなく GitHub 上への実書き込みで、他の dryRun 分岐
+ * （ファイル書き込みの省略）と違って「実行したふり」ができない。プレビューを続行
+ * するための有効なソースを作れないため、ここで中断してユーザーに選択肢を示す。
  */
 async function handleMissingTemplate(
   owner: string,
   repo: string,
+  dryRun: boolean,
 ): Promise<{ sourceOwner: string; sourceRepo: string }> {
   const action = await selectMissingTemplateAction(owner, repo);
 
   return match(action)
     .with("create-repo", async () => {
+      if (dryRun) {
+        throw new ZikuError(
+          `Would create template repository ${owner}/${repo}, but --dryRun prevents remote changes`,
+          "Run without --dryRun to create it, or specify an existing template with --from",
+        );
+      }
+
       const token = getGitHubToken();
       if (!token) {
         throw new ZikuError(
@@ -849,7 +967,7 @@ async function handleMissingTemplate(
 
       return { sourceOwner: owner, sourceRepo: repo };
     })
-    .with("specify-source", () => promptTemplateSource())
+    .with("specify-source", () => promptTemplateSource(dryRun))
     .exhaustive();
 }
 

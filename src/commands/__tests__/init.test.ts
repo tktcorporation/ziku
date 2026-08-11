@@ -124,7 +124,7 @@ const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy, copyFile 
 const { detectGitHubOwner, detectGitHubRepo } = await import("../../utils/git-remote");
 const { selectDirectories, selectOverwriteStrategy, selectTemplateCandidate } =
   await import("../../ui/prompts");
-const { log } = await import("../../ui/renderer");
+const { log, outro } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
 const { loadTemplateConfig } = await import("../../utils/template-config");
 const { checkRepoExists, checkRepoSetup } = await import("../../utils/github");
@@ -138,6 +138,7 @@ const _mockDetectGitHubRepo = vi.mocked(detectGitHubRepo);
 const mockSelectDirectories = vi.mocked(selectDirectories);
 const mockSelectOverwriteStrategy = vi.mocked(selectOverwriteStrategy);
 const mockLog = vi.mocked(log);
+const mockOutro = vi.mocked(outro);
 const mockHashFiles = vi.mocked(hashFiles);
 const _mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
 const mockCheckRepoExists = vi.mocked(checkRepoExists);
@@ -188,6 +189,11 @@ describe("initCommand", () => {
     it("yes 引数のデフォルト値は false", () => {
       const args = initCommand.args as { yes: { default: boolean } };
       expect(args.yes.default).toBe(false);
+    });
+
+    it("dryRun 引数のデフォルト値は false", () => {
+      const args = initCommand.args as { dryRun: { default: boolean } };
+      expect(args.dryRun.default).toBe(false);
     });
   });
 
@@ -814,6 +820,228 @@ describe("initCommand", () => {
       const lockContent = JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string);
       // base を記録しない（記録すると次回 pull で deletedFiles 判定→制御ファイル削除になる）
       expect(lockContent.baseHashes?.[".ziku/ziku.jsonc"]).toBeUndefined();
+    });
+  });
+
+  describe("dry run (--dryRun)", () => {
+    it("fetchTemplates / writeFileWithStrategy に dryRun: true を渡す", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true, dryRun: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(mockFetchTemplates).toHaveBeenCalledWith(expect.objectContaining({ dryRun: true }));
+      expect(mockWriteFileWithStrategy).toHaveBeenCalledWith(
+        expect.objectContaining({ relativePath: ".ziku/ziku.jsonc", dryRun: true }),
+      );
+    });
+
+    it("ファイル一覧を表示する前に 'Dry run mode' を表示する（pull/track と同じ挙動）", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true, dryRun: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      const infoCallOrder = mockLog.info.mock.invocationCallOrder;
+      const fetchTemplatesCallOrder = mockFetchTemplates.mock.invocationCallOrder[0];
+      expect(mockLog.info).toHaveBeenCalledWith("Dry run mode");
+      const dryRunLogOrder =
+        infoCallOrder[mockLog.info.mock.calls.findIndex((c) => c[0] === "Dry run mode")];
+      expect(dryRunLogOrder).toBeLessThan(fetchTemplatesCallOrder);
+    });
+
+    it("存在しないターゲットディレクトリを作成しない", async () => {
+      vol.fromJSON({});
+
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/nonexistent-target", force: false, yes: true, dryRun: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(vol.existsSync("/nonexistent-target")).toBe(false);
+      expect(mockLog.message).toHaveBeenCalledWith(
+        expect.stringContaining("Would create directory"),
+      );
+    });
+
+    it("リモートダウンロードが targetDir を副作用的に作成しても、空なら後始末する", async () => {
+      vol.fromJSON({});
+
+      // giget は tempDir (targetDir/.ziku-temp) 作成時に targetDir 自体も
+      // 再帰的に作成する。この副作用をモックで再現する。
+      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: string) => {
+        vol.mkdirSync(`${targetDir}/.ziku-temp`, { recursive: true });
+        return {
+          templateDir: `${targetDir}/.ziku-temp`,
+          cleanup: () => {
+            vol.rmSync(`${targetDir}/.ziku-temp`, { recursive: true, force: true });
+          },
+        };
+      });
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/nonexistent-remote-target", force: false, yes: true, dryRun: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(vol.existsSync("/nonexistent-remote-target")).toBe(false);
+    });
+
+    it("targetDir の祖先ディレクトリも未作成だった場合、まとめて後始末する", async () => {
+      vol.fromJSON({ "/existing-root/.gitkeep": "" });
+
+      // targetDir (/existing-root/new-parent/project) の祖先 new-parent も
+      // 未作成のケース。giget は recursive:true で両方まとめて作成する。
+      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: string) => {
+        vol.mkdirSync(`${targetDir}/.ziku-temp`, { recursive: true });
+        return {
+          templateDir: `${targetDir}/.ziku-temp`,
+          cleanup: () => {
+            vol.rmSync(`${targetDir}/.ziku-temp`, { recursive: true, force: true });
+          },
+        };
+      });
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: {
+          dir: "/existing-root/new-parent/project",
+          force: false,
+          yes: true,
+          dryRun: true,
+        },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      // targetDir とその祖先 new-parent はどちらも削除される
+      expect(vol.existsSync("/existing-root/new-parent")).toBe(false);
+      // 実行前から存在していた /existing-root 自体は残る
+      expect(vol.existsSync("/existing-root")).toBe(true);
+      expect(vol.existsSync("/existing-root/.gitkeep")).toBe(true);
+    });
+
+    it("ダウンロードが失敗しても、副作用で作られた targetDir を後始末する", async () => {
+      vol.fromJSON({});
+
+      // giget は tempDir 作成後にダウンロード/展開に失敗することがある。
+      // 失敗時も tempDir 自体は giget 側で削除されるが（downloadTemplateToTemp の
+      // 実装）、targetDir は giget が作った副作用のまま残る想定を再現する。
+      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: string) => {
+        vol.mkdirSync(targetDir, { recursive: true });
+        throw new Error("network error during extraction");
+      });
+
+      await expect(
+        (initCommand.run as any)({
+          args: { dir: "/nonexistent-failing-target", force: false, yes: true, dryRun: true },
+          rawArgs: [],
+          cmd: initCommand,
+        }),
+      ).rejects.toThrow("network error during extraction");
+
+      expect(vol.existsSync("/nonexistent-failing-target")).toBe(false);
+    });
+
+    it("ターゲットディレクトリが元々存在していた場合は dryRun でも削除しない", async () => {
+      vol.fromJSON({
+        "/existing-target/.gitkeep": "",
+      });
+
+      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: string) => {
+        vol.mkdirSync(`${targetDir}/.ziku-temp`, { recursive: true });
+        return {
+          templateDir: `${targetDir}/.ziku-temp`,
+          cleanup: () => {
+            vol.rmSync(`${targetDir}/.ziku-temp`, { recursive: true, force: true });
+          },
+        };
+      });
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/existing-target", force: false, yes: true, dryRun: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(vol.existsSync("/existing-target")).toBe(true);
+      expect(vol.existsSync("/existing-target/.gitkeep")).toBe(true);
+    });
+
+    it(".ziku/lock.json を書き出さない（実書き込みは saveLock 経由）", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true, dryRun: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(vol.existsSync("/test/.ziku/lock.json")).toBe(false);
+    });
+
+    it("プレビュー用の outro メッセージを表示する（'Setup complete!' ではない）", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true, dryRun: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(mockOutro).toHaveBeenCalledWith(expect.stringContaining("Dry run complete"));
+      expect(mockOutro).not.toHaveBeenCalledWith(expect.stringContaining("Setup complete!"));
+    });
+
+    it("devcontainer.env.example の作成にも dryRun: true を伝える", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      mockSelectDirectories.mockResolvedValueOnce([".devcontainer/**"]);
+      mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
+      mockFetchTemplates.mockResolvedValue([]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false, dryRun: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(mockWriteFileWithStrategy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          relativePath: ".devcontainer/devcontainer.env.example",
+          dryRun: true,
+        }),
+      );
     });
   });
 });

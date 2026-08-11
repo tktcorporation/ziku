@@ -944,6 +944,30 @@ describe("pullCommand", () => {
       expect(mockLog.success).toHaveBeenCalledWith("All conflicts resolved");
     });
 
+    it("--continue --dryRun: 全解決済みでも saveLock を呼ばず pendingMerge を確定しない", async () => {
+      vol.fromJSON({
+        "/test/.mcp.json": "resolved content (no conflict markers)",
+      });
+
+      mockLoadLock.mockResolvedValueOnce({
+        ...baseLock,
+        pendingMerge: {
+          conflicts: [".mcp.json"],
+          templateHashes: { ".mcp.json": "newhash" },
+          latestRef: "newref123",
+        },
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, continue: true, dryRun: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockSaveLock).not.toHaveBeenCalled();
+      expect(mockLog.info).toHaveBeenCalledWith("Dry run mode");
+    });
+
     it("downloadBaseForMerge が baseRef 付きで呼ばれる", async () => {
       vol.fromJSON({
         "/test/settings.json": '{"local": true}',
@@ -1278,6 +1302,161 @@ describe("pullCommand", () => {
         "/test/.claude/rules/worktree.md",
         expect.stringContaining("<<<<<<< LOCAL"),
       );
+    });
+  });
+
+  describe("dry run (--dryRun)", () => {
+    it("dryRun 引数のデフォルト値は false", () => {
+      const args = pullCommand.args as { dryRun: { default: boolean } };
+      expect(args.dryRun.default).toBe(false);
+    });
+
+    it("autoUpdate/newFiles があってもファイルを書き込まず lock も更新しない", async () => {
+      vol.fromJSON({
+        "/test": null,
+        "/tmp/template/.mcp.json": "template content",
+        "/tmp/template/.new-file": "new content",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [".mcp.json"],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [".new-file"],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, dryRun: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockWriteFileEnsureDir).not.toHaveBeenCalled();
+      expect(vol.existsSync("/test/.mcp.json")).toBe(false);
+      expect(vol.existsSync("/test/.new-file")).toBe(false);
+      expect(mockSaveLock).not.toHaveBeenCalled();
+      expect(mockLog.info).toHaveBeenCalledWith("Dry run mode");
+    });
+
+    it("コンフリクトは auto-merge を試すが結果をディスクへ書き込まない", async () => {
+      vol.fromJSON({
+        "/test/.mcp.json": "local content",
+        "/tmp/template/.mcp.json": "template content",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [".mcp.json"],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      mockMergeResult(".mcp.json", "merged content", false);
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, dryRun: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // auto-merge 自体は試す（結果のプレビューのため）
+      expect(mockMergeOneFile).toHaveBeenCalled();
+      // しかしディスクには書き込まない
+      expect(mockWriteFileEnsureDir).not.toHaveBeenCalled();
+      expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining("Would auto-merge"));
+      expect(mockSaveLock).not.toHaveBeenCalled();
+    });
+
+    it("未解決コンフリクトは「manual resolution」ではなく「would need manual resolution」と表示する", async () => {
+      vol.fromJSON({
+        "/test/.mcp.json": "local content",
+        "/tmp/template/.mcp.json": "template content",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [".mcp.json"],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      mockMergeResult(
+        ".mcp.json",
+        "<<<<<<< LOCAL\nlocal content\n=======\ntemplate content\n>>>>>>> TEMPLATE",
+        true,
+      );
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, dryRun: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockWriteFileEnsureDir).not.toHaveBeenCalled();
+      expect(mockLog.warn).toHaveBeenCalledWith(
+        expect.stringContaining("would need manual resolution"),
+      );
+      expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining("Pull would pause here"));
+    });
+
+    it("削除対象ファイルがあっても selectDeletedFiles を呼ばず、実際には削除しない", async () => {
+      vol.fromJSON({
+        "/test/old-file.txt": "old content",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: ["old-file.txt"],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, dryRun: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockSelectDeletedFiles).not.toHaveBeenCalled();
+      expect(vol.existsSync("/test/old-file.txt")).toBe(true);
+      expect(mockLog.info).toHaveBeenCalledWith(
+        expect.stringContaining("would be candidates for deletion"),
+      );
+    });
+
+    it("変更が無い場合は dryRun でも通常どおり 'Already up to date'", async () => {
+      vol.fromJSON({ "/test": null });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedLocally: [],
+        unchanged: [".mcp.json"],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, dryRun: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockLog.success).toHaveBeenCalledWith("Already up to date");
+      expect(mockSaveLock).not.toHaveBeenCalled();
     });
   });
 });
