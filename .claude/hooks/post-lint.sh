@@ -21,17 +21,9 @@ cd "${CLAUDE_PROJECT_DIR:-.}"
 # 同一イベントに複数 hook が登録されても各プロセスが独立した stdin を受け取るので先に読み切る。
 input="$(cat)"
 
-command -v mise >/dev/null 2>&1 || exit 0
-mise tasks ls --no-header 2>/dev/null | awk '{print $1}' | grep -qx 'claude-postedit' || exit 0
-
-[[ -z "$input" ]] && exit 0
-
-# 編集ファイルパスは tool_input.file_path 配下にある。
-file="$(echo "$input" | jq -r '.tool_input.file_path // .tool_input.path // empty' 2>/dev/null || true)"
-[[ -z "$file" || ! -f "$file" ]] && exit 0
-
 # 外側 timeout は mise 機構自体の万一のハングに対する最終防御（task 内でも timeout 済み）。
-# PostToolUse hook が編集をフリーズさせないことを保証する。
+# PostToolUse hook が編集をフリーズさせないことを保証する。task 検出プローブ（mise tasks ls）も
+# ツールバージョン解決でネットワークに触れうるため、実タスク実行と同じ timeout をここにも適用する。
 # timeout は GNU coreutils のため macOS host には無い（gtimeout があれば使い、無ければ素で実行）。
 if command -v timeout >/dev/null 2>&1; then
   guard=(timeout -k 5 120)
@@ -40,6 +32,15 @@ elif command -v gtimeout >/dev/null 2>&1; then
 else
   guard=()
 fi
+
+command -v mise >/dev/null 2>&1 || exit 0
+"${guard[@]+"${guard[@]}"}" mise tasks ls --no-header 2>/dev/null | awk '{print $1}' | grep -qx 'claude-postedit' || exit 0
+
+[[ -z "$input" ]] && exit 0
+
+# 編集ファイルパスは tool_input.file_path 配下にある。
+file="$(echo "$input" | jq -r '.tool_input.file_path // .tool_input.path // empty' 2>/dev/null || true)"
+[[ -z "$file" || ! -f "$file" ]] && exit 0
 
 if diag="$("${guard[@]+"${guard[@]}"}" mise run --quiet claude-postedit -- "$file" 2>&1)"; then
   exit 0

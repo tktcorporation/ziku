@@ -16,11 +16,10 @@ set -euo pipefail
 
 cd "${CLAUDE_PROJECT_DIR:-.}"
 
-command -v mise >/dev/null 2>&1 || exit 0
-mise tasks ls --no-header 2>/dev/null | awk '{print $1}' | grep -qx 'claude-verify' || exit 0
-
 # 外側 timeout は mise 機構自体の万一のハングに対する最終防御（個々のチェックは
 # task 内 chk() でも timeout 済み）。Stop hook が完了をフリーズさせないことを保証する。
+# task 検出プローブ（mise tasks ls）もツールバージョン解決でネットワークに触れうるため、
+# 実タスク実行と同じ timeout をここにも適用する。
 # timeout は GNU coreutils のため macOS host には無い（gtimeout があれば使い、無ければ素で実行）。
 if command -v timeout >/dev/null 2>&1; then
   guard=(timeout -k 5 300)
@@ -29,6 +28,9 @@ elif command -v gtimeout >/dev/null 2>&1; then
 else
   guard=()
 fi
+
+command -v mise >/dev/null 2>&1 || exit 0
+"${guard[@]+"${guard[@]}"}" mise tasks ls --no-header 2>/dev/null | awk '{print $1}' | grep -qx 'claude-verify' || exit 0
 
 if errors="$("${guard[@]+"${guard[@]}"}" mise run --quiet claude-verify 2>&1)"; then
   exit 0

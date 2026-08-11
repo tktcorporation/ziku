@@ -196,11 +196,19 @@ export const initCommand = defineCommand({
 
       log.step("Fetching template...");
       // giget は tempDir (targetDir/.ziku-temp) の親ディレクトリも再帰的に作成するため、
-      // dryRun かつ targetDir が未作成だった場合、ここで targetDir 自体が
-      // 副作用的に作られてしまう。cleanup 合成でこの分も後始末する
-      // （下の finally 相当の cleanup 差し替えを参照）。
+      // dryRun かつ targetDir が未作成だった場合、ここで targetDir 自体が副作用的に
+      // 作られてしまう。ダウンロードが失敗した場合も同じ副作用は起きているのに、
+      // 失敗時は cleanupWithTargetDir の構築（このブロックの外）まで到達せず後始末が
+      // 漏れるため、ここでも失敗経路を捕まえて同じ後始末を行う（try/catch は
+      // ast-grep で禁止のため Promise.then(onFulfilled, onRejected) を使う）。
       const downloaded = await withSpinner("Downloading template from GitHub...", () =>
         downloadTemplateToTemp(targetDir, `gh:${resolved.sourceOwner}/${resolved.sourceRepo}`),
+      ).then(
+        (result) => result,
+        (error: unknown) => {
+          removeEmptyDryRunTargetDir(targetDir, dryRun, targetDirPreexisted);
+          throw error;
+        },
       );
       templateDir = downloaded.templateDir;
       cleanup = downloaded.cleanup;
@@ -208,19 +216,10 @@ export const initCommand = defineCommand({
 
     // dryRun で targetDir が存在しなかった場合、giget のダウンロード（tempDir 作成）が
     // targetDir 自体を副作用的に作ってしまうことがある。テンプレート側の cleanup
-    // （tempDir 削除）の後に、targetDir が空のままなら削除して
-    // 「dryRun は何も書き込まない」という保証を守る。既存ディレクトリだった場合や、
-    // 中身が残っている場合（何らかの理由で書き込みが発生した場合）は削除しない。
+    // （tempDir 削除）の後に、targetDir が空のままなら削除する。
     const cleanupWithTargetDir = (): void => {
       cleanup();
-      if (
-        dryRun &&
-        !targetDirPreexisted &&
-        existsSync(targetDir) &&
-        readdirSync(targetDir).length === 0
-      ) {
-        rmdirSync(targetDir);
-      }
+      removeEmptyDryRunTargetDir(targetDir, dryRun, targetDirPreexisted);
     };
 
     // ─── 共通処理: テンプレート適用 ───
@@ -382,6 +381,28 @@ AWS_DEFAULT_REGION=ap-northeast-1
 # WakaTime API Key (optional)
 WAKATIME_API_KEY=
 `;
+
+/**
+ * dryRun 中に targetDir が副作用（giget の tempDir 作成等）で新規作成された場合、
+ * 空のままなら削除して「dryRun は何も書き込まない」という保証を守る。
+ * 既存ディレクトリだった場合や中身が残っている場合（何らかの理由で書き込みが
+ * 発生した場合）は削除しない。ダウンロード成功時・失敗時の両方から呼ばれる
+ * （失敗時に呼ばないと、途中まで作られた targetDir が残ってしまう）。
+ */
+function removeEmptyDryRunTargetDir(
+  targetDir: string,
+  dryRun: boolean,
+  targetDirPreexisted: boolean,
+): void {
+  if (
+    dryRun &&
+    !targetDirPreexisted &&
+    existsSync(targetDir) &&
+    readdirSync(targetDir).length === 0
+  ) {
+    rmdirSync(targetDir);
+  }
+}
 
 function createEnvExample(
   targetDir: string,

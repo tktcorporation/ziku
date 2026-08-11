@@ -906,6 +906,28 @@ describe("initCommand", () => {
       expect(vol.existsSync("/nonexistent-remote-target")).toBe(false);
     });
 
+    it("ダウンロードが失敗しても、副作用で作られた targetDir を後始末する", async () => {
+      vol.fromJSON({});
+
+      // giget は tempDir 作成後にダウンロード/展開に失敗することがある。
+      // 失敗時も tempDir 自体は giget 側で削除されるが（downloadTemplateToTemp の
+      // 実装）、targetDir は giget が作った副作用のまま残る想定を再現する。
+      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: string) => {
+        vol.mkdirSync(targetDir, { recursive: true });
+        throw new Error("network error during extraction");
+      });
+
+      await expect(
+        (initCommand.run as any)({
+          args: { dir: "/nonexistent-failing-target", force: false, yes: true, dryRun: true },
+          rawArgs: [],
+          cmd: initCommand,
+        }),
+      ).rejects.toThrow("network error during extraction");
+
+      expect(vol.existsSync("/nonexistent-failing-target")).toBe(false);
+    });
+
     it("ターゲットディレクトリが元々存在していた場合は dryRun でも削除しない", async () => {
       vol.fromJSON({
         "/existing-target/.gitkeep": "",
