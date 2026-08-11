@@ -906,6 +906,40 @@ describe("initCommand", () => {
       expect(vol.existsSync("/nonexistent-remote-target")).toBe(false);
     });
 
+    it("targetDir の祖先ディレクトリも未作成だった場合、まとめて後始末する", async () => {
+      vol.fromJSON({ "/existing-root/.gitkeep": "" });
+
+      // targetDir (/existing-root/new-parent/project) の祖先 new-parent も
+      // 未作成のケース。giget は recursive:true で両方まとめて作成する。
+      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: string) => {
+        vol.mkdirSync(`${targetDir}/.ziku-temp`, { recursive: true });
+        return {
+          templateDir: `${targetDir}/.ziku-temp`,
+          cleanup: () => {
+            vol.rmSync(`${targetDir}/.ziku-temp`, { recursive: true, force: true });
+          },
+        };
+      });
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: {
+          dir: "/existing-root/new-parent/project",
+          force: false,
+          yes: true,
+          dryRun: true,
+        },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      // targetDir とその祖先 new-parent はどちらも削除される
+      expect(vol.existsSync("/existing-root/new-parent")).toBe(false);
+      // 実行前から存在していた /existing-root 自体は残る
+      expect(vol.existsSync("/existing-root")).toBe(true);
+      expect(vol.existsSync("/existing-root/.gitkeep")).toBe(true);
+    });
+
     it("ダウンロードが失敗しても、副作用で作られた targetDir を後始末する", async () => {
       vol.fromJSON({});
 

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, rmdirSync } from "node:fs";
 import { defineCommand } from "citty";
 import { Effect } from "effect";
-import { join, resolve } from "pathe";
+import { dirname, join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { loadTemplateConfig, extractDirectoryEntries } from "../utils/template-config";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
@@ -149,9 +149,12 @@ export const initCommand = defineCommand({
     const dir = args.dir === "init" ? "." : args.dir;
     const targetDir = resolve(dir);
     const dryRun = args.dryRun as boolean;
-    // dryRun 中に targetDir が新規作成された場合、後始末の判断に使う
-    // （既存ディレクトリなら dryRun でも消してはいけない）。
-    const targetDirPreexisted = existsSync(targetDir);
+    // targetDir 自身だけでなく、存在しない祖先ディレクトリも giget が recursive:true で
+    // まとめて作ってしまう（例: targetDir が /tmp/new-parent/project で new-parent も
+    // 未作成の場合、両方が副作用で作られる）。dryRun 終了後にどこまで後始末してよいかの
+    // 基準点として、実行前から存在していた最も近い祖先を記録しておく。
+    const existingAncestor = findExistingAncestor(targetDir);
+    const targetDirPreexisted = existingAncestor === targetDir;
 
     log.info(`Target: ${pc.cyan(targetDir)}`);
     if (dryRun) {
@@ -206,7 +209,7 @@ export const initCommand = defineCommand({
       ).then(
         (result) => result,
         (error: unknown) => {
-          removeEmptyDryRunTargetDir(targetDir, dryRun, targetDirPreexisted);
+          removeEmptyDryRunDirs(targetDir, dryRun, existingAncestor);
           throw error;
         },
       );
@@ -214,12 +217,13 @@ export const initCommand = defineCommand({
       cleanup = downloaded.cleanup;
     }
 
-    // dryRun で targetDir が存在しなかった場合、giget のダウンロード（tempDir 作成）が
-    // targetDir 自体を副作用的に作ってしまうことがある。テンプレート側の cleanup
-    // （tempDir 削除）の後に、targetDir が空のままなら削除する。
+    // dryRun で targetDir やその祖先が存在しなかった場合、giget のダウンロード
+    // （tempDir 作成）がそれらを副作用的に作ってしまうことがある。テンプレート側の
+    // cleanup（tempDir 削除）の後に、existingAncestor に達するまで空のディレクトリを
+    // 削除する。
     const cleanupWithTargetDir = (): void => {
       cleanup();
-      removeEmptyDryRunTargetDir(targetDir, dryRun, targetDirPreexisted);
+      removeEmptyDryRunDirs(targetDir, dryRun, existingAncestor);
     };
 
     // ─── 共通処理: テンプレート適用 ───
@@ -383,24 +387,37 @@ WAKATIME_API_KEY=
 `;
 
 /**
- * dryRun 中に targetDir が副作用（giget の tempDir 作成等）で新規作成された場合、
- * 空のままなら削除して「dryRun は何も書き込まない」という保証を守る。
- * 既存ディレクトリだった場合や中身が残っている場合（何らかの理由で書き込みが
- * 発生した場合）は削除しない。ダウンロード成功時・失敗時の両方から呼ばれる
- * （失敗時に呼ばないと、途中まで作られた targetDir が残ってしまう）。
+ * dir から見て、実行前から存在していた最も近い祖先ディレクトリを返す。dir 自身が
+ * 既に存在する場合は dir 自身を返す。dryRun 終了後の後始末で「どこまで削除して
+ * よいか」の基準点として使う。
  */
-function removeEmptyDryRunTargetDir(
-  targetDir: string,
-  dryRun: boolean,
-  targetDirPreexisted: boolean,
-): void {
-  if (
-    dryRun &&
-    !targetDirPreexisted &&
-    existsSync(targetDir) &&
-    readdirSync(targetDir).length === 0
-  ) {
-    rmdirSync(targetDir);
+function findExistingAncestor(dir: string): string {
+  let current = dir;
+  while (!existsSync(current)) {
+    const parent = dirname(current);
+    if (parent === current) return current; // ルートに到達（通常は起きない）
+    current = parent;
+  }
+  return current;
+}
+
+/**
+ * dryRun 中に targetDir、あるいはその祖先ディレクトリが副作用（giget の
+ * recursive:true な tempDir 作成等）で新規作成された場合、空のままなら
+ * existingAncestor に達するまで削除して「dryRun は何も書き込まない」という
+ * 保証を守る。existingAncestor より上（実行前から存在した部分）や、中身が
+ * 残っているディレクトリ（何らかの理由で書き込みが発生した場合）は削除しない。
+ * ダウンロード成功時・失敗時の両方から呼ばれる（失敗時に呼ばないと、途中まで
+ * 作られたディレクトリが残ってしまう）。
+ */
+function removeEmptyDryRunDirs(targetDir: string, dryRun: boolean, existingAncestor: string): void {
+  if (!dryRun) return;
+
+  let current = targetDir;
+  while (current !== existingAncestor) {
+    if (!existsSync(current) || readdirSync(current).length > 0) return;
+    rmdirSync(current);
+    current = dirname(current);
   }
 }
 
