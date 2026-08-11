@@ -230,10 +230,13 @@ export const initCommand = defineCommand({
         zikuConfigExists(targetDir),
       );
 
+      const dryRun = args.dryRun as boolean;
+      if (dryRun) {
+        log.info("Dry run mode");
+      }
+
       // Step 2: ファイルをコピー
       log.step("Applying templates...");
-
-      const dryRun = args.dryRun as boolean;
 
       const templateResults = await fetchTemplates({
         targetDir,

@@ -843,6 +843,27 @@ describe("initCommand", () => {
       );
     });
 
+    it("ファイル一覧を表示する前に 'Dry run mode' を表示する（pull/track と同じ挙動）", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true, dryRun: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      const infoCallOrder = mockLog.info.mock.invocationCallOrder;
+      const fetchTemplatesCallOrder = mockFetchTemplates.mock.invocationCallOrder[0];
+      expect(mockLog.info).toHaveBeenCalledWith("Dry run mode");
+      const dryRunLogOrder =
+        infoCallOrder[mockLog.info.mock.calls.findIndex((c) => c[0] === "Dry run mode")];
+      expect(dryRunLogOrder).toBeLessThan(fetchTemplatesCallOrder);
+    });
+
     it(".ziku/lock.json を書き出さない（実書き込みは saveLock 経由）", async () => {
       vol.fromJSON({
         "/test": null,
