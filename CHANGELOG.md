@@ -1,5 +1,26 @@
 # @tktco/ziku
 
+## 1.6.0
+
+### Minor Changes
+
+- [#93](https://github.com/tktcorporation/ziku/pull/93) [`ae90cac`](https://github.com/tktcorporation/ziku/commit/ae90cac8e6f8747222e245d5948f1e662222ff08) Thanks [@tktcorporation](https://github.com/tktcorporation)! - `ziku pull` / `ziku init` / `ziku track` に `--dryRun` (`-n`) オプションを追加した。実際にファイルを書き込む前に、何が変更されるかをプレビューできる。
+
+  `ziku push` には既に `--dryRun` があったが、ファイルを実際に書き換える他のコマンドには同等のプレビュー手段がなかった。特に `pull` はテンプレート側の削除をローカルへ反映したり 3-way マージで既存ファイルを上書きしたりするため、実行前に内容を確認したいニーズがある。
+
+  - `ziku pull --dryRun`: 自動更新・新規追加・削除候補・`ziku.jsonc` の union マージ内容を表示する。コンフリクトは実際と同じ auto-merge を試すが、結果はディスクへ書き込まない（未解決のまま残るファイルまでプレビューできる）。ファイルの書き込みや `.ziku/lock.json` の更新は行わない。
+  - `ziku init --dryRun`: どのファイルが作成/上書きされるかを表示する。上書き戦略の判定（`prompt` 戦略の確認を含む）は通常どおり行うが、実際のファイル・`.ziku/ziku.jsonc`・`.ziku/lock.json` への書き込みは行わない。
+  - `ziku track --dryRun`: `.ziku/ziku.jsonc` に追加されるパターンを表示するが、ファイルは書き込まない。
+
+### Patch Changes
+
+- [#91](https://github.com/tktcorporation/ziku/pull/91) [`6ad98a8`](https://github.com/tktcorporation/ziku/commit/6ad98a8704fa2cc745dd812173e916179c0c9d05) Thanks [@tktcorporation](https://github.com/tktcorporation)! - `ziku push --files=<path>` でファイル本体だけを指定すると、事前に `ziku track` 済みの include パターンが `.ziku/ziku.jsonc` の除外により push 候補から漏れる不具合を修正した。
+
+  これまで `ziku track <path>` → `ziku push --files=<path>` の順で操作すると、ファイル本体はテンプレートに反映される一方、`.ziku/ziku.jsonc` は `--files` に含めていないため push 対象から漏れていた。ファイルは実在するのに include パターンがテンプレートへ伝わらず、他プロジェクトの `ziku pull` がそのファイルを一切検出できなくなっていた（[#90](https://github.com/tktcorporation/ziku/issues/90)）。
+
+  - push されるファイルに対応する include パターンが `.ziku/ziku.jsonc` の未選択により漏れる場合、テンプレートの `.ziku/ziku.jsonc` へ関連パターンだけを自動的に同梱するようにした。無関係なローカル限定パターンまで一緒にテンプレートへ漏らすことはない。
+  - `--dryRun` のプレビューでも、実 push で自動同梱される旨を事前に警告する。
+
 ## 1.5.0
 
 ### Minor Changes
