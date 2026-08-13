@@ -68,6 +68,7 @@ function applyConfigDrift(
     conflicts: strip(classification.conflicts),
     newFiles: strip(classification.newFiles),
     deletedFiles: strip(classification.deletedFiles),
+    deletedWithLocalEdits: strip(classification.deletedWithLocalEdits),
     deletedLocally: strip(classification.deletedLocally),
     unchanged: strip(classification.unchanged),
   };

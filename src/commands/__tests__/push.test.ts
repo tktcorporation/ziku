@@ -64,6 +64,7 @@ vi.mock("../../utils/merge", async () => {
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
+      deletedWithLocalEdits: [],
       deletedLocally: [],
       unchanged: [],
     })),
@@ -222,6 +223,7 @@ function setupPushableFiles(
     conflicts: [],
     newFiles: [],
     deletedFiles: [],
+    deletedWithLocalEdits: [],
     deletedLocally: [],
     unchanged: [],
   });
@@ -378,6 +380,7 @@ describe("pushCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -429,6 +432,7 @@ describe("pushCommand", () => {
         conflicts: ["conflict.txt"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -465,6 +469,7 @@ describe("pushCommand", () => {
         conflicts: ["conflict.txt"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -494,6 +499,7 @@ describe("pushCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: ["gone.txt"],
         unchanged: [],
       });
@@ -523,6 +529,7 @@ describe("pushCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: ["gone.txt"],
         unchanged: [],
       });
@@ -542,6 +549,77 @@ describe("pushCommand", () => {
 
       const previewArg = mockLogDiffSummary.mock.calls.at(-1)?.[0] as Array<{ path: string }>;
       expect(previewArg.map((f) => f.path).toSorted()).toEqual(["gone.txt", "keep.txt"]);
+    });
+
+    it("deletedWithLocalEdits を push 候補に含める", async () => {
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedWithLocalEdits: ["edited.md"],
+        deletedLocally: [],
+        unchanged: [],
+      });
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [{ path: "edited.md", type: "added", localContent: "local edits" }],
+        summary: { added: 1, modified: 0, deleted: 0, unchanged: 0 },
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: true, yes: false, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      const previewArg = mockLogDiffSummary.mock.calls.at(-1)?.[0] as Array<{ path: string }>;
+      expect(previewArg.map((f) => f.path)).toEqual(["edited.md"]);
+    });
+
+    it("deletedWithLocalEdits の push はテンプレの削除を取り消すとサマリで示す", async () => {
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: ["plain.txt"],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedWithLocalEdits: ["edited.md"],
+        deletedLocally: [],
+        unchanged: [],
+      });
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [
+          { path: "edited.md", type: "added", localContent: "local edits" },
+          { path: "plain.txt", type: "added", localContent: "plain" },
+        ],
+        summary: { added: 2, modified: 0, deleted: 0, unchanged: 0 },
+      });
+      mockSelectPushFiles.mockResolvedValueOnce([
+        { path: "edited.md", type: "added", localContent: "local edits" },
+        { path: "plain.txt", type: "added", localContent: "plain" },
+      ]);
+      mockGetGitHubToken.mockReturnValue("ghp_token");
+      mockCreatePullRequest.mockResolvedValueOnce({
+        url: "https://github.com/owner/repo/pull/1",
+        branch: "update-template-123",
+        number: 1,
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: true, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      const summary = mockLog.message.mock.calls
+        .map((call) => call[0])
+        .find((text) => text.includes("edited.md"));
+      expect(summary).toContain("restores file deleted in template");
+      // 注記は該当ファイルの行だけに付く
+      expect(summary?.split("\n").find((line) => line.includes("plain.txt"))).not.toContain(
+        "restores file deleted in template",
+      );
     });
 
     it("ファイル選択をキャンセルすると PR を作成しない", async () => {
@@ -893,6 +971,7 @@ describe("pushCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -959,6 +1038,7 @@ describe("pushCommand", () => {
         conflicts: [".ziku/ziku.jsonc"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1015,6 +1095,7 @@ describe("pushCommand", () => {
         conflicts: ["file.txt"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1067,6 +1148,7 @@ describe("pushCommand", () => {
         conflicts: ["bad.txt"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1129,6 +1211,7 @@ describe("pushCommand", () => {
         conflicts: ["file.txt"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1181,6 +1264,7 @@ describe("pushCommand", () => {
         conflicts: ["file.txt"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1237,6 +1321,7 @@ describe("pushCommand", () => {
         conflicts: ["file.txt"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1328,6 +1413,7 @@ describe("pushCommand", () => {
         conflicts: [".ziku/ziku.jsonc"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1396,6 +1482,7 @@ describe("pushCommand", () => {
         conflicts: ["deleted-file.txt"], // delete/modify conflict
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1451,6 +1538,7 @@ describe("pushCommand", () => {
         conflicts: ["file.txt"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1527,6 +1615,7 @@ describe("pushCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: ["file.txt"],
       });
@@ -1577,6 +1666,7 @@ describe("pushCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });

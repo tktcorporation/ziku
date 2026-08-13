@@ -20,7 +20,7 @@ function merge(base: string, local: string, template: string, filePath?: string)
 
 describe("merge", () => {
   describe("classifyFiles", () => {
-    it("全7カテゴリに正しく分類する", () => {
+    it("全カテゴリに正しく分類する", () => {
       const result = classifyFiles({
         baseHashes: {
           "unchanged.txt": "aaa",
@@ -29,12 +29,14 @@ describe("merge", () => {
           "conflict.txt": "ddd",
           "deleted.txt": "eee",
           "deleted-locally.txt": "fff",
+          "deleted-with-edits.txt": "ggg",
         },
         localHashes: {
           "unchanged.txt": "aaa",
           "auto-update.txt": "bbb",
           "local-only.txt": "ccc-modified",
           "conflict.txt": "ddd-local",
+          "deleted-with-edits.txt": "ggg-edited",
         },
         templateHashes: {
           "unchanged.txt": "aaa",
@@ -53,6 +55,38 @@ describe("merge", () => {
       expect(result.newFiles).toContain("new-file.txt");
       expect(result.deletedFiles).toContain("deleted.txt");
       expect(result.deletedLocally).toContain("deleted-locally.txt");
+      expect(result.deletedWithLocalEdits).toContain("deleted-with-edits.txt");
+    });
+
+    // conflicts の要素はテンプレート内容をマージの片側として読むため、テンプレート側に
+    // 存在しないファイルが混ざると mergeOneFile が defect でクラッシュする。
+    it("conflicts に入るファイルはすべてテンプレート側に存在する（mergeOneFile の不変条件）", () => {
+      const result = classifyFiles({
+        baseHashes: {
+          "both-changed.txt": "aaa",
+          "local-deleted.txt": "bbb",
+          "template-deleted.txt": "ccc",
+          "template-deleted-clean.txt": "ddd",
+          "gone-everywhere.txt": "eee",
+        },
+        localHashes: {
+          "both-changed.txt": "aaa-local",
+          "template-deleted.txt": "ccc-edited",
+          "template-deleted-clean.txt": "ddd",
+          "local-new.txt": "fff",
+        },
+        templateHashes: {
+          "both-changed.txt": "aaa-template",
+          "local-deleted.txt": "bbb-updated",
+          "template-new.txt": "ggg",
+        },
+      });
+
+      const templatePaths = new Set(["both-changed.txt", "local-deleted.txt", "template-new.txt"]);
+      expect(result.conflicts.length).toBeGreaterThan(0);
+      for (const file of result.conflicts) {
+        expect(templatePaths.has(file)).toBe(true);
+      }
     });
 
     it("空のハッシュマップを処理する", () => {
@@ -68,6 +102,7 @@ describe("merge", () => {
       expect(result.conflicts).toEqual([]);
       expect(result.newFiles).toEqual([]);
       expect(result.deletedFiles).toEqual([]);
+      expect(result.deletedWithLocalEdits).toEqual([]);
       expect(result.deletedLocally).toEqual([]);
     });
 
@@ -107,15 +142,17 @@ describe("merge", () => {
       expect(result.deletedLocally).not.toContain("removed.txt");
     });
 
-    it("テンプレートで削除されローカルが編集済み → delete/modify conflict", () => {
+    it("テンプレートで削除されローカルが編集済み → deletedWithLocalEdits", () => {
       const result = classifyFiles({
         baseHashes: { "rules.md": "abc" },
         localHashes: { "rules.md": "abc-edited" },
         templateHashes: {},
       });
 
-      // ローカルの編集を確認なしで消さないため、削除候補ではなく conflict にする
-      expect(result.conflicts).toContain("rules.md");
+      // 「削除するか編集を残すか」の二択であって、テキストマージの対象ではない。
+      // テンプレート側にファイルが無いので conflicts にも入れられない。
+      expect(result.deletedWithLocalEdits).toContain("rules.md");
+      expect(result.conflicts).not.toContain("rules.md");
       expect(result.deletedFiles).not.toContain("rules.md");
     });
 
@@ -127,6 +164,7 @@ describe("merge", () => {
       });
 
       expect(result.deletedFiles).toContain("rules.md");
+      expect(result.deletedWithLocalEdits).not.toContain("rules.md");
       expect(result.conflicts).not.toContain("rules.md");
     });
 

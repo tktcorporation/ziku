@@ -491,20 +491,40 @@ export async function confirmRetryConflictResolution(): Promise<boolean> {
   return result;
 }
 
-/**
- * テンプレートで削除されたファイルの中から、ローカルでも削除するものを選択する。
- */
-export async function selectDeletedFiles(files: string[]): Promise<string[]> {
-  const result = await p.multiselect({
-    message: "These files were deleted in template. Select to delete locally:",
-    options: files.map((f) => ({ value: f, label: f })),
-    required: false,
-  });
+/** 削除候補ファイルの multiselect。選択されなかったファイルはローカルに残る。 */
+async function selectFilesToDelete(
+  message: string,
+  options: Array<{ value: string; label: string; hint?: string }>,
+): Promise<string[]> {
+  const result = await p.multiselect({ message, options, required: false });
   if (p.isCancel(result)) {
     p.cancel("Operation cancelled.");
     process.exit(0);
   }
   return result as string[];
+}
+
+/**
+ * テンプレートで削除されたファイルの中から、ローカルでも削除するものを選択する。
+ */
+export function selectDeletedFiles(files: string[]): Promise<string[]> {
+  return selectFilesToDelete(
+    "These files were deleted in template. Select to delete locally:",
+    files.map((f) => ({ value: f, label: f })),
+  );
+}
+
+/**
+ * テンプレートで削除され、かつローカルに編集があるファイルの削除対象を選択する。
+ *
+ * 削除するとローカルの編集が失われる。選択を省略できる操作にしないため、
+ * `--force` を含むどの経路でもこのプロンプトを通す。
+ */
+export function selectDeletedFilesWithLocalEdits(files: string[]): Promise<string[]> {
+  return selectFilesToDelete(
+    "These files were deleted in template but you edited them locally. Select to delete (your edits will be lost):",
+    files.map((f) => ({ value: f, label: f, hint: "locally edited" })),
+  );
 }
 
 /**

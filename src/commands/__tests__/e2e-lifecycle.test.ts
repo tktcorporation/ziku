@@ -91,6 +91,7 @@ vi.mock("../../ui/prompts", () => ({
   selectTemplateCandidate: vi.fn(),
   inputTemplateSource: vi.fn(),
   selectDeletedFiles: vi.fn(() => Promise.resolve([])),
+  selectDeletedFilesWithLocalEdits: vi.fn(() => Promise.resolve([])),
   selectPushFiles: vi.fn(),
   confirmAction: vi.fn(() => Promise.resolve(true)),
   inputGitHubToken: vi.fn(),
@@ -155,6 +156,7 @@ vi.mock("../../utils/merge", async (importOriginal) => {
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
+      deletedWithLocalEdits: [],
       deletedLocally: [],
       unchanged: [],
     })),
@@ -435,6 +437,7 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
+      deletedWithLocalEdits: [],
       deletedLocally: [],
       unchanged: [".claude/rules/style.md", ".mcp.json"],
     });
@@ -488,6 +491,7 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
+      deletedWithLocalEdits: [],
       deletedLocally: [],
       unchanged: [".claude/rules/style.md", ".claude/rules/testing.md", ".mcp.json"],
     });
@@ -560,6 +564,7 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
+      deletedWithLocalEdits: [],
       deletedLocally: [],
       unchanged: [".claude/rules/style.md", ".mcp.json"],
     });
@@ -735,6 +740,7 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
+      deletedWithLocalEdits: [],
       deletedLocally: [],
       unchanged: [".claude/rules/style.md", ".mcp.json"],
     });
@@ -781,6 +787,7 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
+      deletedWithLocalEdits: [],
       deletedLocally: [],
       unchanged: [".claude/rules/style.md", ".claude/rules/testing.md", ".mcp.json"],
     });
@@ -816,6 +823,7 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
+      deletedWithLocalEdits: [],
       deletedLocally: [],
       unchanged: [".claude/rules/style.md", ".mcp.json"],
     });
@@ -889,6 +897,7 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
       conflicts: [],
       newFiles: [],
       deletedFiles: [".eslintrc.json"],
+      deletedWithLocalEdits: [],
       deletedLocally: [],
       unchanged: [".claude/rules/style.md", ".claude/rules/testing.md", ".mcp.json"],
     });
@@ -922,6 +931,7 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
       conflicts: [],
       newFiles: [],
       deletedFiles: [".eslintrc.json"],
+      deletedWithLocalEdits: [],
       deletedLocally: [],
       unchanged: [".claude/rules/style.md", ".claude/rules/testing.md", ".mcp.json"],
     });

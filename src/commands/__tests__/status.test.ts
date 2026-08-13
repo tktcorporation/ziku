@@ -112,6 +112,7 @@ function emptyClassification(): FileClassification {
     conflicts: [],
     newFiles: [],
     deletedFiles: [],
+    deletedWithLocalEdits: [],
     deletedLocally: [],
     unchanged: [],
   };

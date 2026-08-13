@@ -86,6 +86,7 @@ vi.mock("../../ui/prompts", () => ({
   selectTemplateCandidate: vi.fn(() => Promise.resolve({ owner: "test-org", repo: ".github" })),
   inputTemplateSource: vi.fn(),
   selectDeletedFiles: vi.fn(() => Promise.resolve([])),
+  selectDeletedFilesWithLocalEdits: vi.fn(() => Promise.resolve([])),
   selectPushFiles: vi.fn(),
   confirmAction: vi.fn(() => Promise.resolve(true)),
   inputGitHubToken: vi.fn(() => Promise.resolve("ghp_test")),
@@ -199,6 +200,7 @@ vi.mock("../../utils/merge", () => ({
     conflicts: [],
     newFiles: [],
     deletedFiles: [],
+    deletedWithLocalEdits: [],
     deletedLocally: [],
     unchanged: [],
   })),
@@ -847,6 +849,7 @@ describe("E2E: multi-scenario tests", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [".mcp.json", ".claude/rules/style.md"],
       });
@@ -909,6 +912,7 @@ describe("E2E: multi-scenario tests", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [".claude/rules/testing.md"],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [".mcp.json", ".claude/rules/style.md"],
       });
@@ -981,6 +985,7 @@ describe("E2E: multi-scenario tests", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [".claude/rules/deprecated-a.md", ".claude/rules/deprecated-b.md"],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [".mcp.json", ".claude/rules/style.md"],
       });
@@ -1050,6 +1055,7 @@ describe("E2E: multi-scenario tests", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: ["config/old.json"],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [".mcp.json", ".claude/rules/style.md"],
       });

@@ -12,6 +12,10 @@ type Presence = { hasBase: boolean; hasLocal: boolean; hasTemplate: boolean };
  *
  * 背景: classifyFiles の分岐数を抑えるために切り出した純粋関数。
  * 3値の有無パターンで大分類し、値の一致で細分類する。
+ *
+ * 不変条件: `conflicts` に入るファイルはテンプレート側に必ず存在する。
+ * conflicts はテンプレート内容をマージの片側として読む（conflict-io.ts の mergeOneFile）ため、
+ * テンプレート側に無いファイルを入れると読み込みが失敗して回復不能になる。
  */
 function classifyOneFile(
   base: string | undefined,
@@ -27,13 +31,16 @@ function classifyOneFile(
   return (
     match(presence)
       .with({ hasBase: false, hasLocal: false, hasTemplate: true }, () => "newFiles" as const)
-      // テンプレート側の削除とローカル側の編集は、どちらを採るかをユーザーしか決められない
-      // delete/modify の衝突。削除候補に混ぜると --force がローカルの編集ごと消す。
-      // 逆向き（ローカル削除 × テンプレート変更）を conflicts にしているのと同じ扱いにする。
+      // テンプレート側の削除とローカル側の編集が衝突する delete/modify。テンプレート側に
+      // ファイルが無いのでテキストマージの材料が揃わず、conflicts には入れられない
+      // （下の不変条件を参照）。削除候補に混ぜると --force がローカルの編集ごと消すため、
+      // 「削除するか残すか」を選ばせる専用カテゴリに分ける。
       .with({ hasBase: true, hasLocal: true, hasTemplate: false }, () =>
-        local === base ? ("deletedFiles" as const) : ("conflicts" as const),
+        local === base ? ("deletedFiles" as const) : ("deletedWithLocalEdits" as const),
       )
       .with({ hasBase: true, hasLocal: false, hasTemplate: false }, () => "deletedFiles" as const)
+      // 逆向きの delete/modify（ローカル削除 × テンプレート変更）は conflicts のままでよい。
+      // テンプレート側にファイルがあるので、ローカル側を空文字列としてマージできる。
       .with({ hasBase: true, hasLocal: false, hasTemplate: true }, () =>
         template === base ? ("deletedLocally" as const) : ("conflicts" as const),
       )
@@ -85,6 +92,7 @@ export function classifyFiles(opts: ClassifyOptions): FileClassification {
     conflicts: [],
     newFiles: [],
     deletedFiles: [],
+    deletedWithLocalEdits: [],
     deletedLocally: [],
     unchanged: [],
   };

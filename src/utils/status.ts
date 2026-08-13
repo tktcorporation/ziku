@@ -5,7 +5,7 @@ import type { FileClassification } from "./merge/types";
 /**
  * ステータス表示で使う「方向」のラベル。
  *
- * 7カテゴリ（FileClassification）を UX 上の3方向に集約するためのキー。
+ * FileClassification の各カテゴリを UX 上の3方向に集約するためのキー。
  * - "pull"  : テンプレート側で起きた変更を取り込む方向
  * - "push"  : ローカル側で起きた変更をテンプレートに送る方向
  * - "conflict" : 双方が変更しており、3-way merge が必要
@@ -36,8 +36,7 @@ export interface StatusEntry {
    * 破壊的（ファイル削除を伴う）変更か。
    *
    * UI は `git status` の "deleted" のように赤系で目立たせ、必要なら確認プロンプトの
-   * トリガにする。`deletedFiles` (テンプレ側削除→pull) と `deletedLocally`
-   * (ローカル側削除→push --includeDeletions で反映) が true。
+   * トリガにする。判定は isDestructiveCategory が持つ。
    */
   readonly isDestructive: boolean;
 }
@@ -111,6 +110,8 @@ export function isEntryCategory(category: keyof FileClassification): category is
  *     （deletedLocally は push --includeDeletions で実反映。
  *      status の役割は「方向を見せる」ことなので、フラグの有無は別問題として扱う）
  *   - conflicts は両方変更されているので merge 必要
+ *   - deletedWithLocalEdits は「テンプレの削除を受け入れるか、ローカルの編集を残すか」を
+ *     ユーザーが決めるまで進めない。pull にも push にも倒せないので conflict へ入れる
  *
  * `unchanged` は型から除外しているため `match.exhaustive()` の対象にならない。
  */
@@ -118,7 +119,7 @@ export function directionOfCategory(category: EntryCategory): StatusDirection {
   return match(category)
     .with("autoUpdate", "newFiles", "deletedFiles", () => "pull" as const)
     .with("localOnly", "deletedLocally", () => "push" as const)
-    .with("conflicts", () => "conflict" as const)
+    .with("conflicts", "deletedWithLocalEdits", () => "conflict" as const)
     .exhaustive();
 }
 
@@ -126,21 +127,29 @@ export function directionOfCategory(category: EntryCategory): StatusDirection {
  * 削除を伴うカテゴリかどうかを判定する。
  *
  * UI が破壊的操作を警告表示するために StatusEntry.isDestructive にコピーする。
- * `deletedFiles` (テンプレ側削除) と `deletedLocally` (ローカル側削除) が破壊的。
+ * テンプレ側削除 (`deletedFiles` / `deletedWithLocalEdits`) とローカル側削除
+ * (`deletedLocally`) が破壊的。
+ *
+ * カテゴリ追加時に判定漏れをコンパイルエラーにするため、条件式ではなく網羅的な
+ * match で書く。
  */
 export function isDestructiveCategory(category: EntryCategory): boolean {
-  return category === "deletedFiles" || category === "deletedLocally";
+  return match(category)
+    .with("deletedFiles", "deletedWithLocalEdits", "deletedLocally", () => true)
+    .with("autoUpdate", "newFiles", "localOnly", "conflicts", () => false)
+    .exhaustive();
 }
 
 /** path 昇順比較。決定論的出力のためバケツ内ソートに使う。 */
 const byPath = (a: StatusEntry, b: StatusEntry): number => a.path.localeCompare(b.path);
 
 /**
- * FileClassification の 7 カテゴリを、UX の3方向（pull / push / conflict）に集約する。
+ * FileClassification の各カテゴリを、UX の3方向（pull / push / conflict）に集約する。
  *
- * push.ts は内部で `localOnly + conflicts + deletedLocally` を pushable として扱うが、
- * status は conflict を別バケツとして表示する点が異なる（「次に何をすべきか」を
- * 強調するため、両方変更されたファイルは "modify both sides" として目立たせる）。
+ * push.ts は内部で `localOnly + conflicts + deletedLocally + deletedWithLocalEdits` を
+ * pushable として扱うが、status は conflict を別バケツとして表示する点が異なる
+ * （「次に何をすべきか」を強調するため、両方変更されたファイルは "modify both sides"
+ * として目立たせる）。
  *
  * 並び: 各バケツ内は path 昇順。
  */

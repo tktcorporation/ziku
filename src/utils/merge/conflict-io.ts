@@ -2,10 +2,9 @@
  * コンフリクト解決の I/O ユーティリティ。
  *
  * pull/push 共通の「ベースダウンロード→ファイル読み込み→3-way マージ」ロジックを
- * SSOT として集約する。以前は各コマンドに同じコードが分散しており、
- * pull 側にだけ existsSync チェックが漏れて ENOENT クラッシュを引き起こした。
- * ファイル I/O の安全なプリミティブと、1ファイル単位のマージを Effect で提供し、
- * post-merge 処理（ディスク書き込み or Map 保存）は各コマンドに委ねる。
+ * SSOT として集約する。ファイル不在を握りつぶさない I/O プリミティブと、1ファイル単位の
+ * マージを Effect で提供する。post-merge 処理（ディスク書き込み or Map 保存）は
+ * コマンドごとに異なるため、各コマンドに委ねる。
  */
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -69,8 +68,9 @@ export interface MergeOneFileOutput extends MergeResult {
  * local/template/base の3バージョンを読み込み、threeWayMerge に渡す。
  * - local, base: ファイルがない場合は FileNotFoundError → 空文字列にフォールバック
  *   （delete/modify conflict でローカルが削除されているケースに対応）
- * - template: 必ず存在する前提（classifyFiles が検出済み）。不在時は orDie でクラッシュ。
- *   テンプレートファイルがないのに conflict に分類されることは classifyFiles の不変条件違反。
+ * - template: `conflicts` のファイルはテンプレート側に必ず存在する（classifyFiles の
+ *   不変条件。classify.ts の classifyOneFile を参照）。不在は不変条件違反なので
+ *   呼び出し側で回復できず、defect として扱う。
  */
 export const mergeOneFile = (input: MergeOneFileInput): Effect.Effect<MergeOneFileOutput> =>
   Effect.gen(function* () {
@@ -79,7 +79,7 @@ export const mergeOneFile = (input: MergeOneFileInput): Effect.Effect<MergeOneFi
       Effect.catchTag("FileNotFoundError", () => Effect.succeed("")),
     );
 
-    // template: classifyFiles が検出済みなので必ず存在する（不変条件）
+    // template: conflicts のファイルはテンプレート側に必ず存在する（classifyFiles の不変条件）
     const templateContent = yield* readFileSafe(join(input.templateDir, input.file));
 
     // base: ダウンロードした時点でファイルがない可能性がある → 空文字列にフォールバック

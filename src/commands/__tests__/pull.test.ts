@@ -96,6 +96,7 @@ vi.mock("../../utils/template-config", async () => {
 
 vi.mock("../../ui/prompts", () => ({
   selectDeletedFiles: vi.fn(),
+  selectDeletedFilesWithLocalEdits: vi.fn(() => Promise.resolve([])),
 }));
 
 vi.mock("../../ui/renderer", () => ({
@@ -123,8 +124,9 @@ vi.mock("../../ui/renderer", () => ({
 // モック後にインポート
 const { pullCommand } = await import("../pull");
 const { loadCommandContext } = await import("../../services/command-context");
-const { selectDeletedFiles } = await import("../../ui/prompts");
+const { selectDeletedFiles, selectDeletedFilesWithLocalEdits } = await import("../../ui/prompts");
 const mockSelectDeletedFiles = vi.mocked(selectDeletedFiles);
+const mockSelectDeletedFilesWithLocalEdits = vi.mocked(selectDeletedFilesWithLocalEdits);
 const { downloadTemplateToTemp } = await import("../../utils/template");
 const { zikuConfigExists } = await import("../../utils/ziku-config");
 const { loadLock, saveLock } = await import("../../utils/lock");
@@ -247,6 +249,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [".mcp.json"],
       });
@@ -288,6 +291,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -325,6 +329,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -360,6 +365,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -396,6 +402,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [".ziku/ziku.jsonc"],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -431,6 +438,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -460,6 +468,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -487,6 +496,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [".new-file"],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -522,6 +532,7 @@ describe("pullCommand", () => {
         conflicts: [".mcp.json"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -578,6 +589,7 @@ describe("pullCommand", () => {
         conflicts: [".ziku/ziku.jsonc"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -609,6 +621,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [".old-file"],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -632,6 +645,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: ["old-file.txt"],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -657,6 +671,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: ["old-file.txt"],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -671,6 +686,64 @@ describe("pullCommand", () => {
       expect(vol.existsSync("/test/old-file.txt")).toBe(false);
     });
 
+    it("--force では deletedWithLocalEdits を削除せず、選択も求めない", async () => {
+      vol.fromJSON({
+        "/test/edited.md": "local edits",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedWithLocalEdits: ["edited.md"],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // --force は確認のスキップであって、ローカルの編集を捨てる承認ではない。
+      // 非対話を意図する実行でプロンプトを出すと CI が入力待ちで止まるため、
+      // 選択を求めず全て残す側に倒す。
+      expect(mockSelectDeletedFilesWithLocalEdits).not.toHaveBeenCalled();
+      expect(mockSelectDeletedFiles).not.toHaveBeenCalled();
+      expect(vol.existsSync("/test/edited.md")).toBe(true);
+    });
+
+    it("deletedWithLocalEdits は選択したファイルだけ削除する", async () => {
+      vol.fromJSON({
+        "/test/chosen.md": "local edits",
+        "/test/kept.md": "local edits",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedWithLocalEdits: ["chosen.md", "kept.md"],
+        deletedLocally: [],
+        unchanged: [],
+      });
+      mockSelectDeletedFilesWithLocalEdits.mockResolvedValueOnce(["chosen.md"]);
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(vol.existsSync("/test/chosen.md")).toBe(false);
+      expect(vol.existsSync("/test/kept.md")).toBe(true);
+    });
+
     it("selectDeletedFiles で選択したファイルのみ削除する", async () => {
       vol.fromJSON({
         "/test/a.txt": "aaa",
@@ -683,6 +756,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: ["a.txt", "b.txt"],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -712,6 +786,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -753,6 +828,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -787,6 +863,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -816,6 +893,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [".mcp.json"],
       });
@@ -841,6 +919,7 @@ describe("pullCommand", () => {
         conflicts: [".mcp.json"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -989,6 +1068,7 @@ describe("pullCommand", () => {
         conflicts: ["settings.json"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1054,6 +1134,7 @@ describe("pullCommand", () => {
         conflicts: [".mcp.json"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1091,6 +1172,7 @@ describe("pullCommand", () => {
         conflicts: ["a.json", "b.txt"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1140,6 +1222,7 @@ describe("pullCommand", () => {
         conflicts: ["a.json", "b.json"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1183,6 +1266,7 @@ describe("pullCommand", () => {
         conflicts: ["config.json"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1218,6 +1302,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [".devcontainer/config.json"],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1260,6 +1345,7 @@ describe("pullCommand", () => {
         conflicts: [".claude/rules/worktree.md"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1324,6 +1410,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [".new-file"],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1353,6 +1440,7 @@ describe("pullCommand", () => {
         conflicts: [".mcp.json"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1385,6 +1473,7 @@ describe("pullCommand", () => {
         conflicts: [".mcp.json"],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1419,6 +1508,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: ["old-file.txt"],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
@@ -1445,6 +1535,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [".mcp.json"],
       });

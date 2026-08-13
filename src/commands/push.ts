@@ -88,6 +88,11 @@ interface PushTarget {
   readonly files: Array<{ path: string; content: string }>;
   readonly deletions: Array<{ path: string }>;
   readonly pushableFiles: FileDiff[];
+  /**
+   * テンプレートが削除したファイルのうち、ローカルの編集を保持したまま push するもの。
+   * push はテンプレート側の削除を取り消すことになるので、サマリで明示する。
+   */
+  readonly restoresTemplateDeletion: ReadonlySet<string>;
 }
 
 /**
@@ -141,9 +146,8 @@ function pushToGitHub(
         `→ ${baseBranch}`,
         baseHashStr,
         title,
-        target.pushableFiles,
+        target,
         files,
-        target.deletions,
       );
 
       if (!args.yes) {
@@ -212,9 +216,8 @@ function pushToLocal(
         "(local)",
         "",
         `push ${target.files.length + target.deletions.length} file(s)`,
-        target.pushableFiles,
+        target,
         target.files,
-        target.deletions,
       );
 
       if (!args.yes) {
@@ -286,10 +289,10 @@ function logPushSummary(
   branchInfo: string,
   baseHashStr: string,
   title: string,
-  pushableFiles: FileDiff[],
+  target: PushTarget,
   files: Array<{ path: string; content: string }>,
-  deletions: Array<{ path: string }> = [],
 ): void {
+  const { pushableFiles, deletions, restoresTemplateDeletion } = target;
   const fileLines: string[] = [];
   // files の content は mergedContent を含むため、detectDiff の localContent ではなく
   // 実際に push される content でサマリーを計算する（PR の差分行数と一致させる）
@@ -309,7 +312,12 @@ function logPushSummary(
       .with("modified", () => pc.yellow("~"))
       .with("deleted", () => pc.red("-"))
       .exhaustive();
-    fileLines.push(`  ${icon} ${pf.path.padEnd(50)} ${stat}`);
+    // テンプレートが削除したファイルの push は、新規追加ではなく「削除の取り消し」。
+    // 同じ `+` 行では区別できないので注記する。
+    const note = restoresTemplateDeletion.has(pf.path)
+      ? ` ${pc.yellow("(restores file deleted in template)")}`
+      : "";
+    fileLines.push(`  ${icon} ${pf.path.padEnd(50)} ${stat}${note}`);
   }
   for (const f of files) {
     if (!pushableFiles.some((pf) => pf.path === f.path)) {
@@ -462,14 +470,15 @@ export const pushCommand = defineCommand({
 
       // 分類 + auto-merge。未解決の衝突は控えておき、push 対象に含めようとした時だけ中断する。
       // ziku.jsonc の加法 union マージは classifyAndResolveConflicts 内で処理する。
-      const { pushableFilePaths, unresolvedConflicts } = await classifyAndResolveConflicts({
-        targetDir,
-        templateDir,
-        source,
-        lock,
-        patterns: effectivePatterns,
-        mergedContents,
-      });
+      const { pushableFilePaths, unresolvedConflicts, deletedWithLocalEdits } =
+        await classifyAndResolveConflicts({
+          targetDir,
+          templateDir,
+          source,
+          lock,
+          patterns: effectivePatterns,
+          mergedContents,
+        });
 
       log.step("Detecting changes...");
 
@@ -589,10 +598,17 @@ export const pushCommand = defineCommand({
 
       // ─── 分岐: ソース���別に応じた push 戦略 (ts-pattern + Effect) ───
 
+      const target: PushTarget = {
+        files,
+        deletions,
+        pushableFiles,
+        restoresTemplateDeletion: deletedWithLocalEdits,
+      };
+
       const pushed = await runCommandEffect(
         match(source)
           .with({ owner: P.string, repo: P.string }, (ghSource) =>
-            pushToGitHub(ghSource, { files, deletions, pushableFiles }, ctx, {
+            pushToGitHub(ghSource, target, ctx, {
               message: args.message as string | undefined,
               edit: args.edit as boolean,
               yes: args.yes as boolean,
@@ -601,7 +617,7 @@ export const pushCommand = defineCommand({
           .with({ path: P.string }, (localSource) =>
             pushToLocal(
               localSource,
-              { files, deletions, pushableFiles },
+              target,
               ctx,
               targetDir,
               { yes: args.yes as boolean },
@@ -920,7 +936,8 @@ async function selectFilesToPush(
 /**
  * ローカル/テンプレート/ベースのハッシュを比較して push 対象を分類し、衝突は auto-merge を試みる。
  *
- * - localOnly / conflicts / deletedLocally を push 対象候補（pushableFilePaths）に含める。
+ * - localOnly / conflicts / deletedLocally / deletedWithLocalEdits を push 対象候補
+ *   （pushableFilePaths）に含める。
  * - autoUpdate（テンプレートのみ変更）は push 対象外としてスキップ理由を表示する。
  * - 衝突は auto-merge を試行し、成功分は mergedContents に保存、失敗分は unresolvedConflicts に返す。
  *
@@ -933,7 +950,12 @@ async function classifyAndResolveConflicts(params: {
   lock: { baseHashes?: Record<string, string>; baseRef?: string };
   patterns: { include: string[]; exclude: string[] };
   mergedContents: Map<string, string>;
-}): Promise<{ pushableFilePaths: Set<string>; unresolvedConflicts: Set<string> }> {
+}): Promise<{
+  pushableFilePaths: Set<string>;
+  unresolvedConflicts: Set<string>;
+  /** テンプレートが削除したがローカルに編集があるファイル。push はその削除を取り消す。 */
+  deletedWithLocalEdits: Set<string>;
+}> {
   const { classifyFiles } = await import("../utils/merge");
 
   const templateHashes = await hashFiles(
@@ -957,6 +979,11 @@ async function classifyAndResolveConflicts(params: {
   for (const file of classification.localOnly) pushableFilePaths.add(file);
   for (const file of classification.conflicts) pushableFilePaths.add(file);
   for (const file of classification.deletedLocally) pushableFilePaths.add(file);
+  // テンプレートに無く、ローカルにだけ編集済みの内容がある状態。テンプレートへ送る候補
+  // としては localOnly と同じ扱いになる（送るとテンプレート側の削除が取り消される点だけが
+  // 異なり、それはサマリで明示する）。
+  const deletedWithLocalEdits = new Set(classification.deletedWithLocalEdits);
+  for (const file of deletedWithLocalEdits) pushableFilePaths.add(file);
 
   if (classification.autoUpdate.length > 0) {
     log.info(
@@ -994,7 +1021,7 @@ async function classifyAndResolveConflicts(params: {
     for (const file of unresolved) unresolvedConflicts.add(file);
   }
 
-  return { pushableFilePaths, unresolvedConflicts };
+  return { pushableFilePaths, unresolvedConflicts, deletedWithLocalEdits };
 }
 
 // ─── コンフリクト解決 ───

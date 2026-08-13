@@ -18,6 +18,7 @@ function emptyClassification(): FileClassification {
     conflicts: [],
     newFiles: [],
     deletedFiles: [],
+    deletedWithLocalEdits: [],
     deletedLocally: [],
     unchanged: [],
   };
@@ -37,6 +38,7 @@ describe("status", () => {
       "localOnly",
       "deletedLocally",
       "conflicts",
+      "deletedWithLocalEdits",
     ] as const)("%s は EntryCategory（status の表示対象）", (cat) => {
       expect(isEntryCategory(cat)).toBe(true);
     });
@@ -54,6 +56,7 @@ describe("status", () => {
       ["localOnly", "push"],
       ["deletedLocally", "push"],
       ["conflicts", "conflict"],
+      ["deletedWithLocalEdits", "conflict"],
     ] as const)("%s カテゴリは %s 方向にマップされる", (cat, expected) => {
       expect(directionOfCategory(cat)).toBe(expected);
     });
@@ -62,9 +65,10 @@ describe("status", () => {
   });
 
   describe("isDestructiveCategory", () => {
-    it("deletedFiles と deletedLocally は破壊的", () => {
+    it("削除を伴うカテゴリは破壊的", () => {
       expect(isDestructiveCategory("deletedFiles")).toBe(true);
       expect(isDestructiveCategory("deletedLocally")).toBe(true);
+      expect(isDestructiveCategory("deletedWithLocalEdits")).toBe(true);
     });
 
     it("非削除カテゴリは非破壊的", () => {
@@ -115,6 +119,18 @@ describe("status", () => {
       });
 
       expect(result.conflict.map((e) => e.path)).toEqual(["both.txt"]);
+    });
+
+    it("deletedWithLocalEdits は conflict バケツに入り、破壊的として扱われる", () => {
+      const result = categorizeForStatus({
+        ...emptyClassification(),
+        deletedWithLocalEdits: ["edited-then-deleted.txt"],
+      });
+
+      expect(result.conflict.map((e) => e.path)).toEqual(["edited-then-deleted.txt"]);
+      expect(result.conflict[0]?.isDestructive).toBe(true);
+      expect(result.pull).toEqual([]);
+      expect(result.push).toEqual([]);
     });
 
     it("unchanged は inSyncCount に反映される（バケツには入らない）", () => {

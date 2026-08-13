@@ -25,6 +25,7 @@ const CATEGORY_LABEL: Record<EntryCategory, string> = {
   localOnly: "modified:",
   deletedLocally: "deleted: ",
   conflicts: "both modified:",
+  deletedWithLocalEdits: "deleted in template, edited locally:",
 };
 
 function colorForEntry(entry: StatusEntry): (s: string) => string {

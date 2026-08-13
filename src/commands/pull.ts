@@ -5,7 +5,7 @@ import { join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
 import type { LockState, TemplateSource } from "../modules/schemas";
-import { selectDeletedFiles } from "../ui/prompts";
+import { selectDeletedFiles, selectDeletedFilesWithLocalEdits } from "../ui/prompts";
 import { intro, log, outro, pc } from "../ui/renderer";
 import { LOCK_FILE, loadLock, saveLock } from "../utils/lock";
 import { ZIKU_CONFIG_FILE, withConfigTracked, zikuConfigExists } from "../utils/ziku-config";
@@ -61,7 +61,7 @@ export const pullLifecycle: CommandLifecycle = {
   ],
   notes: [
     "`ziku.jsonc` 自体が追跡ファイルとして加法 union マージされる。テンプレ側で追加されたパターンはユーザーの `ziku.jsonc` へ取り込まれる（push と双方向に同期）。パターンの削除は自動伝播しない（安全側）。",
-    "テンプレートで削除されたファイルは `--force` で自動削除、またはユーザーが選択的に削除できる。",
+    "テンプレートで削除されたファイルは `--force` で自動削除、またはユーザーが選択的に削除できる。ただしローカルに編集があるものは対象外で、対話実行では明示的に選んだものだけを削除し、`--force` では削除せず残す。",
   ],
 };
 
@@ -170,6 +170,11 @@ export const pullCommand = defineCommand({
       // 制御ファイルを消すと以降プロジェクトが壊れる（loadCommandContext が未初期化扱いにする）。
       // deletedFiles からも除外し、削除は伝播させない（codex P2）。
       const deletedFiles = classification.deletedFiles.filter((f) => f !== ZIKU_CONFIG_FILE);
+      // ローカル編集付きの削除候補も同じ理由で ziku.jsonc を除外する。ziku.jsonc の同期は
+      // 上の configSync（加法 union）が担い、削除は伝播させない。
+      const deletedWithLocalEdits = classification.deletedWithLocalEdits.filter(
+        (f) => f !== ZIKU_CONFIG_FILE,
+      );
 
       // configInPlay のとき lock の base[ziku.jsonc] をローカル最終内容（union）に揃える。
       // templateHashes 側に寄せると、テンプレが削除したパターンを後続 push が localOnly として
@@ -184,6 +189,7 @@ export const pullCommand = defineCommand({
         classification.newFiles.length +
         conflicts.length +
         deletedFiles.length +
+        deletedWithLocalEdits.length +
         (configSync.write !== undefined ? 1 : 0);
 
       // ファイル変更が無くても、ziku.jsonc の base を union に揃える必要がある場合
@@ -200,7 +206,13 @@ export const pullCommand = defineCommand({
       }
 
       if (totalChanges > 0) {
-        logPullSummary({ ...classification, autoUpdate, conflicts, deletedFiles });
+        logPullSummary({
+          ...classification,
+          autoUpdate,
+          conflicts,
+          deletedFiles,
+          deletedWithLocalEdits,
+        });
       }
 
       if (args.dryRun) {
@@ -211,7 +223,9 @@ export const pullCommand = defineCommand({
           lock,
           conflicts,
           deletedFiles,
+          deletedWithLocalEdits,
           configWrite: configSync.write,
+          force: args.force as boolean,
         });
         return;
       }
@@ -250,6 +264,10 @@ export const pullCommand = defineCommand({
       // 削除されたファイルを処理（ziku.jsonc は除外済み）
       if (deletedFiles.length > 0) {
         await handleDeletedFiles(deletedFiles, targetDir, args.force as boolean);
+      }
+
+      if (deletedWithLocalEdits.length > 0) {
+        await handleDeletedWithLocalEdits(deletedWithLocalEdits, targetDir, args.force as boolean);
       }
 
       // ziku.jsonc は上の classification で他ファイルと同様に同期済み
@@ -354,7 +372,9 @@ async function previewPull(params: {
   lock: LockState;
   conflicts: string[];
   deletedFiles: string[];
+  deletedWithLocalEdits: string[];
   configWrite: string | undefined;
+  force: boolean;
 }): Promise<void> {
   log.info("Dry run mode");
 
@@ -375,6 +395,14 @@ async function previewPull(params: {
   } else if (params.deletedFiles.length > 0) {
     log.info(
       `${params.deletedFiles.length} file(s) removed from the template would be candidates for deletion.`,
+    );
+  }
+
+  if (params.deletedWithLocalEdits.length > 0) {
+    log.warn(
+      params.force
+        ? `${params.deletedWithLocalEdits.length} file(s) removed from the template have local edits — pull would keep them (--force never discards local edits).`
+        : `${params.deletedWithLocalEdits.length} file(s) removed from the template have local edits — pull would ask you to pick which to delete (never deleted automatically).`,
     );
   }
 
@@ -462,7 +490,8 @@ async function resolveConflicts(
 }
 
 /**
- * テンプレートで削除されたファイルを処理する。
+ * テンプレートで削除され、ローカルも base のままのファイルを処理する。
+ * ローカルの編集が無いので、`--force` では確認を省いて削除できる。
  */
 async function handleDeletedFiles(
   deletedFiles: string[],
@@ -473,7 +502,46 @@ async function handleDeletedFiles(
     ? (log.info(`Deleting ${deletedFiles.length} file(s) removed from template...`), deletedFiles)
     : await selectDeletedFiles(deletedFiles);
 
-  for (const file of filesToDelete) {
+  await deleteSelectedFiles(filesToDelete, targetDir);
+}
+
+/**
+ * テンプレートで削除され、ローカルに編集があるファイルを処理する。
+ *
+ * `--force` は "Skip confirmations" であって「ローカルの編集を捨てる承認」ではないため、
+ * このカテゴリを自動削除はしない。対話実行では明示的に選択させ、`--force`（非対話を
+ * 意図する実行）では選択プロンプトを出さずに全て残す。CI で入力待ちのまま止まるのを
+ * 避けつつ、確認を省く側ではなく編集を守る側へ倒す。
+ * 残ったファイルは以降「ローカルにしかないファイル」として push 候補になる。
+ */
+async function handleDeletedWithLocalEdits(
+  files: string[],
+  targetDir: string,
+  force: boolean,
+): Promise<void> {
+  if (force) {
+    log.warn(
+      `Kept ${files.length} file(s) removed from the template because they have local edits. Run 'ziku pull' without --force to choose which to delete.`,
+    );
+    return;
+  }
+
+  log.warn(
+    `${files.length} file(s) removed from the template have local edits — select explicitly to delete:`,
+  );
+  const filesToDelete = await selectDeletedFilesWithLocalEdits(files);
+
+  await deleteSelectedFiles(filesToDelete, targetDir);
+
+  const kept = files.filter((f) => !filesToDelete.includes(f));
+  if (kept.length > 0) {
+    log.info(`Kept ${kept.length} locally edited file(s).`);
+  }
+}
+
+/** 選択された削除対象をローカルから削除する。削除できないファイルは警告のみで続行する。 */
+async function deleteSelectedFiles(files: string[], targetDir: string): Promise<void> {
+  for (const file of files) {
     await Effect.runPromise(
       Effect.tryPromise(async () => {
         await rm(join(targetDir, file), { force: true });
@@ -539,6 +607,7 @@ function logPullSummary(classification: {
   newFiles: string[];
   conflicts: string[];
   deletedFiles: string[];
+  deletedWithLocalEdits: string[];
   localOnly: string[];
   unchanged: string[];
 }): void {
@@ -556,6 +625,11 @@ function logPullSummary(classification: {
   for (const file of classification.deletedFiles) {
     lines.push(`${pc.red("-")} ${pc.red(file)}`);
   }
+  // 削除候補だがローカルに編集がある。削除すると編集が失われるので、他の削除と見分けが
+  // つくよう注記を添える。
+  for (const file of classification.deletedWithLocalEdits) {
+    lines.push(`${pc.red("-")} ${pc.red(file)} ${pc.dim("(locally edited)")}`);
+  }
 
   const summaryParts = [
     classification.autoUpdate.length > 0
@@ -567,6 +641,9 @@ function logPullSummary(classification: {
       : null,
     classification.deletedFiles.length > 0
       ? pc.red(`-${classification.deletedFiles.length} deleted`)
+      : null,
+    classification.deletedWithLocalEdits.length > 0
+      ? pc.red(`-${classification.deletedWithLocalEdits.length} deleted (locally edited)`)
       : null,
   ]
     .filter(Boolean)
