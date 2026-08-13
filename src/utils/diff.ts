@@ -2,7 +2,6 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createPatch } from "diff";
 import { join } from "pathe";
-import pc from "picocolors";
 import { match } from "ts-pattern";
 import type { DiffResult, DiffType, FileDiff } from "../modules/schemas";
 import { filterByGitignore, loadMergedGitignore } from "./gitignore";
@@ -104,72 +103,6 @@ export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
 }
 
 /**
- * 差分をフォーマットして表示用文字列を生成
- */
-export function formatDiff(diff: DiffResult, verbose = false): string {
-  const lines: string[] = [];
-
-  // サマリー表示
-  const summaryParts: string[] = [];
-  if (diff.summary.added > 0) {
-    summaryParts.push(pc.green(`+${diff.summary.added} added`));
-  }
-  if (diff.summary.modified > 0) {
-    summaryParts.push(pc.yellow(`~${diff.summary.modified} modified`));
-  }
-  if (diff.summary.deleted > 0) {
-    summaryParts.push(pc.red(`-${diff.summary.deleted} deleted`));
-  }
-  if (diff.summary.unchanged > 0) {
-    summaryParts.push(pc.dim(`${diff.summary.unchanged} unchanged`));
-  }
-
-  if (summaryParts.length > 0) {
-    lines.push(`  ${summaryParts.join(pc.dim(" │ "))}`);
-    lines.push("");
-  }
-
-  // 詳細
-  const changedFiles = diff.files.filter((f) => f.type !== "unchanged");
-  if (changedFiles.length > 0) {
-    for (const file of changedFiles) {
-      const { icon, color } = getStatusStyle(file.type);
-      lines.push(`  ${icon} ${color(file.path)}`);
-
-      if (verbose && file.type === "modified") {
-        lines.push(pc.dim("    └─ Content differs from template"));
-      }
-    }
-  } else {
-    lines.push(pc.dim("  No changes detected"));
-  }
-
-  return lines.join("\n");
-}
-
-interface StatusStyle {
-  icon: string;
-  color: (s: string) => string;
-}
-
-function getStatusStyle(type: DiffType): StatusStyle {
-  return match(type)
-    .with("added", () => ({ icon: pc.green("+"), color: pc.green }))
-    .with("modified", () => ({ icon: pc.yellow("~"), color: pc.yellow }))
-    .with("deleted", () => ({ icon: pc.red("-"), color: pc.red }))
-    .with("unchanged", () => ({ icon: pc.dim(" "), color: pc.dim }))
-    .exhaustive();
-}
-
-/**
- * push 対象のファイルのみをフィルタリング
- * (ローカルで追加・変更されたファイル)
- */
-export function getPushableFiles(diff: DiffResult): FileDiff[] {
-  return diff.files.filter((f) => f.type === "added" || f.type === "modified");
-}
-
-/**
  * 差分があるかどうかを判定
  */
 export function hasDiff(diff: DiffResult): boolean {
@@ -177,34 +110,34 @@ export function hasDiff(diff: DiffResult): boolean {
 }
 
 /**
- * FileDiff から unified diff 形式の文字列を生成
+ * unified diff のハンク前後に付ける文脈行数。
+ *
+ * git の既定値と揃える。jsdiff の既定は 4 行で、そのままだと同じ変更でも
+ * `git diff` よりハンクが広くなり、両者を見比べたときに変更範囲が食い違って見える。
+ */
+const DIFF_CONTEXT_LINES = 3;
+
+/**
+ * FileDiff から unified diff 形式の文字列を生成する。
+ *
+ * 差分の向きは常にテンプレート → ローカルで、ローカル側が「変更後」になる。
+ * deleted（テンプレートにのみ存在する）は、テンプレート側の全行が削除される
+ * patch として表す。削除をテンプレートへ push するかどうかを、内容を見てから
+ * 判断できるようにするため。
+ * unchanged は表示すべき差分が無いので空文字列を返す。
  */
 export function generateUnifiedDiff(fileDiff: FileDiff): string {
   const { path, type, localContent, templateContent } = fileDiff;
+  const options = { context: DIFF_CONTEXT_LINES };
 
   return match(type)
-    .with("added", () => createPatch(path, "", localContent || "", "template", "local"))
+    .with("added", () => createPatch(path, "", localContent ?? "", "template", "local", options))
     .with("modified", () =>
-      createPatch(path, templateContent || "", localContent || "", "template", "local"),
+      createPatch(path, templateContent ?? "", localContent ?? "", "template", "local", options),
     )
-    .otherwise(() => "");
-}
-
-/**
- * unified diff にカラーを適用
- * (テスト互換性のため、直接 ANSI エスケープシーケンスを使用)
- */
-export function colorizeUnifiedDiff(diff: string): string {
-  return diff
-    .split("\n")
-    .map((line) => {
-      if (line.startsWith("+++") || line.startsWith("---")) {
-        return `\u001B[1m${line}\u001B[0m`; // Bold
-      }
-      if (line.startsWith("+")) return `\u001B[32m${line}\u001B[0m`; // Green
-      if (line.startsWith("-")) return `\u001B[31m${line}\u001B[0m`; // Red
-      if (line.startsWith("@@")) return `\u001B[36m${line}\u001B[0m`; // Cyan
-      return line;
-    })
-    .join("\n");
+    .with("deleted", () =>
+      createPatch(path, templateContent ?? "", "", "template", "local", options),
+    )
+    .with("unchanged", () => "")
+    .exhaustive();
 }

@@ -27,9 +27,7 @@ vi.mock("../../services/command-context", async (importOriginal) => {
 // utils/diff をモック
 vi.mock("../../utils/diff", () => ({
   detectDiff: vi.fn(),
-  getPushableFiles: vi.fn(() => []),
   generateUnifiedDiff: vi.fn(() => ""),
-  colorizeUnifiedDiff: vi.fn((s: string) => s),
 }));
 
 // utils/github をモック
@@ -126,7 +124,7 @@ vi.mock("../../ui/renderer", () => ({
 // モック後にインポート
 const { pushCommand } = await import("../push");
 const { loadCommandContext } = await import("../../services/command-context");
-const { detectDiff, getPushableFiles } = await import("../../utils/diff");
+const { detectDiff } = await import("../../utils/diff");
 const { getGitHubToken, createPullRequest } = await import("../../utils/github");
 const {
   confirmAction,
@@ -143,7 +141,6 @@ const { hashFiles } = await import("../../utils/hash");
 const { classifyFiles, mergeOneFile, downloadBaseForMerge } = await import("../../utils/merge");
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
 const mockDetectDiff = vi.mocked(detectDiff);
-const mockGetPushableFiles = vi.mocked(getPushableFiles);
 const mockGetGitHubToken = vi.mocked(getGitHubToken);
 const mockCreatePullRequest = vi.mocked(createPullRequest);
 const mockConfirmAction = vi.mocked(confirmAction);
@@ -256,7 +253,6 @@ describe("pushCommand", () => {
     mockLoadCommandContext.mockReturnValue(effect);
 
     mockDetectDiff.mockResolvedValue(emptyDiff);
-    mockGetPushableFiles.mockReturnValue([]);
   });
 
   describe("meta", () => {
@@ -351,8 +347,6 @@ describe("pushCommand", () => {
     });
 
     it("push 対象ファイルがない場合は情報メッセージ", async () => {
-      mockGetPushableFiles.mockReturnValue([]);
-
       await (pushCommand.run as any)({
         args: { dir: "/test", dryRun: false, yes: false, edit: false },
         rawArgs: [],
@@ -1492,8 +1486,6 @@ describe("pushCommand", () => {
     });
 
     it("baseHashes がない場合でもコンフリクト検出を実行（空の baseHashes で分類）", async () => {
-      mockGetPushableFiles.mockReturnValue([]);
-
       await (pushCommand.run as any)({
         args: { dir: "/test", dryRun: false, yes: false, edit: false },
         rawArgs: [],
@@ -1589,8 +1581,6 @@ describe("pushCommand", () => {
         unchanged: [],
       });
 
-      mockGetPushableFiles.mockReturnValue([]);
-
       await (pushCommand.run as any)({
         args: { dir: "/test", dryRun: false, yes: false, edit: false },
         rawArgs: [],
@@ -1613,7 +1603,6 @@ describe("未追跡ファイルの追跡フロー", () => {
     const { effect } = mockContext();
     mockLoadCommandContext.mockReturnValue(effect);
     mockDetectDiff.mockResolvedValue(emptyDiff);
-    mockGetPushableFiles.mockReturnValue([]);
   });
 
   /** /test/.ziku/ziku.jsonc を初期 include 付きで memfs に用意する */
@@ -1771,7 +1760,6 @@ describe("未追跡ファイルの追跡フロー", () => {
     seedZikuConfig();
     mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);
     // --yes では追跡対象なし → push 対象もなしで終了
-    mockGetPushableFiles.mockReturnValue([]);
 
     await (pushCommand.run as any)({
       args: { dir: "/test", dryRun: false, yes: true, edit: false },
@@ -1881,7 +1869,6 @@ describe("--files でファイル本体だけを指定した場合の ziku.jsonc
     const { effect } = mockContext();
     mockLoadCommandContext.mockReturnValue(effect);
     mockDetectDiff.mockResolvedValue(emptyDiff);
-    mockGetPushableFiles.mockReturnValue([]);
   });
 
   /** /test/.ziku/ziku.jsonc を指定 include 付きで memfs に用意する（`ziku track` 済み想定） */

@@ -29,13 +29,6 @@ export function filterByGitignore(files: string[], ig: Ignore): string[] {
 }
 
 /**
- * ファイルが gitignore に該当するかどうかを判定
- */
-export function isIgnored(file: string, ig: Ignore): boolean {
-  return ig.ignores(file);
-}
-
-/**
  * ファイルリストを ignored と non-ignored に分離
  */
 export interface SeparatedFiles {

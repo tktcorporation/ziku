@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { FileDiff } from "../../modules/schemas";
-import { colorizeUnifiedDiff, generateUnifiedDiff } from "../diff";
+import { generateUnifiedDiff } from "../diff";
 
 describe("diff", () => {
   describe("generateUnifiedDiff", () => {
@@ -37,17 +37,21 @@ describe("diff", () => {
       expect(result).toContain("+modified line");
     });
 
-    it("deleted タイプのファイルでは空文字列を返す", () => {
+    it("deleted タイプはテンプレート側の内容が全行削除される patch を返す", () => {
       const fileDiff: FileDiff = {
         path: "deleted-file.txt",
         type: "deleted",
         localContent: undefined,
-        templateContent: "content\n",
+        templateContent: "first\nsecond\n",
       };
 
       const result = generateUnifiedDiff(fileDiff);
 
-      expect(result).toBe("");
+      expect(result).toContain("--- deleted-file.txt");
+      expect(result).toContain("-first");
+      expect(result).toContain("-second");
+      // ローカルには存在しないので追加行は出ない
+      expect(result.split("\n").some((l) => l.startsWith("+") && !l.startsWith("+++"))).toBe(false);
     });
 
     it("unchanged タイプのファイルでは空文字列を返す", () => {
@@ -114,75 +118,26 @@ describe("diff", () => {
       expect(result).toContain('-  "version": "1.0.0"');
       expect(result).toContain('+  "version": "2.0.0"');
     });
-  });
 
-  describe("colorizeUnifiedDiff", () => {
-    it("追加行を緑色にする", () => {
-      const diff = "+added line";
+    it("文脈行は git と同じ 3 行になる", () => {
+      // 前後に十分な行を置き、中央 1 行だけを変更する
+      const templateLines = Array.from({ length: 21 }, (_, i) => `line${i}`);
+      const localLines = [...templateLines];
+      localLines[10] = "changed";
 
-      const result = colorizeUnifiedDiff(diff);
+      const fileDiff: FileDiff = {
+        path: "context.txt",
+        type: "modified",
+        templateContent: `${templateLines.join("\n")}\n`,
+        localContent: `${localLines.join("\n")}\n`,
+      };
 
-      expect(result).toBe("\u001B[32m+added line\u001B[0m");
-    });
+      const contextLines = generateUnifiedDiff(fileDiff)
+        .split("\n")
+        .filter((l) => l.startsWith(" "));
 
-    it("削除行を赤色にする", () => {
-      const diff = "-removed line";
-
-      const result = colorizeUnifiedDiff(diff);
-
-      expect(result).toBe("\u001B[31m-removed line\u001B[0m");
-    });
-
-    it("ハンク行をシアン色にする", () => {
-      const diff = "@@ -1,3 +1,4 @@";
-
-      const result = colorizeUnifiedDiff(diff);
-
-      expect(result).toBe("\u001B[36m@@ -1,3 +1,4 @@\u001B[0m");
-    });
-
-    it("ヘッダー行をボールドにする", () => {
-      const diff = "--- file.txt\n+++ file.txt";
-
-      const result = colorizeUnifiedDiff(diff);
-
-      expect(result).toContain("\u001B[1m--- file.txt\u001B[0m");
-      expect(result).toContain("\u001B[1m+++ file.txt\u001B[0m");
-    });
-
-    it("コンテキスト行はそのまま", () => {
-      const diff = " unchanged line";
-
-      const result = colorizeUnifiedDiff(diff);
-
-      expect(result).toBe(" unchanged line");
-    });
-
-    it("複数行の diff を正しくカラー化する", () => {
-      const diff = `--- file.txt
-+++ file.txt
-@@ -1,3 +1,3 @@
- line1
--old line
-+new line
- line3`;
-
-      const result = colorizeUnifiedDiff(diff);
-
-      const lines = result.split("\n");
-      expect(lines[0]).toBe("\u001B[1m--- file.txt\u001B[0m");
-      expect(lines[1]).toBe("\u001B[1m+++ file.txt\u001B[0m");
-      expect(lines[2]).toBe("\u001B[36m@@ -1,3 +1,3 @@\u001B[0m");
-      expect(lines[3]).toBe(" line1");
-      expect(lines[4]).toBe("\u001B[31m-old line\u001B[0m");
-      expect(lines[5]).toBe("\u001B[32m+new line\u001B[0m");
-      expect(lines[6]).toBe(" line3");
-    });
-
-    it("空の diff を処理する", () => {
-      const result = colorizeUnifiedDiff("");
-
-      expect(result).toBe("");
+      // 変更行の前後に 3 行ずつ
+      expect(contextLines).toEqual([" line7", " line8", " line9", " line11", " line12", " line13"]);
     });
   });
 });

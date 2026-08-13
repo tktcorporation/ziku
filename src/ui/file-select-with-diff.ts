@@ -23,7 +23,14 @@ import pc from "picocolors";
 import { match } from "ts-pattern";
 import type { FileDiff } from "../modules/schemas";
 import { generateUnifiedDiff } from "../utils/diff";
-import { applyWordDiffAndColorize, calculateDiffStats, formatStats } from "./diff-view";
+import {
+  applyWordDiffAndColorize,
+  calculateDiffStats,
+  formatStats,
+  getTypeIcon,
+  getTypeLabel,
+  toDiffContentLines,
+} from "./diff-view";
 
 // ─── ANSI ユーティリティ ──────────────────────────────────────
 
@@ -59,32 +66,15 @@ function cursorUp(n: number): string {
 /**
  * FileDiff から色付きの diff 行配列を生成する。
  *
- * unified diff を生成し、隣接する -/+ ペアに word diff ハイライトを適用する。
- * unified diff ヘッダー行のみ除外する（コンテンツ行の ---/+++ は保持）。
+ * unified diff を生成し、置換ブロックに word diff ハイライトを適用する。
+ * 差分本文を持たないのは unchanged だけなので、空の diff はそのまま
+ * 「変更なし」として表示する。
  */
 export function buildColoredDiffLines(file: FileDiff): string[] {
-  if (file.type === "unchanged") return [pc.dim("(no changes)")];
-
   const raw = generateUnifiedDiff(file);
-  if (!raw) return [pc.dim("(no diff available)")];
+  if (!raw) return [pc.dim("(no changes)")];
 
-  // unified diff ヘッダーのみ除外。diff ライブラリの出力形式:
-  //   Index: <path>
-  //   ===...
-  //   --- <path>\t<label>
-  //   +++ <path>\t<label>
-  // コンテンツ行の --- や +++ を誤除去しないため、タブ文字の存在で判定する。
-  const lines = raw
-    .split("\n")
-    .filter(
-      (l) =>
-        !l.startsWith("Index:") &&
-        !l.startsWith("===") &&
-        !(l.startsWith("--- ") && l.includes("\t")) &&
-        !(l.startsWith("+++ ") && l.includes("\t")),
-    );
-
-  return applyWordDiffAndColorize(lines);
+  return applyWordDiffAndColorize(toDiffContentLines(raw));
 }
 
 // ─── ファイルリストアイテム ──────────────────────────────────────
@@ -99,11 +89,7 @@ export interface FileItem {
 export function buildFileItems(files: FileDiff[], conflictedPaths?: Set<string>): FileItem[] {
   const conflicted = conflictedPaths ?? new Set<string>();
   return files.map((file) => {
-    const icon = match(file.type)
-      .with("added", () => pc.green("+"))
-      .with("modified", () => pc.yellow("~"))
-      .with("deleted", () => pc.red("-"))
-      .otherwise(() => " ");
+    const icon = getTypeIcon(file.type);
 
     const stats = calculateDiffStats(file);
     const statHint = stats.additions === 0 && stats.deletions === 0 ? "" : formatStats(stats);
@@ -209,11 +195,7 @@ export function render(state: RenderState, termSize?: TerminalSize): string {
   const scrollOffset = Math.min(diffScrollOffset, maxScroll);
 
   const diffTitle = ` ${currentItem.file.path} `;
-  const typeLabel = match(currentItem.file.type)
-    .with("added", () => pc.green("added"))
-    .with("modified", () => pc.yellow("modified"))
-    .with("deleted", () => pc.red("deleted"))
-    .otherwise(() => "");
+  const typeLabel = getTypeLabel(currentItem.file.type);
   const headerText = `${diffTitle}${pc.dim("—")} ${typeLabel} ${currentItem.hint}`;
 
   // diff 枠上部

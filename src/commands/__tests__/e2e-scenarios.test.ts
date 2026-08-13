@@ -190,7 +190,6 @@ vi.mock("../../utils/diff", () => ({
     }),
   ),
   hasDiff: vi.fn(() => false),
-  getPushableFiles: vi.fn(() => []),
 }));
 
 vi.mock("../../utils/merge", () => ({

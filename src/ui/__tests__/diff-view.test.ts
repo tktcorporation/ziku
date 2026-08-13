@@ -4,9 +4,37 @@ vi.mock("@clack/prompts", () => ({
   log: { step: vi.fn(), message: vi.fn(), info: vi.fn() },
 }));
 
+// picocolors は TTY 以外では色を付けないため、色の付き方を検証できるよう
+// 装飾をタグに置き換える。ハイライト範囲の検査に使う。
+vi.mock("picocolors", () => ({
+  default: {
+    red: (s: string) => `<red>${s}</red>`,
+    green: (s: string) => `<green>${s}</green>`,
+    yellow: (s: string) => `<yellow>${s}</yellow>`,
+    cyan: (s: string) => `<cyan>${s}</cyan>`,
+    dim: (s: string) => `<dim>${s}</dim>`,
+    bold: (s: string) => `<bold>${s}</bold>`,
+    black: (s: string) => s,
+    white: (s: string) => s,
+    bgRed: (s: string) => `<bg>${s}</bg>`,
+    bgGreen: (s: string) => `<bg>${s}</bg>`,
+  },
+}));
+
 import * as p from "@clack/prompts";
 import type { FileDiff } from "../../modules/schemas";
-import { calculateDiffStats, formatStats, getFileLabel, renderFileDiff } from "../diff-view";
+import {
+  applyWordDiffAndColorize,
+  calculateDiffStats,
+  formatStats,
+  getFileLabel,
+  renderFileDiff,
+} from "../diff-view";
+
+/** 背景色（word diff のハイライト）が付いた部分だけを連結して返す */
+function highlighted(line: string): string {
+  return [...line.matchAll(/<bg>(.*?)<\/bg>/g)].map((m) => m[1]).join("");
+}
 
 describe("diff-view", () => {
   beforeEach(() => {
@@ -182,6 +210,98 @@ describe("diff-view", () => {
         deletions: 0,
       });
     });
+
+    it("should count content lines starting with --- as deletions", () => {
+      // front matter 区切りの削除。ヘッダー行と取り違えるとカウントから漏れる
+      const file: FileDiff = {
+        path: "rule.md",
+        type: "modified",
+        templateContent: "---\ntitle: a\n---\nbody\n",
+        localContent: "title: a\nbody\n",
+      };
+      expect(calculateDiffStats(file)).toEqual({
+        additions: 0,
+        deletions: 2,
+      });
+    });
+
+    it("should count content lines starting with --- as additions", () => {
+      const file: FileDiff = {
+        path: "rule.md",
+        type: "modified",
+        templateContent: "title: a\nbody\n",
+        localContent: "---\ntitle: a\n---\nbody\n",
+      };
+      expect(calculateDiffStats(file)).toEqual({
+        additions: 2,
+        deletions: 0,
+      });
+    });
+  });
+
+  describe("applyWordDiffAndColorize", () => {
+    it("should pair removals and additions by position within a block", () => {
+      const result = applyWordDiffAndColorize([
+        "-const a = 1;",
+        "-const b = 2;",
+        "-const c = 3;",
+        "+const a = 10;",
+        "+const b = 20;",
+        "+const c = 30;",
+      ]);
+
+      expect(result).toHaveLength(6);
+      // unified diff の並び（削除行が先、追加行が後）を保つ
+      expect(result.slice(0, 3).every((l) => l.startsWith("<red>-</red>"))).toBe(true);
+      expect(result.slice(3).every((l) => l.startsWith("<green>+</green>"))).toBe(true);
+
+      // 位置で対応するので、ハイライトされるのは値の部分だけ。
+      // 無関係な行同士が組になると行全体がハイライトされる。
+      for (const line of result) {
+        expect(highlighted(line)).toMatch(/^[0-9;]+$/);
+      }
+    });
+
+    it("should leave unpaired lines without word diff highlight", () => {
+      const result = applyWordDiffAndColorize([
+        "-alpha 1",
+        "-beta 2",
+        "+alpha 10",
+        "+beta 20",
+        "+gamma 30",
+      ]);
+
+      expect(result).toHaveLength(5);
+      expect(highlighted(result[0])).not.toBe("");
+      expect(highlighted(result[1])).not.toBe("");
+      // 対応する削除行を持たない追加行は通常色
+      expect(result[4]).toBe("<green>+gamma 30</green>");
+    });
+
+    it("should not pair lines separated by a context line", () => {
+      const result = applyWordDiffAndColorize(["-old", " context", "+new"]);
+
+      expect(result[0]).toBe("<red>-old</red>");
+      expect(result[1]).toBe(" context");
+      expect(result[2]).toBe("<green>+new</green>");
+    });
+
+    it("should colorize hunk headers", () => {
+      const result = applyWordDiffAndColorize(["@@ -1,3 +1,3 @@"]);
+      expect(result[0]).toBe("<cyan>@@ -1,3 +1,3 @@</cyan>");
+    });
+
+    it("should treat content lines starting with --- as deletions", () => {
+      const result = applyWordDiffAndColorize(["---", "+++"]);
+      // ヘッダー（タブ区切り）ではないので、置換ブロックとして扱われる
+      expect(result[0]).toContain("<red>-</red>");
+      expect(result[1]).toContain("<green>+</green>");
+    });
+
+    it("should keep diff headers unstyled", () => {
+      const header = "--- path/to/file\ttemplate";
+      expect(applyWordDiffAndColorize([header])).toEqual([header]);
+    });
   });
 
   describe("formatStats", () => {
@@ -228,6 +348,18 @@ describe("diff-view", () => {
       const label = getFileLabel(file);
       expect(label).toContain("mod.ts");
     });
+
+    it("should not mark unchanged files with the deleted icon", () => {
+      const file: FileDiff = {
+        path: "same.ts",
+        type: "unchanged",
+        localContent: "x\n",
+        templateContent: "x\n",
+      };
+      const label = getFileLabel(file);
+      expect(label).toContain("same.ts");
+      expect(label).not.toContain("<red>");
+    });
   });
 
   describe("renderFileDiff", () => {
@@ -237,6 +369,26 @@ describe("diff-view", () => {
       expect(p.log.step).toHaveBeenCalledTimes(1);
       // unchanged files should not show diff content
       expect(p.log.message).not.toHaveBeenCalled();
+    });
+
+    it("should label unchanged files as unchanged, not deleted", () => {
+      const file: FileDiff = { path: "a.ts", type: "unchanged" };
+      renderFileDiff(file);
+      const header = vi.mocked(p.log.step).mock.calls[0][0];
+      expect(header).toContain("unchanged");
+      expect(header).not.toContain("deleted");
+    });
+
+    it("should display diff content for deleted files", () => {
+      const file: FileDiff = {
+        path: "gone.ts",
+        type: "deleted",
+        templateContent: "const x = 1;\n",
+      };
+      renderFileDiff(file);
+      expect(p.log.step).toHaveBeenCalledTimes(1);
+      const body = vi.mocked(p.log.message).mock.calls[0][0];
+      expect(body).toContain("const x = 1;");
     });
 
     it("should display diff content for added files", () => {

@@ -6,6 +6,8 @@ import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { parse } from "jsonc-parser";
 import { join } from "pathe";
+import { zikuConfigSchema } from "../modules/schemas";
+import { ZIKU_CONFIG_FILE } from "./ziku-config";
 
 // マーカー定義
 const MARKERS = {
@@ -24,34 +26,22 @@ const MARKERS = {
 } as const;
 
 /**
- * modules.jsonc からパターン一覧を読み込む（フラット形式 or モジュール形式対応）
+ * ziku.jsonc の include パターンを読み込む。
+ *
+ * 同期対象パターンの SSOT は ziku.jsonc なので、README の機能一覧と
+ * ファイル一覧はここから導出する。
+ *
+ * README の更新は同期処理の付随作業であり、これを理由に同期そのものを
+ * 止めたくない。設定が無い・読めない場合はパターン無しとして扱い、
+ * マーカー間を書き換えずに現状の README を残す。
  */
-async function loadPatternsFromFile(
-  modulesPath: string,
-): Promise<{ include: string[]; exclude: string[] }> {
-  if (!existsSync(modulesPath)) {
-    return { include: [], exclude: [] };
+async function loadIncludePatterns(configPath: string): Promise<string[]> {
+  if (!existsSync(configPath)) {
+    return [];
   }
-  const content = await readFile(modulesPath, "utf-8");
-  const parsed = parse(content);
-
-  // フラット形式
-  if (parsed && Array.isArray(parsed.include)) {
-    return {
-      include: parsed.include,
-      exclude: parsed.exclude ?? [],
-    };
-  }
-
-  // モジュール形式（後方互換）→ フラット化
-  if (parsed && Array.isArray(parsed.modules)) {
-    return {
-      include: parsed.modules.flatMap((m: { include?: string[] }) => m.include ?? []),
-      exclude: parsed.modules.flatMap((m: { exclude?: string[] }) => m.exclude ?? []),
-    };
-  }
-
-  return { include: [], exclude: [] };
+  const content = await readFile(configPath, "utf-8");
+  const parsed = zikuConfigSchema.safeParse(parse(content));
+  return parsed.success ? parsed.data.include : [];
 }
 
 /**
@@ -126,8 +116,8 @@ function updateSection(
 export interface GenerateReadmeOptions {
   /** README.md のパス */
   readmePath: string;
-  /** modules.jsonc のパス */
-  modulesPath: string;
+  /** 同期パターンを定義する ziku.jsonc のパス */
+  configPath: string;
   /** コマンドセクションを生成する関数（オプション） */
   generateCommandsSection?: () => Promise<string>;
 }
@@ -147,14 +137,14 @@ export interface GenerateReadmeResult {
 export async function generateReadme(
   options: GenerateReadmeOptions,
 ): Promise<GenerateReadmeResult> {
-  const { readmePath, modulesPath, generateCommandsSection } = options;
+  const { readmePath, configPath, generateCommandsSection } = options;
 
   // README が存在しない場合はスキップ
   if (!existsSync(readmePath)) {
     return { updated: false, content: "", readmePath };
   }
 
-  const { include } = await loadPatternsFromFile(modulesPath);
+  const include = await loadIncludePatterns(configPath);
 
   let readme = await readFile(readmePath, "utf-8");
   let anyUpdated = false;
@@ -213,15 +203,15 @@ export async function updateReadmeFile(
 
 /**
  * プロジェクトディレクトリ内の README を検出して更新
- * @param targetDir プロジェクトのルートディレクトリ
- * @param templateDir テンプレートディレクトリ（modules.jsonc の場所）
+ * @param targetDir 更新対象の README.md があるディレクトリ
+ * @param templateDir 同期パターンを定義する ziku.jsonc があるディレクトリ
  */
 export async function detectAndUpdateReadme(
   targetDir: string,
   templateDir: string,
 ): Promise<GenerateReadmeResult | null> {
   const readmePath = join(targetDir, "README.md");
-  const modulesPath = join(templateDir, ".ziku/modules.jsonc");
+  const configPath = join(templateDir, ZIKU_CONFIG_FILE);
 
   // README にマーカーがあるか確認
   if (!existsSync(readmePath)) {
@@ -238,6 +228,6 @@ export async function detectAndUpdateReadme(
 
   return updateReadmeFile({
     readmePath,
-    modulesPath,
+    configPath,
   });
 }

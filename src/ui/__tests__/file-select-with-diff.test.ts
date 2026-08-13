@@ -146,14 +146,15 @@ describe("file-select-with-diff", () => {
       expect(lines.length).toBeGreaterThan(0);
     });
 
-    it("should return no-diff message for deleted files without diff", () => {
+    it("should show the removed content for deleted files", () => {
       const file: FileDiff = {
         path: "a.ts",
         type: "deleted",
         templateContent: "old content\n",
       };
       const lines = buildColoredDiffLines(file);
-      expect(lines.length).toBeGreaterThan(0);
+      // 削除を push するか判断できるよう、テンプレート側の内容が削除行として出る
+      expect(lines.some((l) => stripAnsi(l) === "-old content")).toBe(true);
     });
 
     it("should preserve content lines starting with --- or +++", () => {
@@ -231,6 +232,10 @@ describe("file-select-with-diff", () => {
       const items = buildFileItems(files);
       const plain = stripAnsi(items[0].label);
       expect(plain).toContain("u.ts");
+      // 変更を示す記号は付けない
+      expect(plain).not.toContain("-");
+      expect(plain).not.toContain("+");
+      expect(plain).not.toContain("~");
       // unchanged は空ヒント
       expect(items[0].hint).toBe("");
     });
@@ -279,7 +284,7 @@ describe("file-select-with-diff", () => {
       expect(plain).toContain("deleted");
     });
 
-    it("should render unchanged file with empty type label", () => {
+    it("should render unchanged file with its own type label", () => {
       const files: FileDiff[] = [{ path: "u.ts", type: "unchanged" }];
       const items = buildFileItems(files);
       const state: RenderState = {
@@ -292,7 +297,8 @@ describe("file-select-with-diff", () => {
       const output = render(state, { columns: 80, rows: 20 });
       const plain = stripAnsi(output);
       expect(plain).toContain("u.ts");
-      // unchanged は added/modified/deleted のいずれでもないので、typeLabel は空
+      // unchanged に added/modified/deleted のラベルを付けない
+      expect(plain).toContain("unchanged");
       expect(plain).not.toContain("added");
       expect(plain).not.toContain("modified");
       expect(plain).not.toContain("deleted");
