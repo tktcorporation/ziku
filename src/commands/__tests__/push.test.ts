@@ -3,6 +3,8 @@ import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FileNotFoundError } from "../../errors";
 import type {
+  AbsPath,
+  CommitSha,
   FileDiff,
   GitHubSource,
   LockState,
@@ -199,6 +201,8 @@ const { classifyFiles, mergeOneFile, downloadBaseForMerge } = await import("../.
 // マージ結果の判定は本物を使う（"../../utils/merge" のモックは index 経由の import だけを
 // 置き換えるので、実装モジュールを直接読み込めば素の関数が得られる）。
 const { classifyMergeOutcome } = await import("../../utils/merge/types");
+const { absPath, commitSha, globPatterns, hashMap, repoRelPath, repoRelPaths } =
+  await import("../../__tests__/brands");
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
 const mockDetectDiff = vi.mocked(detectDiff);
 const mockGetGitHubToken = vi.mocked(getGitHubToken);
@@ -219,12 +223,12 @@ const mockMergeOneFile = vi.mocked(mergeOneFile);
 const mockDownloadBaseForMerge = vi.mocked(downloadBaseForMerge);
 
 const validZikuConfig = {
-  include: [".github/**"],
+  include: globPatterns([".github/**"]),
   exclude: [],
 };
 
 const githubSource: TemplateSource = { kind: "github", owner: "tktcorporation", repo: ".github" };
-const localTemplateSource: TemplateSource = { kind: "local", path: "/local/template" };
+const localTemplateSource: TemplateSource = { kind: "local", path: absPath("/local/template") };
 
 const validLock: ResumableLockState = {
   version: "0.1.0",
@@ -246,7 +250,10 @@ function lockWith(opts: {
   });
   return opts.hashes === undefined && opts.commitSha === undefined
     ? base
-    : markSynced(base, { hashes: opts.hashes ?? {}, commitSha: opts.commitSha });
+    : markSynced(base, {
+        hashes: hashMap(opts.hashes ?? {}),
+        commitSha: opts.commitSha === undefined ? undefined : commitSha(opts.commitSha),
+      });
 }
 
 const emptyDiff = {
@@ -273,7 +280,7 @@ function mockContext(overrides?: {
   config?: typeof validZikuConfig;
   lock?: LockState;
   source?: TemplateSource;
-  templateDir?: string;
+  templateDir?: AbsPath;
 }) {
   const cleanup = vi.fn();
   const source = overrides?.source ?? githubSource;
@@ -282,9 +289,9 @@ function mockContext(overrides?: {
       config: overrides?.config ?? validZikuConfig,
       lock: overrides?.lock ?? validLock,
       source,
-      templateDir: overrides?.templateDir ?? "/tmp/template",
+      templateDir: overrides?.templateDir ?? absPath("/tmp/template"),
       cleanup,
-      resolveBaseRef: Effect.succeed(Option.none<string>()),
+      resolveBaseRef: Effect.succeed(Option.none<CommitSha>()),
     }),
     cleanup,
   };
@@ -502,7 +509,9 @@ describe("pushCommand", () => {
     });
 
     it("--dry-run オプションで PR を作成しない", async () => {
-      setupPushableFiles([{ path: "file.txt", type: "added", localContent: "content" }]);
+      setupPushableFiles([
+        { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
+      ]);
 
       await (pushCommand.run as any)({
         args: { dir: "/test", dryRun: true, yes: false, edit: false },
@@ -519,7 +528,7 @@ describe("pushCommand", () => {
       // push 候補を複数用意し、--files で 1 つだけ指定する
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
-        localOnly: ["a.txt", "b.txt"],
+        localOnly: repoRelPaths(["a.txt", "b.txt"]),
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
@@ -529,8 +538,8 @@ describe("pushCommand", () => {
       });
       mockDetectDiff.mockResolvedValueOnce({
         files: [
-          { path: "a.txt", type: "added", localContent: "a" },
-          { path: "b.txt", type: "added", localContent: "b" },
+          { path: repoRelPath("a.txt"), type: "added", localContent: "a" },
+          { path: repoRelPath("b.txt"), type: "added", localContent: "b" },
         ],
       });
 
@@ -547,7 +556,7 @@ describe("pushCommand", () => {
     });
 
     it("--dry-run + --files で存在しないファイルは not found を警告する（#81）", async () => {
-      setupPushableFiles([{ path: "a.txt", type: "added", localContent: "a" }]);
+      setupPushableFiles([{ path: repoRelPath("a.txt"), type: "added", localContent: "a" }]);
 
       await (pushCommand.run as any)({
         args: { dir: "/test", dryRun: true, yes: false, edit: false, files: "missing.txt" },
@@ -570,8 +579,8 @@ describe("pushCommand", () => {
 
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
-        localOnly: ["normal.txt"],
-        conflicts: ["conflict.txt"],
+        localOnly: repoRelPaths(["normal.txt"]),
+        conflicts: repoRelPaths(["conflict.txt"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -580,8 +589,18 @@ describe("pushCommand", () => {
       });
       mockDetectDiff.mockResolvedValueOnce({
         files: [
-          { path: "normal.txt", type: "modified", localContent: "n", templateContent: "nt" },
-          { path: "conflict.txt", type: "modified", localContent: "c", templateContent: "ct" },
+          {
+            path: repoRelPath("normal.txt"),
+            type: "modified",
+            localContent: "n",
+            templateContent: "nt",
+          },
+          {
+            path: repoRelPath("conflict.txt"),
+            type: "modified",
+            localContent: "c",
+            templateContent: "ct",
+          },
         ],
       });
       // downloadBaseForMerge は既定で null を返すため conflict.txt は auto-merge 不可 → unresolved
@@ -607,7 +626,7 @@ describe("pushCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: ["conflict.txt"],
+        conflicts: repoRelPaths(["conflict.txt"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -616,7 +635,12 @@ describe("pushCommand", () => {
       });
       mockDetectDiff.mockResolvedValueOnce({
         files: [
-          { path: "conflict.txt", type: "modified", localContent: "c", templateContent: "ct" },
+          {
+            path: repoRelPath("conflict.txt"),
+            type: "modified",
+            localContent: "c",
+            templateContent: "ct",
+          },
         ],
       });
       // downloadBaseForMerge は既定で null を返すため conflict.txt は unresolved
@@ -635,18 +659,18 @@ describe("pushCommand", () => {
     it("--dry-run は --include-deletions なしでは削除ファイルをプレビューから除外する（#81）", async () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
-        localOnly: ["keep.txt"],
+        localOnly: repoRelPaths(["keep.txt"]),
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
-        deletedLocally: ["gone.txt"],
+        deletedLocally: repoRelPaths(["gone.txt"]),
         unchanged: [],
       });
       mockDetectDiff.mockResolvedValueOnce({
         files: [
-          { path: "keep.txt", type: "added", localContent: "k" },
-          { path: "gone.txt", type: "deleted", templateContent: "g" },
+          { path: repoRelPath("keep.txt"), type: "added", localContent: "k" },
+          { path: repoRelPath("gone.txt"), type: "deleted", templateContent: "g" },
         ],
       });
 
@@ -664,18 +688,18 @@ describe("pushCommand", () => {
     it("--dry-run --include-deletions は削除ファイルもプレビューに含める（#81）", async () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
-        localOnly: ["keep.txt"],
+        localOnly: repoRelPaths(["keep.txt"]),
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
-        deletedLocally: ["gone.txt"],
+        deletedLocally: repoRelPaths(["gone.txt"]),
         unchanged: [],
       });
       mockDetectDiff.mockResolvedValueOnce({
         files: [
-          { path: "keep.txt", type: "added", localContent: "k" },
-          { path: "gone.txt", type: "deleted", templateContent: "g" },
+          { path: repoRelPath("keep.txt"), type: "added", localContent: "k" },
+          { path: repoRelPath("gone.txt"), type: "deleted", templateContent: "g" },
         ],
       });
 
@@ -696,12 +720,12 @@ describe("pushCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
-        deletedWithLocalEdits: ["edited.md"],
+        deletedWithLocalEdits: repoRelPaths(["edited.md"]),
         deletedLocally: [],
         unchanged: [],
       });
       mockDetectDiff.mockResolvedValueOnce({
-        files: [{ path: "edited.md", type: "added", localContent: "local edits" }],
+        files: [{ path: repoRelPath("edited.md"), type: "added", localContent: "local edits" }],
       });
 
       await (pushCommand.run as any)({
@@ -717,18 +741,18 @@ describe("pushCommand", () => {
     it("deletedWithLocalEdits の push はテンプレの削除を取り消すとサマリで示す", async () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
-        localOnly: ["plain.txt"],
+        localOnly: repoRelPaths(["plain.txt"]),
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
-        deletedWithLocalEdits: ["edited.md"],
+        deletedWithLocalEdits: repoRelPaths(["edited.md"]),
         deletedLocally: [],
         unchanged: [],
       });
       mockDetectDiff.mockResolvedValueOnce({
         files: [
-          { path: "edited.md", type: "added", localContent: "local edits" },
-          { path: "plain.txt", type: "added", localContent: "plain" },
+          { path: repoRelPath("edited.md"), type: "added", localContent: "local edits" },
+          { path: repoRelPath("plain.txt"), type: "added", localContent: "plain" },
         ],
       });
       // --yes なので既定集合（追加された 2 ファイル）がそのまま push 対象になる
@@ -756,7 +780,9 @@ describe("pushCommand", () => {
     });
 
     it("ファイル選択をキャンセルすると PR を作成しない", async () => {
-      setupPushableFiles([{ path: "file.txt", type: "added", localContent: "content" }]);
+      setupPushableFiles([
+        { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
+      ]);
 
       mockSelectPushFiles.mockResolvedValueOnce([]);
 
@@ -772,8 +798,13 @@ describe("pushCommand", () => {
 
     it("--yes は選択プロンプトを出さず既定集合を push する", async () => {
       setupPushableFiles([
-        { path: "file.txt", type: "added", localContent: "content" },
-        { path: "other.txt", type: "modified", localContent: "new", templateContent: "old" },
+        { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
+        {
+          path: repoRelPath("other.txt"),
+          type: "modified",
+          localContent: "new",
+          templateContent: "old",
+        },
       ]);
       mockGetGitHubToken.mockReturnValue("ghp_token");
       mockCreatePullRequest.mockResolvedValueOnce({
@@ -798,18 +829,18 @@ describe("pushCommand", () => {
     it("--yes の既定集合は削除ファイルを外す", async () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
-        localOnly: ["keep.txt"],
+        localOnly: repoRelPaths(["keep.txt"]),
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
-        deletedLocally: ["gone.txt"],
+        deletedLocally: repoRelPaths(["gone.txt"]),
         unchanged: [],
       });
       mockDetectDiff.mockResolvedValueOnce({
         files: [
-          { path: "keep.txt", type: "added", localContent: "k" },
-          { path: "gone.txt", type: "deleted", templateContent: "g" },
+          { path: repoRelPath("keep.txt"), type: "added", localContent: "k" },
+          { path: repoRelPath("gone.txt"), type: "deleted", templateContent: "g" },
         ],
       });
       mockGetGitHubToken.mockReturnValue("ghp_token");
@@ -833,18 +864,18 @@ describe("pushCommand", () => {
     it("--yes --include-deletions の既定集合は削除ファイルも含む", async () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
-        localOnly: ["keep.txt"],
+        localOnly: repoRelPaths(["keep.txt"]),
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
-        deletedLocally: ["gone.txt"],
+        deletedLocally: repoRelPaths(["gone.txt"]),
         unchanged: [],
       });
       mockDetectDiff.mockResolvedValueOnce({
         files: [
-          { path: "keep.txt", type: "added", localContent: "k" },
-          { path: "gone.txt", type: "deleted", templateContent: "g" },
+          { path: repoRelPath("keep.txt"), type: "added", localContent: "k" },
+          { path: repoRelPath("gone.txt"), type: "deleted", templateContent: "g" },
         ],
       });
       mockGetGitHubToken.mockReturnValue("ghp_token");
@@ -874,11 +905,11 @@ describe("pushCommand", () => {
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
-        deletedLocally: ["gone.txt"],
+        deletedLocally: repoRelPaths(["gone.txt"]),
         unchanged: [],
       });
       mockDetectDiff.mockResolvedValueOnce({
-        files: [{ path: "gone.txt", type: "deleted", templateContent: "g" }],
+        files: [{ path: repoRelPath("gone.txt"), type: "deleted", templateContent: "g" }],
       });
 
       await (pushCommand.run as any)({
@@ -893,7 +924,7 @@ describe("pushCommand", () => {
 
     it("PR 作成前の確認でキャンセル", async () => {
       const pushableFile = {
-        path: "file.txt",
+        path: repoRelPath("file.txt"),
         type: "added" as const,
         localContent: "content",
       };
@@ -915,7 +946,7 @@ describe("pushCommand", () => {
 
     it("PR 作成成功（タイトル・本文は自動生成）", async () => {
       const pushableFile = {
-        path: "file.txt",
+        path: repoRelPath("file.txt"),
         type: "added" as const,
         localContent: "content",
       };
@@ -955,7 +986,7 @@ describe("pushCommand", () => {
 
     it("GitHub トークンがない場合はプロンプト", async () => {
       const pushableFile = {
-        path: "file.txt",
+        path: repoRelPath("file.txt"),
         type: "added" as const,
         localContent: "content",
       };
@@ -983,7 +1014,7 @@ describe("pushCommand", () => {
 
     it("--message オプションで PR タイトルを指定", async () => {
       const pushableFile = {
-        path: "file.txt",
+        path: repoRelPath("file.txt"),
         type: "added" as const,
         localContent: "content",
       };
@@ -1022,18 +1053,18 @@ describe("pushCommand", () => {
 
     it("--files オプションで指定ファイルのみ PR に含める", async () => {
       const file1 = {
-        path: ".claude/statusline.sh",
+        path: repoRelPath(".claude/statusline.sh"),
         type: "added" as const,
         localContent: "#!/bin/bash\necho hello",
       };
       const file2 = {
-        path: ".claude/settings.json",
+        path: repoRelPath(".claude/settings.json"),
         type: "modified" as const,
         localContent: '{"statusLine": "script"}',
         templateContent: '{"statusLine": "default"}',
       };
       const file3 = {
-        path: ".devcontainer/devcontainer.json",
+        path: repoRelPath(".devcontainer/devcontainer.json"),
         type: "modified" as const,
         localContent: '{"name": "new"}',
         templateContent: '{"name": "old"}',
@@ -1080,7 +1111,7 @@ describe("pushCommand", () => {
 
     it("--files に存在しないファイルを指定すると警告", async () => {
       const file1 = {
-        path: "file.txt",
+        path: repoRelPath("file.txt"),
         type: "added" as const,
         localContent: "content",
       };
@@ -1111,7 +1142,9 @@ describe("pushCommand", () => {
     });
 
     it("--files に一致するファイルがない場合はキャンセル", async () => {
-      setupPushableFiles([{ path: "file.txt", type: "added", localContent: "content" }]);
+      setupPushableFiles([
+        { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
+      ]);
 
       await (pushCommand.run as any)({
         args: {
@@ -1131,7 +1164,7 @@ describe("pushCommand", () => {
 
     it("--yes オプションで確認をスキップ", async () => {
       const pushableFile = {
-        path: "file.txt",
+        path: repoRelPath("file.txt"),
         type: "added" as const,
         localContent: "content",
       };
@@ -1160,7 +1193,7 @@ describe("pushCommand", () => {
 
     it("コンフリクト解決待ちの場合はエラー", async () => {
       const { effect } = mockContext({
-        lock: markMerging(validLock, { hashes: {} }, [".mcp.json"]),
+        lock: markMerging(validLock, { hashes: {} }, [repoRelPath(".mcp.json")]),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -1210,7 +1243,7 @@ describe("pushCommand", () => {
 
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
-        localOnly: [".ziku/ziku.jsonc"],
+        localOnly: repoRelPaths([".ziku/ziku.jsonc"]),
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
@@ -1220,7 +1253,7 @@ describe("pushCommand", () => {
       });
 
       const pushableFile = {
-        path: ".ziku/ziku.jsonc",
+        path: repoRelPath(".ziku/ziku.jsonc"),
         type: "modified" as const,
         localContent: localConfig,
         templateContent: templateConfig,
@@ -1258,7 +1291,7 @@ describe("pushCommand", () => {
       const { effect } = mockContext({
         source: localTemplateSource,
         // ローカルソースでは templateDir は localSource.path に解決される
-        templateDir: "/local/template",
+        templateDir: absPath("/local/template"),
         lock: lockWith({
           source: localTemplateSource,
           hashes: { ".ziku/ziku.jsonc": "oldhash" },
@@ -1276,7 +1309,7 @@ describe("pushCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: [".ziku/ziku.jsonc"],
+        conflicts: repoRelPaths([".ziku/ziku.jsonc"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -1285,7 +1318,7 @@ describe("pushCommand", () => {
       });
 
       const pushableFile = {
-        path: ".ziku/ziku.jsonc",
+        path: repoRelPath(".ziku/ziku.jsonc"),
         type: "modified" as const,
         localContent: localConfig,
         templateContent: templateConfig,
@@ -1330,7 +1363,7 @@ describe("pushCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: ["file.txt"],
+        conflicts: repoRelPaths(["file.txt"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -1341,7 +1374,7 @@ describe("pushCommand", () => {
       mockDetectDiff.mockResolvedValueOnce({
         files: [
           {
-            path: "file.txt",
+            path: repoRelPath("file.txt"),
             type: "modified",
             localContent: "local content",
             templateContent: "template content",
@@ -1380,8 +1413,8 @@ describe("pushCommand", () => {
       // safe.txt は localOnly（push 可）、bad.txt は conflict（ベースの SHA なし → unresolved）
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
-        localOnly: ["safe.txt"],
-        conflicts: ["bad.txt"],
+        localOnly: repoRelPaths(["safe.txt"]),
+        conflicts: repoRelPaths(["bad.txt"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -1390,13 +1423,18 @@ describe("pushCommand", () => {
       });
       mockDetectDiff.mockResolvedValueOnce({
         files: [
-          { path: "safe.txt", type: "added", localContent: "safe" },
-          { path: "bad.txt", type: "modified", localContent: "local", templateContent: "template" },
+          { path: repoRelPath("safe.txt"), type: "added", localContent: "safe" },
+          {
+            path: repoRelPath("bad.txt"),
+            type: "modified",
+            localContent: "local",
+            templateContent: "template",
+          },
         ],
       });
       // ユーザーは衝突しない safe.txt のみ選択（bad.txt は既定で未選択）
       mockSelectPushFiles.mockResolvedValueOnce([
-        { path: "safe.txt", type: "added", localContent: "safe" },
+        { path: repoRelPath("safe.txt"), type: "added", localContent: "safe" },
       ]);
       mockGetGitHubToken.mockReturnValue("ghp_token");
       mockConfirmAction.mockResolvedValueOnce(true);
@@ -1442,7 +1480,7 @@ describe("pushCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: ["file.txt"],
+        conflicts: repoRelPaths(["file.txt"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -1452,7 +1490,7 @@ describe("pushCommand", () => {
       mockDetectDiff.mockResolvedValueOnce({
         files: [
           {
-            path: "file.txt",
+            path: repoRelPath("file.txt"),
             type: "modified",
             localContent: "local content",
             templateContent: "template content",
@@ -1493,7 +1531,7 @@ describe("pushCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: ["file.txt"],
+        conflicts: repoRelPaths(["file.txt"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -1501,7 +1539,7 @@ describe("pushCommand", () => {
         unchanged: [],
       });
       const conflictFile = {
-        path: "file.txt",
+        path: repoRelPath("file.txt"),
         type: "modified" as const,
         localContent: "local content",
         templateContent: "template content",
@@ -1548,7 +1586,7 @@ describe("pushCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: ["file.txt"],
+        conflicts: repoRelPaths(["file.txt"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -1558,16 +1596,19 @@ describe("pushCommand", () => {
 
       // downloadBaseForMerge がベースを返す
       mockDownloadBaseForMerge.mockReturnValueOnce(
-        Effect.succeed({ templateDir: "/tmp/base-template", cleanup: vi.fn() }),
+        Effect.succeed({ templateDir: absPath("/tmp/base-template"), cleanup: vi.fn() }),
       );
 
       // mergeOneFile のモック（自動マージ成功）
       mockMergeOneFile.mockReturnValueOnce(
-        Effect.succeed({ file: "file.txt", outcome: classifyMergeOutcome("merged content") }),
+        Effect.succeed({
+          file: repoRelPath("file.txt"),
+          outcome: classifyMergeOutcome("merged content"),
+        }),
       );
 
       const pushableFile = {
-        path: "file.txt",
+        path: repoRelPath("file.txt"),
         type: "modified" as const,
         localContent: "local content",
         templateContent: "template content",
@@ -1598,7 +1639,7 @@ describe("pushCommand", () => {
 
       // mergeOneFile に正しい引数が渡されること
       expect(mockMergeOneFile).toHaveBeenCalledWith({
-        file: "file.txt",
+        file: repoRelPath("file.txt"),
         targetDir: "/test",
         templateDir: "/tmp/template",
         base: { kind: "with-base", dir: "/tmp/base-template" },
@@ -1609,7 +1650,7 @@ describe("pushCommand", () => {
         expect.objectContaining({
           files: expect.arrayContaining([
             expect.objectContaining({
-              path: "file.txt",
+              path: repoRelPath("file.txt"),
               content: "merged content",
             }),
           ]),
@@ -1640,7 +1681,7 @@ describe("pushCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: ["clean.txt", "conflicted.txt"],
+        conflicts: repoRelPaths(["clean.txt", "conflicted.txt"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -1649,15 +1690,18 @@ describe("pushCommand", () => {
       });
 
       mockDownloadBaseForMerge.mockReturnValueOnce(
-        Effect.succeed({ templateDir: "/tmp/base-template", cleanup: vi.fn() }),
+        Effect.succeed({ templateDir: absPath("/tmp/base-template"), cleanup: vi.fn() }),
       );
 
       mockMergeOneFile.mockReturnValueOnce(
-        Effect.succeed({ file: "clean.txt", outcome: classifyMergeOutcome("merged clean") }),
+        Effect.succeed({
+          file: repoRelPath("clean.txt"),
+          outcome: classifyMergeOutcome("merged clean"),
+        }),
       );
       mockMergeOneFile.mockReturnValueOnce(
         Effect.succeed({
-          file: "conflicted.txt",
+          file: repoRelPath("conflicted.txt"),
           outcome: classifyMergeOutcome(
             "<<<<<<< LOCAL\nlocal conflicted\n=======\ntemplate conflicted\n>>>>>>> TEMPLATE",
           ),
@@ -1665,13 +1709,13 @@ describe("pushCommand", () => {
       );
 
       const cleanDiff = {
-        path: "clean.txt",
+        path: repoRelPath("clean.txt"),
         type: "modified" as const,
         localContent: "local clean",
         templateContent: "template clean",
       };
       const conflictedDiff = {
-        path: "conflicted.txt",
+        path: repoRelPath("conflicted.txt"),
         type: "modified" as const,
         localContent: "local conflicted",
         templateContent: "template conflicted",
@@ -1726,7 +1770,7 @@ describe("pushCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: [".ziku/ziku.jsonc"],
+        conflicts: repoRelPaths([".ziku/ziku.jsonc"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -1737,7 +1781,7 @@ describe("pushCommand", () => {
       // base が取れない（downloadBaseForMerge→null, デフォルト）→ 2-way 和集合
 
       const pushableFile = {
-        path: ".ziku/ziku.jsonc",
+        path: repoRelPath(".ziku/ziku.jsonc"),
         type: "modified" as const,
         localContent: localConfig,
         templateContent: templateConfig,
@@ -1793,7 +1837,7 @@ describe("pushCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: ["deleted-file.txt"], // delete/modify conflict
+        conflicts: repoRelPaths(["deleted-file.txt"]), // delete/modify conflict
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -1803,14 +1847,14 @@ describe("pushCommand", () => {
 
       // downloadBaseForMerge がベースを返す
       mockDownloadBaseForMerge.mockReturnValueOnce(
-        Effect.succeed({ templateDir: "/tmp/base-template", cleanup: vi.fn() }),
+        Effect.succeed({ templateDir: absPath("/tmp/base-template"), cleanup: vi.fn() }),
       );
 
       // mergeOneFile: コンフリクト（delete/modify conflict は mergeOneFile 内で
       // readFileSafe により安全にローカル=空文字列で処理される）
       mockMergeOneFile.mockReturnValueOnce(
         Effect.succeed({
-          file: "deleted-file.txt",
+          file: repoRelPath("deleted-file.txt"),
           outcome: classifyMergeOutcome(
             "<<<<<<< LOCAL\n=======\ntemplate content updated\n>>>>>>> TEMPLATE",
           ),
@@ -1848,8 +1892,8 @@ describe("pushCommand", () => {
       // ベースの SHA なし → 3-way マージ不可 → unresolved
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
-        localOnly: ["safe.txt"],
-        conflicts: ["file.txt"],
+        localOnly: repoRelPaths(["safe.txt"]),
+        conflicts: repoRelPaths(["file.txt"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -1858,9 +1902,9 @@ describe("pushCommand", () => {
       });
       mockDetectDiff.mockResolvedValueOnce({
         files: [
-          { path: "safe.txt", type: "added", localContent: "safe" },
+          { path: repoRelPath("safe.txt"), type: "added", localContent: "safe" },
           {
-            path: "file.txt",
+            path: repoRelPath("file.txt"),
             type: "modified",
             localContent: "local content",
             templateContent: "template content",
@@ -1923,14 +1967,14 @@ describe("pushCommand", () => {
 
       // classification が autoUpdate に分類 → pushableFilePaths に含まれない
       mockClassifyFiles.mockReturnValueOnce({
-        autoUpdate: ["template-only.txt"],
+        autoUpdate: repoRelPaths(["template-only.txt"]),
         localOnly: [],
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
         deletedLocally: [],
-        unchanged: ["file.txt"],
+        unchanged: repoRelPaths(["file.txt"]),
       });
 
       // detectDiff は template-only.txt を "modified" として返すが、
@@ -1938,7 +1982,7 @@ describe("pushCommand", () => {
       mockDetectDiff.mockResolvedValueOnce({
         files: [
           {
-            path: "template-only.txt",
+            path: repoRelPath("template-only.txt"),
             type: "modified" as const,
             localContent: "old template content",
             templateContent: "new template content",
@@ -1972,7 +2016,7 @@ describe("pushCommand", () => {
 
       // コンフリクトなし
       mockClassifyFiles.mockReturnValueOnce({
-        autoUpdate: ["file.txt"],
+        autoUpdate: repoRelPaths(["file.txt"]),
         localOnly: [],
         conflicts: [],
         newFiles: [],
@@ -2027,12 +2071,14 @@ describe("未追跡ファイルの追跡フロー", () => {
   it("対話モードで選択した未追跡ファイルが include に追記され push 対象に乗る", async () => {
     seedZikuConfig();
     mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);
-    mockSelectUntrackedToTrack.mockResolvedValueOnce(["docs/new.md"]);
+    mockSelectUntrackedToTrack.mockResolvedValueOnce(repoRelPaths(["docs/new.md"]));
 
     // 追跡したファイルが localOnly として分類され、diff にも現れる
-    setupPushableFiles([{ path: "docs/new.md", type: "added", localContent: "# New doc" }]);
+    setupPushableFiles([
+      { path: repoRelPath("docs/new.md"), type: "added", localContent: "# New doc" },
+    ]);
     mockSelectPushFiles.mockResolvedValueOnce([
-      { path: "docs/new.md", type: "added", localContent: "# New doc" },
+      { path: repoRelPath("docs/new.md"), type: "added", localContent: "# New doc" },
     ]);
     mockGetGitHubToken.mockReturnValue("ghp_token");
     mockConfirmAction.mockResolvedValueOnce(true);
@@ -2064,11 +2110,13 @@ describe("未追跡ファイルの追跡フロー", () => {
     // include を欠いた設定は JSONC としては通るので、構文エラーと混同されやすい。
     vol.fromJSON({ "/test/.ziku/ziku.jsonc": `${JSON.stringify({ exclude: [] }, null, 2)}\n` });
     mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);
-    mockSelectUntrackedToTrack.mockResolvedValueOnce(["docs/new.md"]);
+    mockSelectUntrackedToTrack.mockResolvedValueOnce(repoRelPaths(["docs/new.md"]));
 
-    setupPushableFiles([{ path: "docs/new.md", type: "added", localContent: "# New doc" }]);
+    setupPushableFiles([
+      { path: repoRelPath("docs/new.md"), type: "added", localContent: "# New doc" },
+    ]);
     mockSelectPushFiles.mockResolvedValueOnce([
-      { path: "docs/new.md", type: "added", localContent: "# New doc" },
+      { path: repoRelPath("docs/new.md"), type: "added", localContent: "# New doc" },
     ]);
     mockGetGitHubToken.mockReturnValue("ghp_token");
     mockConfirmAction.mockResolvedValueOnce(true);
@@ -2097,11 +2145,13 @@ describe("未追跡ファイルの追跡フロー", () => {
       "/tmp/template/.ziku/ziku.jsonc": `${JSON.stringify({ include: [".github/**"] }, null, 2)}\n`,
     });
     mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);
-    mockSelectUntrackedToTrack.mockResolvedValueOnce(["docs/new.md"]);
+    mockSelectUntrackedToTrack.mockResolvedValueOnce(repoRelPaths(["docs/new.md"]));
 
-    setupPushableFiles([{ path: "docs/new.md", type: "added", localContent: "# New doc" }]);
+    setupPushableFiles([
+      { path: repoRelPath("docs/new.md"), type: "added", localContent: "# New doc" },
+    ]);
     mockSelectPushFiles.mockResolvedValueOnce([
-      { path: "docs/new.md", type: "added", localContent: "# New doc" },
+      { path: repoRelPath("docs/new.md"), type: "added", localContent: "# New doc" },
     ]);
     mockGetGitHubToken.mockReturnValue("ghp_token");
     mockConfirmAction.mockResolvedValueOnce(true);
@@ -2135,9 +2185,9 @@ describe("未追跡ファイルの追跡フロー", () => {
     mockSelectUntrackedToTrack.mockResolvedValueOnce([]);
 
     // 別の追跡済みファイルの変更だけを push する
-    setupPushableFiles([{ path: "file.txt", type: "added", localContent: "content" }]);
+    setupPushableFiles([{ path: repoRelPath("file.txt"), type: "added", localContent: "content" }]);
     mockSelectPushFiles.mockResolvedValueOnce([
-      { path: "file.txt", type: "added", localContent: "content" },
+      { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
     ]);
     mockGetGitHubToken.mockReturnValue("ghp_token");
     mockConfirmAction.mockResolvedValueOnce(true);
@@ -2160,11 +2210,13 @@ describe("未追跡ファイルの追跡フロー", () => {
   it("push 失敗時は include を書き換えない（部分適用しない）", async () => {
     seedZikuConfig();
     mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);
-    mockSelectUntrackedToTrack.mockResolvedValueOnce(["docs/new.md"]);
+    mockSelectUntrackedToTrack.mockResolvedValueOnce(repoRelPaths(["docs/new.md"]));
 
-    setupPushableFiles([{ path: "docs/new.md", type: "added", localContent: "# New doc" }]);
+    setupPushableFiles([
+      { path: repoRelPath("docs/new.md"), type: "added", localContent: "# New doc" },
+    ]);
     mockSelectPushFiles.mockResolvedValueOnce([
-      { path: "docs/new.md", type: "added", localContent: "# New doc" },
+      { path: repoRelPath("docs/new.md"), type: "added", localContent: "# New doc" },
     ]);
     mockGetGitHubToken.mockReturnValue("ghp_token");
     mockConfirmAction.mockResolvedValueOnce(true);
@@ -2236,11 +2288,13 @@ describe("未追跡ファイルの追跡フロー", () => {
     mockLoadCommandContext.mockReturnValue(effect);
     seedZikuConfig();
     mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);
-    mockSelectUntrackedToTrack.mockResolvedValueOnce(["docs/new.md"]);
+    mockSelectUntrackedToTrack.mockResolvedValueOnce(repoRelPaths(["docs/new.md"]));
 
-    setupPushableFiles([{ path: "docs/new.md", type: "added", localContent: "# New doc" }]);
+    setupPushableFiles([
+      { path: repoRelPath("docs/new.md"), type: "added", localContent: "# New doc" },
+    ]);
     mockSelectPushFiles.mockResolvedValueOnce([
-      { path: "docs/new.md", type: "added", localContent: "# New doc" },
+      { path: repoRelPath("docs/new.md"), type: "added", localContent: "# New doc" },
     ]);
     // ローカル push の確認プロンプト
     mockConfirmAction.mockResolvedValueOnce(true);
@@ -2259,16 +2313,16 @@ describe("未追跡ファイルの追跡フロー", () => {
   it("追跡を選んでもファイル選択で外したファイルは永続化されない", async () => {
     seedZikuConfig();
     mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);
-    mockSelectUntrackedToTrack.mockResolvedValueOnce(["docs/new.md"]);
+    mockSelectUntrackedToTrack.mockResolvedValueOnce(repoRelPaths(["docs/new.md"]));
 
     // docs/new.md（追跡候補）と safe.txt の両方が push 可能
     setupPushableFiles([
-      { path: "docs/new.md", type: "added", localContent: "# New doc" },
-      { path: "safe.txt", type: "added", localContent: "safe" },
+      { path: repoRelPath("docs/new.md"), type: "added", localContent: "# New doc" },
+      { path: repoRelPath("safe.txt"), type: "added", localContent: "safe" },
     ]);
     // ユーザーはファイル選択で safe.txt のみ選び、docs/new.md は外す
     mockSelectPushFiles.mockResolvedValueOnce([
-      { path: "safe.txt", type: "added", localContent: "safe" },
+      { path: repoRelPath("safe.txt"), type: "added", localContent: "safe" },
     ]);
     mockGetGitHubToken.mockReturnValue("ghp_token");
     mockConfirmAction.mockResolvedValueOnce(true);
@@ -2319,9 +2373,13 @@ describe("--files でファイル本体だけを指定した場合の ziku.jsonc
     });
 
     setupPushableFiles([
-      { path: ".claude/skills/new-skill/SKILL.md", type: "added", localContent: "# skill" },
       {
-        path: ".ziku/ziku.jsonc",
+        path: repoRelPath(".claude/skills/new-skill/SKILL.md"),
+        type: "added",
+        localContent: "# skill",
+      },
+      {
+        path: repoRelPath(".ziku/ziku.jsonc"),
         type: "modified",
         localContent: JSON.stringify(
           { include: [".github/**", ".claude/skills/new-skill/SKILL.md"] },
@@ -2378,9 +2436,13 @@ describe("--files でファイル本体だけを指定した場合の ziku.jsonc
     ]);
 
     setupPushableFiles([
-      { path: ".claude/skills/new-skill/SKILL.md", type: "added", localContent: "# skill" },
       {
-        path: ".ziku/ziku.jsonc",
+        path: repoRelPath(".claude/skills/new-skill/SKILL.md"),
+        type: "added",
+        localContent: "# skill",
+      },
+      {
+        path: repoRelPath(".ziku/ziku.jsonc"),
         type: "modified",
         localContent: JSON.stringify(
           {
@@ -2437,7 +2499,7 @@ describe("--files でファイル本体だけを指定した場合の ziku.jsonc
 
     setupPushableFiles([
       {
-        path: ".ziku/ziku.jsonc",
+        path: repoRelPath(".ziku/ziku.jsonc"),
         type: "modified",
         localContent: JSON.stringify(
           {
@@ -2493,9 +2555,9 @@ describe("--files でファイル本体だけを指定した場合の ziku.jsonc
     });
 
     setupPushableFiles([
-      { path: "docs/b.md", type: "added", localContent: "# doc b" },
+      { path: repoRelPath("docs/b.md"), type: "added", localContent: "# doc b" },
       {
-        path: ".ziku/ziku.jsonc",
+        path: repoRelPath(".ziku/ziku.jsonc"),
         type: "modified",
         localContent: JSON.stringify(
           { include: [".github/**", "docs/a.md", "docs/b.md"] },

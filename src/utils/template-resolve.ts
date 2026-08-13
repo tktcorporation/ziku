@@ -9,10 +9,10 @@
  */
 import { Effect } from "effect";
 import type { Scope } from "effect";
-import { resolve } from "pathe";
 import { match } from "ts-pattern";
-import type { TemplateSource } from "../modules/schemas";
+import type { AbsPath, TemplateSource } from "../modules/schemas";
 import type { TemplateError } from "../errors";
+import { absPath } from "./paths";
 import { acquireTempTemplate, buildTemplateSource } from "./template";
 
 /**
@@ -30,13 +30,17 @@ import { acquireTempTemplate, buildTemplateSource } from "./template";
  */
 export function resolveTemplateDirScoped(
   source: TemplateSource,
-  targetDir: string,
+  targetDir: AbsPath,
   label?: string,
-): Effect.Effect<string, TemplateError, Scope.Scope> {
-  return match(source)
-    .with({ kind: "local" }, (local) => Effect.succeed(resolve(local.path)))
-    .with({ kind: "github" }, (gh) =>
-      acquireTempTemplate(targetDir, buildTemplateSource(gh), label),
-    )
-    .exhaustive();
+): Effect.Effect<AbsPath, TemplateError, Scope.Scope> {
+  return (
+    match(source)
+      // lock.json は手で書き換えられるので、載っているパスが絶対とは限らない。読んだ値を
+      // そのまま基点にすると、カレントディレクトリ次第で別の場所をテンプレートとして扱う。
+      .with({ kind: "local" }, (local) => Effect.succeed(absPath(local.path)))
+      .with({ kind: "github" }, (gh) =>
+        acquireTempTemplate(targetDir, buildTemplateSource(gh), label),
+      )
+      .exhaustive()
+  );
 }

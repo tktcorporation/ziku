@@ -10,15 +10,22 @@ import {
 import { homedir, tmpdir } from "node:os";
 import * as p from "@clack/prompts";
 import { downloadTemplate } from "giget";
-import { dirname, join, resolve } from "pathe";
+import { dirname, resolve } from "pathe";
 import { Effect } from "effect";
 import type { Scope } from "effect";
 import { match } from "ts-pattern";
 import { TemplateError } from "../errors";
-import type { FileOperationResult, GitHubSource, OverwriteStrategy } from "../modules/schemas";
+import type {
+  AbsPath,
+  CommitSha,
+  FileOperationResult,
+  GitHubSource,
+  OverwriteStrategy,
+} from "../modules/schemas";
 import { templateRefToString } from "../modules/schemas";
 import { log } from "../ui/renderer";
 import { loadMergedGitignore, separateByGitignore } from "./gitignore";
+import { absPath, joinAbs } from "./paths";
 import type { FlatPatterns } from "./patterns";
 import { resolvePatterns } from "./patterns";
 import {
@@ -87,7 +94,7 @@ export function buildTemplateSource(source: GitHubSource): string {
  * 3-way マージのベースツリーは「その時点のコミット」を取り直す必要があるため、
  * source が持つ ref ではなく渡された SHA で上書きする。
  */
-export function buildCommitPinnedSource(source: GitHubSource, sha: string): string {
+export function buildCommitPinnedSource(source: GitHubSource, sha: CommitSha): string {
   return buildTemplateSource({ ...source, ref: { kind: "commit", sha } });
 }
 
@@ -122,12 +129,12 @@ export function buildCommitPinnedSource(source: GitHubSource, sha: string): stri
  * @param label 同一 targetDir で複数同時取得する場合の識別子 (例: "base")
  */
 export function acquireTempTemplate(
-  targetDir: string,
+  targetDir: AbsPath,
   source?: string,
   label?: string,
-): Effect.Effect<string, TemplateError, Scope.Scope> {
+): Effect.Effect<AbsPath, TemplateError, Scope.Scope> {
   return Effect.gen(function* () {
-    const tempDir = join(targetDir, label ? `.ziku-temp-${label}` : ".ziku-temp");
+    const tempDir = joinAbs(targetDir, label ? `.ziku-temp-${label}` : ".ziku-temp");
 
     // 順序が重要: register → addFinalizer → download
     // download が失敗・中断しても、Scope クローズ時に finalizer が走って
@@ -144,16 +151,17 @@ export function acquireTempTemplate(
       catch: (e) => new TemplateError({ message: "Failed to download template", cause: e }),
     });
 
-    return result.dir;
+    // giget が返すのは展開先の実パス。ここが「外の世界から入ってきた絶対パス」の入口。
+    return absPath(result.dir);
   });
 }
 
 export function downloadTemplateToTemp(
-  targetDir: string,
+  targetDir: AbsPath,
   source?: string,
   label?: string,
-): Promise<{ templateDir: string; cleanup: () => void }> {
-  const tempDir = join(targetDir, label ? `.ziku-temp-${label}` : ".ziku-temp");
+): Promise<{ templateDir: AbsPath; cleanup: () => void }> {
+  const tempDir = joinAbs(targetDir, label ? `.ziku-temp-${label}` : ".ziku-temp");
 
   // 中断時 (Ctrl+C / process.exit) でも削除されるよう、ダウンロード前に登録する。
   // 通常終了は cleanup() 経由で unregister + 削除する。
@@ -173,7 +181,7 @@ export function downloadTemplateToTemp(
           rmSync(tempDir, { recursive: true, force: true });
         }
       };
-      return { templateDir, cleanup };
+      return { templateDir: absPath(templateDir), cleanup };
     },
     (error: unknown) => {
       unregisterTempDir(tempDir);
@@ -186,10 +194,10 @@ export function downloadTemplateToTemp(
 }
 
 export interface DownloadOptions {
-  targetDir: string;
+  targetDir: AbsPath;
   overwriteStrategy: OverwriteStrategy;
   patterns: FlatPatterns; // フラットな include/exclude パターン
-  templateDir?: string; // 事前にダウンロードしたテンプレートディレクトリ
+  templateDir?: AbsPath; // 事前にダウンロードしたテンプレートディレクトリ
   dryRun?: boolean; // true の場合、ファイルへの書き込みを行わずプレビューのみ行う
 }
 
@@ -269,7 +277,7 @@ export function fetchTemplates(options: DownloadOptions): Promise<FileOperationR
   } = options;
   // 事前ダウンロード済みか、新規ダウンロードか
   const shouldDownload = !preDownloadedDir;
-  const tempDir = join(targetDir, ".ziku-temp");
+  const tempDir = joinAbs(targetDir, ".ziku-temp");
 
   if (shouldDownload) {
     // 中断時 (Ctrl+C / process.exit) でも削除されるよう、ダウンロード前に登録する。
@@ -283,13 +291,13 @@ export function fetchTemplates(options: DownloadOptions): Promise<FileOperationR
   const work = async (): Promise<FileOperationResult[]> => {
     const allResults: FileOperationResult[] = [];
 
-    let templateDir: string;
+    let templateDir: AbsPath;
     if (shouldDownload) {
       const result = await downloadTemplate(TEMPLATE_SOURCE, {
         dir: tempDir,
         force: true,
       });
-      templateDir = result.dir;
+      templateDir = absPath(result.dir);
     } else {
       templateDir = preDownloadedDir;
     }
@@ -307,8 +315,8 @@ export function fetchTemplates(options: DownloadOptions): Promise<FileOperationR
 
     // tracked ファイルは通常通りコピー
     for (const relativePath of tracked) {
-      const srcPath = join(templateDir, relativePath);
-      const destPath = join(targetDir, relativePath);
+      const srcPath = joinAbs(templateDir, relativePath);
+      const destPath = joinAbs(targetDir, relativePath);
 
       const result = await copyFile(srcPath, destPath, overwriteStrategy, relativePath, dryRun);
       allResults.push(result);
@@ -318,8 +326,8 @@ export function fetchTemplates(options: DownloadOptions): Promise<FileOperationR
     // - ローカルに存在しない場合 → コピー
     // - ローカルに存在する場合 → スキップ（上書き防止）
     for (const relativePath of ignored) {
-      const srcPath = join(templateDir, relativePath);
-      const destPath = join(targetDir, relativePath);
+      const srcPath = joinAbs(templateDir, relativePath);
+      const destPath = joinAbs(targetDir, relativePath);
       const destExists = existsSync(destPath);
 
       if (destExists) {

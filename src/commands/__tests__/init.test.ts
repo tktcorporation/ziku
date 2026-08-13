@@ -2,6 +2,8 @@ import { vol } from "memfs";
 import { Effect } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { baseHashesOf, lockSchema } from "../../modules/schemas";
+import { absPath, globPatterns, hashMap, repoRelPath } from "../../__tests__/brands";
+import type { AbsPath } from "../../modules/schemas";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -152,7 +154,7 @@ describe("initCommand", () => {
 
     // デフォルトのモック設定
     mockDownloadTemplateToTemp.mockResolvedValue({
-      templateDir: "/tmp/template",
+      templateDir: absPath("/tmp/template"),
       cleanup: vi.fn(),
     });
     mockFetchTemplates.mockResolvedValue([]);
@@ -238,7 +240,7 @@ describe("initCommand", () => {
     it("ターゲットディレクトリが存在しない場合は作成", async () => {
       vol.fromJSON({});
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
@@ -257,7 +259,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectDirectories.mockResolvedValueOnce([".devcontainer/**"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".devcontainer/**"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -281,7 +283,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -369,11 +371,11 @@ describe("initCommand", () => {
 
       const mockCleanup = vi.fn();
       mockDownloadTemplateToTemp.mockResolvedValue({
-        templateDir: "/tmp/template",
+        templateDir: absPath("/tmp/template"),
         cleanup: mockCleanup,
       });
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -392,7 +394,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -418,7 +420,7 @@ describe("initCommand", () => {
 
       const mockCleanup = vi.fn();
       mockDownloadTemplateToTemp.mockResolvedValue({
-        templateDir: "/tmp/template",
+        templateDir: absPath("/tmp/template"),
         cleanup: mockCleanup,
       });
 
@@ -605,7 +607,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
 
       mockFetchTemplates.mockResolvedValue([]);
 
@@ -652,7 +654,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -680,7 +682,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -714,7 +716,7 @@ describe("initCommand", () => {
         .mockResolvedValueOnce(false) // .ziku
         .mockResolvedValueOnce(true); // .github
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
       mockFetchTemplates.mockResolvedValue([]);
 
@@ -742,7 +744,7 @@ describe("initCommand", () => {
         .mockResolvedValueOnce({ _tag: "NotFound" }); // .github
       mockCheckRepoSetup.mockResolvedValueOnce(false); // .ziku はセットアップ未完了
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
       mockFetchTemplates.mockResolvedValue([]);
 
@@ -769,7 +771,7 @@ describe("initCommand", () => {
         repo: ".github",
       });
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -799,7 +801,7 @@ describe("initCommand", () => {
       // ユーザーが custom-org/templates を入力
       mockInputTemplateSource.mockResolvedValueOnce("custom-org/templates");
       mockCheckRepoExists.mockResolvedValueOnce({ _tag: "Exists" });
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -857,7 +859,7 @@ describe("initCommand", () => {
       });
 
       // テンプレに ziku.jsonc が存在する状況（hashFiles が ziku.jsonc を返す）
-      mockHashFiles.mockResolvedValueOnce({ ".ziku/ziku.jsonc": "template-config-hash" });
+      mockHashFiles.mockResolvedValueOnce(hashMap({ ".ziku/ziku.jsonc": "template-config-hash" }));
 
       mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
 
@@ -872,9 +874,13 @@ describe("initCommand", () => {
         JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string),
       );
       // base はローカル subset 由来のハッシュで記録される（テンプレ保護のため）
-      expect(baseHashesOf(lockContent)[".ziku/ziku.jsonc"]).toEqual(expect.any(String));
+      expect(baseHashesOf(lockContent)[repoRelPath(".ziku/ziku.jsonc")]).toEqual(
+        expect.any(String),
+      );
       // テンプレ側ハッシュではなくローカル内容のハッシュ
-      expect(baseHashesOf(lockContent)[".ziku/ziku.jsonc"]).not.toBe("template-config-hash");
+      expect(baseHashesOf(lockContent)[repoRelPath(".ziku/ziku.jsonc")]).not.toBe(
+        "template-config-hash",
+      );
     });
 
     it("テンプレに ziku.jsonc が無ければ同期ベースに ziku.jsonc を記録しない（誤削除防止 / codex P1）", async () => {
@@ -897,7 +903,7 @@ describe("initCommand", () => {
         JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string),
       );
       // base を記録しない（記録すると次回 pull で deletedFiles 判定→制御ファイル削除になる）
-      expect(baseHashesOf(lockContent)[".ziku/ziku.jsonc"]).toBeUndefined();
+      expect(baseHashesOf(lockContent)[repoRelPath(".ziku/ziku.jsonc")]).toBeUndefined();
     });
   });
 
@@ -964,10 +970,10 @@ describe("initCommand", () => {
 
       // giget は tempDir (targetDir/.ziku-temp) 作成時に targetDir 自体も
       // 再帰的に作成する。この副作用をモックで再現する。
-      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: string) => {
+      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: AbsPath) => {
         vol.mkdirSync(`${targetDir}/.ziku-temp`, { recursive: true });
         return {
-          templateDir: `${targetDir}/.ziku-temp`,
+          templateDir: absPath(`${targetDir}/.ziku-temp`),
           cleanup: () => {
             vol.rmSync(`${targetDir}/.ziku-temp`, { recursive: true, force: true });
           },
@@ -989,10 +995,10 @@ describe("initCommand", () => {
 
       // targetDir (/existing-root/new-parent/project) の祖先 new-parent も
       // 未作成のケース。giget は recursive:true で両方まとめて作成する。
-      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: string) => {
+      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: AbsPath) => {
         vol.mkdirSync(`${targetDir}/.ziku-temp`, { recursive: true });
         return {
-          templateDir: `${targetDir}/.ziku-temp`,
+          templateDir: absPath(`${targetDir}/.ziku-temp`),
           cleanup: () => {
             vol.rmSync(`${targetDir}/.ziku-temp`, { recursive: true, force: true });
           },
@@ -1024,7 +1030,7 @@ describe("initCommand", () => {
       // giget は tempDir 作成後にダウンロード/展開に失敗することがある。
       // 失敗時も tempDir 自体は giget 側で削除されるが（downloadTemplateToTemp の
       // 実装）、targetDir は giget が作った副作用のまま残る想定を再現する。
-      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: string) => {
+      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: AbsPath) => {
         vol.mkdirSync(targetDir, { recursive: true });
         throw new Error("network error during extraction");
       });
@@ -1045,10 +1051,10 @@ describe("initCommand", () => {
         "/existing-target/.gitkeep": "",
       });
 
-      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: string) => {
+      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: AbsPath) => {
         vol.mkdirSync(`${targetDir}/.ziku-temp`, { recursive: true });
         return {
-          templateDir: `${targetDir}/.ziku-temp`,
+          templateDir: absPath(`${targetDir}/.ziku-temp`),
           cleanup: () => {
             vol.rmSync(`${targetDir}/.ziku-temp`, { recursive: true, force: true });
           },
@@ -1104,7 +1110,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectDirectories.mockResolvedValueOnce([".devcontainer/**"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".devcontainer/**"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
       mockFetchTemplates.mockResolvedValue([]);
 
@@ -1126,7 +1132,10 @@ describe("initCommand", () => {
 
 describe("generateZikuJsonc", () => {
   it("include と $schema を含む JSON を生成する", () => {
-    const content = generateZikuJsonc({ include: [".mcp.json", ".devcontainer/**"], exclude: [] });
+    const content = generateZikuJsonc({
+      include: globPatterns([".mcp.json", ".devcontainer/**"]),
+      exclude: [],
+    });
     const parsed = JSON.parse(content);
     expect(parsed.$schema).toBeDefined();
     expect(parsed.include).toBeDefined();
@@ -1135,7 +1144,7 @@ describe("generateZikuJsonc", () => {
   });
 
   it("デフォルト生成に include パターンがある", () => {
-    const content = generateZikuJsonc({ include: [".mcp.json"], exclude: [] });
+    const content = generateZikuJsonc({ include: globPatterns([".mcp.json"]), exclude: [] });
     const parsed = JSON.parse(content);
     expect(Array.isArray(parsed.include)).toBe(true);
     expect(parsed.include.length).toBeGreaterThan(0);
@@ -1144,7 +1153,7 @@ describe("generateZikuJsonc", () => {
 
 describe("resolveConfigBaseHash（テンプレ保護の安全装置）", () => {
   it("ローカル(部分集合) の内容ハッシュを base にする（テンプレを削らないため）", () => {
-    const localContent = generateZikuJsonc({ include: [".claude/**"], exclude: [] });
+    const localContent = generateZikuJsonc({ include: globPatterns([".claude/**"]), exclude: [] });
     const result = resolveConfigBaseHash({
       localConfigContent: localContent,
       templateConfigHash: hashContent("different-template-content"),
@@ -1154,7 +1163,7 @@ describe("resolveConfigBaseHash（テンプレ保護の安全装置）", () => {
   });
 
   it("テンプレ側ハッシュが undefined でもローカル内容から base を決められる", () => {
-    const localContent = generateZikuJsonc({ include: [".mcp.json"], exclude: [] });
+    const localContent = generateZikuJsonc({ include: globPatterns([".mcp.json"]), exclude: [] });
     const result = resolveConfigBaseHash({
       localConfigContent: localContent,
       templateConfigHash: undefined,
@@ -1163,7 +1172,10 @@ describe("resolveConfigBaseHash（テンプレ保護の安全装置）", () => {
   });
 
   it("ローカルが完全集合（テンプレと同一）なら base はテンプレと一致する", () => {
-    const content = generateZikuJsonc({ include: [".claude/**", ".mcp.json"], exclude: [] });
+    const content = generateZikuJsonc({
+      include: globPatterns([".claude/**", ".mcp.json"]),
+      exclude: [],
+    });
     const templateHash = hashContent(content);
     const result = resolveConfigBaseHash({
       localConfigContent: content,

@@ -1,11 +1,13 @@
 import { globSync } from "tinyglobby";
+import type { AbsPath, GlobPattern, RepoRelPath } from "../modules/schemas";
+import { repoRelPaths } from "./paths";
 
 /**
  * フラットな include/exclude パターン
  */
 export interface FlatPatterns {
-  include: string[];
-  exclude: string[];
+  include: GlobPattern[];
+  exclude: GlobPattern[];
 }
 
 /**
@@ -16,9 +18,9 @@ export interface FlatPatterns {
  */
 export interface PatternUnion {
   /** ローカル優先の順序に整えた和集合。 */
-  readonly merged: string[];
+  readonly merged: GlobPattern[];
   /** `incoming` 側にだけあったパターン。取り込んだ差分をユーザーへ提示するために返す。 */
-  readonly added: string[];
+  readonly added: GlobPattern[];
 }
 
 /**
@@ -34,10 +36,13 @@ export interface PatternUnion {
  *
  * 呼び出し側は `added` を見て「テンプレート側で新しく増えたパターン」を判断してよい。
  */
-export function unionPatterns(local: readonly string[], incoming: readonly string[]): PatternUnion {
+export function unionPatterns(
+  local: readonly GlobPattern[],
+  incoming: readonly GlobPattern[],
+): PatternUnion {
   const seen = new Set<string>();
-  const merged: string[] = [];
-  const added: string[] = [];
+  const merged: GlobPattern[] = [];
+  const added: GlobPattern[] = [];
 
   for (const pattern of local) {
     if (seen.has(pattern)) continue;
@@ -55,14 +60,21 @@ export function unionPatterns(local: readonly string[], incoming: readonly strin
 }
 
 /**
- * パターンにマッチするファイル一覧を取得
+ * パターンにマッチするファイル一覧を、基点からの相対パスとして取得する。
+ *
+ * パターンからパスへの変換点。`baseDir` の中身を実際に走査した結果だけが
+ * `RepoRelPath` になるので、パターン文字列がパスとして紛れ込む経路をここで塞ぐ。
  */
-export function resolvePatterns(baseDir: string, patterns: string[], ignore?: string[]): string[] {
+export function resolvePatterns(
+  baseDir: AbsPath,
+  patterns: readonly GlobPattern[],
+  ignore?: readonly GlobPattern[],
+): RepoRelPath[] {
   const files = globSync(patterns, {
     cwd: baseDir,
     dot: true,
     onlyFiles: true,
     ignore: ignore ?? [],
   });
-  return files.toSorted();
+  return repoRelPaths(files.toSorted());
 }

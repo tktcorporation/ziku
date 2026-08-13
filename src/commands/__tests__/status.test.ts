@@ -9,8 +9,11 @@ import type {
   LockState,
   ResumableLockState,
   TemplateSource,
+  CommitSha,
+  GlobPattern,
 } from "../../modules/schemas";
 import { markMerging } from "../../modules/schemas";
+import { absPath, globPatterns, repoRelPath, repoRelPaths } from "../../__tests__/brands";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -40,7 +43,7 @@ vi.mock("../../utils/sync-analysis", () => ({
 // utils/template-patterns をモック (デフォルトはマージ無し = テンプレ側に追加パターン無し)
 vi.mock("../../utils/template-patterns", () => ({
   mergeTemplatePatterns: vi.fn().mockResolvedValue({
-    mergedInclude: [".claude/**"],
+    mergedInclude: globPatterns([".claude/**"]),
     mergedExclude: [],
     newInclude: [],
     newExclude: [],
@@ -61,8 +64,8 @@ vi.mock("../../utils/lock", () => ({
 vi.mock("../../utils/ziku-config", () => ({
   zikuConfigExists: vi.fn().mockReturnValue(false),
   ZIKU_CONFIG_FILE: ".ziku/ziku.jsonc",
-  withConfigTracked: (include: string[]) =>
-    include.includes(".ziku/ziku.jsonc") ? include : [...include, ".ziku/ziku.jsonc"],
+  withConfigTracked: (include: readonly string[]) =>
+    include.includes(".ziku/ziku.jsonc") ? [...include] : [...include, ".ziku/ziku.jsonc"],
 }));
 
 // utils/untracked をモック
@@ -151,19 +154,19 @@ function mergingLock(conflicts: ConflictPaths): LockState {
 
 function mockContext(
   overrides: Partial<{
-    include: string[];
+    include: GlobPattern[];
     lock: LockState;
   }> = {},
 ) {
   const cleanup = vi.fn();
   return {
     effect: Effect.succeed({
-      config: { include: overrides.include ?? [".claude/**"] },
+      config: { include: overrides.include ?? globPatterns([".claude/**"]) },
       lock: overrides.lock ?? pendingLock,
       source: testSource,
-      templateDir: "/tmp/template",
+      templateDir: absPath("/tmp/template"),
       cleanup,
-      resolveBaseRef: Effect.succeed(Option.none<string>()),
+      resolveBaseRef: Effect.succeed(Option.none<CommitSha>()),
     }),
     cleanup,
   };
@@ -175,7 +178,7 @@ describe("statusCommand", () => {
     vi.clearAllMocks();
     // デフォルト: テンプレ側にパターン追加なし (P1 fix の no-op パス)
     mockMergeTemplatePatterns.mockResolvedValue({
-      mergedInclude: [".claude/**"],
+      mergedInclude: globPatterns([".claude/**"]),
       mergedExclude: [],
       newInclude: [],
       newExclude: [],
@@ -214,7 +217,9 @@ describe("statusCommand", () => {
       // 早期 return することで、loadCommandContext (= template download) を回避する。
       mockZikuConfigExists.mockReturnValue(true);
       mockLoadLock.mockReturnValueOnce(
-        Effect.succeed(mergingLock([".claude/settings.json", ".mcp.json"])),
+        Effect.succeed(
+          mergingLock([repoRelPath(".claude/settings.json"), repoRelPath(".mcp.json")]),
+        ),
       );
       // loadCommandContext は失敗するように設定 (template 取得不可をシミュレート)
       const { TemplateError } = await import("../../errors");
@@ -248,7 +253,7 @@ describe("statusCommand", () => {
       // "Not initialized" を出して失敗する。動かない命令を出さないために、
       // fast-path 内でも config 存在を前提条件として確認する。
       mockZikuConfigExists.mockReturnValue(false);
-      mockLoadLock.mockReturnValueOnce(Effect.succeed(mergingLock(["foo.txt"])));
+      mockLoadLock.mockReturnValueOnce(Effect.succeed(mergingLock([repoRelPath("foo.txt")])));
       mockLoadCommandContext.mockReturnValue(
         Effect.fail(new FileNotFoundError({ path: ".ziku/ziku.jsonc" })),
       );
@@ -327,7 +332,7 @@ describe("statusCommand", () => {
       const { effect } = mockContext();
       mockLoadCommandContext.mockReturnValue(effect);
       mockAnalyzeSync.mockResolvedValueOnce({
-        plan: syncPlanOf({ ...emptyClassification(), autoUpdate: ["a.txt"] }),
+        plan: syncPlanOf({ ...emptyClassification(), autoUpdate: repoRelPaths(["a.txt"]) }),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
       });
 
@@ -346,7 +351,7 @@ describe("statusCommand", () => {
       const { effect } = mockContext();
       mockLoadCommandContext.mockReturnValue(effect);
       mockAnalyzeSync.mockResolvedValueOnce({
-        plan: syncPlanOf({ ...emptyClassification(), localOnly: ["b.txt"] }),
+        plan: syncPlanOf({ ...emptyClassification(), localOnly: repoRelPaths(["b.txt"]) }),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
       });
 
@@ -364,7 +369,9 @@ describe("statusCommand", () => {
     it("コンフリクト解決待ちの場合は outro に 'pull --continue'", async () => {
       // nextBase の中身は decideRecommendation の分岐に影響しないため空で十分。
       // 解決待ちであること自体が continueMerge を発火させる。
-      const { effect } = mockContext({ lock: mergingLock(["c.txt"]) });
+      const { effect } = mockContext({
+        lock: mergingLock([repoRelPath("c.txt")]),
+      });
       mockLoadCommandContext.mockReturnValue(effect);
       mockAnalyzeSync.mockResolvedValueOnce({
         plan: syncPlanOf(emptyClassification()),
@@ -388,8 +395,8 @@ describe("statusCommand", () => {
       mockAnalyzeSync.mockResolvedValueOnce({
         plan: syncPlanOf({
           ...emptyClassification(),
-          autoUpdate: ["a.txt"],
-          localOnly: ["b.txt"],
+          autoUpdate: repoRelPaths(["a.txt"]),
+          localOnly: repoRelPaths(["b.txt"]),
         }),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
       });
@@ -410,7 +417,7 @@ describe("statusCommand", () => {
       const { effect } = mockContext();
       mockLoadCommandContext.mockReturnValue(effect);
       mockAnalyzeSync.mockResolvedValueOnce({
-        plan: syncPlanOf({ ...emptyClassification(), conflicts: ["c.txt"] }),
+        plan: syncPlanOf({ ...emptyClassification(), conflicts: repoRelPaths(["c.txt"]) }),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
       });
 
@@ -430,9 +437,9 @@ describe("statusCommand", () => {
       const { effect } = mockContext();
       mockLoadCommandContext.mockReturnValue(effect);
       mockMergeTemplatePatterns.mockResolvedValueOnce({
-        mergedInclude: [".claude/**", ".new-pattern/**"],
+        mergedInclude: globPatterns([".claude/**", ".new-pattern/**"]),
         mergedExclude: [],
-        newInclude: [".new-pattern/**"],
+        newInclude: globPatterns([".new-pattern/**"]),
         newExclude: [],
         patternsUpdated: true,
       });
@@ -460,9 +467,9 @@ describe("statusCommand", () => {
       const { effect } = mockContext();
       mockLoadCommandContext.mockReturnValue(effect);
       mockMergeTemplatePatterns.mockResolvedValueOnce({
-        mergedInclude: [".claude/**", ".new-feature/**"],
+        mergedInclude: globPatterns([".claude/**", ".new-feature/**"]),
         mergedExclude: [],
-        newInclude: [".new-feature/**"],
+        newInclude: globPatterns([".new-feature/**"]),
         newExclude: [],
         patternsUpdated: true,
       });
@@ -482,7 +489,7 @@ describe("statusCommand", () => {
       // ziku.jsonc 自体も追跡ファイルとして include に含まれる（withConfigTracked）。
       expect(mockAnalyzeSync).toHaveBeenCalledWith(
         expect.objectContaining({
-          include: [".claude/**", ".new-feature/**", ".ziku/ziku.jsonc"],
+          include: globPatterns([".claude/**", ".new-feature/**", ".ziku/ziku.jsonc"]),
         }),
       );
       // ユーザー向けの新パターン通知
@@ -500,7 +507,7 @@ describe("statusCommand", () => {
       mockDetectUntrackedFiles.mockResolvedValueOnce([
         {
           folder: "x",
-          files: [{ path: ".claude/rules/draft.md", folder: "x" }],
+          files: [{ path: repoRelPath(".claude/rules/draft.md"), folder: "x" }],
         },
       ]);
 

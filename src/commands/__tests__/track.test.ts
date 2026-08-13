@@ -1,5 +1,6 @@
 import { vol } from "memfs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { absPath, globPatterns } from "../../__tests__/brands";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -83,7 +84,7 @@ describe("track command - core logic", () => {
         2,
       );
 
-      const result = addIncludePattern(rawContent, [".cloud/rules/*.md"]);
+      const result = addIncludePattern(rawContent, globPatterns([".cloud/rules/*.md"]));
 
       const parsed = JSON.parse(result);
       expect(parsed.include).toContain(".cloud/config.json");
@@ -100,7 +101,10 @@ describe("track command - core logic", () => {
         2,
       );
 
-      const result = addIncludePattern(rawContent, [".cloud/rules/*.md", ".cloud/config.json"]);
+      const result = addIncludePattern(
+        rawContent,
+        globPatterns([".cloud/rules/*.md", ".cloud/config.json"]),
+      );
 
       const parsed = JSON.parse(result);
       expect(parsed.include).toContain(".mcp.json");
@@ -125,8 +129,8 @@ describe("track command - core logic", () => {
         "/project/.ziku/ziku.jsonc": initialContent,
       });
 
-      const updated = addIncludePattern(initialContent, [".cloud/rules/*.md"]);
-      await saveZikuConfig("/project", updated);
+      const updated = addIncludePattern(initialContent, globPatterns([".cloud/rules/*.md"]));
+      await saveZikuConfig(absPath("/project"), updated);
 
       const saved = vol.readFileSync("/project/.ziku/ziku.jsonc", "utf8") as string;
       const parsed = JSON.parse(saved);
@@ -137,7 +141,7 @@ describe("track command - core logic", () => {
 
     it("ziku.jsonc が存在しない場合を検知できる", () => {
       vol.fromJSON({});
-      expect(zikuConfigExists("/project")).toBe(false);
+      expect(zikuConfigExists(absPath("/project"))).toBe(false);
     });
   });
 });

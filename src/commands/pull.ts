@@ -1,11 +1,19 @@
 import { readFile, rm } from "node:fs/promises";
 import { defineCommand } from "citty";
 import { Effect, Option } from "effect";
-import { join, resolve } from "pathe";
 import { match } from "ts-pattern";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
-import type { ConflictPaths, MergingLockState, ResumableLockState } from "../modules/schemas";
+import type {
+  AbsPath,
+  ConflictPaths,
+  ContentHash,
+  GlobPattern,
+  HashMap,
+  MergingLockState,
+  RepoRelPath,
+  ResumableLockState,
+} from "../modules/schemas";
 import {
   baseCommitSha,
   baseHashesOf,
@@ -21,6 +29,7 @@ import { loadCommandContext, runCommandEffect, toZikuError } from "../services/c
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 import { hashContent } from "../utils/hash";
+import { absPath, joinAbs } from "../utils/paths";
 import type { ConflictRegion, FileMergeOutcome } from "../utils/merge";
 import {
   findConflictRegions,
@@ -113,7 +122,7 @@ export const pullCommand = defineCommand({
   async run({ args }) {
     intro("pull");
 
-    const targetDir = resolve(args.dir);
+    const targetDir = absPath(args.dir);
     // 既定値付きの boolean 引数なので、citty のパース結果は常に真偽値が入る。
     // `as boolean` で潰さずそのまま渡し、フラグ名を変えたときに型で気付けるようにする。
     const approvalFlags: PullApprovalFlags = { force: args.force, yes: args.yes };
@@ -197,7 +206,7 @@ export const pullCommand = defineCommand({
       // union マージを行ったときは lock の base[ziku.jsonc] をローカル最終内容（union）に
       // 揃える。templateHashes 側に寄せると、テンプレが削除したパターンを後続 push が
       // localOnly として再追加してしまう。
-      const baseHashesForLock: Record<string, string> =
+      const baseHashesForLock: HashMap =
         configSync.baseHash !== undefined
           ? { ...hashes.templateHashes, [ZIKU_CONFIG_FILE]: configSync.baseHash }
           : hashes.templateHashes;
@@ -310,7 +319,7 @@ export const pullCommand = defineCommand({
  * テンプレ側で追加された include パターンをユーザーへ通知する。
  * mergeTemplatePatterns 自体は副作用フリーなので、ログ出力はここで行う。
  */
-function logNewIncludeNotice(newInclude: string[]): void {
+function logNewIncludeNotice(newInclude: readonly GlobPattern[]): void {
   if (newInclude.length === 0) return;
   log.info(`Template added ${newInclude.length} new pattern(s):`);
   for (const p of newInclude) {
@@ -328,15 +337,15 @@ function logNewIncludeNotice(newInclude: string[]): void {
  *   undefined（no-op）。これにより再検出ノイズを防ぐ。
  */
 function resolveConfigMerge(
-  targetDir: string,
-  templateDir: string,
+  targetDir: AbsPath,
+  templateDir: AbsPath,
   action: ZikuConfigPullAction,
-): Promise<{ baseHash?: string; write?: string }> {
+): Promise<{ baseHash?: ContentHash; write?: string }> {
   return match(action)
     .with({ _tag: "Skip" }, () => Promise.resolve({}))
     .with({ _tag: "UnionMerge" }, async () => {
       const merged = await computeMergedZikuConfig({ targetDir, templateDir });
-      const currentLocal = await readFile(join(targetDir, ZIKU_CONFIG_FILE), "utf-8");
+      const currentLocal = await readFile(joinAbs(targetDir, ZIKU_CONFIG_FILE), "utf-8");
       return {
         baseHash: hashContent(merged),
         write: merged !== currentLocal ? merged : undefined,
@@ -350,11 +359,11 @@ function resolveConfigMerge(
  * まとめて実行する。run() 本体の分岐数（複雑度）を抑えるために切り出す。
  */
 async function applyPullUpdates(opts: {
-  autoUpdate: string[];
-  newFiles: string[];
+  autoUpdate: readonly RepoRelPath[];
+  newFiles: readonly RepoRelPath[];
   configWrite: string | undefined;
-  targetDir: string;
-  templateDir: string;
+  targetDir: AbsPath;
+  templateDir: AbsPath;
 }): Promise<void> {
   await applyFiles(opts.autoUpdate, opts.templateDir, opts.targetDir);
   if (opts.autoUpdate.length > 0) {
@@ -369,7 +378,7 @@ async function applyPullUpdates(opts: {
   // ziku.jsonc を加法 union で同期（テンプレの追加は取り込み、削除は伝播しない）。
   if (opts.configWrite !== undefined) {
     await Effect.runPromise(
-      writeFileEnsureDir(join(opts.targetDir, ZIKU_CONFIG_FILE), opts.configWrite),
+      writeFileEnsureDir(joinAbs(opts.targetDir, ZIKU_CONFIG_FILE), opts.configWrite),
     );
     log.success(`Merged ${pc.cyan(ZIKU_CONFIG_FILE)}`);
   }
@@ -383,12 +392,12 @@ async function applyPullUpdates(opts: {
  * ファイルへの書き込みや lock.json の更新は行わない。
  */
 async function previewPull(params: {
-  targetDir: string;
-  templateDir: string;
+  targetDir: AbsPath;
+  templateDir: AbsPath;
   lock: ResumableLockState;
-  conflicts: string[];
-  deletedFiles: string[];
-  deletedWithLocalEdits: string[];
+  conflicts: readonly RepoRelPath[];
+  deletedFiles: readonly RepoRelPath[];
+  deletedWithLocalEdits: readonly RepoRelPath[];
   configWrite: string | undefined;
   flags: PullApprovalFlags;
 }): Promise<void> {
@@ -446,10 +455,14 @@ function describeDeletedFilesPreview(count: number, flags: PullApprovalFlags): s
  * 内容をバイト列のまま運ぶ。テンプレートの画像やフォントを utf-8 の文字列として
  * 読み書きすると、不正バイトが U+FFFD へ置き換わってファイルが壊れる。
  */
-async function applyFiles(files: string[], templateDir: string, targetDir: string): Promise<void> {
+async function applyFiles(
+  files: readonly RepoRelPath[],
+  templateDir: AbsPath,
+  targetDir: AbsPath,
+): Promise<void> {
   for (const file of files) {
-    const bytes = await readFile(join(templateDir, file));
-    await Effect.runPromise(writeFileEnsureDir(join(targetDir, file), bytes));
+    const bytes = await readFile(joinAbs(templateDir, file));
+    await Effect.runPromise(writeFileEnsureDir(joinAbs(targetDir, file), bytes));
   }
 }
 
@@ -460,14 +473,14 @@ async function applyFiles(files: string[], templateDir: string, targetDir: strin
  * つまり「マージできた内容をローカルへ書き戻し、結末をユーザーへ伝える」ことだけ。
  */
 async function resolveConflicts(
-  conflicts: string[],
+  conflicts: readonly RepoRelPath[],
   ctx: {
-    targetDir: string;
-    templateDir: string;
+    targetDir: AbsPath;
+    templateDir: AbsPath;
     lock: ResumableLockState;
     dryRun?: boolean;
   },
-): Promise<readonly string[]> {
+): Promise<readonly RepoRelPath[]> {
   const dryRun = ctx.dryRun ?? false;
 
   const unresolvedConflicts = await Effect.runPromise(
@@ -497,14 +510,14 @@ async function resolveConflicts(
  * dry-run はプレビューなのでどの結末でもディスクへ触れない。
  */
 function applyMergeOutcome(params: {
-  file: string;
+  file: RepoRelPath;
   outcome: FileMergeOutcome;
-  targetDir: string;
+  targetDir: AbsPath;
   dryRun: boolean;
 }): Effect.Effect<void> {
   const { file, outcome, targetDir, dryRun } = params;
   const writeMerged = (content: string): Effect.Effect<void> =>
-    dryRun ? Effect.void : writeFileEnsureDir(join(targetDir, file), content);
+    dryRun ? Effect.void : writeFileEnsureDir(joinAbs(targetDir, file), content);
 
   return match(outcome)
     .with({ _tag: "Clean" }, ({ content }) =>
@@ -586,16 +599,16 @@ function keepsLocalEditsWithoutAsking(flags: PullApprovalFlags): boolean {
 
 /** テンプレートで削除され、ローカルも base のままのファイルを処理する。 */
 async function handleDeletedFiles(
-  deletedFiles: string[],
-  targetDir: string,
+  deletedFiles: readonly RepoRelPath[],
+  targetDir: AbsPath,
   flags: PullApprovalFlags,
 ): Promise<void> {
   const filesToDelete = await match(resolveDeletionPolicy(flags))
-    .with("deleteAll", (): string[] => {
+    .with("deleteAll", (): readonly RepoRelPath[] => {
       log.info(`Deleting ${deletedFiles.length} file(s) removed from template...`);
       return deletedFiles;
     })
-    .with("keepAll", (): string[] => {
+    .with("keepAll", (): readonly RepoRelPath[] => {
       log.warn(
         `Kept ${deletedFiles.length} file(s) removed from the template — --yes skips prompts but does not approve deletion. Re-run with --force to delete them.`,
       );
@@ -617,8 +630,8 @@ async function handleDeletedFiles(
  * 残ったファイルは以降「ローカルにしかないファイル」として push 候補になる。
  */
 async function handleDeletedWithLocalEdits(
-  files: string[],
-  targetDir: string,
+  files: readonly RepoRelPath[],
+  targetDir: AbsPath,
   flags: PullApprovalFlags,
 ): Promise<void> {
   if (keepsLocalEditsWithoutAsking(flags)) {
@@ -635,18 +648,22 @@ async function handleDeletedWithLocalEdits(
 
   await deleteSelectedFiles(filesToDelete, targetDir);
 
-  const kept = files.filter((f) => !filesToDelete.includes(f));
+  const deleted = new Set<string>(filesToDelete);
+  const kept = files.filter((f) => !deleted.has(f));
   if (kept.length > 0) {
     log.info(`Kept ${kept.length} locally edited file(s).`);
   }
 }
 
 /** 選択された削除対象をローカルから削除する。削除できないファイルは警告のみで続行する。 */
-async function deleteSelectedFiles(files: string[], targetDir: string): Promise<void> {
+async function deleteSelectedFiles(
+  files: readonly RepoRelPath[],
+  targetDir: AbsPath,
+): Promise<void> {
   for (const file of files) {
     await Effect.runPromise(
       Effect.tryPromise(async () => {
-        await rm(join(targetDir, file), { force: true });
+        await rm(joinAbs(targetDir, file), { force: true });
         log.success(`Deleted: ${file}`);
       }).pipe(
         Effect.orElseSucceed(() => {
@@ -677,7 +694,7 @@ function pausedMergeError(lock: MergingLockState): ZikuError {
  * 引数が `MergingLockState` なので、解決待ちでない lock に対しては呼べない。
  */
 async function runContinue(
-  targetDir: string,
+  targetDir: AbsPath,
   lock: MergingLockState,
   dryRun: boolean,
 ): Promise<void> {
@@ -685,10 +702,10 @@ async function runContinue(
 
   // 解決済みかどうかはディスクの現在の内容だけが決める。ユーザーが手で編集した後なので、
   // マージ時点で得た位置情報は既にずれている。読み直して今のブロック位置を提示する。
-  const stillConflicted: Array<{ file: string; regions: readonly ConflictRegion[] }> = [];
+  const stillConflicted: Array<{ file: RepoRelPath; regions: readonly ConflictRegion[] }> = [];
   for (const file of conflicts) {
     const contentOption = await Effect.runPromise(
-      readFileSafe(join(targetDir, file)).pipe(Effect.option),
+      readFileSafe(joinAbs(targetDir, file)).pipe(Effect.option),
     );
     if (Option.isNone(contentOption)) continue;
     const regions = findConflictRegions(contentOption.value);
@@ -722,13 +739,13 @@ async function runContinue(
 }
 
 function logPullSummary(classification: {
-  autoUpdate: string[];
-  newFiles: string[];
-  conflicts: string[];
-  deletedFiles: string[];
-  deletedWithLocalEdits: string[];
-  localOnly: string[];
-  unchanged: string[];
+  autoUpdate: readonly RepoRelPath[];
+  newFiles: readonly RepoRelPath[];
+  conflicts: readonly RepoRelPath[];
+  deletedFiles: readonly RepoRelPath[];
+  deletedWithLocalEdits: readonly RepoRelPath[];
+  localOnly: readonly RepoRelPath[];
+  unchanged: readonly RepoRelPath[];
 }): void {
   const lines: string[] = [];
 

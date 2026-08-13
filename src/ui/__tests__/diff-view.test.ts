@@ -30,6 +30,7 @@ import {
   getFileLabel,
   renderFileDiff,
 } from "../diff-view";
+import { repoRelPath } from "../../__tests__/brands";
 
 /** 背景色（word diff のハイライト）が付いた部分だけを連結して返す */
 function highlighted(line: string): string {
@@ -49,7 +50,7 @@ describe("diff-view", () => {
   describe("calculateDiffStats", () => {
     it("should return zeros for unchanged", () => {
       const file: FileDiff = {
-        path: "a.ts",
+        path: repoRelPath("a.ts"),
         type: "unchanged",
         localContent: "same\n",
         templateContent: "same\n",
@@ -63,7 +64,7 @@ describe("diff-view", () => {
 
     it("should count lines for added files", () => {
       const file: FileDiff = {
-        path: "a.ts",
+        path: repoRelPath("a.ts"),
         type: "added",
         localContent: "line1\nline2\nline3",
       };
@@ -76,7 +77,7 @@ describe("diff-view", () => {
 
     it("should count lines for added files with trailing newline", () => {
       const file: FileDiff = {
-        path: "a.ts",
+        path: repoRelPath("a.ts"),
         type: "added",
         localContent: "line1\nline2\nline3\n",
       };
@@ -90,7 +91,7 @@ describe("diff-view", () => {
 
     it("should count lines for deleted files", () => {
       const file: FileDiff = {
-        path: "a.ts",
+        path: repoRelPath("a.ts"),
         type: "deleted",
         templateContent: "line1\nline2",
       };
@@ -103,7 +104,7 @@ describe("diff-view", () => {
 
     it("should count lines for deleted files with trailing newline", () => {
       const file: FileDiff = {
-        path: "a.ts",
+        path: repoRelPath("a.ts"),
         type: "deleted",
         templateContent: "line1\nline2\n",
       };
@@ -116,7 +117,7 @@ describe("diff-view", () => {
 
     it("should compute stats for modified files using unified diff", () => {
       const file: FileDiff = {
-        path: "a.ts",
+        path: repoRelPath("a.ts"),
         type: "modified",
         localContent: "hello world",
         templateContent: "hello",
@@ -138,7 +139,7 @@ describe("diff-view", () => {
       }).join("\n");
 
       const file: FileDiff = {
-        path: "big-file.ts",
+        path: repoRelPath("big-file.ts"),
         type: "modified",
         localContent: localLines,
         templateContent: templateLines,
@@ -155,7 +156,7 @@ describe("diff-view", () => {
       const localContent = '{\n  "name": "dev",\n  "settings": {\n    "key": "value"\n  }\n}\n';
 
       const file: FileDiff = {
-        path: ".devcontainer/devcontainer.json",
+        path: repoRelPath(".devcontainer/devcontainer.json"),
         type: "modified",
         localContent,
         templateContent,
@@ -169,7 +170,7 @@ describe("diff-view", () => {
 
     it("should report zero lines for an empty added file", () => {
       const file: FileDiff = {
-        path: "a.ts",
+        path: repoRelPath("a.ts"),
         type: "added",
         localContent: "",
       };
@@ -182,7 +183,7 @@ describe("diff-view", () => {
 
     it("should report zero lines for an empty deleted file", () => {
       const file: FileDiff = {
-        path: "a.ts",
+        path: repoRelPath("a.ts"),
         type: "deleted",
         templateContent: "",
       };
@@ -195,7 +196,7 @@ describe("diff-view", () => {
 
     it("should handle single line content without newline", () => {
       const file: FileDiff = {
-        path: "a.ts",
+        path: repoRelPath("a.ts"),
         type: "added",
         localContent: "single line",
       };
@@ -208,7 +209,7 @@ describe("diff-view", () => {
 
     it("should handle empty string content", () => {
       const file: FileDiff = {
-        path: "a.ts",
+        path: repoRelPath("a.ts"),
         type: "added",
         localContent: "",
       };
@@ -221,7 +222,7 @@ describe("diff-view", () => {
 
     it("should handle content that is only a newline", () => {
       const file: FileDiff = {
-        path: "a.ts",
+        path: repoRelPath("a.ts"),
         type: "added",
         localContent: "\n",
       };
@@ -236,7 +237,7 @@ describe("diff-view", () => {
     it("should count content lines starting with --- as deletions", () => {
       // front matter 区切りの削除。ヘッダー行と取り違えるとカウントから漏れる
       const file: FileDiff = {
-        path: "rule.md",
+        path: repoRelPath("rule.md"),
         type: "modified",
         templateContent: "---\ntitle: a\n---\nbody\n",
         localContent: "title: a\nbody\n",
@@ -250,7 +251,7 @@ describe("diff-view", () => {
 
     it("should count content lines starting with --- as additions", () => {
       const file: FileDiff = {
-        path: "rule.md",
+        path: repoRelPath("rule.md"),
         type: "modified",
         templateContent: "title: a\nbody\n",
         localContent: "---\ntitle: a\n---\nbody\n",
@@ -354,7 +355,7 @@ describe("diff-view", () => {
   describe("getFileLabel", () => {
     it("should include path and stats for added file", () => {
       const file: FileDiff = {
-        path: "test.ts",
+        path: repoRelPath("test.ts"),
         type: "added",
         localContent: "hello",
       };
@@ -364,7 +365,7 @@ describe("diff-view", () => {
 
     it("should include path for modified file", () => {
       const file: FileDiff = {
-        path: "mod.ts",
+        path: repoRelPath("mod.ts"),
         type: "modified",
         localContent: "new",
         templateContent: "old",
@@ -375,7 +376,7 @@ describe("diff-view", () => {
 
     it("should not mark unchanged files with the deleted icon", () => {
       const file: FileDiff = {
-        path: "same.ts",
+        path: repoRelPath("same.ts"),
         type: "unchanged",
         localContent: "x\n",
         templateContent: "x\n",
@@ -389,7 +390,7 @@ describe("diff-view", () => {
   describe("renderFileDiff", () => {
     it("should display header for unchanged files without diff", () => {
       const file: FileDiff = {
-        path: "a.ts",
+        path: repoRelPath("a.ts"),
         type: "unchanged",
         localContent: "same\n",
         templateContent: "same\n",
@@ -402,7 +403,7 @@ describe("diff-view", () => {
 
     it("should label unchanged files as unchanged, not deleted", () => {
       const file: FileDiff = {
-        path: "a.ts",
+        path: repoRelPath("a.ts"),
         type: "unchanged",
         localContent: "same\n",
         templateContent: "same\n",
@@ -415,7 +416,7 @@ describe("diff-view", () => {
 
     it("should display diff content for deleted files", () => {
       const file: FileDiff = {
-        path: "gone.ts",
+        path: repoRelPath("gone.ts"),
         type: "deleted",
         templateContent: "const x = 1;\n",
       };
@@ -427,7 +428,7 @@ describe("diff-view", () => {
 
     it("should display diff content for added files", () => {
       const file: FileDiff = {
-        path: "new.ts",
+        path: repoRelPath("new.ts"),
         type: "added",
         localContent: "const x = 1;",
       };
@@ -438,7 +439,7 @@ describe("diff-view", () => {
 
     it("should display diff content for modified files", () => {
       const file: FileDiff = {
-        path: "mod.ts",
+        path: repoRelPath("mod.ts"),
         type: "modified",
         localContent: "const x = 2;",
         templateContent: "const x = 1;",
@@ -450,7 +451,7 @@ describe("diff-view", () => {
   });
   describe("バイナリ", () => {
     const binaryFile: FileDiff = {
-      path: "assets/icon.png",
+      path: repoRelPath("assets/icon.png"),
       type: "modified",
       templateContent: asDiffContent([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]),
       localContent: asDiffContent([0x89, 0x50, 0x4e, 0x47, 0x00, 0x02]),

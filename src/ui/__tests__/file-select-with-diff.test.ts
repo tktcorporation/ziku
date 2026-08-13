@@ -15,6 +15,7 @@ import {
   truncateLine,
 } from "../file-select-with-diff";
 import { stringWidth } from "../text-width";
+import { repoRelPath } from "../../__tests__/brands";
 
 // ─── ヘルパー ──────────────────────────────────────────────────
 
@@ -23,9 +24,14 @@ function createTestState(
   overrides?: Partial<Pick<RenderState, "cursorIndex" | "diffScrollOffset">>,
 ): RenderState {
   const files: FileDiff[] = [
-    { path: "a.ts", type: "added", localContent: "line1\nline2\nline3\n" },
-    { path: "b.ts", type: "modified", localContent: "new\n", templateContent: "old\n" },
-    { path: "c.ts", type: "deleted", templateContent: "del\n" },
+    { path: repoRelPath("a.ts"), type: "added", localContent: "line1\nline2\nline3\n" },
+    {
+      path: repoRelPath("b.ts"),
+      type: "modified",
+      localContent: "new\n",
+      templateContent: "old\n",
+    },
+    { path: repoRelPath("c.ts"), type: "deleted", templateContent: "del\n" },
   ];
   const items = buildFileItems(files);
   return {
@@ -40,7 +46,7 @@ function createTestState(
 /** 指定件数のファイルを持つ RenderState を生成する（パスは file-<index>.ts） */
 function createManyFilesState(fileCount: number, cursorIndex = 0): RenderState {
   const files: FileDiff[] = Array.from({ length: fileCount }, (_, i) => ({
-    path: `file-${i}.ts`,
+    path: repoRelPath(`file-${i}.ts`),
     type: "modified" as const,
     localContent: `new ${i}\n`,
     templateContent: `old ${i}\n`,
@@ -158,7 +164,7 @@ describe("file-select-with-diff", () => {
   describe("buildColoredDiffLines", () => {
     it("should return no-changes message for unchanged files", () => {
       const file: FileDiff = {
-        path: "a.ts",
+        path: repoRelPath("a.ts"),
         type: "unchanged",
         localContent: "same\n",
         templateContent: "same\n",
@@ -170,7 +176,7 @@ describe("file-select-with-diff", () => {
 
     it("should return colored diff lines for added files", () => {
       const file: FileDiff = {
-        path: "a.ts",
+        path: repoRelPath("a.ts"),
         type: "added",
         localContent: "const x = 1;\n",
       };
@@ -182,7 +188,7 @@ describe("file-select-with-diff", () => {
 
     it("should return colored diff lines for modified files", () => {
       const file: FileDiff = {
-        path: "a.ts",
+        path: repoRelPath("a.ts"),
         type: "modified",
         localContent: "const x = 2;\n",
         templateContent: "const x = 1;\n",
@@ -193,7 +199,7 @@ describe("file-select-with-diff", () => {
 
     it("should show the removed content for deleted files", () => {
       const file: FileDiff = {
-        path: "a.ts",
+        path: repoRelPath("a.ts"),
         type: "deleted",
         templateContent: "old content\n",
       };
@@ -205,7 +211,7 @@ describe("file-select-with-diff", () => {
     it("should preserve content lines starting with --- or +++", () => {
       // P1 regression test: --- in content should not be filtered
       const file: FileDiff = {
-        path: "front-matter.md",
+        path: repoRelPath("front-matter.md"),
         type: "modified",
         localContent: "---\ntitle: new\n---\nbody\n",
         templateContent: "---\ntitle: old\n---\nbody\n",
@@ -221,9 +227,14 @@ describe("file-select-with-diff", () => {
   describe("buildFileItems", () => {
     it("should create items with labels and hints for each file", () => {
       const files: FileDiff[] = [
-        { path: "added.ts", type: "added", localContent: "new\n" },
-        { path: "modified.ts", type: "modified", localContent: "new\n", templateContent: "old\n" },
-        { path: "deleted.ts", type: "deleted", templateContent: "old\n" },
+        { path: repoRelPath("added.ts"), type: "added", localContent: "new\n" },
+        {
+          path: repoRelPath("modified.ts"),
+          type: "modified",
+          localContent: "new\n",
+          templateContent: "old\n",
+        },
+        { path: repoRelPath("deleted.ts"), type: "deleted", templateContent: "old\n" },
       ];
       const items = buildFileItems(files);
       expect(items).toHaveLength(3);
@@ -236,7 +247,7 @@ describe("file-select-with-diff", () => {
     });
 
     it("should include type icon in label", () => {
-      const files: FileDiff[] = [{ path: "a.ts", type: "added", localContent: "x\n" }];
+      const files: FileDiff[] = [{ path: repoRelPath("a.ts"), type: "added", localContent: "x\n" }];
       const items = buildFileItems(files);
       const plain = stripCsi(items[0].label);
       expect(plain).toContain("+");
@@ -245,8 +256,18 @@ describe("file-select-with-diff", () => {
 
     it("conflictedPaths のファイルは hint で conflict と表示される", () => {
       const files: FileDiff[] = [
-        { path: "ok.ts", type: "modified", localContent: "new\n", templateContent: "old\n" },
-        { path: "bad.ts", type: "modified", localContent: "new\n", templateContent: "old\n" },
+        {
+          path: repoRelPath("ok.ts"),
+          type: "modified",
+          localContent: "new\n",
+          templateContent: "old\n",
+        },
+        {
+          path: repoRelPath("bad.ts"),
+          type: "modified",
+          localContent: "new\n",
+          templateContent: "old\n",
+        },
       ];
       const items = buildFileItems(files, new Set(["bad.ts"]));
       const okHint = stripCsi(items[0].hint);
@@ -258,7 +279,12 @@ describe("file-select-with-diff", () => {
 
     it("should show modified icon for modified files", () => {
       const files: FileDiff[] = [
-        { path: "m.ts", type: "modified", localContent: "new\n", templateContent: "old\n" },
+        {
+          path: repoRelPath("m.ts"),
+          type: "modified",
+          localContent: "new\n",
+          templateContent: "old\n",
+        },
       ];
       const items = buildFileItems(files);
       const plain = stripCsi(items[0].label);
@@ -266,7 +292,9 @@ describe("file-select-with-diff", () => {
     });
 
     it("should show deleted icon for deleted files", () => {
-      const files: FileDiff[] = [{ path: "d.ts", type: "deleted", templateContent: "old\n" }];
+      const files: FileDiff[] = [
+        { path: repoRelPath("d.ts"), type: "deleted", templateContent: "old\n" },
+      ];
       const items = buildFileItems(files);
       const plain = stripCsi(items[0].label);
       expect(plain).toContain("-");
@@ -274,7 +302,12 @@ describe("file-select-with-diff", () => {
 
     it("should handle unchanged files with space icon", () => {
       const files: FileDiff[] = [
-        { path: "u.ts", type: "unchanged", localContent: "u\n", templateContent: "u\n" },
+        {
+          path: repoRelPath("u.ts"),
+          type: "unchanged",
+          localContent: "u\n",
+          templateContent: "u\n",
+        },
       ];
       const items = buildFileItems(files);
       const plain = stripCsi(items[0].label);
@@ -333,7 +366,12 @@ describe("file-select-with-diff", () => {
 
     it("should render unchanged file with its own type label", () => {
       const files: FileDiff[] = [
-        { path: "u.ts", type: "unchanged", localContent: "u\n", templateContent: "u\n" },
+        {
+          path: repoRelPath("u.ts"),
+          type: "unchanged",
+          localContent: "u\n",
+          templateContent: "u\n",
+        },
       ];
       const items = buildFileItems(files);
       const state: RenderState = {
@@ -356,7 +394,9 @@ describe("file-select-with-diff", () => {
     it("should show scroll indicator when diff exceeds preview height", () => {
       // 多くの行を持つファイルで小さなターミナルをシミュレート
       const longContent = Array.from({ length: 50 }, (_, i) => `line ${i}`).join("\n") + "\n";
-      const files: FileDiff[] = [{ path: "long.ts", type: "added", localContent: longContent }];
+      const files: FileDiff[] = [
+        { path: repoRelPath("long.ts"), type: "added", localContent: longContent },
+      ];
       const items = buildFileItems(files);
       const state: RenderState = {
         items,
@@ -531,7 +571,9 @@ describe("file-select-with-diff", () => {
     it("should scroll diff down when content exceeds preview", () => {
       // 長いファイルで小さいターミナル
       const longContent = Array.from({ length: 100 }, (_, i) => `line ${i}`).join("\n");
-      const files: FileDiff[] = [{ path: "long.ts", type: "added", localContent: longContent }];
+      const files: FileDiff[] = [
+        { path: repoRelPath("long.ts"), type: "added", localContent: longContent },
+      ];
       const items = buildFileItems(files);
       const state: RenderState = {
         items,

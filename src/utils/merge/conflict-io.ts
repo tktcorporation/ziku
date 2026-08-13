@@ -9,13 +9,14 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { Effect } from "effect";
-import { dirname, join } from "pathe";
+import { dirname } from "pathe";
 import { match, P } from "ts-pattern";
-import type { LockState } from "../../modules/schemas";
+import type { AbsPath, LockState, RepoRelPath } from "../../modules/schemas";
 import { FileNotFoundError } from "../../errors";
 import { buildCommitPinnedSource, downloadTemplateToTemp } from "../template";
 import type { FileContent } from "../file-content";
 import { readFileContent } from "../file-content";
+import { joinAbs } from "../paths";
 import { log, pc } from "../../ui/renderer";
 import type { FileMergeOutcome } from "./types";
 import { asBaseContent, asLocalContent, asTemplateContent } from "./types";
@@ -29,7 +30,7 @@ import { threeWayMerge } from "./three-way-merge";
  * 空文字列で握りつぶさず、呼び出し側がエラーチャネルから
  * 明示的にフォールバック戦略（catchTag）を選択する設計。
  */
-export const readFileSafe = (path: string): Effect.Effect<string, FileNotFoundError> =>
+export const readFileSafe = (path: AbsPath): Effect.Effect<string, FileNotFoundError> =>
   Effect.tryPromise(() => readFile(path, "utf-8")).pipe(
     Effect.catchAll(() => Effect.fail(new FileNotFoundError({ path }))),
   );
@@ -40,7 +41,7 @@ export const readFileSafe = (path: string): Effect.Effect<string, FileNotFoundEr
  * 存在しないファイルは「テキストの空内容」として扱う。マージ対象の不在は
  * `mergeOneFile` が扱う正常な入力（削除された側）であり、種別の判定は不要なため。
  */
-const readFileKind = (path: string): Effect.Effect<FileContent> =>
+const readFileKind = (path: AbsPath): Effect.Effect<FileContent> =>
   Effect.tryPromise(() => readFileContent(path)).pipe(
     Effect.orElseSucceed(() => ({ kind: "text", content: "" }) as const),
   );
@@ -53,7 +54,7 @@ const readFileKind = (path: string): Effect.Effect<FileContent> =>
  * utf-8 の文字列を経由させるとバイナリが U+FFFD へ潰れて壊れる。
  */
 export const writeFileEnsureDir = (
-  path: string,
+  path: AbsPath,
   content: string | Uint8Array,
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
@@ -74,22 +75,22 @@ export const writeFileEnsureDir = (
  * 呼び出し側からは 3-way マージが成立したのか区別できなくなるため、値として区別する。
  */
 export type MergeBaseSource =
-  | { readonly kind: "with-base"; readonly dir: string }
+  | { readonly kind: "with-base"; readonly dir: AbsPath }
   | { readonly kind: "no-base" };
 
 export interface MergeOneFileInput {
   /** 対象ファイルの相対パス */
-  readonly file: string;
+  readonly file: RepoRelPath;
   /** ローカルプロジェクトのルートディレクトリ */
-  readonly targetDir: string;
+  readonly targetDir: AbsPath;
   /** テンプレート（最新版）のディレクトリ */
-  readonly templateDir: string;
+  readonly templateDir: AbsPath;
   /** 共通祖先の所在。`no-base` のときはファイルを一切読まず、自動マージも試みない。 */
   readonly base: MergeBaseSource;
 }
 
 export interface MergeOneFileOutput {
-  readonly file: string;
+  readonly file: RepoRelPath;
   readonly outcome: FileMergeOutcome;
 }
 
@@ -120,16 +121,16 @@ export const mergeOneFile = (input: MergeOneFileInput): Effect.Effect<MergeOneFi
 
 const mergeAgainstBase = (
   input: MergeOneFileInput,
-  baseDir: string,
+  baseDir: AbsPath,
 ): Effect.Effect<MergeOneFileOutput> =>
   Effect.gen(function* () {
-    const localContent = yield* readFileSafe(join(input.targetDir, input.file)).pipe(
+    const localContent = yield* readFileSafe(joinAbs(input.targetDir, input.file)).pipe(
       Effect.catchTag("FileNotFoundError", () => Effect.succeed("")),
     );
 
-    const templateContent = yield* readFileSafe(join(input.templateDir, input.file));
+    const templateContent = yield* readFileSafe(joinAbs(input.templateDir, input.file));
 
-    const baseContent = yield* readFileSafe(join(baseDir, input.file)).pipe(
+    const baseContent = yield* readFileSafe(joinAbs(baseDir, input.file)).pipe(
       Effect.catchTag("FileNotFoundError", () => Effect.succeed("")),
     );
 
@@ -149,7 +150,7 @@ const mergeAgainstBase = (
 // ─── ベーステンプレートのダウンロード ───
 
 interface DownloadBaseResult {
-  readonly templateDir: string;
+  readonly templateDir: AbsPath;
   readonly cleanup: () => void;
 }
 
@@ -165,7 +166,7 @@ interface DownloadBaseResult {
  */
 export const downloadBaseForMerge = (opts: {
   lock: LockState;
-  targetDir: string;
+  targetDir: AbsPath;
 }): Effect.Effect<DownloadBaseResult | null> =>
   match(opts.lock)
     .with({ source: { kind: "local" } }, () => Effect.succeed(null))
@@ -196,11 +197,11 @@ export const downloadBaseForMerge = (opts: {
 
 export interface MergeConflictFilesInput {
   /** classifyFiles が `conflicts` と判定したファイルの相対パス。 */
-  readonly conflicts: readonly string[];
+  readonly conflicts: readonly RepoRelPath[];
   /** ローカルプロジェクトのルートディレクトリ */
-  readonly targetDir: string;
+  readonly targetDir: AbsPath;
   /** テンプレート（最新版）のディレクトリ */
-  readonly templateDir: string;
+  readonly templateDir: AbsPath;
   /** ベースツリーの取得可否を決める lock。 */
   readonly lock: LockState;
   /**
@@ -230,7 +231,7 @@ export interface MergeConflictFilesInput {
  */
 export const mergeConflictFiles = (
   input: MergeConflictFilesInput,
-): Effect.Effect<readonly string[]> =>
+): Effect.Effect<readonly RepoRelPath[]> =>
   Effect.gen(function* () {
     if (input.conflicts.length === 0) return [];
 
@@ -244,7 +245,7 @@ export const mergeConflictFiles = (
         : { kind: "with-base", dir: downloaded.templateDir };
 
     return yield* Effect.gen(function* () {
-      const unresolved: string[] = [];
+      const unresolved: RepoRelPath[] = [];
       for (const file of input.conflicts) {
         if (yield* isBinaryConflict(input, file)) {
           log.warn(
@@ -274,10 +275,13 @@ export const mergeConflictFiles = (
  * 行に切って比べた結果をマーカーで囲んで書き戻せば、元のバイト列が壊れるだけになる。
  * どちらか一方でもバイナリなら、内容を突き合わせずにユーザーへ判断を渡す。
  */
-const isBinaryConflict = (input: MergeConflictFilesInput, file: string): Effect.Effect<boolean> =>
+const isBinaryConflict = (
+  input: MergeConflictFilesInput,
+  file: RepoRelPath,
+): Effect.Effect<boolean> =>
   Effect.gen(function* () {
-    const local = yield* readFileKind(join(input.targetDir, file));
-    const template = yield* readFileKind(join(input.templateDir, file));
+    const local = yield* readFileKind(joinAbs(input.targetDir, file));
+    const template = yield* readFileKind(joinAbs(input.templateDir, file));
     return local.kind === "binary" || template.kind === "binary";
   });
 

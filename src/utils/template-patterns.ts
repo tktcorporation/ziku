@@ -11,18 +11,19 @@
  * 呼び出し元がそれを見て `log.info` するなり、`status` のように暗黙に取り込むなりを選ぶ。
  */
 import { Effect, Option } from "effect";
+import type { AbsPath, GlobPattern } from "../modules/schemas";
 import { unionPatterns } from "./patterns";
 import { loadTemplateConfig } from "./template-config";
 
 export interface MergedTemplatePatterns {
   /** ローカル + テンプレ追加分の include */
-  readonly mergedInclude: string[];
+  readonly mergedInclude: GlobPattern[];
   /** ローカル + テンプレ追加分の exclude */
-  readonly mergedExclude: string[];
+  readonly mergedExclude: GlobPattern[];
   /** テンプレ側で新規に追加された include パターン (ローカルには無い) */
-  readonly newInclude: string[];
+  readonly newInclude: GlobPattern[];
   /** テンプレ側で新規に追加された exclude パターン (ローカルには無い) */
-  readonly newExclude: string[];
+  readonly newExclude: GlobPattern[];
   /** マージで何か変化したか (ローカル `ziku.jsonc` 更新の判定に使う) */
   readonly patternsUpdated: boolean;
 }
@@ -37,16 +38,16 @@ export interface MergedTemplatePatterns {
  * 戻り値の `newInclude` / `newExclude` を呼び出し側が見て、ログ表示や永続化を決める。
  */
 export async function mergeTemplatePatterns(
-  templateDir: string,
-  include: string[],
-  exclude: string[],
+  templateDir: AbsPath,
+  include: readonly GlobPattern[],
+  exclude: readonly GlobPattern[],
 ): Promise<MergedTemplatePatterns> {
   const templateConfigOption = await Effect.runPromise(
     loadTemplateConfig(templateDir).pipe(Effect.option),
   );
 
   const templatePatterns = Option.match(templateConfigOption, {
-    onNone: () => ({ include: [] as string[], exclude: [] as string[] }),
+    onNone: () => ({ include: [] as GlobPattern[], exclude: [] as GlobPattern[] }),
     onSome: (config) => ({ include: config.include, exclude: config.exclude ?? [] }),
   });
 

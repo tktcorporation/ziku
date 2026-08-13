@@ -11,6 +11,7 @@
  * `SyncPlan.files` には設定ファイルが入らない。
  */
 import { match } from "ts-pattern";
+import type { RepoRelPath } from "../../modules/schemas";
 import type { ConfigDrift } from "../config-merge";
 import { ZIKU_CONFIG_FILE, classifySyncPath } from "../ziku-config";
 import type { FileCategory, FileClassification } from "./types";
@@ -52,8 +53,8 @@ export function partitionSyncPlan(classification: FileClassification): SyncPlan 
   // 仕分けのコールバックがループごとに別の値を掴む形になり読み解きづらくなる。
   const configCategories: FileCategory[] = [];
 
-  const take = (category: FileCategory, paths: string[]): string[] => {
-    const syncedFiles: string[] = [];
+  const take = (category: FileCategory, paths: readonly RepoRelPath[]): RepoRelPath[] => {
+    const syncedFiles: RepoRelPath[] = [];
     for (const path of paths) {
       match(classifySyncPath(path))
         .with({ kind: "syncedFile" }, (synced) => {

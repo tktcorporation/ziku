@@ -5,6 +5,14 @@ import type { ParseError, ValidationError } from "../../errors";
 import type { LockState, ZikuConfig } from "../../modules/schemas";
 import { baseCommitSha, baseHashesOf, markSynced } from "../../modules/schemas";
 import { toZikuError, toZikuFailure } from "../../services/command-context";
+import {
+  absPath,
+  commitSha,
+  globPatterns,
+  hashMap,
+  pathAsPattern,
+  repoRelPath,
+} from "../../__tests__/brands";
 
 // fs モジュールをモック
 vi.mock("node:fs/promises", async () => {
@@ -44,9 +52,9 @@ describe("loadZikuConfig", () => {
   });
 
   const runLoad = (dir: string): Promise<{ config: ZikuConfig; rawContent: string }> =>
-    Effect.runPromise(loadZikuConfig(dir));
+    Effect.runPromise(loadZikuConfig(absPath(dir)));
   const loadFailure = async (dir: string): Promise<unknown> => {
-    const exit = await Effect.runPromiseExit(loadZikuConfig(dir));
+    const exit = await Effect.runPromiseExit(loadZikuConfig(absPath(dir)));
     return Exit.isFailure(exit) ? Cause.failureOption(exit.cause) : undefined;
   };
 
@@ -171,7 +179,7 @@ describe("saveZikuConfig", () => {
 
     const content =
       '{\n  "source": { "owner": "test", "repo": "test" },\n  "include": [".github/**"]\n}\n';
-    await saveZikuConfig("/project", content);
+    await saveZikuConfig(absPath("/project"), content);
 
     const saved = vol.readFileSync("/project/.ziku/ziku.jsonc", "utf8") as string;
     expect(saved).toBe(content);
@@ -181,7 +189,7 @@ describe("saveZikuConfig", () => {
     vol.fromJSON({ "/project": null });
 
     const content = '{ "source": { "owner": "a", "repo": "b" }, "include": [] }';
-    await saveZikuConfig("/project", content);
+    await saveZikuConfig(absPath("/project"), content);
 
     const saved = vol.readFileSync("/project/.ziku/ziku.jsonc", "utf8") as string;
     expect(saved).toBe(content);
@@ -197,19 +205,19 @@ describe("zikuConfigExists", () => {
     vol.fromJSON({
       "/project/.ziku/ziku.jsonc": "{}",
     });
-    expect(zikuConfigExists("/project")).toBe(true);
+    expect(zikuConfigExists(absPath("/project"))).toBe(true);
   });
 
   it("ファイルが存在しない場合は false", () => {
     vol.fromJSON({});
-    expect(zikuConfigExists("/project")).toBe(false);
+    expect(zikuConfigExists(absPath("/project"))).toBe(false);
   });
 });
 
 describe("generateZikuJsonc", () => {
   it("include のみの設定を生成できる", () => {
     const result = generateZikuJsonc({
-      include: [".github/**"],
+      include: globPatterns([".github/**"]),
       exclude: [],
     });
 
@@ -223,8 +231,8 @@ describe("generateZikuJsonc", () => {
 
   it("exclude が指定されている場合は含まれる", () => {
     const result = generateZikuJsonc({
-      include: [".github/**"],
-      exclude: ["*.secret"],
+      include: globPatterns([".github/**"]),
+      exclude: globPatterns(["*.secret"]),
     });
 
     const parsed = JSON.parse(result);
@@ -246,7 +254,7 @@ describe("generateZikuJsonc", () => {
 describe("addIncludePattern", () => {
   it("新しいパターンを include に追加できる", () => {
     const raw = '{\n  "source": { "owner": "a", "repo": "b" },\n  "include": [".github/**"]\n}\n';
-    const result = addIncludePattern(raw, ["docs/**"]);
+    const result = addIncludePattern(raw, globPatterns(["docs/**"]));
 
     const parsed = JSON.parse(result);
     expect(parsed.include).toContain(".github/**");
@@ -255,14 +263,14 @@ describe("addIncludePattern", () => {
 
   it("既に存在するパターンは追加しない", () => {
     const raw = '{\n  "source": { "owner": "a", "repo": "b" },\n  "include": [".github/**"]\n}\n';
-    const result = addIncludePattern(raw, [".github/**"]);
+    const result = addIncludePattern(raw, globPatterns([".github/**"]));
 
     expect(result).toBe(raw);
   });
 
   it("複数パターンを一度に追加できる", () => {
     const raw = '{\n  "source": { "owner": "a", "repo": "b" },\n  "include": []\n}\n';
-    const result = addIncludePattern(raw, ["a/**", "b/**"]);
+    const result = addIncludePattern(raw, globPatterns(["a/**", "b/**"]));
 
     const parsed = JSON.parse(result);
     expect(parsed.include).toEqual(["a/**", "b/**"]);
@@ -271,16 +279,16 @@ describe("addIncludePattern", () => {
 
 describe("withConfigTracked", () => {
   it("ziku.jsonc を追跡対象として include 末尾に追加する", () => {
-    const result = withConfigTracked([".claude/**", ".mcp.json"]);
+    const result = withConfigTracked(globPatterns([".claude/**", ".mcp.json"]));
     expect(result).toEqual([".claude/**", ".mcp.json", ZIKU_CONFIG_FILE]);
   });
 
   it("既に ziku.jsonc が含まれていれば重複追加しない", () => {
-    const input = [".claude/**", ZIKU_CONFIG_FILE];
+    const input = globPatterns([".claude/**"]).concat(pathAsPattern(ZIKU_CONFIG_FILE));
     const result = withConfigTracked(input);
     expect(result).toEqual(input);
     // 重複しないこと
-    expect(result.filter((p) => p === ZIKU_CONFIG_FILE)).toHaveLength(1);
+    expect(result.filter((p) => p === pathAsPattern(ZIKU_CONFIG_FILE))).toHaveLength(1);
   });
 
   it("空配列でも ziku.jsonc だけは追跡対象になる", () => {
@@ -288,7 +296,7 @@ describe("withConfigTracked", () => {
   });
 
   it("元の配列を破壊しない（イミュータブル）", () => {
-    const input = [".claude/**"];
+    const input = globPatterns([".claude/**"]);
     withConfigTracked(input);
     expect(input).toEqual([".claude/**"]);
   });
@@ -306,29 +314,32 @@ describe("classifySyncPath", () => {
   it("同じ `.ziku/` 配下でも lock.json は通常の同期ファイル扱い", () => {
     // lock.json はテンプレート取得元 source を持つローカル専用ファイルで、同期対象ではない。
     // 種別判定がディレクトリではなくパス単位であることを固定する。
-    expect(classifySyncPath(".ziku/lock.json")).toEqual({
+    expect(classifySyncPath(repoRelPath(".ziku/lock.json"))).toEqual({
       kind: "syncedFile",
       path: ".ziku/lock.json",
     });
-    expect(isZikuConfigPath(".ziku/lock.json")).toBe(false);
+    expect(isZikuConfigPath(repoRelPath(".ziku/lock.json"))).toBe(false);
   });
 
   it("通常のファイルは syncedFile 種別", () => {
-    expect(classifySyncPath(".claude/rules/foo.md").kind).toBe("syncedFile");
-    expect(isZikuConfigPath(".claude/rules/foo.md")).toBe(false);
+    expect(classifySyncPath(repoRelPath(".claude/rules/foo.md")).kind).toBe("syncedFile");
+    expect(isZikuConfigPath(repoRelPath(".claude/rules/foo.md"))).toBe(false);
   });
 });
 
 describe("withoutConfigTracked", () => {
   it("常に追跡されるパスだけを取り除く", () => {
-    expect(withoutConfigTracked([".claude/**", ZIKU_CONFIG_FILE, ".ziku/lock.json"])).toEqual([
-      ".claude/**",
-      ".ziku/lock.json",
-    ]);
+    expect(
+      withoutConfigTracked([
+        ...globPatterns([".claude/**"]),
+        pathAsPattern(ZIKU_CONFIG_FILE),
+        ...globPatterns([".ziku/lock.json"]),
+      ]),
+    ).toEqual([".claude/**", ".ziku/lock.json"]);
   });
 
   it("withConfigTracked と往復すると元の include に戻る", () => {
-    const include = [".claude/**", ".mcp.json"];
+    const include = globPatterns([".claude/**", ".mcp.json"]);
     expect(withoutConfigTracked(withConfigTracked(include))).toEqual(include);
   });
 });
@@ -340,12 +351,12 @@ describe("alwaysTrackedPathsIn", () => {
 
   it("実在する常時追跡パスを返す", () => {
     vol.fromJSON({ [`/project/${ZIKU_CONFIG_FILE}`]: "{}" });
-    expect(alwaysTrackedPathsIn("/project")).toEqual([ZIKU_CONFIG_FILE]);
+    expect(alwaysTrackedPathsIn(absPath("/project"))).toEqual([ZIKU_CONFIG_FILE]);
   });
 
   it("実在しなければ返さない（走査に存在しないファイルを混ぜない）", () => {
     vol.fromJSON({ "/project/.claude/rules/foo.md": "x" });
-    expect(alwaysTrackedPathsIn("/project")).toEqual([]);
+    expect(alwaysTrackedPathsIn(absPath("/project"))).toEqual([]);
   });
 });
 
@@ -358,9 +369,9 @@ describe("loadLock", () => {
     vol.reset();
   });
 
-  const runLoad = (dir: string): Promise<LockState> => Effect.runPromise(loadLock(dir));
+  const runLoad = (dir: string): Promise<LockState> => Effect.runPromise(loadLock(absPath(dir)));
   const loadFailure = async (dir: string): Promise<unknown> => {
-    const exit = await Effect.runPromiseExit(loadLock(dir));
+    const exit = await Effect.runPromiseExit(loadLock(absPath(dir)));
     return Exit.isFailure(exit) ? Cause.failureOption(exit.cause) : undefined;
   };
 
@@ -542,7 +553,7 @@ describe("saveLock", () => {
   it("ロックを JSON ファイルとして保存できる", async () => {
     vol.fromJSON({ "/project/.ziku": null });
 
-    await saveLock("/project", lock);
+    await saveLock(absPath("/project"), lock);
 
     const saved = vol.readFileSync("/project/.ziku/lock.json", "utf8");
     expect(JSON.parse(saved as string)).toEqual(lock);
@@ -551,7 +562,7 @@ describe("saveLock", () => {
   it("保存される JSON は整形されている（2スペースインデント + 末尾改行）", async () => {
     vol.fromJSON({ "/project/.ziku": null });
 
-    await saveLock("/project", lock);
+    await saveLock(absPath("/project"), lock);
 
     const saved = vol.readFileSync("/project/.ziku/lock.json", "utf8") as string;
     expect(saved).toContain("\n");
@@ -567,9 +578,12 @@ describe("saveLock", () => {
       }),
     });
 
-    const newLock = markSynced(lock, { hashes: { "a.txt": "h" }, commitSha: "newref" });
+    const newLock = markSynced(lock, {
+      hashes: hashMap({ "a.txt": "h" }),
+      commitSha: commitSha("newref"),
+    });
 
-    await saveLock("/project", newLock);
+    await saveLock(absPath("/project"), newLock);
 
     const saved = vol.readFileSync("/project/.ziku/lock.json", "utf8");
     expect(JSON.parse(saved as string)).toEqual(newLock);
@@ -578,7 +592,7 @@ describe("saveLock", () => {
   it(".ziku ディレクトリが存在しなくても保存できる", async () => {
     vol.fromJSON({ "/project": null });
 
-    await saveLock("/project", lock);
+    await saveLock(absPath("/project"), lock);
 
     const saved = vol.readFileSync("/project/.ziku/lock.json", "utf8");
     expect(JSON.parse(saved as string)).toEqual(lock);

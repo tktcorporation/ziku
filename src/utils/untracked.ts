@@ -1,13 +1,14 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import ignore, { type Ignore } from "ignore";
-import { join } from "pathe";
 import { globSync } from "tinyglobby";
+import type { AbsPath, GlobPattern, RepoRelPath } from "../modules/schemas";
+import { joinAbs, repoRelPaths } from "./paths";
 import type { FlatPatterns } from "./patterns";
 import { resolvePatterns } from "./patterns";
 
 export interface UntrackedFile {
-  path: string;
+  path: RepoRelPath;
   folder: string;
 }
 
@@ -19,7 +20,7 @@ export interface UntrackedFilesByFolder {
 /**
  * ファイルパスから表示用フォルダ名を取得
  */
-export function getDisplayFolderFromPath(filePath: string): string {
+export function getDisplayFolderFromPath(filePath: RepoRelPath): string {
   const parts = filePath.split("/");
   if (parts.length === 1) {
     return "root";
@@ -30,7 +31,7 @@ export function getDisplayFolderFromPath(filePath: string): string {
 /**
  * include パターンからベースディレクトリを抽出
  */
-function getBaseDirsFromPatterns(include: string[]): {
+function getBaseDirsFromPatterns(include: readonly GlobPattern[]): {
   dirs: string[];
   hasRootPatterns: boolean;
 } {
@@ -52,42 +53,49 @@ function getBaseDirsFromPatterns(include: string[]): {
 /**
  * ディレクトリ内の全ファイルを取得
  */
-export function getAllFilesInDirs(baseDir: string, dirs: string[]): string[] {
+export function getAllFilesInDirs(baseDir: AbsPath, dirs: readonly string[]): RepoRelPath[] {
   if (dirs.length === 0) return [];
 
   const patterns = dirs.map((d) => `${d}/**/*`);
-  return globSync(patterns, {
-    cwd: baseDir,
-    dot: true,
-    onlyFiles: true,
-  }).toSorted();
+  return repoRelPaths(
+    globSync(patterns, {
+      cwd: baseDir,
+      dot: true,
+      onlyFiles: true,
+    }).toSorted(),
+  );
 }
 
 /**
  * ルート直下の隠しファイルを取得
  */
-export function getRootDotFiles(baseDir: string): string[] {
-  return globSync([".*"], {
-    cwd: baseDir,
-    dot: true,
-    onlyFiles: true,
-  }).toSorted();
+export function getRootDotFiles(baseDir: AbsPath): RepoRelPath[] {
+  return repoRelPaths(
+    globSync([".*"], {
+      cwd: baseDir,
+      dot: true,
+      onlyFiles: true,
+    }).toSorted(),
+  );
 }
 
 /**
  * 複数ディレクトリの .gitignore をマージして読み込み
  */
-export async function loadAllGitignores(baseDir: string, dirs: string[]): Promise<Ignore> {
+export async function loadAllGitignores(
+  baseDir: AbsPath,
+  dirs: readonly string[],
+): Promise<Ignore> {
   const ig = ignore();
 
-  const rootGitignore = join(baseDir, ".gitignore");
+  const rootGitignore = joinAbs(baseDir, ".gitignore");
   if (existsSync(rootGitignore)) {
     const content = await readFile(rootGitignore, "utf-8");
     ig.add(content);
   }
 
   for (const dir of dirs) {
-    const gitignorePath = join(baseDir, dir, ".gitignore");
+    const gitignorePath = joinAbs(baseDir, dir, ".gitignore");
     if (existsSync(gitignorePath)) {
       const content = await readFile(gitignorePath, "utf-8");
       const prefixedContent = content
@@ -112,13 +120,15 @@ export async function loadAllGitignores(baseDir: string, dirs: string[]): Promis
  * ホワイトリスト外のファイルをフォルダごとに検出
  */
 export async function detectUntrackedFiles(options: {
-  targetDir: string;
+  targetDir: AbsPath;
   patterns: FlatPatterns;
 }): Promise<UntrackedFilesByFolder[]> {
   const { targetDir, patterns } = options;
 
   // フラットパターンで tracked files を算出
-  const allTrackedFiles = new Set(resolvePatterns(targetDir, patterns.include, patterns.exclude));
+  const allTrackedFiles = new Set<string>(
+    resolvePatterns(targetDir, patterns.include, patterns.exclude),
+  );
 
   // ベースディレクトリを抽出
   const { dirs: allBaseDirs, hasRootPatterns } = getBaseDirsFromPatterns(patterns.include);
@@ -136,7 +146,7 @@ export async function detectUntrackedFiles(options: {
     : [];
 
   // 全ファイルをマージ（重複なし）
-  const allFiles = new Set([...filteredDirFiles, ...filteredRootFiles]);
+  const allFiles = new Set<RepoRelPath>([...filteredDirFiles, ...filteredRootFiles]);
 
   // フォルダごとにグループ化
   const filesByFolder = new Map<string, UntrackedFile[]>();

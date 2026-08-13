@@ -23,14 +23,14 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { parse } from "jsonc-parser";
-import { join } from "pathe";
-import type { ZikuConfig } from "../modules/schemas";
+import type { AbsPath, GlobPattern, RepoRelPath } from "../modules/schemas";
+import { globPatterns, joinAbs, selectPatternsMatchingPaths } from "./paths";
 import { unionPatterns } from "./patterns";
 import { ZIKU_CONFIG_FILE, generateZikuJsonc } from "./ziku-config";
 
 export interface ConfigPatterns {
-  readonly include: string[];
-  readonly exclude: string[];
+  readonly include: GlobPattern[];
+  readonly exclude: GlobPattern[];
 }
 
 const EMPTY_PATTERNS: ConfigPatterns = { include: [], exclude: [] };
@@ -55,19 +55,20 @@ export function mergeConfigPatterns(opts: {
  * 指定ディレクトリの `.ziku/ziku.jsonc` を読み、パターンを抽出する。
  * ファイルが無ければ undefined（base が無いケースの判定に使う）。
  */
-async function readPatternsAt(dir: string): Promise<ConfigPatterns | undefined> {
-  const path = join(dir, ZIKU_CONFIG_FILE);
+async function readPatternsAt(dir: AbsPath): Promise<ConfigPatterns | undefined> {
+  const path = joinAbs(dir, ZIKU_CONFIG_FILE);
   if (!existsSync(path)) return undefined;
   const content = await readFile(path, "utf-8");
-  const parsed = parse(content) as ZikuConfig | undefined;
+  // ディスク上の JSONC はスキーマを通っていない生の値。ここがパターンの brand 入口になる。
+  const parsed = parse(content) as { include?: string[]; exclude?: string[] } | undefined;
   return {
-    include: parsed?.include ?? [],
-    exclude: parsed?.exclude ?? [],
+    include: globPatterns(parsed?.include ?? []),
+    exclude: globPatterns(parsed?.exclude ?? []),
   };
 }
 
 /** 2 つのパターン配列が集合として等しいか（順序・重複を無視）。 */
-function sameSet(a: string[], b: string[]): boolean {
+function sameSet(a: readonly GlobPattern[], b: readonly GlobPattern[]): boolean {
   const sa = new Set(a);
   const sb = new Set(b);
   if (sa.size !== sb.size) return false;
@@ -95,8 +96,8 @@ export interface ConfigDrift {
  * 無限に推奨してしまう no-op ループを防ぐ。
  */
 export async function analyzeConfigDrift(
-  targetDir: string,
-  templateDir: string,
+  targetDir: AbsPath,
+  templateDir: AbsPath,
 ): Promise<ConfigDrift> {
   const [local, template] = await Promise.all([
     readPatternsAt(targetDir),
@@ -128,9 +129,9 @@ export async function analyzeConfigDrift(
  * 確定した新規追跡パターンをローカル側へ加えてから union を取る（codex P2）。
  */
 export async function computeMergedZikuConfig(opts: {
-  targetDir: string;
-  templateDir: string;
-  extraIncludes?: string[];
+  targetDir: AbsPath;
+  templateDir: AbsPath;
+  extraIncludes?: readonly GlobPattern[];
 }): Promise<string> {
   const [local, template] = await Promise.all([
     readPatternsAt(opts.targetDir),
@@ -152,24 +153,26 @@ export async function computeMergedZikuConfig(opts: {
 }
 
 /**
- * ローカルの `ziku.jsonc` にのみ存在する include パターンのうち、指定パス集合に
+ * ローカルの `ziku.jsonc` にのみ存在する include パターンのうち、指定パスのいずれかに
  * 一致するものだけを返す。
  *
- * 背景（#90）: `ziku track <path>` は即座にディスクの `ziku.jsonc` にパターンを
+ * 背景（#90）: `ziku track <pattern>` は即座にディスクの `ziku.jsonc` にパターンを
  * 書き込む。その後 `ziku push --files=<path>` のようにファイル本体だけを指定すると、
  * `ziku.jsonc` 自体は `--files` に含まれず push 候補から漏れ、パターンがテンプレへ
  * 伝播しない（本体だけテンプレに存在し、他プロジェクトの `pull` が検出できない）。
  *
- * パターン = ファイルパス（個別追跡）の前提で、push されるパスと厳密一致するものだけを
- * 「関連パターン」として返す。無関係なローカル限定パターン（今回の push が触れていない
- * ファイルのもの）まで巻き込まないためのスコープ計算に使う。glob パターンの一致判定は
- * 将来拡張。
+ * 一致判定は glob として行う（`src/utils/paths.ts` の `selectPatternsMatchingPaths`）。
+ * パターンとパスを同じ文字列として突き合わせると、`.claude/rules/*.md` のような glob は
+ * どのパスとも一致せず、glob で追跡した利用者だけがこの補完から永久に漏れる。
+ *
+ * 無関係なローカル限定パターン（今回の push が触れていないファイルのもの）まで巻き込まない
+ * ためのスコープ計算に使う。
  */
 export async function findLocalOnlyPatternsForPaths(opts: {
-  targetDir: string;
-  templateDir: string;
-  paths: string[];
-}): Promise<string[]> {
+  targetDir: AbsPath;
+  templateDir: AbsPath;
+  paths: readonly RepoRelPath[];
+}): Promise<GlobPattern[]> {
   if (opts.paths.length === 0) return [];
 
   const [local, template] = await Promise.all([
@@ -177,12 +180,16 @@ export async function findLocalOnlyPatternsForPaths(opts: {
     readPatternsAt(opts.templateDir),
   ]);
 
-  const templateInclude = new Set((template ?? EMPTY_PATTERNS).include);
-  const pathSet = new Set(opts.paths);
-
-  return (local ?? EMPTY_PATTERNS).include.filter(
-    (pattern) => !templateInclude.has(pattern) && pathSet.has(pattern),
+  const templateInclude = new Set<string>((template ?? EMPTY_PATTERNS).include);
+  const localOnly = (local ?? EMPTY_PATTERNS).include.filter(
+    (pattern) => !templateInclude.has(pattern),
   );
+
+  return selectPatternsMatchingPaths({
+    baseDir: opts.targetDir,
+    patterns: localOnly,
+    paths: opts.paths,
+  });
 }
 
 /**
@@ -196,12 +203,12 @@ export async function findLocalOnlyPatternsForPaths(opts: {
  * 追加分だけを union するため、無関係なパターンを一切巻き込まない。
  */
 export async function computeScopedZikuConfig(opts: {
-  templateDir: string;
-  additionalIncludes: string[];
+  templateDir: AbsPath;
+  additionalIncludes: readonly GlobPattern[];
 }): Promise<string> {
   const template = (await readPatternsAt(opts.templateDir)) ?? EMPTY_PATTERNS;
   const merged = mergeConfigPatterns({
-    local: { include: opts.additionalIncludes, exclude: [] },
+    local: { include: [...opts.additionalIncludes], exclude: [] },
     template,
   });
   return generateZikuJsonc(merged);

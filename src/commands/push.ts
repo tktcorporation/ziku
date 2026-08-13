@@ -2,12 +2,20 @@ import { existsSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { defineCommand } from "citty";
 import { Effect } from "effect";
-import { dirname, join, resolve } from "pathe";
+import { dirname } from "pathe";
 import { P, match } from "ts-pattern";
 import { z } from "zod/v4";
 import { withFinally } from "../effect-helpers";
 import { ZikuError, zikuFailure } from "../errors";
-import type { FileDiff, GitHubSource, LocalSource, LockState } from "../modules/schemas";
+import type {
+  AbsPath,
+  FileDiff,
+  GitHubSource,
+  GlobPattern,
+  LocalSource,
+  LockState,
+  RepoRelPath,
+} from "../modules/schemas";
 import { baseCommitSha, baseHashesOf, markSynced } from "../modules/schemas";
 import { LOCK_FILE, saveLock } from "../utils/lock";
 import {
@@ -25,6 +33,7 @@ import { mergeConflictFiles } from "../utils/merge";
 import { zikuConfigPushAction } from "../utils/merge/sync-plan";
 import { analyzeSync } from "../utils/sync-analysis";
 import { transportTextToBytes } from "../utils/file-content";
+import { absPath, joinAbs, pathAsPattern, repoRelPath } from "../utils/paths";
 import {
   computeMergedZikuConfig,
   computeScopedZikuConfig,
@@ -121,14 +130,14 @@ function mergedAsPushContent(content: MergedContent): PushContent {
 // ─── Push 戦略: GitHub / Local を Effect で分離 ───
 
 interface PushTarget {
-  readonly files: Array<{ path: string; content: PushContent }>;
-  readonly deletions: Array<{ path: string }>;
+  readonly files: Array<{ path: RepoRelPath; content: PushContent }>;
+  readonly deletions: Array<{ path: RepoRelPath }>;
   readonly pushableFiles: FileDiff[];
   /**
    * テンプレートが削除したファイルのうち、ローカルの編集を保持したまま push するもの。
    * push はテンプレート側の削除を取り消すことになるので、サマリで明示する。
    */
-  readonly restoresTemplateDeletion: ReadonlySet<string>;
+  readonly restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
 }
 
 /**
@@ -189,7 +198,10 @@ function pushToGitHub(
       const readmeResult = await detectAndUpdateReadme(ctx.templateDir, ctx.templateDir);
       const files = [...target.files];
       if (readmeResult?.updated) {
-        files.push({ path: "README.md", content: asPushContent(readmeResult.content) });
+        files.push({
+          path: repoRelPath("README.md"),
+          content: asPushContent(readmeResult.content),
+        });
       }
 
       // サマリー表示
@@ -259,9 +271,9 @@ function pushToLocal(
   localSource: LocalSource,
   target: PushTarget,
   ctx: CommandContextShape,
-  projectDir: string,
+  projectDir: AbsPath,
   args: { yes?: boolean },
-  patterns: { include: string[]; exclude: string[] },
+  patterns: { include: readonly GlobPattern[]; exclude: readonly GlobPattern[] },
   configWriteBackSafe: boolean,
 ): Effect.Effect<boolean, ZikuError> {
   return Effect.tryPromise({
@@ -286,7 +298,7 @@ function pushToLocal(
       log.step("Pushing to local template...");
 
       for (const file of target.files) {
-        const destPath = join(localSource.path, file.path);
+        const destPath = joinAbs(localSource.path, file.path);
         const destDir = dirname(destPath);
         if (!existsSync(destDir)) {
           await mkdir(destDir, { recursive: true });
@@ -299,7 +311,7 @@ function pushToLocal(
 
       // 削除対象ファイルを処理
       for (const file of target.deletions) {
-        const destPath = join(localSource.path, file.path);
+        const destPath = joinAbs(localSource.path, file.path);
         if (existsSync(destPath)) {
           await rm(destPath, { force: true });
           log.message(`  ${pc.red("-")} ${file.path}`);
@@ -319,7 +331,7 @@ function pushToLocal(
       // 書き戻しをスキップする（ローカルは元々正しい内容を保持しているので何もしなくてよい）。
       const mergedConfig = target.files.find((f) => isZikuConfigPath(f.path));
       if (mergedConfig && configWriteBackSafe) {
-        const localConfigPath = join(projectDir, ZIKU_CONFIG_FILE);
+        const localConfigPath = joinAbs(projectDir, ZIKU_CONFIG_FILE);
         await mkdir(dirname(localConfigPath), { recursive: true });
         await writeFile(localConfigPath, mergedConfig.content, "utf-8");
       }
@@ -526,7 +538,7 @@ export const pushCommand = defineCommand({
 
     intro("push");
 
-    const targetDir = resolve(args.dir);
+    const targetDir = absPath(args.dir);
 
     const ctx = await runCommandEffect(
       loadCommandContext(targetDir).pipe(Effect.mapError(toZikuError)),
@@ -561,7 +573,7 @@ export const pushCommand = defineCommand({
     await withFinally(async () => {
       // ─── 共通: 差分検出 + ファイル選択 ───
 
-      const mergedContents = new Map<string, PushContent>();
+      const mergedContents = new Map<RepoRelPath, PushContent>();
 
       // ─── 未追跡ファイルの追跡フロー ───
       // 検知・選択・include へのマージは classify より「前」に行う必要がある。
@@ -762,12 +774,12 @@ export const pushCommand = defineCommand({
  *   newlyTrackedPaths（push 成功後に永続化する候補パス。非対話時は空）。
  */
 async function resolveUntrackedTracking(
-  targetDir: string,
-  patterns: { include: string[]; exclude: string[] },
+  targetDir: AbsPath,
+  patterns: { include: GlobPattern[]; exclude: GlobPattern[] },
   args: { yes: boolean; dryRun: boolean },
 ): Promise<{
-  effectivePatterns: { include: string[]; exclude: string[] };
-  newlyTrackedPaths: string[];
+  effectivePatterns: { include: GlobPattern[]; exclude: GlobPattern[] };
+  newlyTrackedPaths: RepoRelPath[];
 }> {
   // 未追跡探索は、ユーザーが明示的に追跡すると決めたパターンだけを見る（除外の理由は
   // withoutConfigTracked の JSDoc を参照）。
@@ -798,7 +810,8 @@ async function resolveUntrackedTracking(
 
   return {
     effectivePatterns: {
-      include: [...patterns.include, ...selected],
+      // 個別に選んだファイルは、そのパス 1 本だけに一致する include として登録する。
+      include: [...patterns.include, ...selected.map((path) => pathAsPattern(path))],
       exclude: patterns.exclude,
     },
     newlyTrackedPaths: selected,
@@ -809,18 +822,20 @@ async function resolveUntrackedTracking(
  * push 成功後に、新規追跡ファイルを ziku.jsonc の include へ永続化する。
  *
  * 実際に push されたファイルのパターンのみ追記する。これによりファイル選択で外された
- * 追跡候補を除外し、「追跡したのに push していない」状態を作らない。
- * パターン = ファイルパス（個別追跡）の前提。ディレクトリ glob 対応は将来拡張。
+ * 追跡候補を除外し、「追跡したのに push していない」状態を作らない。追記するのは選択された
+ * ファイルのパスそのものなので、1 パス = 1 パターンで対応が付く。
  *
  * 永続化は addIncludePattern による include キーのみの部分更新（jsonc の modify）で行う。
  * exclude やコメント等は保持されるため、push 中に外部編集が入っても include 以外は壊さない。
  */
 async function persistNewlyTracked(
-  targetDir: string,
-  newlyTrackedPaths: string[],
-  pushedPaths: Set<string>,
+  targetDir: AbsPath,
+  newlyTrackedPaths: readonly RepoRelPath[],
+  pushedPaths: ReadonlySet<string>,
 ): Promise<void> {
-  const patternsToPersist = newlyTrackedPaths.filter((p) => pushedPaths.has(p));
+  const patternsToPersist = newlyTrackedPaths
+    .filter((p) => pushedPaths.has(p))
+    .map((path) => pathAsPattern(path));
   if (patternsToPersist.length === 0) return;
 
   // 分類済みの失敗（不在 / 構文エラー / スキーマ違反）を ZikuError へ落としてから投げる。
@@ -864,12 +879,12 @@ async function persistNewlyTracked(
  *   なし）だけ `true` を返す。
  */
 async function applyNewlyTrackedConfigToPush(params: {
-  targetDir: string;
-  templateDir: string;
-  newlyTrackedPaths: string[];
+  targetDir: AbsPath;
+  templateDir: AbsPath;
+  newlyTrackedPaths: readonly RepoRelPath[];
   pushableFiles: FileDiff[];
   diffFiles: FileDiff[];
-  mergedContents: Map<string, PushContent>;
+  mergedContents: Map<RepoRelPath, PushContent>;
 }): Promise<{ pushableFiles: FileDiff[]; configWriteBackSafe: boolean }> {
   const { targetDir, templateDir, newlyTrackedPaths, pushableFiles, diffFiles, mergedContents } =
     params;
@@ -877,8 +892,10 @@ async function applyNewlyTrackedConfigToPush(params: {
   const configAlreadySelected = pushableFiles.some((f) => isZikuConfigPath(f.path));
 
   const selectedPaths = pushableFiles.map((f) => f.path);
-  const selectedPathSet = new Set(selectedPaths);
-  const trackedAndPushed = newlyTrackedPaths.filter((p) => selectedPathSet.has(p));
+  const selectedPathSet = new Set<string>(selectedPaths);
+  const trackedAndPushed = newlyTrackedPaths
+    .filter((p) => selectedPathSet.has(p))
+    .map((path) => pathAsPattern(path));
 
   // `--files` でファイル本体だけが指定され、事前に `ziku track` 済みのパターンが
   // ziku.jsonc の push 候補から漏れているケースを検出する（#90）。ziku.jsonc が既に
@@ -949,8 +966,8 @@ async function applyNewlyTrackedConfigToPush(params: {
  * （dry-run は「実際に push される集合」を見せる方針を保つ）。
  */
 async function warnIfConfigWouldBeAutoIncluded(params: {
-  targetDir: string;
-  templateDir: string;
+  targetDir: AbsPath;
+  templateDir: AbsPath;
   previewFiles: FileDiff[];
 }): Promise<void> {
   const { targetDir, templateDir, previewFiles } = params;
@@ -983,14 +1000,16 @@ async function warnIfConfigWouldBeAutoIncluded(params: {
 function filterByFilesArg(
   candidates: FileDiff[],
   filesArg: string,
-): { filtered: FileDiff[]; notFound: string[] } {
+): { filtered: FileDiff[]; notFound: RepoRelPath[] } {
+  // `--files` は CLI 引数。ここが相対パスの入口になる。
   const requestedPaths = filesArg
     .split(",")
     .map((p) => p.trim())
-    .filter(Boolean);
-  const availablePaths = new Set(candidates.map((f) => f.path));
+    .filter(Boolean)
+    .map((p) => repoRelPath(p));
+  const availablePaths = new Set<string>(candidates.map((f) => f.path));
   const notFound = requestedPaths.filter((p) => !availablePaths.has(p));
-  const requestedSet = new Set(requestedPaths);
+  const requestedSet = new Set<string>(requestedPaths);
   const filtered = candidates.filter((f) => requestedSet.has(f.path));
   return { filtered, notFound };
 }
@@ -1004,7 +1023,7 @@ function filterByFilesArg(
  */
 function defaultPushSelection(
   candidates: FileDiff[],
-  opts: { includeDeletions: boolean; conflictedPaths: Set<string> },
+  opts: { includeDeletions: boolean; conflictedPaths: ReadonlySet<string> },
 ): FileDiff[] {
   return candidates.filter(
     (f) => !opts.conflictedPaths.has(f.path) && (opts.includeDeletions || f.type !== "deleted"),
@@ -1075,16 +1094,16 @@ async function selectFilesToPush(
  * 未解決の衝突があってもここでは中断しない（巻き添えで他ファイルの push を止めないため）。
  */
 async function classifyAndResolveConflicts(params: {
-  targetDir: string;
-  templateDir: string;
+  targetDir: AbsPath;
+  templateDir: AbsPath;
   lock: LockState;
-  patterns: { include: string[]; exclude: string[] };
-  mergedContents: Map<string, PushContent>;
+  patterns: { include: readonly GlobPattern[]; exclude: readonly GlobPattern[] };
+  mergedContents: Map<RepoRelPath, PushContent>;
 }): Promise<{
-  pushableFilePaths: Set<string>;
-  unresolvedConflicts: Set<string>;
+  pushableFilePaths: Set<RepoRelPath>;
+  unresolvedConflicts: Set<RepoRelPath>;
   /** テンプレートが削除したがローカルに編集があるファイル。push はその削除を取り消す。 */
-  deletedWithLocalEdits: Set<string>;
+  deletedWithLocalEdits: Set<RepoRelPath>;
 }> {
   const { plan } = await analyzeSync({
     targetDir: params.targetDir,
@@ -1095,7 +1114,7 @@ async function classifyAndResolveConflicts(params: {
   });
   const classification = plan.files;
 
-  const pushableFilePaths = new Set<string>();
+  const pushableFilePaths = new Set<RepoRelPath>();
   for (const file of classification.localOnly) pushableFilePaths.add(file);
   for (const file of classification.conflicts) pushableFilePaths.add(file);
   for (const file of classification.deletedLocally) pushableFilePaths.add(file);
@@ -1110,7 +1129,7 @@ async function classifyAndResolveConflicts(params: {
   // 場合にテンプレ側のパターンも消してしまい「削除は自動伝播しない」方針に反する。union 内容を
   // mergedContents に入れておくと後段の files 構築で採用され、diff3（mergeOneFile）の対象にも
   // ならない（plan.files.conflicts に ziku.jsonc は入らない）。
-  const templateOnly = [...classification.autoUpdate];
+  const templateOnly: RepoRelPath[] = [...classification.autoUpdate];
   await match(zikuConfigPushAction(plan.config))
     .with({ _tag: "Skip" }, () => Promise.resolve())
     .with({ _tag: "TemplateOnly" }, () => {
@@ -1137,7 +1156,7 @@ async function classifyAndResolveConflicts(params: {
     }
   }
 
-  const unresolvedConflicts = new Set<string>();
+  const unresolvedConflicts = new Set<RepoRelPath>();
   const conflictsToResolve = classification.conflicts;
   if (conflictsToResolve.length > 0) {
     const unresolved = await resolveConflicts(conflictsToResolve, {
@@ -1170,14 +1189,14 @@ async function classifyAndResolveConflicts(params: {
  * @returns auto-merge できなかった未解決ファイルのパス一覧。
  */
 async function resolveConflicts(
-  conflicts: string[],
+  conflicts: readonly RepoRelPath[],
   ctx: {
-    targetDir: string;
-    templateDir: string;
+    targetDir: AbsPath;
+    templateDir: AbsPath;
     lock: LockState;
-    mergedContents: Map<string, PushContent>;
+    mergedContents: Map<RepoRelPath, PushContent>;
   },
-): Promise<readonly string[]> {
+): Promise<readonly RepoRelPath[]> {
   const baseSha = baseCommitSha(ctx.lock);
   const baseInfo = baseSha
     ? `since ${pc.bold(baseSha.slice(0, 7))} (your last sync)`
@@ -1186,7 +1205,7 @@ async function resolveConflicts(
     `Template updated ${baseInfo} — ${conflicts.length} conflict(s) detected, attempting auto-merge...`,
   );
 
-  const autoMerged: string[] = [];
+  const autoMerged: RepoRelPath[] = [];
 
   const unresolved = await Effect.runPromise(
     mergeConflictFiles({

@@ -1,14 +1,18 @@
 import { existsSync, mkdirSync, readdirSync, rmdirSync } from "node:fs";
 import { defineCommand } from "citty";
 import { Effect } from "effect";
-import { dirname, join, resolve } from "pathe";
+import { dirname } from "pathe";
 import { withCleanup } from "../effect-helpers";
 import { runCommandEffect } from "../services/command-context";
 import { loadTemplateConfig, extractDirectoryEntries } from "../utils/template-config";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 import type {
+  AbsPath,
+  CommitSha,
+  ContentHash,
   FileOperationResult,
+  GlobPattern,
   HashMap,
   LockState,
   OverwriteStrategy,
@@ -43,6 +47,7 @@ import {
 } from "../utils/github";
 import type { RepoExistence } from "../utils/github";
 import { hashContent, hashFiles } from "../utils/hash";
+import { absPath, joinAbs } from "../utils/paths";
 import { LOCK_FILE, saveLock } from "../utils/lock";
 import {
   ZIKU_CONFIG_FILE,
@@ -152,7 +157,7 @@ export const initCommand = defineCommand({
 
     // "init" という引数は無視して現在のディレクトリを使用
     const dir = args.dir === "init" ? "." : args.dir;
-    const targetDir = resolve(dir);
+    const targetDir = absPath(dir);
     const dryRun = args.dryRun as boolean;
     // targetDir 自身だけでなく、存在しない祖先ディレクトリも giget が recursive:true で
     // まとめて作ってしまう（例: targetDir が /tmp/new-parent/project で new-parent も
@@ -181,13 +186,13 @@ export const initCommand = defineCommand({
     // ─── 入り口: テンプレートソースの解決 ───
     const fromDir = args["from-dir"] as string | undefined;
 
-    let templateDir: string;
+    let templateDir: AbsPath;
     let cleanup: () => void;
     let source: TemplateSource;
 
     if (fromDir) {
       // ローカルディレクトリをテンプレートとして使用（ダウンロード不要）
-      templateDir = resolve(fromDir);
+      templateDir = absPath(fromDir);
       cleanup = () => {};
       source = { kind: "local", path: templateDir };
       log.info(`Template: ${pc.cyan(templateDir)} (local)`);
@@ -431,10 +436,14 @@ function findExistingAncestor(dir: string): string {
  * ダウンロード成功時・失敗時の両方から呼ばれる（失敗時に呼ばないと、途中まで
  * 作られたディレクトリが残ってしまう）。
  */
-function removeEmptyDryRunDirs(targetDir: string, dryRun: boolean, existingAncestor: string): void {
+function removeEmptyDryRunDirs(
+  targetDir: AbsPath,
+  dryRun: boolean,
+  existingAncestor: string,
+): void {
   if (!dryRun) return;
 
-  let current = targetDir;
+  let current: string = targetDir;
   while (current !== existingAncestor) {
     if (!existsSync(current) || readdirSync(current).length > 0) return;
     rmdirSync(current);
@@ -443,12 +452,12 @@ function removeEmptyDryRunDirs(targetDir: string, dryRun: boolean, existingAnces
 }
 
 function createEnvExample(
-  targetDir: string,
+  targetDir: AbsPath,
   strategy: OverwriteStrategy,
   dryRun = false,
 ): Promise<FileOperationResult> {
   return writeFileWithStrategy({
-    destPath: resolve(targetDir, ".devcontainer/devcontainer.env.example"),
+    destPath: joinAbs(targetDir, ".devcontainer/devcontainer.env.example"),
     content: ENV_EXAMPLE_CONTENT,
     strategy,
     relativePath: ".devcontainer/devcontainer.env.example",
@@ -479,8 +488,8 @@ function createEnvExample(
  */
 export function resolveConfigBaseHash(opts: {
   localConfigContent: string;
-  templateConfigHash: string | undefined;
-}): string {
+  templateConfigHash: ContentHash | undefined;
+}): ContentHash {
   // テンプレート保護のため base はローカル（部分集合）側に置く。
   // これにより local == base となり、初回 push でテンプレのパターンを削らない。
   return hashContent(opts.localConfigContent);
@@ -490,7 +499,7 @@ export function resolveConfigBaseHash(opts: {
  * .ziku/ziku.jsonc を書き出す（パターン定義のみ、source は lock.json に分離）
  */
 function writeZikuJsonc(
-  targetDir: string,
+  targetDir: AbsPath,
   opts: {
     patterns: FlatPatterns;
     strategy: OverwriteStrategy;
@@ -503,7 +512,7 @@ function writeZikuJsonc(
   });
 
   return writeFileWithStrategy({
-    destPath: resolve(targetDir, ZIKU_CONFIG_FILE),
+    destPath: joinAbs(targetDir, ZIKU_CONFIG_FILE),
     content,
     strategy: opts.strategy,
     relativePath: ZIKU_CONFIG_FILE,
@@ -518,11 +527,11 @@ function writeZikuJsonc(
  * 経由しない。dryRun: true の場合は判定結果（created/overwritten）だけ返し、saveLock は呼ばない。
  */
 async function writeLockFile(
-  targetDir: string,
+  targetDir: AbsPath,
   opts: {
     source: TemplateSource;
     baseHashes: HashMap;
-    baseCommit: string | undefined;
+    baseCommit: CommitSha | undefined;
     dryRun?: boolean;
   },
 ): Promise<FileOperationResult> {
@@ -538,7 +547,7 @@ async function writeLockFile(
       ? markSynced(pending, { hashes: opts.baseHashes, commitSha: opts.baseCommit })
       : pending;
 
-  const isNew = !existsSync(join(targetDir, LOCK_FILE));
+  const isNew = !existsSync(joinAbs(targetDir, LOCK_FILE));
   if (!opts.dryRun) {
     await saveLock(targetDir, lock);
   }
@@ -556,7 +565,7 @@ async function writeLockFile(
  * ユーザーにディレクトリ単位で選択させる。
  */
 async function resolveTemplatePatterns(
-  templateConfig: { include: string[]; exclude?: string[] },
+  templateConfig: { include: GlobPattern[]; exclude?: GlobPattern[] },
   nonInteractive: boolean,
   dirsArg: string | undefined,
 ): Promise<FlatPatterns> {
@@ -579,10 +588,10 @@ async function resolveTemplatePatterns(
  * --yes: 全ディレクトリ、--dirs: 指定ディレクトリ、それ以外: インタラクティブ選択
  */
 async function selectDirsFromTemplate(
-  entries: Array<{ label: string; patterns: string[] }>,
+  entries: Array<{ label: string; patterns: GlobPattern[] }>,
   nonInteractive: boolean,
   dirsArg: string | undefined,
-): Promise<string[]> {
+): Promise<GlobPattern[]> {
   const hasDirsArg = typeof dirsArg === "string" && dirsArg.length > 0;
 
   if (nonInteractive && !hasDirsArg) {

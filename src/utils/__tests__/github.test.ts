@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { repoRelPath } from "../../__tests__/brands";
 import {
   checkRepoExists,
   checkRepoSetup,
@@ -142,7 +143,7 @@ describe("createPullRequest", () => {
     const result = await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: "file.txt", content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: "content" }],
       title: "Test PR",
     });
 
@@ -158,7 +159,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: "assets/icon.png", content: bytes.toString("latin1") }],
+      files: [{ path: repoRelPath("assets/icon.png"), content: bytes.toString("latin1") }],
       title: "Test PR",
     });
 
@@ -172,7 +173,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: "README.md", content }],
+      files: [{ path: repoRelPath("README.md"), content }],
       title: "Test PR",
     });
 
@@ -188,7 +189,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: "file.txt", content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: "content" }],
       title: "Test PR",
     });
 
@@ -208,7 +209,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: "file.txt", content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: "content" }],
       title: "Test PR",
     });
 
@@ -223,8 +224,8 @@ describe("createPullRequest", () => {
       owner: "owner",
       repo: "repo",
       files: [
-        { path: "file1.txt", content: "content1" },
-        { path: "file2.txt", content: "content2" },
+        { path: repoRelPath("file1.txt"), content: "content1" },
+        { path: repoRelPath("file2.txt"), content: "content2" },
       ],
       title: "Test PR",
     });
@@ -243,7 +244,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: "existing.txt", content: "new content" }],
+      files: [{ path: repoRelPath("existing.txt"), content: "new content" }],
       title: "Test PR",
     });
 
@@ -258,7 +259,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: "file.txt", content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: "content" }],
       title: "Test PR",
       baseBranch: "develop",
     });
@@ -280,7 +281,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: "file.txt", content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: "content" }],
       title: "Test PR",
       body: "Custom body content",
     });
@@ -296,7 +297,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: "file.txt", content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: "content" }],
       title: "Test PR",
     });
 
@@ -311,7 +312,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: "file.txt", content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: "content" }],
       title: "Test PR",
     });
 
@@ -326,7 +327,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: "file.txt", content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: "content" }],
       title: "Test PR",
     });
 
@@ -347,7 +348,7 @@ describe("createPullRequest", () => {
       createPullRequest("token", {
         owner: "owner",
         repo: "repo",
-        files: [{ path: "file.txt", content: "content" }],
+        files: [{ path: repoRelPath("file.txt"), content: "content" }],
         title: "Test PR",
       }),
     ).rejects.toThrow("Repository tree is too large");
@@ -365,7 +366,7 @@ describe("createPullRequest", () => {
       owner: "owner",
       repo: "repo",
       files: [],
-      deletions: [{ path: "to-delete.txt" }],
+      deletions: [{ path: repoRelPath("to-delete.txt") }],
       title: "Test PR with deletion",
     });
 
@@ -385,8 +386,8 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: "file.txt", content: "content" }],
-      deletions: [{ path: "nonexistent.txt" }],
+      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      deletions: [{ path: repoRelPath("nonexistent.txt") }],
       title: "Test PR",
     });
 
@@ -397,7 +398,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: "file.txt", content: "Hello, World!" }],
+      files: [{ path: repoRelPath("file.txt"), content: "Hello, World!" }],
       title: "Test PR",
     });
 

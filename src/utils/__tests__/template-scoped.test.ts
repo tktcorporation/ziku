@@ -17,6 +17,7 @@ vi.mock("giget", () => ({
   }),
 }));
 
+const { absPath } = await import("../../__tests__/brands");
 const { acquireTempTemplate } = await import("../template");
 const { _resetForTest, _getTrackedCountForTest } = await import("../temp-tracker");
 const giget = await import("giget");
@@ -34,7 +35,7 @@ describe("acquireTempTemplate (Scope ベースのリソース管理)", () => {
 
   it("Scope 終了で temp dir が削除され、tracker からも除外される", async () => {
     const program = Effect.gen(function* () {
-      const dir = yield* acquireTempTemplate("/work", "gh:foo/bar");
+      const dir = yield* acquireTempTemplate(absPath("/work"), "gh:foo/bar");
       // Scope 内: dir が存在する
       expect(vol.existsSync(dir)).toBe(true);
       expect(_getTrackedCountForTest()).toBe(1);
@@ -50,7 +51,7 @@ describe("acquireTempTemplate (Scope ベースのリソース管理)", () => {
 
   it("Scope 内で失敗しても finalizer が走って temp dir が削除される", async () => {
     const program = Effect.gen(function* () {
-      const dir = yield* acquireTempTemplate("/work", "gh:foo/bar");
+      const dir = yield* acquireTempTemplate(absPath("/work"), "gh:foo/bar");
       expect(vol.existsSync(dir)).toBe(true);
       // 中で失敗
       return yield* Effect.fail("boom" as const);
@@ -67,7 +68,7 @@ describe("acquireTempTemplate (Scope ベースのリソース管理)", () => {
   it("downloadTemplate 失敗時も finalizer で tracker 登録が解除される", async () => {
     vi.mocked(giget.downloadTemplate).mockRejectedValueOnce(new Error("network"));
 
-    const program = acquireTempTemplate("/work", "gh:foo/bar");
+    const program = acquireTempTemplate(absPath("/work"), "gh:foo/bar");
     const exit = await Effect.runPromiseExit(Effect.scoped(program));
 
     expect(Exit.isFailure(exit)).toBe(true);
@@ -87,7 +88,7 @@ describe("acquireTempTemplate (Scope ベースのリソース管理)", () => {
 
     const program = Effect.gen(function* () {
       const scope = yield* Scope.make();
-      const dir = yield* acquireTempTemplate("/work", "gh:foo/bar").pipe(
+      const dir = yield* acquireTempTemplate(absPath("/work"), "gh:foo/bar").pipe(
         Scope.extend(scope),
         Effect.onError(() => Scope.close(scope, Exit.void)),
       );
@@ -104,7 +105,7 @@ describe("acquireTempTemplate (Scope ベースのリソース管理)", () => {
     const { downloadTemplateToTemp } = await import("../template");
     vi.mocked(giget.downloadTemplate).mockRejectedValueOnce(new Error("network"));
 
-    await expect(downloadTemplateToTemp("/work", "gh:foo/bar")).rejects.toThrow("network");
+    await expect(downloadTemplateToTemp(absPath("/work"), "gh:foo/bar")).rejects.toThrow("network");
     // 失敗パスでも tracker から外れていること
     expect(_getTrackedCountForTest()).toBe(0);
   });
@@ -115,7 +116,7 @@ describe("acquireTempTemplate (Scope ベースのリソース管理)", () => {
 
     await expect(
       fetchTemplates({
-        targetDir: "/work",
+        targetDir: absPath("/work"),
         overwriteStrategy: "skip",
         patterns: { include: [], exclude: [] },
       }),
@@ -125,8 +126,8 @@ describe("acquireTempTemplate (Scope ベースのリソース管理)", () => {
 
   it("label を付けると別ディレクトリに展開される", async () => {
     const program = Effect.gen(function* () {
-      const a = yield* acquireTempTemplate("/work", "gh:foo/bar");
-      const b = yield* acquireTempTemplate("/work", "gh:foo/bar", "base");
+      const a = yield* acquireTempTemplate(absPath("/work"), "gh:foo/bar");
+      const b = yield* acquireTempTemplate(absPath("/work"), "gh:foo/bar", "base");
       expect(a).not.toBe(b);
       expect(a.endsWith("/.ziku-temp")).toBe(true);
       expect(b.endsWith("/.ziku-temp-base")).toBe(true);

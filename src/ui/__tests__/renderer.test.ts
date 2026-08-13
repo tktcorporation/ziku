@@ -28,6 +28,7 @@ import {
   outro,
   withSpinner,
 } from "../renderer";
+import { repoRelPath } from "../../__tests__/brands";
 
 /** テスト中に process.stdout.isTTY を切り替えるヘルパー（#84 の分岐検証用） */
 function setIsTTY(value: boolean): void {
@@ -169,10 +170,10 @@ describe("renderer", () => {
   describe("logFileResults", () => {
     it("should count added/updated/skipped", () => {
       const results = [
-        { action: "copied", path: "a.ts" },
-        { action: "created", path: "b.ts" },
-        { action: "overwritten", path: "c.ts" },
-        { action: "skipped", path: "d.ts" },
+        { action: "copied", path: repoRelPath("a.ts") },
+        { action: "created", path: repoRelPath("b.ts") },
+        { action: "overwritten", path: repoRelPath("c.ts") },
+        { action: "skipped", path: repoRelPath("d.ts") },
       ];
       const summary = logFileResults(results);
       expect(summary).toEqual({ added: 2, updated: 1, skipped: 1 });
@@ -188,26 +189,31 @@ describe("renderer", () => {
   describe("logDiffSummary", () => {
     it("should show no changes message when all unchanged", () => {
       logDiffSummary([
-        { path: "a.ts", type: "unchanged", localContent: "same", templateContent: "same" },
+        {
+          path: repoRelPath("a.ts"),
+          type: "unchanged",
+          localContent: "same",
+          templateContent: "same",
+        },
       ]);
       expect(p.log.info).toHaveBeenCalledWith("No changes detected");
     });
 
     it("should display changed files", () => {
       logDiffSummary([
-        { path: "a.ts", type: "added", localContent: "a" },
-        { path: "b.ts", type: "modified", localContent: "b", templateContent: "B" },
-        { path: "c.ts", type: "deleted", templateContent: "c" },
+        { path: repoRelPath("a.ts"), type: "added", localContent: "a" },
+        { path: repoRelPath("b.ts"), type: "modified", localContent: "b", templateContent: "B" },
+        { path: repoRelPath("c.ts"), type: "deleted", templateContent: "c" },
       ]);
       expect(p.log.message).toHaveBeenCalledTimes(1);
     });
 
     it("件数は渡された差分から数える", () => {
       logDiffSummary([
-        { path: "a.ts", type: "added", localContent: "a" },
-        { path: "b.ts", type: "added", localContent: "b" },
-        { path: "c.ts", type: "deleted", templateContent: "c" },
-        { path: "d.ts", type: "unchanged", localContent: "d", templateContent: "d" },
+        { path: repoRelPath("a.ts"), type: "added", localContent: "a" },
+        { path: repoRelPath("b.ts"), type: "added", localContent: "b" },
+        { path: repoRelPath("c.ts"), type: "deleted", templateContent: "c" },
+        { path: repoRelPath("d.ts"), type: "unchanged", localContent: "d", templateContent: "d" },
       ]);
       const message = vi.mocked(p.log.message).mock.calls[0][0] as string;
       expect(message).toContain("+2 added");

@@ -15,6 +15,7 @@ vi.mock("tinyglobby", () => ({
   glob: vi.fn(),
 }));
 
+const { absPath, globPatterns, repoRelPath } = await import("../../__tests__/brands");
 const { analyzeSync } = await import("../sync-analysis");
 const { classifyFiles } = await import("../merge");
 const { partitionSyncPlan } = await import("../merge/sync-plan");
@@ -37,15 +38,17 @@ describe("sync-analysis", () => {
     mockedGlob.mockResolvedValue(["foo.txt"]);
 
     const result = await analyzeSync({
-      targetDir: "/project",
-      templateDir: "/template",
-      baseHashes: { "foo.txt": hashContent("base content") },
-      include: ["**"],
+      targetDir: absPath("/project"),
+      templateDir: absPath("/template"),
+      baseHashes: { [repoRelPath("foo.txt")]: hashContent("base content") },
+      include: globPatterns(["**"]),
     });
 
-    expect(result.hashes.localHashes["foo.txt"]).toBe(hashContent("local content"));
-    expect(result.hashes.templateHashes["foo.txt"]).toBe(hashContent("template content"));
-    expect(result.hashes.baseHashes["foo.txt"]).toBe(hashContent("base content"));
+    expect(result.hashes.localHashes[repoRelPath("foo.txt")]).toBe(hashContent("local content"));
+    expect(result.hashes.templateHashes[repoRelPath("foo.txt")]).toBe(
+      hashContent("template content"),
+    );
+    expect(result.hashes.baseHashes[repoRelPath("foo.txt")]).toBe(hashContent("base content"));
     // base, local, template すべて異なる → conflict カテゴリ
     expect(result.plan.files.conflicts).toContain("foo.txt");
   });
@@ -60,10 +63,10 @@ describe("sync-analysis", () => {
     mockedGlob.mockResolvedValueOnce(["a.txt", "b.txt"]).mockResolvedValueOnce([]);
 
     const result = await analyzeSync({
-      targetDir: "/project",
-      templateDir: "/template",
+      targetDir: absPath("/project"),
+      templateDir: absPath("/template"),
       baseHashes: {},
-      include: ["**"],
+      include: globPatterns(["**"]),
     });
 
     expect(result.hashes.baseHashes).toEqual({});
@@ -81,11 +84,14 @@ describe("sync-analysis", () => {
     mockedGlob.mockResolvedValue(["changed.txt", "same.txt"]);
 
     const result = await analyzeSync({
-      targetDir: "/project",
-      templateDir: "/template",
-      baseHashes: { "changed.txt": hashContent("base"), "same.txt": hashContent("same") },
-      include: ["**"],
-      exclude: ["ignored/**"],
+      targetDir: absPath("/project"),
+      templateDir: absPath("/template"),
+      baseHashes: {
+        [repoRelPath("changed.txt")]: hashContent("base"),
+        [repoRelPath("same.txt")]: hashContent("same"),
+      },
+      include: globPatterns(["**"]),
+      exclude: globPatterns(["ignored/**"]),
     });
 
     // pull / push / status は同じ 3 つのハッシュマップを渡す限り同じ分類を受け取る。
@@ -100,10 +106,10 @@ describe("sync-analysis", () => {
     mockedGlob.mockResolvedValue(["same.txt"]);
 
     const result = await analyzeSync({
-      targetDir: "/project",
-      templateDir: "/template",
-      baseHashes: { "same.txt": hashContent("stable") },
-      include: ["**"],
+      targetDir: absPath("/project"),
+      templateDir: absPath("/template"),
+      baseHashes: { [repoRelPath("same.txt")]: hashContent("stable") },
+      include: globPatterns(["**"]),
     });
 
     expect(result.plan.files.unchanged).toContain("same.txt");

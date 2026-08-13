@@ -1,17 +1,17 @@
 import { existsSync } from "node:fs";
 import { createPatch } from "diff";
-import { join } from "pathe";
 import { match } from "ts-pattern";
-import type { DiffResult, FileDiff } from "../modules/schemas";
+import type { AbsPath, DiffResult, FileDiff, RepoRelPath } from "../modules/schemas";
 import { isBinaryFileDiff, readFileContent, toTransportText } from "./file-content";
 import { filterByGitignore, loadMergedGitignore } from "./gitignore";
+import { joinAbs } from "./paths";
 import type { FlatPatterns } from "./patterns";
 import { resolvePatterns } from "./patterns";
 import { alwaysTrackedPathsIn } from "./ziku-config";
 
 export interface DiffOptions {
-  targetDir: string;
-  templateDir: string;
+  targetDir: AbsPath;
+  templateDir: AbsPath;
   patterns: FlatPatterns;
 }
 
@@ -36,7 +36,7 @@ export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
     gitignore,
   );
 
-  const allFiles = new Set([...templateFiles, ...localFiles]);
+  const allFiles = new Set<RepoRelPath>([...templateFiles, ...localFiles]);
 
   // 常に追跡するファイルは ziku 自身の制御ファイル（追跡対象の SSOT）。プロジェクトや
   // テンプレートが `.ziku/` を gitignore していても、パターン同期のために必ず差分対象に
@@ -48,8 +48,8 @@ export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
   }
 
   for (const filePath of allFiles) {
-    const localPath = join(targetDir, filePath);
-    const templatePath = join(templateDir, filePath);
+    const localPath = joinAbs(targetDir, filePath);
+    const templatePath = joinAbs(templateDir, filePath);
 
     const localExists = existsSync(localPath);
     const templateExists = existsSync(templatePath);
@@ -94,7 +94,7 @@ export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
  * （`FileDiff`）は内容を `string` で持つので、バイナリはバイト列を保つエンコードで載せる
  * （`src/utils/file-content.ts`）。
  */
-async function readContent(path: string): Promise<string> {
+async function readContent(path: AbsPath): Promise<string> {
   return toTransportText(await readFileContent(path));
 }
 

@@ -2,16 +2,88 @@ import { match } from "ts-pattern";
 import { z } from "zod";
 
 // ────────────────────────────────────────────────────────────────
-// Branded Types - より厳密な型定義
+// Branded Types — 同じ string に載る別種の値を型で分ける
+//
+// ここに定義するのは「実際に取り違えが起きている／起きうる」値だけに限る。使われない
+// brand を増やすと、変換関数だけが増えて型の意味は増えない。
+// 値を作る変換は `src/utils/paths.ts`（パス 3 種）と、それぞれの値が外の世界から
+// 入ってくる場所（`src/utils/hash.ts` のハッシュ計算、GitHub API のレスポンス）に集約する。
 // ────────────────────────────────────────────────────────────────
 
-/** 非負整数（行数カウント用） */
-export const nonNegativeIntSchema = z.number().int().nonnegative().brand<"NonNegativeInt">();
-export type NonNegativeInt = z.infer<typeof nonNegativeIntSchema>;
+/**
+ * ファイルシステム上の絶対パス。プロジェクトルートやテンプレートの展開先を指す。
+ *
+ * ziku が扱うパスは「同期の基点となるディレクトリ」と「その中の 1 ファイルを指す相対パス」の
+ * 2 系統あり、どちらも同じ `string` に載る。相対パスを基点の引数へ渡しても実行時エラーには
+ * ならず、カレントディレクトリ基準で解決された別の場所を読み書きする。基点は
+ * ハッシュ計算・差分検出・書き込みの全経路が共有するため、1 箇所の取り違えが同期対象
+ * 全体へ波及する。
+ */
+export const absPathSchema = z.string().min(1).brand<"AbsPath">();
+export type AbsPath = z.infer<typeof absPathSchema>;
 
-/** ファイルパス */
-export const filePathSchema = z.string().min(1).brand<"FilePath">();
-export type FilePath = z.infer<typeof filePathSchema>;
+/**
+ * 同期の基点ディレクトリからの相対パス（posix 区切り。例: `.claude/rules/x.md`）。
+ *
+ * ローカルとテンプレートという 2 つの基点の下で同じファイルを指す共通の鍵になる。
+ * ハッシュマップのキー、差分と分類結果の要素、lock に記録するコンフリクト一覧が
+ * すべてこの型で、基点そのもの（{@link AbsPath}）や glob パターン
+ * （{@link GlobPattern}）と混ざるとファイルが見つからない・照合が空になるという形で
+ * 失敗する。
+ */
+export const repoRelPathSchema = z.string().min(1).brand<"RepoRelPath">();
+export type RepoRelPath = z.infer<typeof repoRelPathSchema>;
+
+/**
+ * `.ziku/ziku.jsonc` の include / exclude に書く、同期対象を表す glob パターン。
+ *
+ * リテラルなファイルパス（`.ziku/ziku.jsonc` や、push が未追跡ファイルを追記したときの
+ * 個別パス）も正当な値として許容する。1 ファイルだけを追跡したい利用者に glob を強制する
+ * 理由が無いため。
+ *
+ * それでも {@link RepoRelPath} と同じ型にはしない。同一視すると「パターンとパスが一致するか」
+ * の判定が文字列比較に退化し、`.claude/rules/*.md` を `ziku track` した利用者が
+ * `ziku push --files .claude/rules/a.md` を実行しても関連パターン無しと判定され、
+ * パターンがテンプレートへ伝播しない。パスとの照合は `src/utils/paths.ts` の
+ * `selectPatternsMatchingPaths` を通し、glob として解決する。
+ *
+ * 空文字列も弾かない。パターンの妥当性は glob エンジンが決めることで、ここで長さを検査すると
+ * `ziku.jsonc` を読むだけの経路（テンプレート側の設定を覗く処理を含む）が例外で止まる。
+ * 何にも一致しないパターンは走査結果が空になるだけで、同期の結果を壊さない。
+ */
+export const globPatternSchema = z.string().brand<"GlobPattern">();
+export type GlobPattern = z.infer<typeof globPatternSchema>;
+
+/**
+ * ファイル内容の SHA-256 ハッシュ。
+ *
+ * 「前回の同期時点から内容が変わったか」だけを判定するための値で、内容を復元する力も、
+ * テンプレートリポジトリの履歴を指す力も持たない。lock のベースには内容ハッシュ
+ * （パスごと）とコミット SHA（ツリー全体で 1 つ）が並んで載るため、同じ `string` のままだと
+ * ベースツリーの取得に内容ハッシュを渡すような取り違えが型では止まらない。
+ */
+export const contentHashSchema = z.string().brand<"ContentHash">();
+export type ContentHash = z.infer<typeof contentHashSchema>;
+
+/**
+ * テンプレートリポジトリのコミット SHA。
+ *
+ * 3-way マージのベースツリーを取り直すための座標で、{@link ContentHash} と同じ 40 桁前後の
+ * 16 進文字列に見えるが指すものが違う。GitHub API に渡す ref であり、ローカルソースでは
+ * そもそも存在しない。
+ */
+export const commitShaSchema = z.string().brand<"CommitSha">();
+export type CommitSha = z.infer<typeof commitShaSchema>;
+
+/**
+ * GitHub Contents API がファイルの更新・削除時に要求する blob SHA。
+ *
+ * 「そのパスの現在の中身」を指す楽観ロックの鍵で、リポジトリごとに GitHub が採番する。
+ * ziku が計算する {@link ContentHash} とは算出方法（git の blob ヘッダ付き SHA-1）も
+ * 用途も別で、取り違えると API が 409 を返すか、意図しない内容を上書きする。
+ */
+export const blobShaSchema = z.string().brand<"BlobSha">();
+export type BlobSha = z.infer<typeof blobShaSchema>;
 
 // ────────────────────────────────────────────────────────────────
 // Core Schemas
@@ -46,8 +118,8 @@ export type FileOperationResult = z.infer<typeof fileOperationResultSchema>;
 
 export const zikuConfigSchema = z.object({
   $schema: z.string().optional(),
-  include: z.array(z.string()),
-  exclude: z.array(z.string()).optional(),
+  include: z.array(globPatternSchema),
+  exclude: z.array(globPatternSchema).optional(),
 });
 
 export type ZikuConfig = z.infer<typeof zikuConfigSchema>;
@@ -73,7 +145,7 @@ export type ZikuConfig = z.infer<typeof zikuConfigSchema>;
 export const templateRefSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("branch"), name: z.string() }),
   z.object({ kind: z.literal("tag"), name: z.string() }),
-  z.object({ kind: z.literal("commit"), sha: z.string() }),
+  z.object({ kind: z.literal("commit"), sha: commitShaSchema }),
 ]);
 
 export type TemplateRef = z.infer<typeof templateRefSchema>;
@@ -107,7 +179,7 @@ export const gitHubSourceSchema = z.object({
 export const localSourceSchema = z.object({
   kind: z.literal("local"),
   /** ローカルテンプレートディレクトリの絶対パス */
-  path: z.string(),
+  path: absPathSchema,
 });
 
 export const templateSourceSchema = z.discriminatedUnion("kind", [
@@ -123,8 +195,14 @@ export type TemplateSource = z.infer<typeof templateSourceSchema>;
 // LockState (.ziku/lock.json) — 機械管理: 同期状態 + ソース情報
 // ────────────────────────────────────────────────────────────────
 
-/** パス → SHA-256 ハッシュ。ファイル全体を保持せずに「変更されたか」を判定するための写像。 */
-const hashMapSchema = z.record(z.string(), z.string());
+/**
+ * パス → 内容ハッシュ。ファイル全体を保持せずに「変更されたか」を判定するための写像。
+ *
+ * 同じ形の写像がリポジトリ内に 3 つある（パス → 内容ハッシュ / パス → blob SHA /
+ * パス → ファイル内容）。値の brand が違うので、blob SHA の写像やファイル内容の写像を
+ * ベースのハッシュとして渡すとコンパイルエラーになる。
+ */
+const hashMapSchema = z.record(repoRelPathSchema, contentHashSchema);
 export type HashMap = z.infer<typeof hashMapSchema>;
 
 /**
@@ -133,7 +211,7 @@ export type HashMap = z.infer<typeof hashMapSchema>;
  * 空配列は「解決待ちだが対象がゼロ」という、先へ進めようのない状態を意味してしまう。
  * 非空タプルで表現して型として作れなくする。
  */
-const conflictPathsSchema = z.tuple([z.string()], z.string());
+const conflictPathsSchema = z.tuple([repoRelPathSchema], repoRelPathSchema);
 export type ConflictPaths = z.infer<typeof conflictPathsSchema>;
 
 /**
@@ -146,7 +224,7 @@ export type ConflictPaths = z.infer<typeof conflictPathsSchema>;
  */
 const gitHubSyncBaseSchema = z.object({
   hashes: hashMapSchema,
-  ref: z.string().optional(),
+  ref: commitShaSchema.optional(),
 });
 
 /**
@@ -265,7 +343,7 @@ export type MergingLockState = Extract<LockState, { sync: "merging" }>;
 export interface SyncPoint {
   readonly hashes: HashMap;
   /** GitHub ソースのときだけ lock に載る。 */
-  readonly commitSha?: string | undefined;
+  readonly commitSha?: CommitSha | undefined;
 }
 
 function gitHubBaseOf(at: SyncPoint): GitHubSyncBase {
@@ -290,7 +368,7 @@ export function baseHashesOf(lock: LockState): HashMap {
  *
  * GitHub ソースかつベース確定済みのときだけ存在する。表示と 3-way マージのベース取得に使う。
  */
-export function baseCommitSha(lock: LockState): string | undefined {
+export function baseCommitSha(lock: LockState): CommitSha | undefined {
   return match(lock)
     .with({ source: { kind: "github" }, sync: "pending" }, () => undefined)
     .with({ source: { kind: "github" } }, (l) => l.base.ref)
@@ -437,16 +515,16 @@ export type DiffType = z.infer<typeof diffTypeSchema>;
  * 内容を読むには `match(diff).with({ type: ... })` で種別を絞る必要がある。
  */
 export const fileDiffSchema = z.discriminatedUnion("type", [
-  z.object({ path: z.string(), type: z.literal("added"), localContent: z.string() }),
-  z.object({ path: z.string(), type: z.literal("deleted"), templateContent: z.string() }),
+  z.object({ path: repoRelPathSchema, type: z.literal("added"), localContent: z.string() }),
+  z.object({ path: repoRelPathSchema, type: z.literal("deleted"), templateContent: z.string() }),
   z.object({
-    path: z.string(),
+    path: repoRelPathSchema,
     type: z.literal("modified"),
     localContent: z.string(),
     templateContent: z.string(),
   }),
   z.object({
-    path: z.string(),
+    path: repoRelPathSchema,
     type: z.literal("unchanged"),
     localContent: z.string(),
     templateContent: z.string(),

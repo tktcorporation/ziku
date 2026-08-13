@@ -1,14 +1,20 @@
 import { describe, expect, it } from "vitest";
-import type { FileDiff, LockState } from "../schemas";
+import {
+  absPath,
+  commitSha,
+  contentHash,
+  globPattern,
+  hashMap,
+  repoRelPath,
+} from "../../__tests__/brands";
+import type { FileDiff, LockState, SyncPoint } from "../schemas";
 import {
   diffResultSchema,
   diffTypeSchema,
   fileActionSchema,
   fileDiffSchema,
   fileOperationResultSchema,
-  filePathSchema,
   lockSchema,
-  nonNegativeIntSchema,
   overwriteStrategySchema,
   prResultSchema,
   zikuConfigSchema,
@@ -23,35 +29,6 @@ import {
   baseHashesOf,
   summarizeDiff,
 } from "../schemas";
-
-describe("nonNegativeIntSchema", () => {
-  it("0 を受け入れる", () => {
-    expect(nonNegativeIntSchema.parse(0)).toBe(0);
-  });
-
-  it("正の整数を受け入れる", () => {
-    expect(nonNegativeIntSchema.parse(42)).toBe(42);
-  });
-
-  it("負の数を拒否する", () => {
-    expect(() => nonNegativeIntSchema.parse(-1)).toThrow();
-  });
-
-  it("小数を拒否する", () => {
-    expect(() => nonNegativeIntSchema.parse(1.5)).toThrow();
-  });
-});
-
-describe("filePathSchema", () => {
-  it("有効なファイルパスを受け入れる", () => {
-    expect(filePathSchema.parse("file.txt")).toBe("file.txt");
-    expect(filePathSchema.parse("/path/to/file.txt")).toBe("/path/to/file.txt");
-  });
-
-  it("空文字列を拒否する", () => {
-    expect(() => filePathSchema.parse("")).toThrow();
-  });
-});
 
 describe("overwriteStrategySchema", () => {
   it("overwrite を受け入れる", () => {
@@ -158,7 +135,7 @@ describe("templateRefToString", () => {
   it("種別によらず giget の #<ref> に載る文字列へ落とす", () => {
     expect(templateRefToString({ kind: "branch", name: "main" })).toBe("main");
     expect(templateRefToString({ kind: "tag", name: "v1.0.0" })).toBe("v1.0.0");
-    expect(templateRefToString({ kind: "commit", sha: "abc123" })).toBe("abc123");
+    expect(templateRefToString({ kind: "commit", sha: commitSha("abc123") })).toBe("abc123");
   });
 });
 
@@ -295,11 +272,14 @@ describe("lock の状態遷移", () => {
   const localLock = createPendingLock({
     version: "0.1.0",
     installedAt: "2024-01-01T00:00:00+09:00",
-    source: { kind: "local", path: "/tpl" },
+    source: { kind: "local", path: absPath("/tpl") },
   });
 
   it("markSynced: GitHub ソースにはコミット SHA が載る", () => {
-    const synced = markSynced(githubLock, { hashes: { "a.txt": "h" }, commitSha: "sha1" });
+    const synced = markSynced(githubLock, {
+      hashes: hashMap({ "a.txt": "h" }),
+      commitSha: commitSha("sha1"),
+    });
     expect(synced).toEqual({
       ...githubLock,
       sync: "synced",
@@ -312,7 +292,10 @@ describe("lock の状態遷移", () => {
     // ローカルソースの lock に commitSha を渡しても、lock の型がそれを保持できない。
     // `base: { hashes, ref }` を持つローカル lock はコンパイルできないため、
     // ここで確認しているのは「渡しても落ちる」という遷移関数側の振る舞い。
-    const synced = markSynced(localLock, { hashes: { "a.txt": "h" }, commitSha: "sha1" });
+    const synced = markSynced(localLock, {
+      hashes: hashMap({ "a.txt": "h" }),
+      commitSha: commitSha("sha1"),
+    });
     expect(synced).toEqual({ ...localLock, sync: "synced", base: { hashes: { "a.txt": "h" } } });
     expect(baseCommitSha(synced)).toBeUndefined();
   });
@@ -322,7 +305,9 @@ describe("lock の状態遷移", () => {
   });
 
   it("markMerging: ベース未確定から入ると空のベースを記録する", () => {
-    const merging = markMerging(githubLock, { hashes: { "a.txt": "h" } }, ["a.txt"]);
+    const merging = markMerging(githubLock, { hashes: hashMap({ "a.txt": "h" }) }, [
+      repoRelPath("a.txt"),
+    ]);
     expect(merging).toEqual({
       ...githubLock,
       sync: "merging",
@@ -332,10 +317,15 @@ describe("lock の状態遷移", () => {
   });
 
   it("markMerging: ベース確定済みから入ると直前のベースを残す", () => {
-    const synced = markSynced(githubLock, { hashes: { "a.txt": "old" }, commitSha: "sha0" });
-    const merging = markMerging(synced, { hashes: { "a.txt": "new" }, commitSha: "sha1" }, [
-      "a.txt",
-    ]);
+    const synced = markSynced(githubLock, {
+      hashes: hashMap({ "a.txt": "old" }),
+      commitSha: commitSha("sha0"),
+    });
+    const merging = markMerging(
+      synced,
+      { hashes: hashMap({ "a.txt": "new" }), commitSha: commitSha("sha1") },
+      [repoRelPath("a.txt")],
+    );
     expect(merging).toMatchObject({
       sync: "merging",
       base: { hashes: { "a.txt": "old" }, ref: "sha0" },
@@ -352,18 +342,20 @@ describe("lock の状態遷移", () => {
     const invalid: LockState = {
       version: "0.1.0",
       installedAt: "2024-01-01T00:00:00+09:00",
-      source: { kind: "local", path: "/tpl" },
+      source: { kind: "local", path: absPath("/tpl") },
       sync: "synced",
-      base: { hashes: {}, ref: "sha1" },
+      base: { hashes: {}, ref: commitSha("sha1") },
     };
     // 実行時の検証でも同じ組み合わせは弾かれる。
     expect(() => lockSchema.parse(invalid)).toThrow();
   });
 
   it("resolveMerge: nextBase をベースに確定して merge を消す", () => {
-    const merging = markMerging(githubLock, { hashes: { "a.txt": "h" }, commitSha: "sha1" }, [
-      "a.txt",
-    ]);
+    const merging = markMerging(
+      githubLock,
+      { hashes: hashMap({ "a.txt": "h" }), commitSha: commitSha("sha1") },
+      [repoRelPath("a.txt")],
+    );
     if (merging.sync !== "merging") throw new Error("expected merging lock");
     const resolved = resolveMerge(merging);
     expect(resolved).toEqual({
@@ -441,8 +433,12 @@ describe("fileDiffSchema", () => {
   });
 
   it("型: 種別が持たない側の内容は読めない", () => {
-    const added: FileDiff = { path: "file.txt", type: "added", localContent: "local" };
-    const deleted: FileDiff = { path: "file.txt", type: "deleted", templateContent: "template" };
+    const added: FileDiff = { path: repoRelPath("file.txt"), type: "added", localContent: "local" };
+    const deleted: FileDiff = {
+      path: repoRelPath("file.txt"),
+      type: "deleted",
+      templateContent: "template",
+    };
 
     // 存在しない内容へのアクセスがコンパイルエラーになることが型の役目。読めるように
     // なったら下の抑制コメントが不要になり、typecheck が失敗して気付ける。
@@ -454,7 +450,7 @@ describe("fileDiffSchema", () => {
 
   it("型: 種別が持たない側の内容は書けない", () => {
     const invalid: FileDiff = {
-      path: "file.txt",
+      path: repoRelPath("file.txt"),
       type: "added",
       localContent: "local",
       // @ts-expect-error added はテンプレート側の内容を持てない
@@ -504,11 +500,11 @@ describe("diffResultSchema", () => {
 
 describe("summarizeDiff", () => {
   const files: FileDiff[] = [
-    { path: "a.txt", type: "added", localContent: "a" },
-    { path: "b.txt", type: "added", localContent: "b" },
-    { path: "c.txt", type: "modified", localContent: "c", templateContent: "C" },
-    { path: "d.txt", type: "deleted", templateContent: "d" },
-    { path: "e.txt", type: "unchanged", localContent: "e", templateContent: "e" },
+    { path: repoRelPath("a.txt"), type: "added", localContent: "a" },
+    { path: repoRelPath("b.txt"), type: "added", localContent: "b" },
+    { path: repoRelPath("c.txt"), type: "modified", localContent: "c", templateContent: "C" },
+    { path: repoRelPath("d.txt"), type: "deleted", templateContent: "d" },
+    { path: repoRelPath("e.txt"), type: "unchanged", localContent: "e", templateContent: "e" },
   ];
 
   it("種別ごとの件数を数える", () => {
@@ -549,5 +545,38 @@ describe("prResultSchema", () => {
         branch: "main",
       }),
     ).toThrow();
+  });
+});
+
+describe("brand: 同じ形の文字列を取り違えない", () => {
+  it("内容ハッシュは同期ベースのコミット SHA になれない", () => {
+    // 内容ハッシュ（SHA-256）とコミット SHA は同じ 16 進文字列に見えるが、前者はファイル 1 つの
+    // 中身、後者はテンプレートリポジトリのツリー全体を指す。取り違えるとベースツリーの取得が
+    // 存在しない ref を引き、3-way マージが黙って 2-way へ落ちる。抑制コメントが不要になったら
+    // （= 書けるようになったら）typecheck が失敗して気付ける。
+    const at: SyncPoint = {
+      hashes: hashMap({ "a.txt": "h" }),
+      // @ts-expect-error 内容ハッシュはコミット SHA の位置に置けない
+      commitSha: contentHash("2cf24dba5fb0a30e"),
+    };
+    expect(at.commitSha).toBe("2cf24dba5fb0a30e");
+  });
+
+  it("コミット SHA はパス→内容ハッシュの写像に入れられない", () => {
+    const lock = createPendingLock({
+      version: "0.1.0",
+      installedAt: "2024-01-01T00:00:00+09:00",
+      source: { kind: "github", owner: "o", repo: "r" },
+    });
+    // @ts-expect-error 写像の値は内容ハッシュであってコミット SHA ではない
+    const synced = markSynced(lock, { hashes: { [repoRelPath("a.txt")]: commitSha("deadbeef") } });
+    expect(baseHashesOf(synced)[repoRelPath("a.txt")]).toBe("deadbeef");
+  });
+
+  it("ハッシュの写像は glob パターンでは引けない", () => {
+    // パターンは「どのファイルを追跡するか」の記述で、写像の鍵になる 1 ファイルのパスではない。
+    const hashes = hashMap({ ".claude/rules/a.md": "h" });
+    // @ts-expect-error 写像の鍵は相対パスであってパターンではない
+    expect(hashes[globPattern(".claude/rules/*.md")]).toBeUndefined();
   });
 });

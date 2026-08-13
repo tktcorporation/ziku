@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("node:fs", async () => (await import("memfs")).fs);
 vi.mock("node:fs/promises", async () => (await import("memfs")).fs.promises);
 
+const { absPath, globPatterns, repoRelPaths } = await import("../../__tests__/brands");
 const {
   mergeConfigPatterns,
   computeMergedZikuConfig,
@@ -14,8 +15,8 @@ const {
 describe("mergeConfigPatterns（要素レベル加法マージ＝和集合）", () => {
   it("ローカルとテンプレ双方の追加を保持する", () => {
     const result = mergeConfigPatterns({
-      local: { include: [".claude/**", ".eslintrc.json"], exclude: [] },
-      template: { include: [".claude/**", ".github/**"], exclude: [] },
+      local: { include: globPatterns([".claude/**", ".eslintrc.json"]), exclude: [] },
+      template: { include: globPatterns([".claude/**", ".github/**"]), exclude: [] },
     });
     expect(result.include).toEqual([".claude/**", ".eslintrc.json", ".github/**"]);
   });
@@ -23,32 +24,32 @@ describe("mergeConfigPatterns（要素レベル加法マージ＝和集合）", 
   it("削除は伝播しない（片側に無いパターンも結果に残る）", () => {
     // ローカルが .old/** を持たなくても、テンプレにあれば結果に残る（和集合）。
     const result = mergeConfigPatterns({
-      local: { include: [".claude/**"], exclude: [] },
-      template: { include: [".claude/**", ".old/**"], exclude: [] },
+      local: { include: globPatterns([".claude/**"]), exclude: [] },
+      template: { include: globPatterns([".claude/**", ".old/**"]), exclude: [] },
     });
     expect(result.include).toEqual([".claude/**", ".old/**"]);
   });
 
   it("exclude も独立に和集合でマージする", () => {
     const result = mergeConfigPatterns({
-      local: { include: [], exclude: ["a", "b"] },
-      template: { include: [], exclude: ["a", "c"] },
+      local: { include: [], exclude: globPatterns(["a", "b"]) },
+      template: { include: [], exclude: globPatterns(["a", "c"]) },
     });
     expect(result.exclude).toEqual(["a", "b", "c"]);
   });
 
   it("出現順を保つ（ローカル優先 → テンプレ追加分）", () => {
     const result = mergeConfigPatterns({
-      local: { include: ["L1", "shared"], exclude: [] },
-      template: { include: ["shared", "T1"], exclude: [] },
+      local: { include: globPatterns(["L1", "shared"]), exclude: [] },
+      template: { include: globPatterns(["shared", "T1"]), exclude: [] },
     });
     expect(result.include).toEqual(["L1", "shared", "T1"]);
   });
 
   it("重複を除去する", () => {
     const result = mergeConfigPatterns({
-      local: { include: [".claude/**", ".claude/**"], exclude: [] },
-      template: { include: [".claude/**"], exclude: [] },
+      local: { include: globPatterns([".claude/**", ".claude/**"]), exclude: [] },
+      template: { include: globPatterns([".claude/**"]), exclude: [] },
     });
     expect(result.include).toEqual([".claude/**"]);
   });
@@ -74,8 +75,8 @@ describe("computeMergedZikuConfig（ファイル読み込み + 和集合マー�
     });
 
     const merged = await computeMergedZikuConfig({
-      targetDir: "/local",
-      templateDir: "/template",
+      targetDir: absPath("/local"),
+      templateDir: absPath("/template"),
     });
     const parsed = JSON.parse(merged);
     expect(parsed.include).toEqual([".claude/**", ".eslintrc.json", ".github/**"]);
@@ -94,8 +95,8 @@ describe("computeMergedZikuConfig（ファイル読み込み + 和集合マー�
     });
 
     const merged = await computeMergedZikuConfig({
-      targetDir: "/local",
-      templateDir: "/template",
+      targetDir: absPath("/local"),
+      templateDir: absPath("/template"),
     });
     const parsed = JSON.parse(merged);
     expect(parsed.include).toContain(".devcontainer/**"); // 未選択でも消えない
@@ -109,8 +110,8 @@ describe("computeMergedZikuConfig（ファイル読み込み + 和集合マー�
     });
 
     const merged = await computeMergedZikuConfig({
-      targetDir: "/local",
-      templateDir: "/template",
+      targetDir: absPath("/local"),
+      templateDir: absPath("/template"),
     });
     const parsed = JSON.parse(merged);
     expect(parsed.include).toEqual([".claude/**"]);
@@ -130,7 +131,7 @@ describe("analyzeConfigDrift（union 観点の実差分判定）", () => {
 
   it("完全一致なら pull も push も不要", async () => {
     write([".a/**"], [".a/**"]);
-    expect(await analyzeConfigDrift("/local", "/template")).toEqual({
+    expect(await analyzeConfigDrift(absPath("/local"), absPath("/template"))).toEqual({
       pullRelevant: false,
       pushRelevant: false,
     });
@@ -138,14 +139,14 @@ describe("analyzeConfigDrift（union 観点の実差分判定）", () => {
 
   it("テンプレに追加分がある → pullRelevant", async () => {
     write([".a/**"], [".a/**", ".b/**"]);
-    const d = await analyzeConfigDrift("/local", "/template");
+    const d = await analyzeConfigDrift(absPath("/local"), absPath("/template"));
     expect(d.pullRelevant).toBe(true);
     expect(d.pushRelevant).toBe(false);
   });
 
   it("ローカルに追加分がある → pushRelevant", async () => {
     write([".a/**", ".b/**"], [".a/**"]);
-    const d = await analyzeConfigDrift("/local", "/template");
+    const d = await analyzeConfigDrift(absPath("/local"), absPath("/template"));
     expect(d.pullRelevant).toBe(false);
     expect(d.pushRelevant).toBe(true);
   });
@@ -154,7 +155,7 @@ describe("analyzeConfigDrift（union 観点の実差分判定）", () => {
     // local=[a,b], template=[a]（b を削除）。union=[a,b]==local → pull 不要。
     // union≠template → push 観点では「ローカルに余分」= pushRelevant。
     write([".a/**", ".b/**"], [".a/**"]);
-    const d = await analyzeConfigDrift("/local", "/template");
+    const d = await analyzeConfigDrift(absPath("/local"), absPath("/template"));
     expect(d.pullRelevant).toBe(false);
   });
 });
@@ -174,9 +175,9 @@ describe("findLocalOnlyPatternsForPaths（#90: 事前追跡パターンの関連
     write([".github/**", ".claude/skills/new-skill/SKILL.md"], [".github/**"]);
 
     const result = await findLocalOnlyPatternsForPaths({
-      targetDir: "/local",
-      templateDir: "/template",
-      paths: [".claude/skills/new-skill/SKILL.md"],
+      targetDir: absPath("/local"),
+      templateDir: absPath("/template"),
+      paths: repoRelPaths([".claude/skills/new-skill/SKILL.md"]),
     });
     expect(result).toEqual([".claude/skills/new-skill/SKILL.md"]);
   });
@@ -188,9 +189,9 @@ describe("findLocalOnlyPatternsForPaths（#90: 事前追跡パターンの関連
     );
 
     const result = await findLocalOnlyPatternsForPaths({
-      targetDir: "/local",
-      templateDir: "/template",
-      paths: [".claude/skills/new-skill/SKILL.md"],
+      targetDir: absPath("/local"),
+      templateDir: absPath("/template"),
+      paths: repoRelPaths([".claude/skills/new-skill/SKILL.md"]),
     });
     expect(result).toEqual([".claude/skills/new-skill/SKILL.md"]);
     expect(result).not.toContain(".claude/rules/unrelated.md");
@@ -200,9 +201,9 @@ describe("findLocalOnlyPatternsForPaths（#90: 事前追跡パターンの関連
     write([".github/**", "already-synced.md"], [".github/**", "already-synced.md"]);
 
     const result = await findLocalOnlyPatternsForPaths({
-      targetDir: "/local",
-      templateDir: "/template",
-      paths: ["already-synced.md"],
+      targetDir: absPath("/local"),
+      templateDir: absPath("/template"),
+      paths: repoRelPaths(["already-synced.md"]),
     });
     expect(result).toEqual([]);
   });
@@ -211,8 +212,8 @@ describe("findLocalOnlyPatternsForPaths（#90: 事前追跡パターンの関連
     write([".github/**", "new-file.md"], [".github/**"]);
 
     const result = await findLocalOnlyPatternsForPaths({
-      targetDir: "/local",
-      templateDir: "/template",
+      targetDir: absPath("/local"),
+      templateDir: absPath("/template"),
       paths: [],
     });
     expect(result).toEqual([]);

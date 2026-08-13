@@ -35,15 +35,16 @@ import {
   selectOverwriteStrategy,
   selectPushFiles,
 } from "../prompts";
+import { globPatterns, repoRelPath, repoRelPaths } from "../../__tests__/brands";
 
 const testEntries = [
   {
     label: ".devcontainer",
-    patterns: [".devcontainer/**"],
+    patterns: globPatterns([".devcontainer/**"]),
   },
   {
     label: ".github",
-    patterns: [".github/**"],
+    patterns: globPatterns([".github/**"]),
   },
 ];
 
@@ -102,9 +103,9 @@ describe("prompts", () => {
   describe("selectPushFiles", () => {
     it("should filter files by selection", async () => {
       const files = [
-        { path: "a.ts", type: "added" as const, localContent: "local" },
+        { path: repoRelPath("a.ts"), type: "added" as const, localContent: "local" },
         {
-          path: "b.ts",
+          path: repoRelPath("b.ts"),
           type: "modified" as const,
           localContent: "local",
           templateContent: "template",
@@ -117,7 +118,7 @@ describe("prompts", () => {
     });
 
     it("should return empty array when nothing selected", async () => {
-      const files = [{ path: "a.ts", type: "added" as const, localContent: "local" }];
+      const files = [{ path: repoRelPath("a.ts"), type: "added" as const, localContent: "local" }];
       vi.mocked(p.multiselect).mockResolvedValue([]);
       const result = await selectPushFiles(files);
       expect(result).toHaveLength(0);
@@ -126,13 +127,13 @@ describe("prompts", () => {
     it("conflictedPaths のファイルは初期選択から除外され conflict と表示される", async () => {
       const files = [
         {
-          path: "a.ts",
+          path: repoRelPath("a.ts"),
           type: "modified" as const,
           localContent: "local",
           templateContent: "template",
         },
         {
-          path: "bad.ts",
+          path: repoRelPath("bad.ts"),
           type: "modified" as const,
           localContent: "local",
           templateContent: "template",
@@ -184,7 +185,11 @@ describe("prompts", () => {
   describe("generatePrTitle", () => {
     it("should generate feat prefix for added-only files", () => {
       const files: FileDiff[] = [
-        { path: ".devcontainer/devcontainer.json", type: "added", localContent: "local" },
+        {
+          path: repoRelPath(".devcontainer/devcontainer.json"),
+          type: "added",
+          localContent: "local",
+        },
       ];
       expect(generatePrTitle(files)).toBe("feat: add .devcontainer config");
     });
@@ -192,7 +197,7 @@ describe("prompts", () => {
     it("should generate chore prefix for modified files", () => {
       const files: FileDiff[] = [
         {
-          path: ".github/workflows/ci.yml",
+          path: repoRelPath(".github/workflows/ci.yml"),
           type: "modified",
           localContent: "local",
           templateContent: "template",
@@ -203,9 +208,13 @@ describe("prompts", () => {
 
     it("should generate chore prefix for mixed changes", () => {
       const files: FileDiff[] = [
-        { path: ".devcontainer/devcontainer.json", type: "added", localContent: "local" },
         {
-          path: ".github/workflows/ci.yml",
+          path: repoRelPath(".devcontainer/devcontainer.json"),
+          type: "added",
+          localContent: "local",
+        },
+        {
+          path: repoRelPath(".github/workflows/ci.yml"),
           type: "modified",
           localContent: "local",
           templateContent: "template",
@@ -216,17 +225,22 @@ describe("prompts", () => {
 
     it("should use generic title for many modules", () => {
       const files: FileDiff[] = [
-        { path: ".devcontainer/a.json", type: "added", localContent: "local" },
-        { path: ".github/b.yml", type: "added", localContent: "local" },
-        { path: ".claude/c.md", type: "added", localContent: "local" },
-        { path: ".mcp/d.json", type: "added", localContent: "local" },
+        { path: repoRelPath(".devcontainer/a.json"), type: "added", localContent: "local" },
+        { path: repoRelPath(".github/b.yml"), type: "added", localContent: "local" },
+        { path: repoRelPath(".claude/c.md"), type: "added", localContent: "local" },
+        { path: repoRelPath(".mcp/d.json"), type: "added", localContent: "local" },
       ];
       expect(generatePrTitle(files)).toBe("feat: update template configuration");
     });
 
     it("should handle root-level files", () => {
       const files: FileDiff[] = [
-        { path: ".mcp.json", type: "modified", localContent: "local", templateContent: "template" },
+        {
+          path: repoRelPath(".mcp.json"),
+          type: "modified",
+          localContent: "local",
+          templateContent: "template",
+        },
       ];
       expect(generatePrTitle(files)).toBe("chore: update .mcp.json config");
     });
@@ -255,7 +269,11 @@ describe("prompts", () => {
   describe("generatePrBody", () => {
     it("should list added files", () => {
       const files: FileDiff[] = [
-        { path: ".devcontainer/devcontainer.json", type: "added", localContent: "local" },
+        {
+          path: repoRelPath(".devcontainer/devcontainer.json"),
+          type: "added",
+          localContent: "local",
+        },
       ];
       const body = generatePrBody(files);
       expect(body).toContain("**Added:**");
@@ -265,7 +283,7 @@ describe("prompts", () => {
     it("should list modified files", () => {
       const files: FileDiff[] = [
         {
-          path: ".github/workflows/ci.yml",
+          path: repoRelPath(".github/workflows/ci.yml"),
           type: "modified",
           localContent: "local",
           templateContent: "template",
@@ -278,8 +296,13 @@ describe("prompts", () => {
 
     it("should list both added and modified", () => {
       const files: FileDiff[] = [
-        { path: "a.json", type: "added", localContent: "local" },
-        { path: "b.yml", type: "modified", localContent: "local", templateContent: "template" },
+        { path: repoRelPath("a.json"), type: "added", localContent: "local" },
+        {
+          path: repoRelPath("b.yml"),
+          type: "modified",
+          localContent: "local",
+          templateContent: "template",
+        },
       ];
       const body = generatePrBody(files);
       expect(body).toContain("**Added:**");
@@ -287,7 +310,9 @@ describe("prompts", () => {
     });
 
     it("should include ziku attribution", () => {
-      const files: FileDiff[] = [{ path: "a.json", type: "added", localContent: "local" }];
+      const files: FileDiff[] = [
+        { path: repoRelPath("a.json"), type: "added", localContent: "local" },
+      ];
       const body = generatePrBody(files);
       expect(body).toContain("ziku");
     });
@@ -355,7 +380,7 @@ describe("prompts", () => {
 
   describe("selectDeletedFiles", () => {
     it("should call clack.multiselect with file options", async () => {
-      const files = ["a.ts", "b.ts"];
+      const files = repoRelPaths(["a.ts", "b.ts"]);
       vi.mocked(p.multiselect).mockResolvedValue(["a.ts"]);
       const result = await selectDeletedFiles(files);
       expect(result).toEqual(["a.ts"]);
@@ -372,7 +397,7 @@ describe("prompts", () => {
 
     it("should return empty array when nothing selected", async () => {
       vi.mocked(p.multiselect).mockResolvedValue([]);
-      const result = await selectDeletedFiles(["a.ts"]);
+      const result = await selectDeletedFiles(repoRelPaths(["a.ts"]));
       expect(result).toEqual([]);
     });
   });

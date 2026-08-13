@@ -15,22 +15,26 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "pathe";
 import { afterEach, describe, expect, it } from "vitest";
+import { absPath, globPatterns, repoRelPath } from "../../__tests__/brands";
+import type { AbsPath } from "../../modules/schemas";
 import { hashFiles } from "../hash";
 import { classifyFiles } from "../merge";
 import { detectDiff } from "../diff";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../untracked";
 import { ZIKU_CONFIG_FILE, withConfigTracked, withoutConfigTracked } from "../ziku-config";
 
-async function createTempDir(label: string): Promise<string> {
-  const dir = join(
-    tmpdir(),
-    `ziku-test-config-sync-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+async function createTempDir(label: string): Promise<AbsPath> {
+  const dir = absPath(
+    join(
+      tmpdir(),
+      `ziku-test-config-sync-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    ),
   );
   await mkdir(dir, { recursive: true });
   return dir;
 }
 
-async function writeFiles(baseDir: string, files: Record<string, string>): Promise<void> {
+async function writeFiles(baseDir: AbsPath, files: Record<string, string>): Promise<void> {
   for (const [relativePath, content] of Object.entries(files)) {
     const fullPath = join(baseDir, relativePath);
     const dir = join(fullPath, "..");
@@ -42,7 +46,7 @@ async function writeFiles(baseDir: string, files: Record<string, string>): Promi
 }
 
 describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", () => {
-  const tempDirs: string[] = [];
+  const tempDirs: AbsPath[] = [];
 
   afterEach(async () => {
     for (const dir of tempDirs) {
@@ -68,13 +72,13 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
     });
 
     // push は「ローカルの config.include」を withConfigTracked で展開して両側をハッシュする
-    const effectiveInclude = withConfigTracked([".claude/**", ".eslintrc.json"]);
+    const effectiveInclude = withConfigTracked(globPatterns([".claude/**", ".eslintrc.json"]));
     const templateHashes = await hashFiles(templateDir, effectiveInclude);
     const localHashes = await hashFiles(projectDir, effectiveInclude);
 
     // base = 前回 sync 時点（テンプレと一致していた）。ziku.jsonc はテンプレ版のハッシュ。
     const baseHashes = {
-      ".claude/rules.md": templateHashes[".claude/rules.md"],
+      [repoRelPath(".claude/rules.md")]: templateHashes[repoRelPath(".claude/rules.md")],
       [ZIKU_CONFIG_FILE]: templateHashes[ZIKU_CONFIG_FILE],
     };
 
@@ -103,13 +107,13 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
     });
 
     // pull は local+template のパターン和集合を discovery に使う
-    const effectiveInclude = withConfigTracked([".claude/**", ".eslintrc.json"]);
+    const effectiveInclude = withConfigTracked(globPatterns([".claude/**", ".eslintrc.json"]));
     const templateHashes = await hashFiles(templateDir, effectiveInclude);
     const localHashes = await hashFiles(projectDir, effectiveInclude);
 
     // base = 前回 sync 時点（ローカル = テンプレ旧版）。ziku.jsonc はローカル版のハッシュ。
     const baseHashes = {
-      ".claude/rules.md": localHashes[".claude/rules.md"],
+      [repoRelPath(".claude/rules.md")]: localHashes[repoRelPath(".claude/rules.md")],
       [ZIKU_CONFIG_FILE]: localHashes[ZIKU_CONFIG_FILE],
     };
 
@@ -137,7 +141,7 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
     const diff = await detectDiff({
       targetDir: projectDir,
       templateDir,
-      patterns: { include: withConfigTracked([".claude/**"]), exclude: [] },
+      patterns: { include: withConfigTracked(globPatterns([".claude/**"])), exclude: [] },
     });
 
     const configDiff = diff.files.find((f) => f.path === ZIKU_CONFIG_FILE);
@@ -154,10 +158,11 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
     });
 
     // exclude が `.ziku/**` と `**/*.jsonc` で ziku.jsonc を消そうとするケース
-    const hashes = await hashFiles(dir, withConfigTracked([".claude/**"]), [
-      ".ziku/**",
-      "**/*.jsonc",
-    ]);
+    const hashes = await hashFiles(
+      dir,
+      withConfigTracked(globPatterns([".claude/**"])),
+      globPatterns([".ziku/**", "**/*.jsonc"]),
+    );
 
     // include の明示指定が exclude より優先され、ziku.jsonc はハッシュされる
     expect(hashes[ZIKU_CONFIG_FILE]).toEqual(expect.any(String));
@@ -175,7 +180,7 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
     // withConfigTracked をそのまま渡すと `.ziku` がスコープ基点になり lock.json が拾われる
     const untracked = await detectUntrackedFiles({
       targetDir: dir,
-      patterns: { include: withConfigTracked([".claude/**"]), exclude: [] },
+      patterns: { include: withConfigTracked(globPatterns([".claude/**"])), exclude: [] },
     });
     const paths = untracked.flatMap((g) => g.files.map((f) => f.path));
     expect(paths).toContain(".ziku/lock.json");
@@ -191,7 +196,7 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
     });
 
     // push の resolveUntrackedTracking と同じ関数で探索 include から合成エントリを除く
-    const discoveryInclude = withoutConfigTracked(withConfigTracked([".claude/**"]));
+    const discoveryInclude = withoutConfigTracked(withConfigTracked(globPatterns([".claude/**"])));
     const untracked = await detectUntrackedFiles({
       targetDir: dir,
       patterns: { include: discoveryInclude, exclude: [] },

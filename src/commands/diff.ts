@@ -1,11 +1,11 @@
 import { defineCommand } from "citty";
 import { Effect } from "effect";
-import { resolve } from "pathe";
 import { withCleanup } from "../effect-helpers";
 import { renderFileDiff } from "../ui/diff-view";
 import { logUntrackedFilesNotice } from "../ui/prompts";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
 import { detectDiff, hasDiff } from "../utils/diff";
+import { absPath } from "../utils/paths";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked";
 import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
 import { LOCK_FILE } from "../utils/lock";
@@ -59,7 +59,7 @@ export const diffCommand = defineCommand({
   async run({ args }) {
     intro("diff");
 
-    const targetDir = resolve(args.dir);
+    const targetDir = absPath(args.dir);
 
     // loadCommandContext + runCommandEffect で設定読み込み・テンプレート解決を DRY 化
     const ctx = await runCommandEffect(

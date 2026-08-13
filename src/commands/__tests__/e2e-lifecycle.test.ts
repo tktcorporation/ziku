@@ -225,6 +225,7 @@ const { selectPushFiles, selectDeletedFiles } = await import("../../ui/prompts")
 const { createPullRequest } = await import("../../utils/github");
 const { detectDiff } = await import("../../utils/diff");
 const { classifyFiles } = await import("../../utils/merge");
+const { repoRelPath, repoRelPaths } = await import("../../__tests__/brands");
 const { loadTemplateConfig } = await import("../../utils/template-config");
 
 const mockFetchTemplates = vi.mocked(fetchTemplates);
@@ -436,18 +437,18 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
 
     mockClassifyFiles.mockReturnValueOnce({
       autoUpdate: [],
-      localOnly: [".claude/rules/testing.md"],
+      localOnly: repoRelPaths([".claude/rules/testing.md"]),
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
       deletedWithLocalEdits: [],
       deletedLocally: [],
-      unchanged: [".claude/rules/style.md", ".mcp.json"],
+      unchanged: repoRelPaths([".claude/rules/style.md", ".mcp.json"]),
     });
     mockDetectDiff.mockResolvedValueOnce({
       files: [
         {
-          path: ".claude/rules/testing.md",
+          path: repoRelPath(".claude/rules/testing.md"),
           type: "added",
           localContent: "# Testing Guide\nWrite tests first.",
         },
@@ -484,18 +485,18 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
     // 追加したファイルを push
     mockClassifyFiles.mockReturnValueOnce({
       autoUpdate: [],
-      localOnly: [".eslintrc.json"],
+      localOnly: repoRelPaths([".eslintrc.json"]),
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
       deletedWithLocalEdits: [],
       deletedLocally: [],
-      unchanged: [".claude/rules/style.md", ".claude/rules/testing.md", ".mcp.json"],
+      unchanged: repoRelPaths([".claude/rules/style.md", ".claude/rules/testing.md", ".mcp.json"]),
     });
     mockDetectDiff.mockResolvedValueOnce({
       files: [
         {
-          path: ".eslintrc.json",
+          path: repoRelPath(".eslintrc.json"),
           type: "added",
           localContent: '{"extends": ["next"]}',
         },
@@ -548,14 +549,14 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
       // ziku.jsonc 自体が追跡ファイルとして autoUpdate に分類される（テンプレ側で
       // パターンが追加されたため）。applyFiles がテンプレの ziku.jsonc をコピーし、
       // 新パターンがローカルへ伝播する。
-      autoUpdate: [".claude/rules/testing.md", ".eslintrc.json", ".ziku/ziku.jsonc"],
+      autoUpdate: repoRelPaths([".claude/rules/testing.md", ".eslintrc.json", ".ziku/ziku.jsonc"]),
       localOnly: [],
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
       deletedWithLocalEdits: [],
       deletedLocally: [],
-      unchanged: [".claude/rules/style.md", ".mcp.json"],
+      unchanged: repoRelPaths([".claude/rules/style.md", ".mcp.json"]),
     });
 
     await runPull("/projectB");
@@ -725,18 +726,18 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
 
     mockClassifyFiles.mockReturnValueOnce({
       autoUpdate: [],
-      localOnly: [".claude/rules/testing.md"],
+      localOnly: repoRelPaths([".claude/rules/testing.md"]),
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
       deletedWithLocalEdits: [],
       deletedLocally: [],
-      unchanged: [".claude/rules/style.md", ".mcp.json"],
+      unchanged: repoRelPaths([".claude/rules/style.md", ".mcp.json"]),
     });
     mockDetectDiff.mockResolvedValueOnce({
       files: [
         {
-          path: ".claude/rules/testing.md",
+          path: repoRelPath(".claude/rules/testing.md"),
           type: "added",
           localContent: "# Testing Guide\nWrite tests first.",
         },
@@ -765,13 +766,13 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
 
     mockClassifyFiles.mockReturnValueOnce({
       autoUpdate: [],
-      localOnly: [".eslintrc.json"],
+      localOnly: repoRelPaths([".eslintrc.json"]),
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
       deletedWithLocalEdits: [],
       deletedLocally: [],
-      unchanged: [".claude/rules/style.md", ".claude/rules/testing.md", ".mcp.json"],
+      unchanged: repoRelPaths([".claude/rules/style.md", ".claude/rules/testing.md", ".mcp.json"]),
     });
     mockDetectDiff.mockResolvedValueOnce({
       files: [{ path: ".eslintrc.json", type: "added", localContent: '{"extends": ["next"]}' }],
@@ -796,14 +797,14 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
 
     mockClassifyFiles.mockReturnValueOnce({
       // ziku.jsonc も追跡ファイルとして autoUpdate に分類され、テンプレの新パターンが伝播する。
-      autoUpdate: [".claude/rules/testing.md", ".eslintrc.json", ".ziku/ziku.jsonc"],
+      autoUpdate: repoRelPaths([".claude/rules/testing.md", ".eslintrc.json", ".ziku/ziku.jsonc"]),
       localOnly: [],
       conflicts: [],
       newFiles: [],
       deletedFiles: [],
       deletedWithLocalEdits: [],
       deletedLocally: [],
-      unchanged: [".claude/rules/style.md", ".mcp.json"],
+      unchanged: repoRelPaths([".claude/rules/style.md", ".mcp.json"]),
     });
 
     await runPull("/projectB");
@@ -874,14 +875,14 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
       localOnly: [],
       conflicts: [],
       newFiles: [],
-      deletedFiles: [".eslintrc.json"],
+      deletedFiles: repoRelPaths([".eslintrc.json"]),
       deletedWithLocalEdits: [],
       deletedLocally: [],
-      unchanged: [".claude/rules/style.md", ".claude/rules/testing.md", ".mcp.json"],
+      unchanged: repoRelPaths([".claude/rules/style.md", ".claude/rules/testing.md", ".mcp.json"]),
     });
 
     // 対話実行（--force / --yes なし）で削除対象を選ばせる。モックは全選択を返す。
-    mockSelectDeletedFiles.mockResolvedValueOnce([".eslintrc.json"]);
+    mockSelectDeletedFiles.mockResolvedValueOnce(repoRelPaths([".eslintrc.json"]));
 
     await runPull("/projectB", { yes: false });
 
@@ -908,13 +909,13 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
       localOnly: [],
       conflicts: [],
       newFiles: [],
-      deletedFiles: [".eslintrc.json"],
+      deletedFiles: repoRelPaths([".eslintrc.json"]),
       deletedWithLocalEdits: [],
       deletedLocally: [],
-      unchanged: [".claude/rules/style.md", ".claude/rules/testing.md", ".mcp.json"],
+      unchanged: repoRelPaths([".claude/rules/style.md", ".claude/rules/testing.md", ".mcp.json"]),
     });
 
-    mockSelectDeletedFiles.mockResolvedValueOnce([".eslintrc.json"]);
+    mockSelectDeletedFiles.mockResolvedValueOnce(repoRelPaths([".eslintrc.json"]));
 
     await runPull("/projectA", { yes: false });
 

@@ -15,6 +15,7 @@ import { vol } from "memfs";
 import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TemplateNotConfiguredError } from "../../errors";
+import { absPath, globPatterns } from "../../__tests__/brands";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -107,7 +108,7 @@ vi.mock("../../ui/renderer", () => ({
 vi.mock("../../utils/template-config", () => ({
   loadTemplateConfig: vi.fn(() =>
     Effect.succeed({
-      include: [".mcp.json", ".devcontainer/**", ".github/**"],
+      include: globPatterns([".mcp.json", ".devcontainer/**", ".github/**"]),
       exclude: [],
     }),
   ),
@@ -209,7 +210,7 @@ describe("init: セットアップ UX", () => {
 
     // デフォルトのモック設定
     mockDownloadTemplateToTemp.mockResolvedValue({
-      templateDir: "/tmp/template",
+      templateDir: absPath("/tmp/template"),
       cleanup: vi.fn(),
     });
     mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
@@ -230,7 +231,7 @@ describe("init: セットアップ UX", () => {
     mockSelectTemplateCandidate.mockResolvedValue({ owner: "detected-org", repo: ".github" });
     mockLoadTemplateConfig.mockReturnValue(
       Effect.succeed({
-        include: [".mcp.json", ".devcontainer/**", ".github/**"],
+        include: globPatterns([".mcp.json", ".devcontainer/**", ".github/**"]),
         exclude: [],
       }),
     );
@@ -259,7 +260,7 @@ describe("init: セットアップ UX", () => {
       mockScaffoldTemplateRepo.mockResolvedValueOnce({
         url: "https://github.com/detected-org/.ziku",
       });
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
       // リポ作成後、ziku.jsonc がないのでエラーになる（ziku setup への誘導）
@@ -313,11 +314,11 @@ describe("init: セットアップ UX", () => {
       // Template has ziku.jsonc
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".mcp.json"],
+          include: globPatterns([".mcp.json"]),
           exclude: [],
         }),
       );
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
       await runInit({});
@@ -388,11 +389,11 @@ describe("init: セットアップ UX", () => {
       // Template has ziku.jsonc
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".mcp.json"],
+          include: globPatterns([".mcp.json"]),
           exclude: [],
         }),
       );
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
       await runInit({});
@@ -418,7 +419,7 @@ describe("init: セットアップ UX", () => {
 
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".mcp.json"],
+          include: globPatterns([".mcp.json"]),
           exclude: [],
         }),
       );
@@ -441,7 +442,7 @@ describe("init: セットアップ UX", () => {
 
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".mcp.json"],
+          include: globPatterns([".mcp.json"]),
           exclude: [],
         }),
       );
@@ -461,7 +462,7 @@ describe("init: セットアップ UX", () => {
 
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".mcp.json"],
+          include: globPatterns([".mcp.json"]),
           exclude: [],
         }),
       );
@@ -499,11 +500,11 @@ describe("init: セットアップ UX", () => {
       });
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".mcp.json"],
+          include: globPatterns([".mcp.json"]),
           exclude: [],
         }),
       );
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
       await runInit({});
@@ -526,11 +527,11 @@ describe("init: セットアップ UX", () => {
       // Template has ziku.jsonc
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".mcp.json"],
+          include: globPatterns([".mcp.json"]),
           exclude: [],
         }),
       );
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
       await runInit({});

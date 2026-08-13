@@ -1,6 +1,5 @@
 import { defineCommand } from "citty";
 import { Effect } from "effect";
-import { resolve } from "pathe";
 import { zikuFailure } from "../errors";
 import { runCommandEffect, toZikuFailure } from "../services/command-context";
 import { intro, log, outro, pc } from "../ui/renderer";
@@ -13,7 +12,8 @@ import {
   zikuConfigExists,
 } from "../utils/ziku-config";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
-import type { ZikuConfig } from "../modules/schemas";
+import type { AbsPath, ZikuConfig } from "../modules/schemas";
+import { absPath, globPatterns } from "../utils/paths";
 
 /**
  * track コマンドのファイル操作メタデータ。
@@ -84,7 +84,7 @@ export const trackCommand = defineCommand({
   async run({ args }) {
     intro("track");
 
-    const targetDir = resolve(args.dir);
+    const targetDir = absPath(args.dir);
 
     if (!zikuConfigExists(targetDir)) {
       throw zikuFailure({ kind: "NotInitialized", path: ZIKU_CONFIG_FILE });
@@ -97,7 +97,8 @@ export const trackCommand = defineCommand({
 
     // args._ には citty がパースした位置引数だけが入る。`--dir foo` のようなフラグの値も
     // citty 側で取り除かれるため、パース規則をコマンド側に持たなくてよい。
-    const patterns = args._;
+    // CLI 引数はパターンの入口。ここで brand してから設定ファイル側の処理へ渡す。
+    const patterns = globPatterns(args._);
 
     if (patterns.length === 0) {
       throw zikuFailure({
@@ -144,12 +145,12 @@ export const trackCommand = defineCommand({
  * 素の `Effect.runPromise` だと失敗が FiberFailure に包まれ、不在 / 構文エラー /
  * スキーマ違反の区別がトップレベルまで届かない。
  */
-function readConfig(targetDir: string): Promise<{ config: ZikuConfig; rawContent: string }> {
+function readConfig(targetDir: AbsPath): Promise<{ config: ZikuConfig; rawContent: string }> {
   return runCommandEffect(loadZikuConfig(targetDir).pipe(Effect.mapError(toZikuFailure)));
 }
 
 /** --list モード: 現在追跡中のパターン一覧を表示する */
-async function listTrackedPatterns(targetDir: string): Promise<void> {
+async function listTrackedPatterns(targetDir: AbsPath): Promise<void> {
   const {
     config: { include, exclude: excludeRaw },
   } = await readConfig(targetDir);

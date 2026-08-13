@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { hashMap, repoRelPath } from "../../__tests__/brands";
 import {
   asBaseContent,
   asLocalContent,
@@ -14,7 +15,7 @@ function merge(base: string, local: string, template: string, filePath?: string)
     base: asBaseContent(base),
     local: asLocalContent(local),
     template: asTemplateContent(template),
-    filePath,
+    filePath: filePath === undefined ? undefined : repoRelPath(filePath),
   });
 }
 
@@ -22,7 +23,7 @@ describe("merge", () => {
   describe("classifyFiles", () => {
     it("全カテゴリに正しく分類する", () => {
       const result = classifyFiles({
-        baseHashes: {
+        baseHashes: hashMap({
           "unchanged.txt": "aaa",
           "auto-update.txt": "bbb",
           "local-only.txt": "ccc",
@@ -30,22 +31,22 @@ describe("merge", () => {
           "deleted.txt": "eee",
           "deleted-locally.txt": "fff",
           "deleted-with-edits.txt": "ggg",
-        },
-        localHashes: {
+        }),
+        localHashes: hashMap({
           "unchanged.txt": "aaa",
           "auto-update.txt": "bbb",
           "local-only.txt": "ccc-modified",
           "conflict.txt": "ddd-local",
           "deleted-with-edits.txt": "ggg-edited",
-        },
-        templateHashes: {
+        }),
+        templateHashes: hashMap({
           "unchanged.txt": "aaa",
           "auto-update.txt": "bbb-updated",
           "local-only.txt": "ccc",
           "conflict.txt": "ddd-template",
           "new-file.txt": "fff",
           "deleted-locally.txt": "fff", // base と同じ → クリーン削除
-        },
+        }),
       });
 
       expect(result.unchanged).toContain("unchanged.txt");
@@ -62,24 +63,24 @@ describe("merge", () => {
     // 存在しないファイルが混ざると mergeOneFile が defect でクラッシュする。
     it("conflicts に入るファイルはすべてテンプレート側に存在する（mergeOneFile の不変条件）", () => {
       const result = classifyFiles({
-        baseHashes: {
+        baseHashes: hashMap({
           "both-changed.txt": "aaa",
           "local-deleted.txt": "bbb",
           "template-deleted.txt": "ccc",
           "template-deleted-clean.txt": "ddd",
           "gone-everywhere.txt": "eee",
-        },
-        localHashes: {
+        }),
+        localHashes: hashMap({
           "both-changed.txt": "aaa-local",
           "template-deleted.txt": "ccc-edited",
           "template-deleted-clean.txt": "ddd",
           "local-new.txt": "fff",
-        },
-        templateHashes: {
+        }),
+        templateHashes: hashMap({
           "both-changed.txt": "aaa-template",
           "local-deleted.txt": "bbb-updated",
           "template-new.txt": "ggg",
-        },
+        }),
       });
 
       const templatePaths = new Set(["both-changed.txt", "local-deleted.txt", "template-new.txt"]);
@@ -109,7 +110,7 @@ describe("merge", () => {
     it("ローカルのみに存在するファイルを localOnly に分類する", () => {
       const result = classifyFiles({
         baseHashes: {},
-        localHashes: { "my-file.txt": "abc" },
+        localHashes: hashMap({ "my-file.txt": "abc" }),
         templateHashes: {},
       });
 
@@ -118,9 +119,9 @@ describe("merge", () => {
 
     it("ローカルで削除されたファイルを deletedLocally に分類する", () => {
       const result = classifyFiles({
-        baseHashes: { "removed.txt": "abc" },
+        baseHashes: hashMap({ "removed.txt": "abc" }),
         localHashes: {},
-        templateHashes: { "removed.txt": "abc" },
+        templateHashes: hashMap({ "removed.txt": "abc" }),
       });
 
       expect(result.deletedLocally).toContain("removed.txt");
@@ -132,9 +133,9 @@ describe("merge", () => {
 
     it("テンプレートも更新されローカルで削除 → delete/modify conflict（git 準拠）", () => {
       const result = classifyFiles({
-        baseHashes: { "removed.txt": "abc" },
+        baseHashes: hashMap({ "removed.txt": "abc" }),
         localHashes: {},
-        templateHashes: { "removed.txt": "def" },
+        templateHashes: hashMap({ "removed.txt": "def" }),
       });
 
       // テンプレートが変更されている場合は conflict（delete/modify）
@@ -144,8 +145,8 @@ describe("merge", () => {
 
     it("テンプレートで削除されローカルが編集済み → deletedWithLocalEdits", () => {
       const result = classifyFiles({
-        baseHashes: { "rules.md": "abc" },
-        localHashes: { "rules.md": "abc-edited" },
+        baseHashes: hashMap({ "rules.md": "abc" }),
+        localHashes: hashMap({ "rules.md": "abc-edited" }),
         templateHashes: {},
       });
 
@@ -158,8 +159,8 @@ describe("merge", () => {
 
     it("テンプレートで削除されローカルが base のまま → deletedFiles", () => {
       const result = classifyFiles({
-        baseHashes: { "rules.md": "abc" },
-        localHashes: { "rules.md": "abc" },
+        baseHashes: hashMap({ "rules.md": "abc" }),
+        localHashes: hashMap({ "rules.md": "abc" }),
         templateHashes: {},
       });
 
@@ -170,7 +171,7 @@ describe("merge", () => {
 
     it("base とテンプレート両方で削除されたファイルは deletedFiles に分類する（deletedLocally ではない）", () => {
       const result = classifyFiles({
-        baseHashes: { "removed.txt": "abc" },
+        baseHashes: hashMap({ "removed.txt": "abc" }),
         localHashes: {},
         templateHashes: {},
       });
@@ -181,9 +182,9 @@ describe("merge", () => {
 
     it("両方が同じ内容に変更された場合は unchanged に分類する", () => {
       const result = classifyFiles({
-        baseHashes: { "file.txt": "old" },
-        localHashes: { "file.txt": "new" },
-        templateHashes: { "file.txt": "new" },
+        baseHashes: hashMap({ "file.txt": "old" }),
+        localHashes: hashMap({ "file.txt": "new" }),
+        templateHashes: hashMap({ "file.txt": "new" }),
       });
 
       expect(result.unchanged).toContain("file.txt");

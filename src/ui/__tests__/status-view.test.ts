@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { recommendationLine, renderStatusLong, type StatusViewModel } from "../status-view";
 import type { Recommendation, StatusBuckets, StatusEntry } from "../../utils/status";
+import { repoRelPath } from "../../__tests__/brands";
 
 function entry(
   path: string,
@@ -8,7 +9,7 @@ function entry(
   category: StatusEntry["category"],
   isDestructive = false,
 ): StatusEntry {
-  return { path, direction, category, isDestructive };
+  return { path: repoRelPath(path), direction, category, isDestructive };
 }
 
 function buckets(partial: Partial<StatusBuckets> = {}): StatusBuckets {

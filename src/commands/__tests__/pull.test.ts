@@ -3,7 +3,10 @@ import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZikuError, FileNotFoundError } from "../../errors";
 import type {
+  AbsPath,
+  CommitSha,
   ConflictPaths,
+  GlobPattern,
   LockState,
   ResumableLockState,
   SyncPoint,
@@ -184,6 +187,8 @@ const { classifyFiles, mergeOneFile, writeFileEnsureDir, downloadBaseForMerge } 
 // 置き換えるので、実装モジュールを直接読み込めば素の関数が得られる）。
 const { classifyMergeOutcome } = await import("../../utils/merge/types");
 const { log } = await import("../../ui/renderer");
+const { absPath, commitSha, globPatterns, hashMap, repoRelPath, repoRelPaths } =
+  await import("../../__tests__/brands");
 
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
 const mockDownloadTemplateToTemp = vi.mocked(downloadTemplateToTemp);
@@ -199,7 +204,7 @@ const mockLog = vi.mocked(log);
 const mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
 
 const baseZikuConfig = {
-  include: [".mcp.json", ".mise.toml"],
+  include: globPatterns([".mcp.json", ".mise.toml"]),
   exclude: [],
 };
 
@@ -210,12 +215,15 @@ const baseLock: ResumableLockState = {
   installedAt: "2024-01-01T00:00:00.000Z",
   source: baseSource,
   sync: "synced",
-  base: { hashes: { ".mcp.json": "abc123" } },
+  base: { hashes: hashMap({ ".mcp.json": "abc123" }) },
 };
 
 /** baseLock のベースだけ差し替えたロックを作る。 */
-function lockWithBase(hashes: Record<string, string>, commitSha?: string): LockState {
-  return markSynced(baseLock, { hashes, commitSha });
+function lockWithBase(hashes: Record<string, string>, sha?: string): LockState {
+  return markSynced(baseLock, {
+    hashes: hashMap(hashes),
+    commitSha: sha === undefined ? undefined : commitSha(sha),
+  });
 }
 
 /** 直近に保存された lock。saveLock が呼ばれていなければ失敗する。 */
@@ -235,11 +243,11 @@ function mergingLock(conflicts: ConflictPaths, next: SyncPoint): LockState {
  * 通常モード（--continue 以外）で loadCommandContext の戻り値として使う。
  */
 function mockContext(overrides?: {
-  config?: { include: string[]; exclude?: string[] };
+  config?: { include: GlobPattern[]; exclude?: GlobPattern[] };
   lock?: LockState;
   source?: TemplateSource;
-  templateDir?: string;
-  resolveBaseRef?: Effect.Effect<Option.Option<string>>;
+  templateDir?: AbsPath;
+  resolveBaseRef?: Effect.Effect<Option.Option<CommitSha>>;
 }) {
   const cleanup = vi.fn();
   const source = overrides?.source ?? baseSource;
@@ -248,9 +256,9 @@ function mockContext(overrides?: {
       config: overrides?.config ?? baseZikuConfig,
       lock: overrides?.lock ?? baseLock,
       source,
-      templateDir: overrides?.templateDir ?? "/tmp/template",
+      templateDir: overrides?.templateDir ?? absPath("/tmp/template"),
       cleanup,
-      resolveBaseRef: overrides?.resolveBaseRef ?? Effect.succeed(Option.none<string>()),
+      resolveBaseRef: overrides?.resolveBaseRef ?? Effect.succeed(Option.none<CommitSha>()),
     }),
     cleanup,
   };
@@ -265,7 +273,7 @@ function mockContext(overrides?: {
  */
 function mockMergeResult(file: string, content: string) {
   mockMergeOneFile.mockReturnValueOnce(
-    Effect.succeed({ file, outcome: classifyMergeOutcome(content) }),
+    Effect.succeed({ file: repoRelPath(file), outcome: classifyMergeOutcome(content) }),
   );
 }
 
@@ -277,7 +285,9 @@ function mockMergeResult(file: string, content: string) {
  */
 function mockBaseAvailable(templateDir = "/tmp/base"): { cleanup: ReturnType<typeof vi.fn> } {
   const cleanup = vi.fn();
-  mockDownloadBaseForMerge.mockReturnValueOnce(Effect.succeed({ templateDir, cleanup }));
+  mockDownloadBaseForMerge.mockReturnValueOnce(
+    Effect.succeed({ templateDir: absPath(templateDir), cleanup }),
+  );
   return { cleanup };
 }
 
@@ -295,7 +305,7 @@ describe("pullCommand", () => {
     mockLoadLock.mockReturnValue(Effect.succeed(baseLock));
 
     mockDownloadTemplateToTemp.mockResolvedValue({
-      templateDir: "/tmp/template",
+      templateDir: absPath("/tmp/template"),
       cleanup: vi.fn(),
     });
     mockHashFiles.mockResolvedValue({});
@@ -337,7 +347,7 @@ describe("pullCommand", () => {
         deletedFiles: [],
         deletedWithLocalEdits: [],
         deletedLocally: [],
-        unchanged: [".mcp.json"],
+        unchanged: repoRelPaths([".mcp.json"]),
       });
 
       await (pullCommand.run as any)({
@@ -366,13 +376,13 @@ describe("pullCommand", () => {
       mockLoadTemplateConfig.mockReturnValueOnce(
         effectMod.Effect.succeed({
           $schema: undefined,
-          include: [".root/**", ".github/**", ".new-pattern/**"],
+          include: globPatterns([".root/**", ".github/**", ".new-pattern/**"]),
           exclude: undefined,
         }),
       );
       // ziku.jsonc 自体が autoUpdate に分類される（テンプレ側で内容が変わったため）
       mockClassifyFiles.mockReturnValueOnce({
-        autoUpdate: [".ziku/ziku.jsonc"],
+        autoUpdate: repoRelPaths([".ziku/ziku.jsonc"]),
         localOnly: [],
         conflicts: [],
         newFiles: [],
@@ -410,7 +420,7 @@ describe("pullCommand", () => {
       });
 
       mockClassifyFiles.mockReturnValueOnce({
-        autoUpdate: [".ziku/ziku.jsonc"],
+        autoUpdate: repoRelPaths([".ziku/ziku.jsonc"]),
         localOnly: [],
         conflicts: [],
         newFiles: [],
@@ -446,7 +456,7 @@ describe("pullCommand", () => {
         "/tmp/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".a/**", ".c/**"] }, null, 2),
       });
       mockClassifyFiles.mockReturnValueOnce({
-        autoUpdate: [".ziku/ziku.jsonc"],
+        autoUpdate: repoRelPaths([".ziku/ziku.jsonc"]),
         localOnly: [],
         conflicts: [],
         newFiles: [],
@@ -471,7 +481,7 @@ describe("pullCommand", () => {
       // lock の base[ziku.jsonc] は書き込んだ union のハッシュと一致する（テンプレ縮小版ではない）
       const { hashContent } = await import("../../utils/hash");
       const saveArg = lastSavedLock();
-      expect(baseHashesOf(saveArg)[".ziku/ziku.jsonc"]).toBe(hashContent(written));
+      expect(baseHashesOf(saveArg)[repoRelPath(".ziku/ziku.jsonc")]).toBe(hashContent(written));
     });
 
     it("テンプレが ziku.jsonc ファイル自体を削除しても、ローカルの制御ファイルは消さない（codex P2）", async () => {
@@ -487,7 +497,7 @@ describe("pullCommand", () => {
         localOnly: [],
         conflicts: [],
         newFiles: [],
-        deletedFiles: [".ziku/ziku.jsonc"],
+        deletedFiles: repoRelPaths([".ziku/ziku.jsonc"]),
         deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
@@ -518,7 +528,7 @@ describe("pullCommand", () => {
       mockLoadCommandContext.mockReturnValue(effect);
 
       mockClassifyFiles.mockReturnValueOnce({
-        autoUpdate: [".ziku/ziku.jsonc"],
+        autoUpdate: repoRelPaths([".ziku/ziku.jsonc"]),
         localOnly: [],
         conflicts: [],
         newFiles: [],
@@ -538,7 +548,7 @@ describe("pullCommand", () => {
       expect(mockLog.success).not.toHaveBeenCalledWith("Already up to date");
       expect(mockSaveLock).toHaveBeenCalled();
       const saveArg = lastSavedLock();
-      expect(baseHashesOf(saveArg)[".ziku/ziku.jsonc"]).not.toBe("stale-old-hash");
+      expect(baseHashesOf(saveArg)[repoRelPath(".ziku/ziku.jsonc")]).not.toBe("stale-old-hash");
     });
 
     it("自動更新ファイルをコピー", async () => {
@@ -548,7 +558,7 @@ describe("pullCommand", () => {
       });
 
       mockClassifyFiles.mockReturnValueOnce({
-        autoUpdate: [".mcp.json"],
+        autoUpdate: repoRelPaths([".mcp.json"]),
         localOnly: [],
         conflicts: [],
         newFiles: [],
@@ -583,7 +593,7 @@ describe("pullCommand", () => {
         autoUpdate: [],
         localOnly: [],
         conflicts: [],
-        newFiles: [".new-file"],
+        newFiles: repoRelPaths([".new-file"]),
         deletedFiles: [],
         deletedWithLocalEdits: [],
         deletedLocally: [],
@@ -618,7 +628,7 @@ describe("pullCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: [".mcp.json"],
+        conflicts: repoRelPaths([".mcp.json"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -670,7 +680,7 @@ describe("pullCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: [".ziku/ziku.jsonc"],
+        conflicts: repoRelPaths([".ziku/ziku.jsonc"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -704,7 +714,7 @@ describe("pullCommand", () => {
         localOnly: [],
         conflicts: [],
         newFiles: [],
-        deletedFiles: [".old-file"],
+        deletedFiles: repoRelPaths([".old-file"]),
         deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
@@ -728,7 +738,7 @@ describe("pullCommand", () => {
         localOnly: [],
         conflicts: [],
         newFiles: [],
-        deletedFiles: ["old-file.txt"],
+        deletedFiles: repoRelPaths(["old-file.txt"]),
         deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
@@ -754,7 +764,7 @@ describe("pullCommand", () => {
         localOnly: [],
         conflicts: [],
         newFiles: [],
-        deletedFiles: ["old-file.txt"],
+        deletedFiles: repoRelPaths(["old-file.txt"]),
         deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
@@ -780,7 +790,7 @@ describe("pullCommand", () => {
         localOnly: [],
         conflicts: [],
         newFiles: [],
-        deletedFiles: ["old-file.txt"],
+        deletedFiles: repoRelPaths(["old-file.txt"]),
         deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
@@ -808,7 +818,7 @@ describe("pullCommand", () => {
         localOnly: [],
         conflicts: [],
         newFiles: [],
-        deletedFiles: ["old-file.txt"],
+        deletedFiles: repoRelPaths(["old-file.txt"]),
         deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
@@ -835,7 +845,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
-        deletedWithLocalEdits: ["edited.md"],
+        deletedWithLocalEdits: repoRelPaths(["edited.md"]),
         deletedLocally: [],
         unchanged: [],
       });
@@ -861,7 +871,7 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
-        deletedWithLocalEdits: ["edited.md"],
+        deletedWithLocalEdits: repoRelPaths(["edited.md"]),
         deletedLocally: [],
         unchanged: [],
       });
@@ -892,11 +902,11 @@ describe("pullCommand", () => {
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
-        deletedWithLocalEdits: ["chosen.md", "kept.md"],
+        deletedWithLocalEdits: repoRelPaths(["chosen.md", "kept.md"]),
         deletedLocally: [],
         unchanged: [],
       });
-      mockSelectDeletedFilesWithLocalEdits.mockResolvedValueOnce(["chosen.md"]);
+      mockSelectDeletedFilesWithLocalEdits.mockResolvedValueOnce(repoRelPaths(["chosen.md"]));
 
       await (pullCommand.run as any)({
         args: { dir: "/test", force: false, yes: false },
@@ -919,12 +929,12 @@ describe("pullCommand", () => {
         localOnly: [],
         conflicts: [],
         newFiles: [],
-        deletedFiles: ["a.txt", "b.txt"],
+        deletedFiles: repoRelPaths(["a.txt", "b.txt"]),
         deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
       });
-      mockSelectDeletedFiles.mockResolvedValueOnce(["a.txt"]);
+      mockSelectDeletedFiles.mockResolvedValueOnce(repoRelPaths(["a.txt"]));
 
       await (pullCommand.run as any)({
         args: { dir: "/test", force: false, yes: false },
@@ -945,7 +955,7 @@ describe("pullCommand", () => {
       mockHashFiles.mockResolvedValueOnce({});
 
       mockClassifyFiles.mockReturnValueOnce({
-        autoUpdate: [".mcp.json"],
+        autoUpdate: repoRelPaths([".mcp.json"]),
         localOnly: [],
         conflicts: [],
         newFiles: [],
@@ -983,12 +993,12 @@ describe("pullCommand", () => {
       });
 
       const { effect } = mockContext({
-        resolveBaseRef: Effect.succeed(Option.some("newsha456")),
+        resolveBaseRef: Effect.succeed(Option.some(commitSha("newsha456"))),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
       mockClassifyFiles.mockReturnValueOnce({
-        autoUpdate: [".mcp.json"],
+        autoUpdate: repoRelPaths([".mcp.json"]),
         localOnly: [],
         conflicts: [],
         newFiles: [],
@@ -1020,12 +1030,12 @@ describe("pullCommand", () => {
 
       const { effect } = mockContext({
         lock: lockWithBase({ ".mcp.json": "abc123" }, "existing-sha"),
-        resolveBaseRef: Effect.succeed(Option.none<string>()),
+        resolveBaseRef: Effect.succeed(Option.none<CommitSha>()),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
       mockClassifyFiles.mockReturnValueOnce({
-        autoUpdate: [".mcp.json"],
+        autoUpdate: repoRelPaths([".mcp.json"]),
         localOnly: [],
         conflicts: [],
         newFiles: [],
@@ -1060,7 +1070,7 @@ describe("pullCommand", () => {
         deletedFiles: [],
         deletedWithLocalEdits: [],
         deletedLocally: [],
-        unchanged: [".mcp.json"],
+        unchanged: repoRelPaths([".mcp.json"]),
       });
 
       await (pullCommand.run as any)({
@@ -1081,7 +1091,7 @@ describe("pullCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: [".mcp.json"],
+        conflicts: repoRelPaths([".mcp.json"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -1103,7 +1113,7 @@ describe("pullCommand", () => {
         expect.objectContaining({
           sync: "merging",
           merge: expect.objectContaining({
-            conflicts: [".mcp.json"],
+            conflicts: repoRelPaths([".mcp.json"]),
           }),
         }),
       );
@@ -1120,7 +1130,9 @@ describe("pullCommand", () => {
       });
 
       const { effect, cleanup } = mockContext({
-        lock: mergingLock([".mcp.json"], { hashes: { ".mcp.json": "hash123" } }),
+        lock: mergingLock([repoRelPath(".mcp.json")], {
+          hashes: hashMap({ ".mcp.json": "hash123" }),
+        }),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -1158,9 +1170,9 @@ describe("pullCommand", () => {
 
       mockLoadLock.mockReturnValueOnce(
         Effect.succeed(
-          mergingLock([".mcp.json"], {
-            hashes: { ".mcp.json": "hash123" },
-            commitSha: "latest123",
+          mergingLock([repoRelPath(".mcp.json")], {
+            hashes: hashMap({ ".mcp.json": "hash123" }),
+            commitSha: commitSha("latest123"),
           }),
         ),
       );
@@ -1181,9 +1193,9 @@ describe("pullCommand", () => {
 
       mockLoadLock.mockReturnValueOnce(
         Effect.succeed(
-          mergingLock([".mcp.json"], {
-            hashes: { ".mcp.json": "newhash" },
-            commitSha: "newref123",
+          mergingLock([repoRelPath(".mcp.json")], {
+            hashes: hashMap({ ".mcp.json": "newhash" }),
+            commitSha: commitSha("newref123"),
           }),
         ),
       );
@@ -1214,9 +1226,9 @@ describe("pullCommand", () => {
 
       mockLoadLock.mockReturnValueOnce(
         Effect.succeed(
-          mergingLock([".mcp.json"], {
-            hashes: { ".mcp.json": "newhash" },
-            commitSha: "newref123",
+          mergingLock([repoRelPath(".mcp.json")], {
+            hashes: hashMap({ ".mcp.json": "newhash" }),
+            commitSha: commitSha("newref123"),
           }),
         ),
       );
@@ -1245,7 +1257,7 @@ describe("pullCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: ["settings.json"],
+        conflicts: repoRelPaths(["settings.json"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -1256,7 +1268,7 @@ describe("pullCommand", () => {
       // downloadBaseForMerge がベースを返す
       const baseCleanup = vi.fn();
       mockDownloadBaseForMerge.mockReturnValueOnce(
-        Effect.succeed({ templateDir: "/tmp/base", cleanup: baseCleanup }),
+        Effect.succeed({ templateDir: absPath("/tmp/base"), cleanup: baseCleanup }),
       );
 
       mockMergeResult("settings.json", '{"merged": true}');
@@ -1310,7 +1322,7 @@ describe("pullCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: [".mcp.json"],
+        conflicts: repoRelPaths([".mcp.json"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -1349,7 +1361,7 @@ describe("pullCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: ["a.json", "b.txt"],
+        conflicts: repoRelPaths(["a.json", "b.txt"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -1380,7 +1392,7 @@ describe("pullCommand", () => {
         expect.objectContaining({
           sync: "merging",
           merge: expect.objectContaining({
-            conflicts: ["b.txt"],
+            conflicts: repoRelPaths(["b.txt"]),
           }),
         }),
       );
@@ -1397,7 +1409,7 @@ describe("pullCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: ["a.json", "b.json"],
+        conflicts: repoRelPaths(["a.json", "b.json"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -1441,7 +1453,7 @@ describe("pullCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: ["config.json"],
+        conflicts: repoRelPaths(["config.json"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -1478,7 +1490,7 @@ describe("pullCommand", () => {
         autoUpdate: [],
         localOnly: [],
         conflicts: [],
-        newFiles: [".devcontainer/config.json"],
+        newFiles: repoRelPaths([".devcontainer/config.json"]),
         deletedFiles: [],
         deletedWithLocalEdits: [],
         deletedLocally: [],
@@ -1514,7 +1526,7 @@ describe("pullCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: [".claude/rules/worktree.md"],
+        conflicts: repoRelPaths([".claude/rules/worktree.md"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -1524,7 +1536,7 @@ describe("pullCommand", () => {
 
       const baseCleanup = vi.fn();
       mockDownloadBaseForMerge.mockReturnValueOnce(
-        Effect.succeed({ templateDir: "/tmp/base-template", cleanup: baseCleanup }),
+        Effect.succeed({ templateDir: absPath("/tmp/base-template"), cleanup: baseCleanup }),
       );
 
       // mergeOneFile が delete/modify conflict を処理する
@@ -1576,10 +1588,10 @@ describe("pullCommand", () => {
       });
 
       mockClassifyFiles.mockReturnValueOnce({
-        autoUpdate: [".mcp.json"],
+        autoUpdate: repoRelPaths([".mcp.json"]),
         localOnly: [],
         conflicts: [],
-        newFiles: [".new-file"],
+        newFiles: repoRelPaths([".new-file"]),
         deletedFiles: [],
         deletedWithLocalEdits: [],
         deletedLocally: [],
@@ -1608,7 +1620,7 @@ describe("pullCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: [".mcp.json"],
+        conflicts: repoRelPaths([".mcp.json"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -1642,7 +1654,7 @@ describe("pullCommand", () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
-        conflicts: [".mcp.json"],
+        conflicts: repoRelPaths([".mcp.json"]),
         newFiles: [],
         deletedFiles: [],
         deletedWithLocalEdits: [],
@@ -1679,7 +1691,7 @@ describe("pullCommand", () => {
         localOnly: [],
         conflicts: [],
         newFiles: [],
-        deletedFiles: ["old-file.txt"],
+        deletedFiles: repoRelPaths(["old-file.txt"]),
         deletedWithLocalEdits: [],
         deletedLocally: [],
         unchanged: [],
@@ -1709,7 +1721,7 @@ describe("pullCommand", () => {
         deletedFiles: [],
         deletedWithLocalEdits: [],
         deletedLocally: [],
-        unchanged: [".mcp.json"],
+        unchanged: repoRelPaths([".mcp.json"]),
       });
 
       await (pullCommand.run as any)({

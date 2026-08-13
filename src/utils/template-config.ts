@@ -9,10 +9,10 @@ import { Effect } from "effect";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { parse } from "jsonc-parser";
-import { join } from "pathe";
 import { zikuConfigSchema } from "../modules/schemas";
-import type { ZikuConfig } from "../modules/schemas";
+import type { AbsPath, GlobPattern, ZikuConfig } from "../modules/schemas";
 import { ParseError, TemplateNotConfiguredError } from "../errors";
+import { joinAbs } from "./paths";
 import { ZIKU_CONFIG_FILE } from "./ziku-config";
 
 /**
@@ -22,10 +22,10 @@ import { ZIKU_CONFIG_FILE } from "./ziku-config";
  * init 時にどのディレクトリを同期するか選択するためのデータソース。
  */
 export function loadTemplateConfig(
-  templateDir: string,
+  templateDir: AbsPath,
 ): Effect.Effect<ZikuConfig, TemplateNotConfiguredError | ParseError> {
   return Effect.gen(function* () {
-    const configPath = join(templateDir, ZIKU_CONFIG_FILE);
+    const configPath = joinAbs(templateDir, ZIKU_CONFIG_FILE);
 
     if (!existsSync(configPath)) {
       return yield* new TemplateNotConfiguredError({ templateDir });
@@ -53,8 +53,8 @@ export function loadTemplateConfig(
 /**
  * テンプレートに .ziku/ziku.jsonc が存在するか確認する。
  */
-export function templateConfigExists(templateDir: string): boolean {
-  return existsSync(join(templateDir, ZIKU_CONFIG_FILE));
+export function templateConfigExists(templateDir: AbsPath): boolean {
+  return existsSync(joinAbs(templateDir, ZIKU_CONFIG_FILE));
 }
 
 /**
@@ -72,10 +72,10 @@ export function templateConfigExists(templateDir: string): boolean {
  *     ]
  */
 export function extractDirectoryEntries(
-  includePatterns: string[],
-): Array<{ label: string; patterns: string[] }> {
-  const dirMap = new Map<string, string[]>();
-  const rootFiles: string[] = [];
+  includePatterns: readonly GlobPattern[],
+): Array<{ label: string; patterns: GlobPattern[] }> {
+  const dirMap = new Map<string, GlobPattern[]>();
+  const rootFiles: GlobPattern[] = [];
 
   for (const pattern of includePatterns) {
     const slashIndex = pattern.indexOf("/");
@@ -92,7 +92,7 @@ export function extractDirectoryEntries(
     }
   }
 
-  const entries: Array<{ label: string; patterns: string[] }> = [];
+  const entries: Array<{ label: string; patterns: GlobPattern[] }> = [];
 
   // ディレクトリをアルファベット順でソート
   for (const [dir, patterns] of [...dirMap.entries()].toSorted(([a], [b]) => a.localeCompare(b))) {

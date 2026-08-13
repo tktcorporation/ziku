@@ -19,6 +19,7 @@ vi.mock("tinyglobby", () => ({
   glob: vi.fn(),
 }));
 
+const { absPath, globPatterns, repoRelPath } = await import("../../__tests__/brands");
 const { hashBytes, hashContent, hashFiles } = await import("../hash");
 const { glob } = await import("tinyglobby");
 const mockedGlob = vi.mocked(glob);
@@ -78,18 +79,18 @@ describe("hashFiles", () => {
 
     mockedGlob.mockResolvedValue([".github/ci.yml", ".github/label.yml"]);
 
-    const hashes = await hashFiles("/project", [".github/**"]);
+    const hashes = await hashFiles(absPath("/project"), globPatterns([".github/**"]));
     expect(Object.keys(hashes)).toHaveLength(2);
-    expect(hashes[".github/ci.yml"]).toBeDefined();
-    expect(hashes[".github/label.yml"]).toBeDefined();
-    expect(hashes["README.md"]).toBeUndefined();
+    expect(hashes[repoRelPath(".github/ci.yml")]).toBeDefined();
+    expect(hashes[repoRelPath(".github/label.yml")]).toBeDefined();
+    expect(hashes[repoRelPath("README.md")]).toBeUndefined();
   });
 
   it("should return empty map for no matches", async () => {
     vol.fromJSON({ "/project/README.md": "# Hello" });
     mockedGlob.mockResolvedValue([]);
 
-    const hashes = await hashFiles("/project", [".nonexistent/**"]);
+    const hashes = await hashFiles(absPath("/project"), globPatterns([".nonexistent/**"]));
     expect(hashes).toEqual({});
   });
 
@@ -97,8 +98,8 @@ describe("hashFiles", () => {
     vol.fromJSON({ "/project/file.txt": "content" });
     mockedGlob.mockResolvedValue(["file.txt"]);
 
-    const hashes = await hashFiles("/project", ["**"]);
-    expect(hashes["file.txt"]).toBe(hashContent("content"));
+    const hashes = await hashFiles(absPath("/project"), globPatterns(["**"]));
+    expect(hashes[repoRelPath("file.txt")]).toBe(hashContent("content"));
   });
 
   it("バイナリファイルは内容が違えば違うハッシュになる", async () => {
@@ -108,8 +109,8 @@ describe("hashFiles", () => {
     vol.writeFileSync("/project/b.bin", Buffer.from([0x00, 0xfe, 0x41]));
     mockedGlob.mockResolvedValue(["a.bin", "b.bin"]);
 
-    const hashes = await hashFiles("/project", ["**"]);
-    expect(hashes["a.bin"]).not.toBe(hashes["b.bin"]);
+    const hashes = await hashFiles(absPath("/project"), globPatterns(["**"]));
+    expect(hashes[repoRelPath("a.bin")]).not.toBe(hashes[repoRelPath("b.bin")]);
   });
 
   it("改行コードが違うファイルは違うハッシュになる（正規化しない）", async () => {
@@ -117,7 +118,7 @@ describe("hashFiles", () => {
     vol.fromJSON({ "/project/lf.txt": "a\nb\n", "/project/crlf.txt": "a\r\nb\r\n" });
     mockedGlob.mockResolvedValue(["lf.txt", "crlf.txt"]);
 
-    const hashes = await hashFiles("/project", ["**"]);
-    expect(hashes["lf.txt"]).not.toBe(hashes["crlf.txt"]);
+    const hashes = await hashFiles(absPath("/project"), globPatterns(["**"]));
+    expect(hashes[repoRelPath("lf.txt")]).not.toBe(hashes[repoRelPath("crlf.txt")]);
   });
 });

@@ -12,7 +12,7 @@ import { Effect } from "effect";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { match } from "ts-pattern";
-import type { FileDiff, OverwriteStrategy } from "../modules/schemas";
+import type { GlobPattern, FileDiff, OverwriteStrategy, RepoRelPath } from "../modules/schemas";
 import type { UntrackedFilesByFolder } from "../utils/untracked";
 import { calculateDiffStats, formatStats } from "./diff-view";
 import { selectFilesWithDiffPreview } from "./file-select-with-diff";
@@ -34,8 +34,8 @@ function handleCancel(value: unknown): void {
  * ユーザーに選択させる。選択結果はパターン文字列の配列。
  */
 export async function selectDirectories(
-  entries: Array<{ label: string; patterns: string[] }>,
-): Promise<string[]> {
+  entries: Array<{ label: string; patterns: GlobPattern[] }>,
+): Promise<GlobPattern[]> {
   const selected = await p.multiselect({
     message: "Select directories to sync",
     options: entries.map((e) => ({
@@ -275,7 +275,7 @@ export async function selectPushFilesFallback(
  */
 export async function selectUntrackedToTrack(
   untrackedByFolder: UntrackedFilesByFolder[],
-): Promise<string[]> {
+): Promise<RepoRelPath[]> {
   const options = untrackedByFolder.flatMap((group) =>
     group.files.map((file) => ({
       value: file.path,
@@ -292,7 +292,7 @@ export async function selectUntrackedToTrack(
     required: false,
   });
   handleCancel(selected);
-  return selected as string[];
+  return selected as RepoRelPath[];
 }
 
 /**
@@ -494,20 +494,20 @@ export async function confirmRetryConflictResolution(): Promise<boolean> {
 /** 削除候補ファイルの multiselect。選択されなかったファイルはローカルに残る。 */
 async function selectFilesToDelete(
   message: string,
-  options: Array<{ value: string; label: string; hint?: string }>,
-): Promise<string[]> {
+  options: Array<{ value: RepoRelPath; label: string; hint?: string }>,
+): Promise<RepoRelPath[]> {
   const result = await p.multiselect({ message, options, required: false });
   if (p.isCancel(result)) {
     p.cancel("Operation cancelled.");
     process.exit(0);
   }
-  return result as string[];
+  return result as RepoRelPath[];
 }
 
 /**
  * テンプレートで削除されたファイルの中から、ローカルでも削除するものを選択する。
  */
-export function selectDeletedFiles(files: string[]): Promise<string[]> {
+export function selectDeletedFiles(files: readonly RepoRelPath[]): Promise<RepoRelPath[]> {
   return selectFilesToDelete(
     "These files were deleted in template. Select to delete locally:",
     files.map((f) => ({ value: f, label: f })),
@@ -520,7 +520,9 @@ export function selectDeletedFiles(files: string[]): Promise<string[]> {
  * 削除するとローカルの編集が失われる。選択を省略できる操作にしないため、
  * `--force` を含むどの経路でもこのプロンプトを通す。
  */
-export function selectDeletedFilesWithLocalEdits(files: string[]): Promise<string[]> {
+export function selectDeletedFilesWithLocalEdits(
+  files: readonly RepoRelPath[],
+): Promise<RepoRelPath[]> {
   return selectFilesToDelete(
     "These files were deleted in template but you edited them locally. Select to delete (your edits will be lost):",
     files.map((f) => ({ value: f, label: f, hint: "locally edited" })),
@@ -530,7 +532,7 @@ export function selectDeletedFilesWithLocalEdits(files: string[]): Promise<strin
 /**
  * コンフリクトのあるファイルを $EDITOR で開く。
  */
-export function openEditorForConflicts(filePaths: string[]): void {
+export function openEditorForConflicts(filePaths: readonly string[]): void {
   const editor = process.env.VISUAL || process.env.EDITOR || "vi";
   for (const filePath of filePaths) {
     // エディタ起動失敗は None → スキップ（呼び出し側で対処不要な fire-and-forget）

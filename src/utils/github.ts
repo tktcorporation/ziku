@@ -3,7 +3,15 @@ import { Effect, Option } from "effect";
 import { match } from "ts-pattern";
 import { zikuFailure } from "../errors";
 import type { ZikuFailure } from "../errors";
-import type { BranchRef, PrResult, TemplateRef } from "../modules/schemas";
+import type {
+  BlobSha,
+  BranchRef,
+  CommitSha,
+  PrResult,
+  RepoRelPath,
+  TemplateRef,
+} from "../modules/schemas";
+import { blobShaSchema, commitShaSchema } from "../modules/schemas";
 import { transportTextToBytes } from "./file-content";
 
 export interface PushOptions {
@@ -14,9 +22,9 @@ export interface PushOptions {
    * エンコードで載っている（`src/utils/file-content.ts`）。GitHub API へ渡す前に
    * 元のバイト列へ戻す。
    */
-  files: Array<{ path: string; content: string }>;
+  files: Array<{ path: RepoRelPath; content: string }>;
   /** テンプレートから削除するファイル（PR にファイル削除コミットを含める） */
-  deletions?: Array<{ path: string }>;
+  deletions?: Array<{ path: RepoRelPath }>;
   title: string;
   body?: string;
   baseBranch?: string;
@@ -81,10 +89,12 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
         `Consider reducing the number of files in ${forkOwner}/${forkRepo}.`,
     );
   }
-  const shaMap = new Map<string, string>();
+  // GitHub が採番した blob SHA の写像。ziku が計算する内容ハッシュと形が同じなので、
+  // API レスポンスから取り出すここで blob SHA として brand しておく。
+  const shaMap = new Map<string, BlobSha>();
   for (const item of treeData.tree) {
     if (item.type === "blob" && item.sha !== undefined && item.sha !== null && item.path) {
-      shaMap.set(item.path, item.sha);
+      shaMap.set(item.path, blobShaSchema.parse(item.sha));
     }
   }
 
@@ -140,7 +150,7 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
 /**
  * PR の本文を生成
  */
-function generatePrBody(files: Array<{ path: string; content: string }>): string {
+function generatePrBody(files: Array<{ path: RepoRelPath; content: string }>): string {
   const fileList = files.map((f) => `- \`${f.path}\``).join("\n");
 
   return `## Summary
@@ -466,7 +476,7 @@ async function fetchCommitSha(
   owner: string,
   repo: string,
   ref: string,
-): Promise<string | undefined> {
+): Promise<CommitSha | undefined> {
   return Option.getOrUndefined(
     await Effect.runPromise(
       Effect.tryPromise(async () => {
@@ -475,7 +485,8 @@ async function fetchCommitSha(
           headers: { Accept: "application/vnd.github.sha" },
         });
         if (!res.ok) return undefined;
-        return (await res.text()).trim();
+        // API レスポンスがコミット SHA の入口。ここから先は brand 付きで流れる。
+        return commitShaSchema.parse((await res.text()).trim());
       }).pipe(Effect.option),
     ),
   );
@@ -493,7 +504,7 @@ export async function resolveLatestCommitSha(
   owner: string,
   repo: string,
   branch?: BranchRef,
-): Promise<string | undefined> {
+): Promise<CommitSha | undefined> {
   const name = branch?.name ?? (await resolveDefaultBranch(owner, repo));
   if (name === undefined) return undefined;
 
@@ -514,12 +525,12 @@ export function resolveSourceCommitSha(
   owner: string,
   repo: string,
   ref?: TemplateRef,
-): Promise<string | undefined> {
+): Promise<CommitSha | undefined> {
   return match(ref)
     .with(undefined, () => resolveLatestCommitSha(owner, repo))
     .with({ kind: "branch" }, (branch) => resolveLatestCommitSha(owner, repo, branch))
     .with({ kind: "tag" }, (tag) => fetchCommitSha(owner, repo, tag.name))
-    .with({ kind: "commit" }, (commit) => Promise.resolve<string | undefined>(commit.sha))
+    .with({ kind: "commit" }, (commit) => Promise.resolve<CommitSha | undefined>(commit.sha))
     .exhaustive();
 }
 

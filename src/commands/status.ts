@@ -1,6 +1,5 @@
 import { defineCommand } from "citty";
 import { Effect, Option } from "effect";
-import { resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
 import type { LockState } from "../modules/schemas";
@@ -14,6 +13,7 @@ import { categorizeForStatus, decideRecommendation, type Recommendation } from "
 import { withZikuConfigAt, zikuConfigStatusCategory } from "../utils/merge/sync-plan";
 import { analyzeSync } from "../utils/sync-analysis";
 import { analyzeConfigDrift } from "../utils/config-merge";
+import { absPath } from "../utils/paths";
 import { mergeTemplatePatterns } from "../utils/template-patterns";
 import { detectUntrackedFiles } from "../utils/untracked";
 import { ZIKU_CONFIG_FILE, withConfigTracked, zikuConfigExists } from "../utils/ziku-config";
@@ -67,7 +67,7 @@ export const statusCommand = defineCommand({
   async run({ args }) {
     intro("status");
 
-    const targetDir = resolve(args.dir);
+    const targetDir = absPath(args.dir);
 
     // Fast-path: コンフリクト解決待ちを検出できればテンプレートを fetch せずに案内する。
     //

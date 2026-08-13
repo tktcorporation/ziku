@@ -1,5 +1,5 @@
 import { match } from "ts-pattern";
-import type { LockState } from "../modules/schemas";
+import type { LockState, RepoRelPath } from "../modules/schemas";
 import type { FileClassification } from "./merge/types";
 
 /**
@@ -29,7 +29,7 @@ export type EntryCategory = Exclude<keyof FileClassification, "unchanged">;
  * 警告表示する。
  */
 export interface StatusEntry {
-  readonly path: string;
+  readonly path: RepoRelPath;
   readonly direction: StatusDirection;
   readonly category: EntryCategory;
   /**

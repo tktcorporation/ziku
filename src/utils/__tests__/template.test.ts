@@ -1,5 +1,6 @@
 import { vol } from "memfs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { commitSha } from "../../__tests__/brands";
 import type { CopyResult } from "../template";
 import { buildCommitPinnedSource, buildTemplateSource } from "../template";
 
@@ -67,7 +68,7 @@ describe("buildTemplateSource", () => {
         kind: "github",
         owner: "my-org",
         repo: "repo",
-        ref: { kind: "commit", sha: "abc123def" },
+        ref: { kind: "commit", sha: commitSha("abc123def") },
       }),
     ).toBe("gh:my-org/repo#abc123def");
   });
@@ -89,7 +90,7 @@ describe("buildCommitPinnedSource", () => {
           repo: "repo",
           ref: { kind: "branch", name: "develop" },
         },
-        "deadbeef",
+        commitSha("deadbeef"),
       ),
     ).toBe("gh:my-org/repo#deadbeef");
   });

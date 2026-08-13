@@ -1,4 +1,4 @@
-import type { HashMap } from "../modules/schemas";
+import type { AbsPath, GlobPattern, HashMap } from "../modules/schemas";
 import type { SyncPlan } from "./merge/sync-plan";
 import { partitionSyncPlan } from "./merge/sync-plan";
 import { classifyFiles } from "./merge";
@@ -18,15 +18,15 @@ export interface SyncHashes {
 }
 
 export interface AnalyzeSyncOptions {
-  readonly targetDir: string;
-  readonly templateDir: string;
+  readonly targetDir: AbsPath;
+  readonly templateDir: AbsPath;
   /**
    * 前回 sync 時のハッシュ。`baseHashesOf(lock)` の戻り値をそのまま渡す。
    * ベース未確定の lock では空になり、すべてのテンプレートファイルが `newFiles` に分類される。
    */
   readonly baseHashes: HashMap;
-  readonly include: string[];
-  readonly exclude?: string[];
+  readonly include: readonly GlobPattern[];
+  readonly exclude?: readonly GlobPattern[];
 }
 
 export interface SyncAnalysis {

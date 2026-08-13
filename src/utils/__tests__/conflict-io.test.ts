@@ -9,9 +9,11 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { Effect } from "effect";
 import { join } from "pathe";
 import { afterEach, describe, expect, it } from "vitest";
+import { absPath, repoRelPath, repoRelPaths } from "../../__tests__/brands";
+import { joinAbs } from "../paths";
 import type { FileMergeOutcome, MergeOneFileOutput } from "../merge";
 import { mergeConflictFiles, mergeOneFile, readFileSafe, writeFileEnsureDir } from "../merge";
-import type { LockState } from "../../modules/schemas";
+import type { AbsPath, LockState } from "../../modules/schemas";
 import { createPendingLock } from "../../modules/schemas";
 import { tmpdir } from "node:os";
 
@@ -27,7 +29,7 @@ function mergedContentOf(outcome: FileMergeOutcome): string {
 }
 
 /** ベースツリーを取り直せない lock（ローカルテンプレート）。 */
-function localSourceLock(templatePath: string): LockState {
+function localSourceLock(templatePath: AbsPath): LockState {
   return createPendingLock({
     version: "0.1.0",
     installedAt: "2024-01-01T00:00:00.000Z",
@@ -36,17 +38,19 @@ function localSourceLock(templatePath: string): LockState {
 }
 
 /** テストごとにユニークな一時ディレクトリを作成 */
-async function createTempDir(label: string): Promise<string> {
-  const dir = join(
-    tmpdir(),
-    `ziku-test-conflict-io-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+async function createTempDir(label: string): Promise<AbsPath> {
+  const dir = absPath(
+    join(
+      tmpdir(),
+      `ziku-test-conflict-io-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    ),
   );
   await mkdir(dir, { recursive: true });
   return dir;
 }
 
 /** ディレクトリ配下にファイルを配置するヘルパー */
-async function writeFiles(baseDir: string, files: Record<string, string>): Promise<void> {
+async function writeFiles(baseDir: AbsPath, files: Record<string, string>): Promise<void> {
   for (const [relativePath, content] of Object.entries(files)) {
     const fullPath = join(baseDir, relativePath);
     const dir = join(fullPath, "..");
@@ -58,7 +62,7 @@ async function writeFiles(baseDir: string, files: Record<string, string>): Promi
 }
 
 describe("conflict-io", () => {
-  const tempDirs: string[] = [];
+  const tempDirs: AbsPath[] = [];
 
   afterEach(async () => {
     // テスト後に一時ディレクトリをクリーンアップ
@@ -68,7 +72,7 @@ describe("conflict-io", () => {
     tempDirs.length = 0;
   });
 
-  async function temp(label: string): Promise<string> {
+  async function temp(label: string): Promise<AbsPath> {
     const dir = await createTempDir(label);
     tempDirs.push(dir);
     return dir;
@@ -79,13 +83,13 @@ describe("conflict-io", () => {
       const dir = await temp("read-exists");
       await writeFile(join(dir, "test.txt"), "hello", "utf-8");
 
-      const content = await Effect.runPromise(readFileSafe(join(dir, "test.txt")));
+      const content = await Effect.runPromise(readFileSafe(joinAbs(dir, "test.txt")));
       expect(content).toBe("hello");
     });
 
     it("存在しないファイルに対して FileNotFoundError を返す", async () => {
       const dir = await temp("read-missing");
-      const path = join(dir, "nonexistent.txt");
+      const path = joinAbs(dir, "nonexistent.txt");
 
       const exit = await Effect.runPromiseExit(readFileSafe(path));
       expect(exit._tag).toBe("Failure");
@@ -93,7 +97,7 @@ describe("conflict-io", () => {
 
     it("存在しないディレクトリ配下のファイルに対して FileNotFoundError を返す", async () => {
       const dir = await temp("read-missing-dir");
-      const path = join(dir, "nonexistent-dir", "file.txt");
+      const path = joinAbs(dir, "nonexistent-dir", "file.txt");
 
       const exit = await Effect.runPromiseExit(readFileSafe(path));
       expect(exit._tag).toBe("Failure");
@@ -101,7 +105,7 @@ describe("conflict-io", () => {
 
     it("catchTag で FileNotFoundError をフォールバックできる", async () => {
       const dir = await temp("read-catchTag");
-      const path = join(dir, "nonexistent.txt");
+      const path = joinAbs(dir, "nonexistent.txt");
 
       const content = await Effect.runPromise(
         readFileSafe(path).pipe(
@@ -116,7 +120,7 @@ describe("conflict-io", () => {
     it("既存ディレクトリにファイルを書き込む", async () => {
       const dir = await temp("write-existing");
 
-      await Effect.runPromise(writeFileEnsureDir(join(dir, "test.txt"), "content"));
+      await Effect.runPromise(writeFileEnsureDir(joinAbs(dir, "test.txt"), "content"));
 
       const content = await readFile(join(dir, "test.txt"), "utf-8");
       expect(content).toBe("content");
@@ -126,7 +130,7 @@ describe("conflict-io", () => {
       const dir = await temp("write-nested");
 
       await Effect.runPromise(
-        writeFileEnsureDir(join(dir, "a", "b", "c", "file.txt"), "deep content"),
+        writeFileEnsureDir(joinAbs(dir, "a", "b", "c", "file.txt"), "deep content"),
       );
 
       expect(existsSync(join(dir, "a", "b", "c"))).toBe(true);
@@ -145,7 +149,7 @@ describe("conflict-io", () => {
 
       const result = await Effect.runPromise(
         mergeOneFile({
-          file: "config.json",
+          file: repoRelPath("config.json"),
           targetDir,
           templateDir,
           base: { kind: "with-base", dir: templateDir },
@@ -173,7 +177,7 @@ describe("conflict-io", () => {
 
       const result = await Effect.runPromise(
         mergeOneFile({
-          file: "file.txt",
+          file: repoRelPath("file.txt"),
           targetDir,
           templateDir,
           base: { kind: "with-base", dir: baseDir },
@@ -196,7 +200,7 @@ describe("conflict-io", () => {
 
       const result = await Effect.runPromise(
         mergeOneFile({
-          file: "file.txt",
+          file: repoRelPath("file.txt"),
           targetDir,
           templateDir,
           base: { kind: "with-base", dir: baseDir },
@@ -222,7 +226,7 @@ describe("conflict-io", () => {
 
       const result = await Effect.runPromise(
         mergeOneFile({
-          file: ".claude/rules/worktree.md",
+          file: repoRelPath(".claude/rules/worktree.md"),
           targetDir,
           templateDir,
           base: { kind: "with-base", dir: baseDir },
@@ -247,7 +251,7 @@ describe("conflict-io", () => {
 
       const result = await Effect.runPromise(
         mergeOneFile({
-          file: "deep/nested/file.md",
+          file: repoRelPath("deep/nested/file.md"),
           targetDir,
           templateDir,
           base: { kind: "with-base", dir: baseDir },
@@ -267,7 +271,7 @@ describe("conflict-io", () => {
 
       const result = await Effect.runPromise(
         mergeOneFile({
-          file: "settings.json",
+          file: repoRelPath("settings.json"),
           targetDir,
           templateDir,
           base: { kind: "no-base" },
@@ -293,7 +297,7 @@ describe("conflict-io", () => {
       const seen: MergeOneFileOutput[] = [];
       const unresolved = await Effect.runPromise(
         mergeConflictFiles({
-          conflicts: ["a.txt", "b.txt"],
+          conflicts: repoRelPaths(["a.txt", "b.txt"]),
           targetDir,
           templateDir,
           lock: localSourceLock(templateDir),
@@ -317,7 +321,7 @@ describe("conflict-io", () => {
       const writtenByPull: string[] = [];
       const pullUnresolved = await Effect.runPromise(
         mergeConflictFiles({
-          conflicts: ["a.txt"],
+          conflicts: repoRelPaths(["a.txt"]),
           targetDir,
           templateDir,
           lock,
@@ -332,7 +336,7 @@ describe("conflict-io", () => {
       const keptByPush = new Map<string, string>();
       const pushUnresolved = await Effect.runPromise(
         mergeConflictFiles({
-          conflicts: ["a.txt"],
+          conflicts: repoRelPaths(["a.txt"]),
           targetDir,
           templateDir,
           lock,
@@ -365,7 +369,7 @@ describe("conflict-io", () => {
       const seen: MergeOneFileOutput[] = [];
       const unresolved = await Effect.runPromise(
         mergeConflictFiles({
-          conflicts: ["icon.png", "a.txt"],
+          conflicts: repoRelPaths(["icon.png", "a.txt"]),
           targetDir,
           templateDir,
           lock: localSourceLock(templateDir),

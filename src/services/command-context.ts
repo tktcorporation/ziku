@@ -9,7 +9,7 @@
  */
 import { Cause, Context, Effect, Exit, Layer, Option, Scope } from "effect";
 import { match } from "ts-pattern";
-import type { ZikuConfig, LockState, TemplateSource } from "../modules/schemas";
+import type { AbsPath, CommitSha, ZikuConfig, LockState, TemplateSource } from "../modules/schemas";
 import { ZikuError, zikuFailure } from "../errors";
 import type {
   FileNotFoundError,
@@ -33,7 +33,7 @@ export interface CommandContextShape {
   /** テンプレートの取得元（lock.source のエイリアス） */
   readonly source: TemplateSource;
   /** 解決済みテンプレートディレクトリのパス */
-  readonly templateDir: string;
+  readonly templateDir: AbsPath;
   /**
    * テンプレートの一時ディレクトリを削除する関数。
    *
@@ -49,7 +49,7 @@ export interface CommandContextShape {
    * ローカルソースの場合は None を返す。ソース種別の分岐を吸収し、呼び出し元は
    * ソース種別を意識せずに使える。
    */
-  readonly resolveBaseRef: Effect.Effect<Option.Option<string>>;
+  readonly resolveBaseRef: Effect.Effect<Option.Option<CommitSha>>;
 }
 
 /**
@@ -99,7 +99,7 @@ export async function runCommandEffect<A>(
  * 4. resolveBaseRef を source 種別に応じて構築
  */
 export function loadCommandContext(
-  targetDir: string,
+  targetDir: AbsPath,
 ): Effect.Effect<CommandContextShape, ContextLoadError> {
   return Effect.gen(function* () {
     const { config } = yield* loadZikuConfig(targetDir);
@@ -139,10 +139,10 @@ export function loadCommandContext(
       .with({ kind: "github" }, (gh) =>
         Effect.tryPromise(() => resolveSourceCommitSha(gh.owner, gh.repo, gh.ref)).pipe(
           Effect.map(Option.fromNullable),
-          Effect.orElseSucceed(() => Option.none<string>()),
+          Effect.orElseSucceed(() => Option.none<CommitSha>()),
         ),
       )
-      .with({ kind: "local" }, () => Effect.succeed(Option.none<string>()))
+      .with({ kind: "local" }, () => Effect.succeed(Option.none<CommitSha>()))
       .exhaustive();
 
     return { config, lock, source, templateDir, cleanup, resolveBaseRef };
@@ -153,7 +153,7 @@ export function loadCommandContext(
  * CommandContext の Layer を構築する。
  */
 export function makeCommandContextLayer(
-  targetDir: string,
+  targetDir: AbsPath,
 ): Layer.Layer<CommandContext, ContextLoadError> {
   return Layer.effect(CommandContext, loadCommandContext(targetDir));
 }

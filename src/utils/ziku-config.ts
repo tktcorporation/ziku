@@ -8,13 +8,14 @@ import {
   parse,
   printParseErrorCode,
 } from "jsonc-parser";
-import { dirname, join } from "pathe";
+import { dirname } from "pathe";
 import { match } from "ts-pattern";
-import type { ZikuConfig } from "../modules/schemas";
+import type { AbsPath, GlobPattern, RepoRelPath, ZikuConfig } from "../modules/schemas";
 import { zikuConfigSchema } from "../modules/schemas";
 import { FileNotFoundError, ParseError, ValidationError } from "../errors";
+import { globPattern, joinAbs, pathAsPattern, repoRelPath } from "./paths";
 
-export const ZIKU_CONFIG_FILE = ".ziku/ziku.jsonc";
+export const ZIKU_CONFIG_FILE: RepoRelPath = repoRelPath(".ziku/ziku.jsonc");
 
 // ─── 同期対象パスの種別 ───
 
@@ -33,8 +34,8 @@ export const ZIKU_CONFIG_FILE = ".ziku/ziku.jsonc";
  * `src/utils/merge/sync-plan.ts` に集約する。
  */
 export type SyncPath =
-  | { readonly kind: "syncedFile"; readonly path: string }
-  | { readonly kind: "zikuConfig"; readonly path: string };
+  | { readonly kind: "syncedFile"; readonly path: RepoRelPath }
+  | { readonly kind: "zikuConfig"; readonly path: RepoRelPath };
 
 /**
  * 特別扱いする種別と、その相対パス。
@@ -42,7 +43,7 @@ export type SyncPath =
  * `Record` で全種別を必須にしているのは、`SyncPath` に種別を足したときにこの表がコンパイル
  * エラーになり、パスの登録漏れに気付けるようにするため。
  */
-const SPECIAL_SYNC_PATHS: Record<Exclude<SyncPath["kind"], "syncedFile">, string> = {
+const SPECIAL_SYNC_PATHS: Record<Exclude<SyncPath["kind"], "syncedFile">, RepoRelPath> = {
   zikuConfig: ZIKU_CONFIG_FILE,
 };
 
@@ -52,7 +53,7 @@ const SPECIAL_SYNC_PATHS: Record<Exclude<SyncPath["kind"], "syncedFile">, string
  * 特別扱いのファイルは、ユーザーが除外していても ziku 自身が同期の前提として必要とする。
  * `SPECIAL_SYNC_PATHS` から導くので、種別を足せば下の入口すべてが自動的に追随する。
  */
-const ALWAYS_TRACKED_PATHS: readonly string[] = Object.values(SPECIAL_SYNC_PATHS);
+const ALWAYS_TRACKED_PATHS: readonly RepoRelPath[] = Object.values(SPECIAL_SYNC_PATHS);
 
 /**
  * パスの種別を判定する。
@@ -60,7 +61,7 @@ const ALWAYS_TRACKED_PATHS: readonly string[] = Object.values(SPECIAL_SYNC_PATHS
  * 「このパスは ziku 自身の設定ファイルか」を決めるのはこの関数だけで、他の判定
  * （{@link isZikuConfigPath}、分類結果の仕分け）はすべてここを経由する。
  */
-export function classifySyncPath(path: string): SyncPath {
+export function classifySyncPath(path: RepoRelPath): SyncPath {
   if (path === SPECIAL_SYNC_PATHS.zikuConfig) return { kind: "zikuConfig", path };
   return { kind: "syncedFile", path };
 }
@@ -71,7 +72,7 @@ export function classifySyncPath(path: string): SyncPath {
  * 分類結果ではなく個々のパス（push 候補の一覧など）から設定ファイルを見つける入口。
  * 網羅的な分岐で書くことで、種別が増えたときに判定漏れがコンパイルエラーになる。
  */
-export function isZikuConfigPath(path: string): boolean {
+export function isZikuConfigPath(path: RepoRelPath): boolean {
   return match(classifySyncPath(path))
     .with({ kind: "zikuConfig" }, () => true)
     .with({ kind: "syncedFile" }, () => false)
@@ -89,9 +90,12 @@ export function isZikuConfigPath(path: string): boolean {
  * 注意: `.ziku/**` ではなくリテラルパス 1 本だけを足す。`.ziku/lock.json`（テンプレート
  * 取得元 source を含むローカル専用ファイル）を同期対象に巻き込まないため。
  */
-export function withConfigTracked(include: string[]): string[] {
-  const missing = ALWAYS_TRACKED_PATHS.filter((path) => !include.includes(path));
-  return missing.length === 0 ? include : [...include, ...missing];
+export function withConfigTracked(include: readonly GlobPattern[]): GlobPattern[] {
+  const present = new Set<string>(include);
+  const missing = ALWAYS_TRACKED_PATHS.filter((path) => !present.has(path)).map((path) =>
+    pathAsPattern(path),
+  );
+  return [...include, ...missing];
 }
 
 /**
@@ -102,8 +106,9 @@ export function withConfigTracked(include: string[]): string[] {
  * `.ziku/lock.json`（テンプレート取得元 source を含むローカル専用ファイル）まで追跡候補に
  * 出てしまう。特別扱いのファイルは常に追跡されるので、探索対象から外しても追跡漏れは起きない。
  */
-export function withoutConfigTracked(include: string[]): string[] {
-  return include.filter((path) => !ALWAYS_TRACKED_PATHS.includes(path));
+export function withoutConfigTracked(include: readonly GlobPattern[]): GlobPattern[] {
+  const alwaysTracked = new Set<string>(ALWAYS_TRACKED_PATHS);
+  return include.filter((pattern) => !alwaysTracked.has(pattern));
 }
 
 /**
@@ -122,8 +127,8 @@ export function withoutConfigTracked(include: string[]): string[] {
  * 3 者が共有できるのは「どのパスが対象か」だけなので、その一覧をこの関数と
  * {@link withConfigTracked} が同じ定数から引く。
  */
-export function alwaysTrackedPathsIn(dir: string): string[] {
-  return ALWAYS_TRACKED_PATHS.filter((path) => existsSync(join(dir, path)));
+export function alwaysTrackedPathsIn(dir: AbsPath): RepoRelPath[] {
+  return ALWAYS_TRACKED_PATHS.filter((path) => existsSync(joinAbs(dir, path)));
 }
 
 export const ZIKU_CONFIG_SCHEMA_URL =
@@ -153,12 +158,12 @@ function describeJsoncError(error: JsoncParseError, content: string): string {
  * - `ValidationError`: JSONC ではあるが ziku の設定として解釈できない
  */
 export function loadZikuConfig(
-  targetDir: string,
+  targetDir: AbsPath,
 ): Effect.Effect<
   { config: ZikuConfig; rawContent: string },
   FileNotFoundError | ParseError | ValidationError
 > {
-  const configPath = join(targetDir, ZIKU_CONFIG_FILE);
+  const configPath = joinAbs(targetDir, ZIKU_CONFIG_FILE);
 
   return Effect.gen(function* () {
     const content = yield* Effect.tryPromise({
@@ -198,8 +203,8 @@ export function loadZikuConfig(
 /**
  * .ziku/ziku.jsonc を保存
  */
-export async function saveZikuConfig(targetDir: string, content: string): Promise<void> {
-  const configPath = join(targetDir, ZIKU_CONFIG_FILE);
+export async function saveZikuConfig(targetDir: AbsPath, content: string): Promise<void> {
+  const configPath = joinAbs(targetDir, ZIKU_CONFIG_FILE);
   await mkdir(dirname(configPath), { recursive: true });
   await writeFile(configPath, content);
 }
@@ -207,8 +212,8 @@ export async function saveZikuConfig(targetDir: string, content: string): Promis
 /**
  * .ziku/ziku.jsonc が存在するか確認
  */
-export function zikuConfigExists(targetDir: string): boolean {
-  return existsSync(join(targetDir, ZIKU_CONFIG_FILE));
+export function zikuConfigExists(targetDir: AbsPath): boolean {
+  return existsSync(joinAbs(targetDir, ZIKU_CONFIG_FILE));
 }
 
 /**
@@ -217,7 +222,10 @@ export function zikuConfigExists(targetDir: string): boolean {
  * テンプレート側・ユーザー側で同一フォーマット。
  * source 情報は lock.json に分離されたため、ここにはパターンのみ。
  */
-export function generateZikuJsonc(opts: { include: string[]; exclude: string[] }): string {
+export function generateZikuJsonc(opts: {
+  include: readonly GlobPattern[];
+  exclude: readonly GlobPattern[];
+}): string {
   const content: Record<string, unknown> = {
     $schema: ZIKU_CONFIG_SCHEMA_URL,
     include: opts.include,
@@ -234,17 +242,21 @@ export function generateZikuJsonc(opts: { include: string[]; exclude: string[] }
  * 同じ差分に揃えるための共有ヘルパー。ここを分けないと「実際に追加される集合」と
  * 「表示される集合」が別々の判定になり、既存パターンを混ぜて指定したときにズレる。
  */
-export function newIncludePatterns(existing: string[], patterns: string[]): string[] {
-  return patterns.filter((p) => !existing.includes(p));
+export function newIncludePatterns(
+  existing: readonly GlobPattern[],
+  patterns: readonly GlobPattern[],
+): GlobPattern[] {
+  const known = new Set<string>(existing);
+  return patterns.filter((p) => !known.has(p));
 }
 
 /**
  * ziku.jsonc の include にパターンを追加
  * @returns 更新後の JSONC 文字列
  */
-export function addIncludePattern(rawContent: string, patterns: string[]): string {
-  const parsed = parse(rawContent) as ZikuConfig;
-  const existing = parsed.include ?? [];
+export function addIncludePattern(rawContent: string, patterns: readonly GlobPattern[]): string {
+  const parsed = parse(rawContent) as { include?: string[] } | undefined;
+  const existing = (parsed?.include ?? []).map((pattern) => globPattern(pattern));
   const newPatterns = newIncludePatterns(existing, patterns);
 
   if (newPatterns.length === 0) {

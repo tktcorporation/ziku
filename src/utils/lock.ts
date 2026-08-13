@@ -1,11 +1,12 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { Effect } from "effect";
-import { dirname, join } from "pathe";
-import type { LockState } from "../modules/schemas";
+import { dirname } from "pathe";
+import type { AbsPath, LockState, RepoRelPath } from "../modules/schemas";
 import { lockSchema } from "../modules/schemas";
 import { FileNotFoundError, ParseError, ValidationError } from "../errors";
+import { joinAbs, repoRelPath } from "./paths";
 
-export const LOCK_FILE = ".ziku/lock.json";
+export const LOCK_FILE: RepoRelPath = repoRelPath(".ziku/lock.json");
 
 /**
  * 読めない lock.json のうち、同期状態をトップレベルの optional フィールドで表していた
@@ -36,9 +37,9 @@ function hasUnreadableShape(data: unknown): boolean {
  * - `ValidationError`: JSON ではあるが lock として解釈できない
  */
 export function loadLock(
-  targetDir: string,
+  targetDir: AbsPath,
 ): Effect.Effect<LockState, FileNotFoundError | ParseError | ValidationError> {
-  const lockPath = join(targetDir, LOCK_FILE);
+  const lockPath = joinAbs(targetDir, LOCK_FILE);
 
   return Effect.gen(function* () {
     const content = yield* Effect.tryPromise({
@@ -78,8 +79,8 @@ export function loadLock(
  * 引数が `LockState` なので、同期状態の組み合わせは型が保証する。状態を進めるときは
  * `markSynced` / `markMerging` / `resolveMerge` を通すこと。
  */
-export async function saveLock(targetDir: string, lock: LockState): Promise<void> {
-  const lockPath = join(targetDir, LOCK_FILE);
+export async function saveLock(targetDir: AbsPath, lock: LockState): Promise<void> {
+  const lockPath = joinAbs(targetDir, LOCK_FILE);
   await mkdir(dirname(lockPath), { recursive: true });
   await writeFile(lockPath, `${JSON.stringify(lock, null, 2)}\n`);
 }

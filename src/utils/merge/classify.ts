@@ -1,4 +1,6 @@
 import { match } from "ts-pattern";
+import type { ContentHash } from "../../modules/schemas";
+import { repoRelPaths } from "../paths";
 import type { ClassifyOptions, FileCategory, FileClassification } from "./types";
 
 /** 分類カテゴリ名。FileClassification のキーと対応する。 */
@@ -18,9 +20,9 @@ type Presence = { hasBase: boolean; hasLocal: boolean; hasTemplate: boolean };
  * テンプレート側に無いファイルを入れると読み込みが失敗して回復不能になる。
  */
 function classifyOneFile(
-  base: string | undefined,
-  local: string | undefined,
-  template: string | undefined,
+  base: ContentHash | undefined,
+  local: ContentHash | undefined,
+  template: ContentHash | undefined,
 ): Category {
   const presence: Presence = {
     hasBase: base !== undefined,
@@ -63,9 +65,9 @@ function classifyOneFile(
  * ローカル/テンプレートどちらが変更されたかで判定する。
  */
 function classifyThreeWay(
-  base: string | undefined,
-  local: string | undefined,
-  template: string | undefined,
+  base: ContentHash | undefined,
+  local: ContentHash | undefined,
+  template: ContentHash | undefined,
 ): Category {
   const localChanged = local !== base;
   const templateChanged = template !== base;
@@ -97,10 +99,14 @@ export function classifyFiles(opts: ClassifyOptions): FileClassification {
     unchanged: [],
   };
 
-  const allFiles = new Set([
-    ...Object.keys(baseHashes),
-    ...Object.keys(localHashes),
-    ...Object.keys(templateHashes),
+  // `Object.keys` はハッシュマップの鍵 brand を落として `string` を返す。走査対象は
+  // 3 つのマップの鍵そのものなので、重複を畳んでから相対パスとして brand し直す。
+  const allFiles = repoRelPaths([
+    ...new Set([
+      ...Object.keys(baseHashes),
+      ...Object.keys(localHashes),
+      ...Object.keys(templateHashes),
+    ]),
   ]);
 
   for (const file of allFiles) {

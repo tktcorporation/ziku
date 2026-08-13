@@ -5,6 +5,8 @@
  * コマンドへ散らばっていないことは、コマンドを経由せずここだけで仕様を固定できる形で表れる。
  */
 import { describe, expect, it } from "vitest";
+import { repoRelPath, repoRelPaths } from "../../__tests__/brands";
+import type { RepoRelPath } from "../../modules/schemas";
 import type { FileCategory, FileClassification } from "../merge/types";
 import {
   partitionSyncPlan,
@@ -42,12 +44,12 @@ function emptyClassification(): FileClassification {
 /** 指定カテゴリに ziku.jsonc と通常ファイルが 1 つずつ入った分類結果。 */
 function classificationWith(category: FileCategory): FileClassification {
   const classification = emptyClassification();
-  classification[category].push(ZIKU_CONFIG_FILE, "a.txt");
+  classification[category].push(ZIKU_CONFIG_FILE, repoRelPath("a.txt"));
   return classification;
 }
 
 /** 分類結果の全カテゴリを平坦化する。 */
-function allPaths(classification: FileClassification): string[] {
+function allPaths(classification: FileClassification): RepoRelPath[] {
   return ALL_CATEGORIES.flatMap((category) => classification[category]);
 }
 
@@ -63,7 +65,10 @@ describe("partitionSyncPlan", () => {
   );
 
   it("ziku.jsonc が分類に現れなければ Untracked", () => {
-    const plan = partitionSyncPlan({ ...emptyClassification(), localOnly: ["a.txt"] });
+    const plan = partitionSyncPlan({
+      ...emptyClassification(),
+      localOnly: repoRelPaths(["a.txt"]),
+    });
 
     expect(plan.config).toEqual({ _tag: "Untracked" });
     expect(plan.files.localOnly).toEqual(["a.txt"]);
@@ -72,7 +77,7 @@ describe("partitionSyncPlan", () => {
   it("通常ファイルの並びは変えない", () => {
     const plan = partitionSyncPlan({
       ...emptyClassification(),
-      conflicts: ["b.txt", ZIKU_CONFIG_FILE, "a.txt"],
+      conflicts: [repoRelPath("b.txt"), ZIKU_CONFIG_FILE, repoRelPath("a.txt")],
     });
 
     expect(plan.files.conflicts).toEqual(["b.txt", "a.txt"]);
@@ -177,7 +182,7 @@ describe("withZikuConfigAt", () => {
   });
 
   it("元の分類結果を破壊しない", () => {
-    const files = { ...emptyClassification(), localOnly: ["a.txt"] };
+    const files = { ...emptyClassification(), localOnly: repoRelPaths(["a.txt"]) };
     withZikuConfigAt(files, "localOnly");
 
     expect(files.localOnly).toEqual(["a.txt"]);

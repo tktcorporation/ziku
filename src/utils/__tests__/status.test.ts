@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { absPath, repoRelPath, repoRelPaths } from "../../__tests__/brands";
 import type { LockState } from "../../modules/schemas";
 import type { FileClassification } from "../merge/types";
 import {
@@ -91,9 +92,9 @@ describe("status", () => {
     it("autoUpdate / newFiles / deletedFiles はすべて pull バケツに入る", () => {
       const result = categorizeForStatus({
         ...emptyClassification(),
-        autoUpdate: ["a.txt"],
-        newFiles: ["b.txt"],
-        deletedFiles: ["c.txt"],
+        autoUpdate: repoRelPaths(["a.txt"]),
+        newFiles: repoRelPaths(["b.txt"]),
+        deletedFiles: repoRelPaths(["c.txt"]),
       });
 
       expect(result.pull.map((e) => e.path)).toEqual(["a.txt", "b.txt", "c.txt"]);
@@ -104,8 +105,8 @@ describe("status", () => {
     it("localOnly / deletedLocally は push バケツに入る", () => {
       const result = categorizeForStatus({
         ...emptyClassification(),
-        localOnly: ["x.txt"],
-        deletedLocally: ["y.txt"],
+        localOnly: repoRelPaths(["x.txt"]),
+        deletedLocally: repoRelPaths(["y.txt"]),
       });
 
       expect(result.push.map((e) => e.path)).toEqual(["x.txt", "y.txt"]);
@@ -115,7 +116,7 @@ describe("status", () => {
     it("conflicts は conflict バケツに入る", () => {
       const result = categorizeForStatus({
         ...emptyClassification(),
-        conflicts: ["both.txt"],
+        conflicts: repoRelPaths(["both.txt"]),
       });
 
       expect(result.conflict.map((e) => e.path)).toEqual(["both.txt"]);
@@ -124,7 +125,7 @@ describe("status", () => {
     it("deletedWithLocalEdits は conflict バケツに入り、破壊的として扱われる", () => {
       const result = categorizeForStatus({
         ...emptyClassification(),
-        deletedWithLocalEdits: ["edited-then-deleted.txt"],
+        deletedWithLocalEdits: repoRelPaths(["edited-then-deleted.txt"]),
       });
 
       expect(result.conflict.map((e) => e.path)).toEqual(["edited-then-deleted.txt"]);
@@ -136,7 +137,7 @@ describe("status", () => {
     it("unchanged は inSyncCount に反映される（バケツには入らない）", () => {
       const result = categorizeForStatus({
         ...emptyClassification(),
-        unchanged: ["a.txt", "b.txt", "c.txt"],
+        unchanged: repoRelPaths(["a.txt", "b.txt", "c.txt"]),
       });
 
       expect(result.inSyncCount).toBe(3);
@@ -148,12 +149,12 @@ describe("status", () => {
     it("deletedFiles と deletedLocally は isDestructive: true、それ以外は false", () => {
       const result = categorizeForStatus({
         ...emptyClassification(),
-        autoUpdate: ["a.txt"],
-        newFiles: ["b.txt"],
-        deletedFiles: ["c.txt"],
-        localOnly: ["x.txt"],
-        deletedLocally: ["y.txt"],
-        conflicts: ["both.txt"],
+        autoUpdate: repoRelPaths(["a.txt"]),
+        newFiles: repoRelPaths(["b.txt"]),
+        deletedFiles: repoRelPaths(["c.txt"]),
+        localOnly: repoRelPaths(["x.txt"]),
+        deletedLocally: repoRelPaths(["y.txt"]),
+        conflicts: repoRelPaths(["both.txt"]),
       });
 
       const findEntry = (path: string) =>
@@ -170,7 +171,7 @@ describe("status", () => {
     it("各バケツ内は path 昇順でソートされる（決定論的出力）", () => {
       const result = categorizeForStatus({
         ...emptyClassification(),
-        autoUpdate: ["z.txt", "a.txt", "m.txt"],
+        autoUpdate: repoRelPaths(["z.txt", "a.txt", "m.txt"]),
       });
       expect(result.pull.map((e) => e.path)).toEqual(["a.txt", "m.txt", "z.txt"]);
     });
@@ -178,9 +179,9 @@ describe("status", () => {
     it("category フィールドが元のカテゴリを保持する（UI でラベル分けに使用）", () => {
       const result = categorizeForStatus({
         ...emptyClassification(),
-        autoUpdate: ["modified.txt"],
-        newFiles: ["new.txt"],
-        deletedFiles: ["gone.txt"],
+        autoUpdate: repoRelPaths(["modified.txt"]),
+        newFiles: repoRelPaths(["new.txt"]),
+        deletedFiles: repoRelPaths(["gone.txt"]),
       });
 
       const byPath = Object.fromEntries(result.pull.map((e) => [e.path, e.category]));
@@ -207,7 +208,14 @@ describe("status", () => {
     it("pull のみ → pullOnly", () => {
       const buckets: StatusBuckets = {
         ...emptyBuckets(),
-        pull: [{ path: "a", direction: "pull", category: "autoUpdate", isDestructive: false }],
+        pull: [
+          {
+            path: repoRelPath("a"),
+            direction: "pull",
+            category: "autoUpdate",
+            isDestructive: false,
+          },
+        ],
       };
       expect(decideRecommendation(buckets, syncedLock)).toEqual({ kind: "pullOnly", pullCount: 1 });
     });
@@ -215,7 +223,14 @@ describe("status", () => {
     it("push のみ → pushOnly", () => {
       const buckets: StatusBuckets = {
         ...emptyBuckets(),
-        push: [{ path: "a", direction: "push", category: "localOnly", isDestructive: false }],
+        push: [
+          {
+            path: repoRelPath("a"),
+            direction: "push",
+            category: "localOnly",
+            isDestructive: false,
+          },
+        ],
       };
       expect(decideRecommendation(buckets, syncedLock)).toEqual({ kind: "pushOnly", pushCount: 1 });
     });
@@ -223,8 +238,22 @@ describe("status", () => {
     it("pull + push → pullThenPush", () => {
       const buckets: StatusBuckets = {
         ...emptyBuckets(),
-        pull: [{ path: "a", direction: "pull", category: "autoUpdate", isDestructive: false }],
-        push: [{ path: "b", direction: "push", category: "localOnly", isDestructive: false }],
+        pull: [
+          {
+            path: repoRelPath("a"),
+            direction: "pull",
+            category: "autoUpdate",
+            isDestructive: false,
+          },
+        ],
+        push: [
+          {
+            path: repoRelPath("b"),
+            direction: "push",
+            category: "localOnly",
+            isDestructive: false,
+          },
+        ],
       };
       expect(decideRecommendation(buckets, syncedLock)).toEqual({
         kind: "pullThenPush",
@@ -236,10 +265,29 @@ describe("status", () => {
     it("conflict があれば pull/push の有無に関係なく resolveConflict", () => {
       const buckets: StatusBuckets = {
         ...emptyBuckets(),
-        pull: [{ path: "a", direction: "pull", category: "autoUpdate", isDestructive: false }],
-        push: [{ path: "b", direction: "push", category: "localOnly", isDestructive: false }],
+        pull: [
+          {
+            path: repoRelPath("a"),
+            direction: "pull",
+            category: "autoUpdate",
+            isDestructive: false,
+          },
+        ],
+        push: [
+          {
+            path: repoRelPath("b"),
+            direction: "push",
+            category: "localOnly",
+            isDestructive: false,
+          },
+        ],
         conflict: [
-          { path: "c", direction: "conflict", category: "conflicts", isDestructive: false },
+          {
+            path: repoRelPath("c"),
+            direction: "conflict",
+            category: "conflicts",
+            isDestructive: false,
+          },
         ],
       };
       expect(decideRecommendation(buckets, syncedLock)).toEqual({
@@ -255,13 +303,30 @@ describe("status", () => {
         ...syncedLock,
         sync: "merging",
         base: { hashes: {} },
-        merge: { conflicts: ["a.txt", "b.txt"], nextBase: { hashes: {} } },
+        merge: {
+          conflicts: [repoRelPath("a.txt"), repoRelPath("b.txt")],
+          nextBase: { hashes: {} },
+        },
       };
       // 通常なら pullThenPush になる buckets でも continueMerge が優先される
       const buckets: StatusBuckets = {
         ...emptyBuckets(),
-        pull: [{ path: "x", direction: "pull", category: "autoUpdate", isDestructive: false }],
-        push: [{ path: "y", direction: "push", category: "localOnly", isDestructive: false }],
+        pull: [
+          {
+            path: repoRelPath("x"),
+            direction: "pull",
+            category: "autoUpdate",
+            isDestructive: false,
+          },
+        ],
+        push: [
+          {
+            path: repoRelPath("y"),
+            direction: "push",
+            category: "localOnly",
+            isDestructive: false,
+          },
+        ],
       };
       expect(decideRecommendation(buckets, lock)).toEqual({
         kind: "continueMerge",
@@ -283,7 +348,14 @@ describe("status", () => {
     it("patternsUpdated=true + push のみ → pullThenPush (push 単独だと patterns が反映されない)", () => {
       const buckets: StatusBuckets = {
         ...emptyBuckets(),
-        push: [{ path: "x", direction: "push", category: "localOnly", isDestructive: false }],
+        push: [
+          {
+            path: repoRelPath("x"),
+            direction: "push",
+            category: "localOnly",
+            isDestructive: false,
+          },
+        ],
       };
       expect(decideRecommendation(buckets, syncedLock, true)).toEqual({
         kind: "pullThenPush",
@@ -302,12 +374,14 @@ describe("status", () => {
       const pendingLock: LockState = {
         version: "1.0.0",
         installedAt: "2024-01-01T00:00:00Z",
-        source: { kind: "local", path: "/tpl" },
+        source: { kind: "local", path: absPath("/tpl") },
         sync: "pending",
       };
       const buckets: StatusBuckets = {
         ...emptyBuckets(),
-        pull: [{ path: "a", direction: "pull", category: "newFiles", isDestructive: false }],
+        pull: [
+          { path: repoRelPath("a"), direction: "pull", category: "newFiles", isDestructive: false },
+        ],
       };
       expect(decideRecommendation(buckets, pendingLock)).toEqual({
         kind: "pullOnly",

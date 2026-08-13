@@ -1,10 +1,10 @@
 import { defineCommand } from "citty";
 import { Effect } from "effect";
-import { resolve } from "pathe";
 import { P, match } from "ts-pattern";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { zikuFailure } from "../errors";
 import type { ZikuFailure } from "../errors";
+import type { AbsPath, GlobPattern } from "../modules/schemas";
 import { runCommandEffect } from "../services/command-context";
 import {
   checkRepoExists,
@@ -14,6 +14,7 @@ import {
   unauthorizedError,
 } from "../utils/github";
 import { detectGitHubOwner, DEFAULT_TEMPLATE_REPO } from "../utils/git-remote";
+import { absPath, globPatterns } from "../utils/paths";
 import {
   ZIKU_CONFIG_FILE,
   generateZikuJsonc,
@@ -48,7 +49,7 @@ export const setupLifecycle: CommandLifecycle = {
  * AI agent の設定共有を主な用途として想定したデフォルト include パターン。
  * Claude Code のルール・スキル・フック、MCP 設定、開発環境設定をカバーする。
  */
-const DEFAULT_INCLUDE_PATTERNS: string[] = [
+const DEFAULT_INCLUDE_PATTERNS: GlobPattern[] = globPatterns([
   ".claude/settings.json",
   ".claude/rules/*.md",
   ".claude/skills/**",
@@ -56,7 +57,7 @@ const DEFAULT_INCLUDE_PATTERNS: string[] = [
   ".mcp.json",
   ".devcontainer/**",
   ".github/**",
-];
+]);
 
 export const setupCommand = defineCommand({
   meta: {
@@ -96,7 +97,7 @@ export const setupCommand = defineCommand({
       return;
     }
 
-    const targetDir = resolve(args.dir);
+    const targetDir = absPath(args.dir);
     await runCommandEffect(handleLocalSetup(targetDir, dryRun));
   },
 });
@@ -107,7 +108,7 @@ export const setupCommand = defineCommand({
  * テンプレートリポジトリのルートで `ziku setup` を実行した場合の処理。
  * ziku.jsonc が既にあればスキップ。
  */
-function handleLocalSetup(targetDir: string, dryRun: boolean): Effect.Effect<void, ZikuFailure> {
+function handleLocalSetup(targetDir: AbsPath, dryRun: boolean): Effect.Effect<void, ZikuFailure> {
   return Effect.gen(function* () {
     log.info(`Target: ${pc.cyan(targetDir)}`);
 

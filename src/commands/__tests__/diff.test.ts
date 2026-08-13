@@ -2,8 +2,9 @@ import { vol } from "memfs";
 import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FileNotFoundError } from "../../errors";
-import type { TemplateSource } from "../../modules/schemas";
+import type { AbsPath, CommitSha, GlobPattern, TemplateSource } from "../../modules/schemas";
 import { createPendingLock } from "../../modules/schemas";
+import { absPath, globPatterns, repoRelPath } from "../../__tests__/brands";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -84,9 +85,9 @@ const mockRenderFileDiff = vi.mocked(renderFileDiff);
  */
 function mockContext(
   overrides?: Partial<{
-    include: string[];
+    include: GlobPattern[];
     source: TemplateSource;
-    templateDir: string;
+    templateDir: AbsPath;
   }>,
 ) {
   const cleanup = vi.fn();
@@ -102,12 +103,12 @@ function mockContext(
   });
   return {
     effect: Effect.succeed({
-      config: { include: overrides?.include ?? [".root/**", ".github/**"] },
+      config: { include: overrides?.include ?? globPatterns([".root/**", ".github/**"]) },
       lock,
       source,
-      templateDir: overrides?.templateDir ?? "/tmp/template",
+      templateDir: overrides?.templateDir ?? absPath("/tmp/template"),
       cleanup,
-      resolveBaseRef: Effect.succeed(Option.none<string>()),
+      resolveBaseRef: Effect.succeed(Option.none<CommitSha>()),
     }),
     cleanup,
   };
@@ -197,7 +198,9 @@ describe("diffCommand", () => {
       mockLoadCommandContext.mockReturnValue(effect);
 
       const diffWithChanges = {
-        files: [{ path: "new-file.txt", type: "added" as const, localContent: "content" }],
+        files: [
+          { path: repoRelPath("new-file.txt"), type: "added" as const, localContent: "content" },
+        ],
       };
       mockDetectDiff.mockResolvedValueOnce(diffWithChanges);
       mockHasDiff.mockReturnValueOnce(true);
@@ -230,7 +233,7 @@ describe("diffCommand", () => {
     it("lock.source からテンプレートソースを構築", async () => {
       const { effect } = mockContext({
         source: { kind: "github", owner: "custom-org", repo: "custom-templates" },
-        templateDir: "/tmp/custom-template",
+        templateDir: absPath("/tmp/custom-template"),
       });
       mockLoadCommandContext.mockReturnValue(effect);
       mockDetectDiff.mockResolvedValueOnce(emptyDiff);
@@ -267,7 +270,9 @@ describe("diffCommand", () => {
       mockLoadCommandContext.mockReturnValue(effect);
 
       const diffWithChanges = {
-        files: [{ path: "new-file.txt", type: "added" as const, localContent: "content" }],
+        files: [
+          { path: repoRelPath("new-file.txt"), type: "added" as const, localContent: "content" },
+        ],
       };
       mockDetectDiff.mockResolvedValueOnce(diffWithChanges);
       mockHasDiff.mockReturnValueOnce(true);
@@ -286,7 +291,9 @@ describe("diffCommand", () => {
       mockLoadCommandContext.mockReturnValue(effect);
 
       const diffWithChanges = {
-        files: [{ path: "new-file.txt", type: "added" as const, localContent: "content" }],
+        files: [
+          { path: repoRelPath("new-file.txt"), type: "added" as const, localContent: "content" },
+        ],
       };
       mockDetectDiff.mockResolvedValueOnce(diffWithChanges);
       mockHasDiff.mockReturnValueOnce(true);
@@ -305,14 +312,18 @@ describe("diffCommand", () => {
       mockLoadCommandContext.mockReturnValue(effect);
 
       const unchangedFile = {
-        path: "unchanged.txt",
+        path: repoRelPath("unchanged.txt"),
         type: "unchanged" as const,
         localContent: "same",
         templateContent: "same",
       };
-      const addedFile = { path: "added.txt", type: "added" as const, localContent: "new" };
+      const addedFile = {
+        path: repoRelPath("added.txt"),
+        type: "added" as const,
+        localContent: "new",
+      };
       const modifiedFile = {
-        path: "modified.txt",
+        path: repoRelPath("modified.txt"),
         type: "modified" as const,
         localContent: "changed",
         templateContent: "original",
