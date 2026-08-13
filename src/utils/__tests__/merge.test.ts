@@ -4,7 +4,7 @@ import {
   asLocalContent,
   asTemplateContent,
   classifyFiles,
-  hasConflictMarkers,
+  findConflictRegions,
   threeWayMerge,
 } from "../merge";
 
@@ -198,7 +198,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toContain("local-added");
       expect(result.content).toContain("template-added");
     });
@@ -211,7 +211,7 @@ describe("merge", () => {
       const result = merge(base, local, template);
 
       // diff3Merge が同じ行の異なる変更を検出してコンフリクトマーカーを挿入する
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
       expect(result.content).toContain("=======");
       expect(result.content).toContain(">>>>>>> TEMPLATE");
@@ -224,7 +224,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toBe("same modified content\n");
     });
 
@@ -235,7 +235,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toBe("updated by template\n");
     });
 
@@ -246,7 +246,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toBe("modified locally\n");
     });
 
@@ -257,7 +257,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
     });
 
     it("JSON ファイルでも行レベルの 3-way マージが適用される", () => {
@@ -269,7 +269,7 @@ describe("merge", () => {
 
       // 両側が同じ末尾行（"b": 2）を書き換えて別のキーを足しているため、
       // 行レベルでは同じ領域の変更として conflict になる
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
       expect(result.content).toContain('"c": 3');
       expect(result.content).toContain('"d": 4');
@@ -282,7 +282,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
     });
   });
 
@@ -295,7 +295,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toContain("header-modified");
       expect(result.content).toContain("footer-updated");
     });
@@ -330,7 +330,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template);
 
-      if (result.hasConflicts) {
+      if (result._tag === "Conflicted") {
         // マーカーが含まれるが、変更されていない行（line3〜line9）も結果に含まれる
         expect(result.content).toContain("<<<<<<< LOCAL");
         expect(result.content).toContain(">>>>>>> TEMPLATE");
@@ -351,7 +351,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template, "package.json");
 
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
       expect(result.content).toContain("=======");
       expect(result.content).toContain(">>>>>>> TEMPLATE");
@@ -370,8 +370,8 @@ describe("merge", () => {
       // 逆の順序
       const reversed = merge(base, templateValue, localValue, "test.json");
 
-      expect(correct.hasConflicts).toBe(true);
-      expect(reversed.hasConflicts).toBe(true);
+      expect(correct._tag).toBe("Conflicted");
+      expect(reversed._tag).toBe("Conflicted");
 
       // どちらもコンフリクトマーカーが含まれる
       expect(correct.content).toContain("<<<<<<< LOCAL");
@@ -387,7 +387,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template, "config.toml");
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toContain('python = "3.12"');
       expect(result.content).toContain("quiet = true");
     });
@@ -401,7 +401,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template, "config.yml");
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toContain("author: me");
       expect(result.content).toContain("key: updated");
     });
@@ -419,14 +419,14 @@ describe("merge", () => {
     it("テキストマージ自体は行レベルでクリーンに通る（バリデーションの前提）", () => {
       const result = merge(brokenJson.base, brokenJson.local, brokenJson.template);
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).not.toContain("<<<<<<<");
     });
 
     it("テキストマージが壊れた構造ファイルを生成した場合、コンフリクトマーカーにフォールバック", () => {
       const result = merge(brokenJson.base, brokenJson.local, brokenJson.template, "config.json");
 
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
       expect(result.content).toContain("||||||| BASE");
       expect(result.content).toContain(">>>>>>> TEMPLATE");
@@ -451,7 +451,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template, "config.json");
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(JSON.parse(result.content)).toEqual({ a: 10, b: 2, c: 3, d: 4, e: 50 });
     });
   });
@@ -464,7 +464,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       const markerOrder = result.content
         .split("\n")
         .filter((line) => /^[<|=>]{7}/.test(line))
@@ -491,7 +491,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       // 生成されたマーカーは 3 種とも 8 文字。既存の 7 文字マーカーは内容として残る
       expect(result.content).toContain("<<<<<<<< LOCAL");
       expect(result.content).toContain("|||||||| BASE");
@@ -501,7 +501,48 @@ describe("merge", () => {
     });
   });
 
-  describe("hasConflictMarkers", () => {
+  describe("MergeOutcome", () => {
+    it("コンフリクトしたマージは Conflicted になり、regions が実際のマーカー位置を指す", () => {
+      const base = "line1\nline2\nline3\n";
+      const local = "line1\nlocal-change\nline3\n";
+      const template = "line1\ntemplate-change\nline3\n";
+
+      const result = merge(base, local, template);
+
+      if (result._tag !== "Conflicted") throw new Error(`expected Conflicted, got ${result._tag}`);
+      const startLines = result.regions.map((r) => r.startLine);
+      expect(startLines.length).toBeGreaterThan(0);
+      // 各 startLine が実際に開始マーカーの行を指している
+      const lines = result.content.split("\n");
+      for (const startLine of startLines) {
+        expect(lines[startLine - 1]).toMatch(/^<{7,} /);
+      }
+    });
+
+    it("両側が離れた行を変更したマージは Clean になる", () => {
+      const base = "line1\nline2\nline3\nline4\nline5\n";
+      const local = "line1-local\nline2\nline3\nline4\nline5\n";
+      const template = "line1\nline2\nline3\nline4\nline5-template\n";
+
+      const result = merge(base, local, template);
+
+      expect(result._tag).toBe("Clean");
+      expect(result.content).toContain("line1-local");
+      expect(result.content).toContain("line5-template");
+    });
+
+    it("ローカルとテンプレートが同一でも、未解決マーカーが残っていれば Conflicted", () => {
+      // 内容が一致していてもマーカー入りのテキストは解決済みではない。Clean として
+      // 素通しすると、そのままテンプレートへの PR に載る。
+      const unresolved = ["<<<<<<< LOCAL", "a", "=======", "b", ">>>>>>> TEMPLATE", ""].join("\n");
+
+      const result = merge("base\n", unresolved, unresolved);
+
+      expect(result._tag).toBe("Conflicted");
+    });
+  });
+
+  describe("findConflictRegions", () => {
     it("コンフリクトマーカーを含む内容を検出し、ブロックの開始行を返す", () => {
       const content = `line1
 <<<<<<< LOCAL
@@ -511,10 +552,9 @@ template content
 >>>>>>> TEMPLATE
 line2`;
 
-      const result = hasConflictMarkers(content);
+      const regions = findConflictRegions(content);
 
-      expect(result.found).toBe(true);
-      expect(result.lines).toEqual([2]);
+      expect(regions).toEqual([{ startLine: 2 }]);
     });
 
     it("base セクション付き（diff3 形式）のブロックを検出する", () => {
@@ -529,10 +569,9 @@ line2`;
         "",
       ].join("\n");
 
-      const result = hasConflictMarkers(content);
+      const regions = findConflictRegions(content);
 
-      expect(result.found).toBe(true);
-      expect(result.lines).toEqual([1]);
+      expect(regions).toEqual([{ startLine: 1 }]);
     });
 
     it("伸長されたマーカーのブロックを検出する", () => {
@@ -547,10 +586,9 @@ line2`;
         "",
       ].join("\n");
 
-      const result = hasConflictMarkers(content);
+      const regions = findConflictRegions(content);
 
-      expect(result.found).toBe(true);
-      expect(result.lines).toEqual([1]);
+      expect(regions).toEqual([{ startLine: 1 }]);
     });
 
     it("複数ブロックをすべて検出する", () => {
@@ -569,18 +607,17 @@ line2`;
         "",
       ].join("\n");
 
-      const result = hasConflictMarkers(content);
+      const regions = findConflictRegions(content);
 
-      expect(result.lines).toEqual([1, 7]);
+      expect(regions.map((r) => r.startLine)).toEqual([1, 7]);
     });
 
     it("コンフリクトマーカーがない場合", () => {
       const content = "normal line1\nnormal line2\nnormal line3\n";
 
-      const result = hasConflictMarkers(content);
+      const regions = findConflictRegions(content);
 
-      expect(result.found).toBe(false);
-      expect(result.lines).toEqual([]);
+      expect(regions).toEqual([]);
     });
 
     it("Markdown の setext 見出しと区切り線を未解決と誤検出しない", () => {
@@ -597,10 +634,9 @@ line2`;
         "",
       ].join("\n");
 
-      const result = hasConflictMarkers(content);
+      const regions = findConflictRegions(content);
 
-      expect(result.found).toBe(false);
-      expect(result.lines).toEqual([]);
+      expect(regions).toEqual([]);
     });
 
     it("対応する `=======` / `>>>>>>>` が無い `<<<<<<<` は未解決とみなさない", () => {
@@ -608,10 +644,9 @@ line2`;
       // 復旧手段が無くなる。対応の取れたブロックだけを未解決として扱う。
       const content = "line1\n<<<<<<< LOCAL\nsome content\n";
 
-      const result = hasConflictMarkers(content);
+      const regions = findConflictRegions(content);
 
-      expect(result.found).toBe(false);
-      expect(result.lines).toEqual([]);
+      expect(regions).toEqual([]);
     });
 
     it("マージ結果に残るブロックだけを数え、内容中の短いマーカーは本文として扱う", () => {
@@ -621,10 +656,10 @@ line2`;
       const template = base.replace("intro", "intro-template");
 
       const merged = merge(base, local, template);
-      const result = hasConflictMarkers(merged.content);
+      const regions = findConflictRegions(merged.content);
 
       // 生成された 8 文字ブロック（1 行目）と、未解決のまま残る 7 文字ブロックの両方
-      expect(result.lines).toEqual([1, 8]);
+      expect(regions.map((r) => r.startLine)).toEqual([1, 8]);
     });
   });
 
@@ -632,12 +667,12 @@ line2`;
   // 契約検証: threeWayMerge の結果が正しいことを保証するテスト
   // ====================================================================
   //
-  // 契約: threeWayMerge が hasConflicts: false を返す場合、
+  // 契約: threeWayMerge が Clean を返す場合、
   // result.content にはテンプレート側の変更が反映されていなければならない。
   // ローカル側の変更も保持されていなければならない。
   // どちらかが消失している場合はバグ。
 
-  describe("契約検証: hasConflicts: false ならテンプレート変更が反映されている", () => {
+  describe("契約検証: Clean ならテンプレート変更が反映されている", () => {
     it("JSON: 両方が同じ末尾行へ別のキーを追加 → 両側の変更がマーカー内に残る", () => {
       const base = JSON.stringify({ a: 1 }, null, 2);
       const local = JSON.stringify({ a: 1, localKey: "local" }, null, 2);
@@ -645,7 +680,7 @@ line2`;
 
       const result = merge(base, local, template, "settings.json");
 
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
       expect(result.content).toContain("localKey");
       expect(result.content).toContain("templateKey");
@@ -658,8 +693,8 @@ line2`;
 
       const result = merge(base, local, template, "package.json");
 
-      // 同じキーを異なる値に変更 → 必ずコンフリクト（hasConflicts: true）であるべき
-      expect(result.hasConflicts).toBe(true);
+      // 同じキーを異なる値に変更 → 必ずコンフリクトであるべき
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
       expect(result.content).toContain("2.0-local");
       expect(result.content).toContain("2.0-template");
@@ -681,7 +716,7 @@ line2`;
       const result = merge(base, local, template, ".claude/settings.json");
 
       // 配列の同じ位置を異なる内容に変更 → コンフリクト
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
       expect(result.content).toContain("pnpm");
       expect(result.content).toContain("git");
@@ -708,7 +743,7 @@ line2`;
 
       // 変更が隣接する行に集中しているため 1 つのブロックにまとまり、
       // 両側の変更がマーカー内に可視化される
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
       expect(result.content).toContain('"updated"');
       expect(result.content).toContain("localOnly");
@@ -721,7 +756,7 @@ line2`;
 
       const result = merge(base, local, template, "rules/pr-workflow.md");
 
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
       expect(result.content).toContain("Local modified");
       expect(result.content).toContain("Template modified");
@@ -737,7 +772,7 @@ line2`;
 
       const result = merge(base, local, template, "rules/pr-workflow.md");
 
-      if (!result.hasConflicts) {
+      if (result._tag === "Clean") {
         expect(result.content).toContain("Local change in section 1");
         expect(result.content).toContain("Template change in section 3");
       }
@@ -752,7 +787,7 @@ line2`;
 
       const result = merge(base, local, template);
 
-      if (!result.hasConflicts) {
+      if (result._tag === "Clean") {
         expect(result.content).toContain("2.0-local");
       }
     });
@@ -764,7 +799,7 @@ line2`;
 
       const result = merge(base, local, template);
 
-      if (result.hasConflicts) {
+      if (result._tag === "Conflicted") {
         expect(result.content).toContain("<<<<<<< LOCAL");
       } else {
         expect(result.content).toContain("LOCAL");
@@ -807,7 +842,7 @@ line2`;
       const result = merge(base, local, template, "settings.json");
 
       // permissions.allow 配列を両側が異なる内容に変更 → コンフリクトであるべき
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
     });
 
@@ -819,7 +854,7 @@ line2`;
       const result = merge(base, local, template, "config.toml");
 
       // node を両側が変更 → コンフリクト
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
     });
 
@@ -831,7 +866,7 @@ line2`;
       const result = merge(base, local, template, "config.yml");
 
       // version を両側が変更 → コンフリクト
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
     });
   });
@@ -846,12 +881,12 @@ line2`;
 
       // 正しい結果: ローカルの内容がそのまま保持される
       // (テンプレートの a→10 は既に反映済み、ローカルの b→20 はローカル独自の変更)
-      if (!result.hasConflicts) {
+      if (result._tag === "Clean") {
         const parsed = JSON.parse(result.content);
         expect(parsed.a).toBe(10);
         expect(parsed.b).toBe(20);
       }
-      if (result.hasConflicts) {
+      if (result._tag === "Conflicted") {
         expect(result.content).toContain("<<<<<<< LOCAL");
       }
     });
@@ -863,7 +898,7 @@ line2`;
 
       const result = merge(base, local, template, "config.toml");
 
-      if (!result.hasConflicts) {
+      if (result._tag === "Clean") {
         expect(result.content).toContain("python");
         expect(result.content).toContain('"22"');
       }
@@ -877,7 +912,7 @@ line2`;
       const result = merge(base, local, template, "settings.json");
 
       // base === template → テンプレート側に変更なし → ローカルをそのまま返すのが正しい
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toBe(local);
     });
 
@@ -888,7 +923,7 @@ line2`;
 
       const result = merge(base, local, template, ".mise.toml");
 
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
       expect(result.content).toContain(">>>>>>> TEMPLATE");
     });
@@ -936,7 +971,7 @@ line2`;
 
       // ローカルの true 値がサイレントに上書きされてはならない
       // コンフリクトマーカーで明示されるか、ローカル値が保持される
-      if (result.hasConflicts) {
+      if (result._tag === "Conflicted") {
         // コンフリクト内にローカルの true が含まれるべき
         expect(result.content).toContain("true");
         expect(result.content).toContain("<<<<<<< LOCAL");
@@ -954,7 +989,7 @@ line2`;
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
       expect(result.content).toContain("local-value");
       expect(result.content).toContain("template-value");
@@ -985,7 +1020,7 @@ line2`;
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toBe("same content\n");
     });
 
@@ -996,7 +1031,7 @@ line2`;
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toContain("header-modified");
       expect(result.content).toContain("footer-updated");
     });
@@ -1008,7 +1043,7 @@ line2`;
 
       const result = merge(base, local, template, "package.json");
 
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("2.0-local");
       expect(result.content).toContain("2.0-template");
     });
@@ -1028,7 +1063,7 @@ line2`;
 
       // debug = true（ローカルの変更）が結果に含まれるか、
       // コンフリクトマーカーの LOCAL 側に含まれること
-      if (result.hasConflicts) {
+      if (result._tag === "Conflicted") {
         expect(result.content).toContain("debug = true");
       } else {
         expect(result.content).toContain("debug = true");

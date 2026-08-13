@@ -124,8 +124,8 @@ describe("conflict-io", () => {
         mergeOneFile({ file: "config.json", targetDir, templateDir }),
       );
 
-      expect(result.hasConflicts).toBe(false);
-      expect(result.content).toBe('{"key": "value"}');
+      expect(result.outcome._tag).toBe("Clean");
+      expect(result.outcome.content).toBe('{"key": "value"}');
       expect(result.file).toBe("config.json");
     });
 
@@ -152,9 +152,9 @@ describe("conflict-io", () => {
         }),
       );
 
-      expect(result.hasConflicts).toBe(false);
-      expect(result.content).toContain("line1-local");
-      expect(result.content).toContain("line5-template");
+      expect(result.outcome._tag).toBe("Clean");
+      expect(result.outcome.content).toContain("line1-local");
+      expect(result.outcome.content).toContain("line5-template");
     });
 
     it("3-way マージ: 同じ行を両方が変更 → コンフリクトマーカー", async () => {
@@ -175,11 +175,11 @@ describe("conflict-io", () => {
         }),
       );
 
-      expect(result.hasConflicts).toBe(true);
-      expect(result.content).toContain("<<<<<<< LOCAL");
-      expect(result.content).toContain("local-change");
-      expect(result.content).toContain("template-change");
-      expect(result.content).toContain(">>>>>>> TEMPLATE");
+      expect(result.outcome._tag).toBe("Conflicted");
+      expect(result.outcome.content).toContain("<<<<<<< LOCAL");
+      expect(result.outcome.content).toContain("local-change");
+      expect(result.outcome.content).toContain("template-change");
+      expect(result.outcome.content).toContain(">>>>>>> TEMPLATE");
     });
 
     it("delete/modify conflict: ローカルにファイルが存在しなくても ENOENT にならない", async () => {
@@ -202,10 +202,10 @@ describe("conflict-io", () => {
       );
 
       // local が空文字列 → delete/modify conflict としてマーカーが入る
-      expect(result.hasConflicts).toBe(true);
+      expect(result.outcome._tag).toBe("Conflicted");
       expect(result.file).toBe(".claude/rules/worktree.md");
-      expect(result.content).toContain("<<<<<<< LOCAL");
-      expect(result.content).toContain(">>>>>>> TEMPLATE");
+      expect(result.outcome.content).toContain("<<<<<<< LOCAL");
+      expect(result.outcome.content).toContain(">>>>>>> TEMPLATE");
     });
 
     it("delete/modify conflict: ローカルにファイルもディレクトリも存在しなくても動作する", async () => {
@@ -226,7 +226,7 @@ describe("conflict-io", () => {
         }),
       );
 
-      expect(result.hasConflicts).toBe(true);
+      expect(result.outcome._tag).toBe("Conflicted");
       expect(result.file).toBe("deep/nested/file.md");
     });
 
@@ -243,8 +243,8 @@ describe("conflict-io", () => {
       );
 
       // base が空 → 全内容が「両方から追加された」扱い → conflict
-      expect(result.hasConflicts).toBe(true);
-      expect(result.content).toContain("<<<<<<< LOCAL");
+      expect(result.outcome._tag).toBe("Conflicted");
+      expect(result.outcome.content).toContain("<<<<<<< LOCAL");
     });
   });
 });

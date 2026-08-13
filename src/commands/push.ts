@@ -4,6 +4,7 @@ import { defineCommand } from "citty";
 import { Effect } from "effect";
 import { dirname, join, resolve } from "pathe";
 import { P, match } from "ts-pattern";
+import { z } from "zod/v4";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
 import type { FileDiff, GitHubSource, LocalSource, LockState } from "../modules/schemas";
@@ -17,6 +18,7 @@ import {
   withConfigTracked,
 } from "../utils/ziku-config";
 import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
+import type { MergedContent } from "../utils/merge";
 import { classifyFiles, downloadBaseForMerge, mergeOneFile } from "../utils/merge";
 import {
   computeMergedZikuConfig,
@@ -83,10 +85,38 @@ export const pushLifecycle: CommandLifecycle = {
   ],
 };
 
+// ─── テンプレートへ送る内容 ───
+
+/**
+ * テンプレートへ送るファイル内容。PR の本文にも、ローカルテンプレートへの書き込みにも
+ * この型しか渡らない。
+ *
+ * 送るものは 2 系統ある。ユーザーがローカルに書いた内容（および ziku が組み立てた
+ * `ziku.jsonc` の和集合）と、3-way マージの結果。前者はユーザー自身のテキストなので
+ * ziku が中身を選り分ける立場にない。後者は ziku が生成したものなので、コンフリクト
+ * マーカーを含んだままテンプレートへ配ってしまう事故が起こりうる。
+ *
+ * そこでマージ結果の入口を `mergedAsPushContent` だけに絞り、その引数を
+ * `MergedContent`（マーカー非混入が検証済み）に限定する。マーカー入りと確定した
+ * `ConflictedContent` は、この型へ変換する手段が無いので送信対象へ入れられない。
+ */
+const PushContentSchema = z.string().brand("PushContent");
+type PushContent = z.infer<typeof PushContentSchema>;
+
+/** ローカルに実在する内容（ユーザーが書いたファイル・ziku が組み立てた設定）を送る。 */
+function asPushContent(content: string): PushContent {
+  return PushContentSchema.parse(content);
+}
+
+/** 3-way マージの結果を送る。クリーンと判定された内容だけがこの経路を通れる。 */
+function mergedAsPushContent(content: MergedContent): PushContent {
+  return PushContentSchema.parse(content);
+}
+
 // ─── Push 戦略: GitHub / Local を Effect で分離 ───
 
 interface PushTarget {
-  readonly files: Array<{ path: string; content: string }>;
+  readonly files: Array<{ path: string; content: PushContent }>;
   readonly deletions: Array<{ path: string }>;
   readonly pushableFiles: FileDiff[];
   /**
@@ -154,7 +184,7 @@ function pushToGitHub(
       const readmeResult = await detectAndUpdateReadme(ctx.templateDir, ctx.templateDir);
       const files = [...target.files];
       if (readmeResult?.updated) {
-        files.push({ path: "README.md", content: readmeResult.content });
+        files.push({ path: "README.md", content: asPushContent(readmeResult.content) });
       }
 
       // サマリー表示
@@ -310,7 +340,7 @@ function logPushSummary(
   baseHashStr: string,
   title: string,
   target: PushTarget,
-  files: Array<{ path: string; content: string }>,
+  files: Array<{ path: string; content: PushContent }>,
 ): void {
   const { pushableFiles, deletions, restoresTemplateDeletion } = target;
   const fileLines: string[] = [];
@@ -476,7 +506,7 @@ export const pushCommand = defineCommand({
     await withFinally(async () => {
       // ─── 共通: 差分検出 + ファイル選択 ───
 
-      const mergedContents = new Map<string, string>();
+      const mergedContents = new Map<string, PushContent>();
 
       // ─── 未追跡ファイルの追跡フロー ───
       // 検知・選択・include へのマージは classify より「前」に行う必要がある。
@@ -608,7 +638,7 @@ export const pushCommand = defineCommand({
         .filter((f) => f.type !== "deleted")
         .map((f) => ({
           path: f.path,
-          content: mergedContents.get(f.path) ?? f.localContent ?? "",
+          content: mergedContents.get(f.path) ?? asPushContent(f.localContent ?? ""),
         }));
 
       const deletions = pushableFiles
@@ -777,7 +807,7 @@ async function applyNewlyTrackedConfigToPush(params: {
   newlyTrackedPaths: string[];
   pushableFiles: FileDiff[];
   diffFiles: FileDiff[];
-  mergedContents: Map<string, string>;
+  mergedContents: Map<string, PushContent>;
 }): Promise<{ pushableFiles: FileDiff[]; configWriteBackSafe: boolean }> {
   const { targetDir, templateDir, newlyTrackedPaths, pushableFiles, diffFiles, mergedContents } =
     params;
@@ -814,7 +844,7 @@ async function applyNewlyTrackedConfigToPush(params: {
         templateDir,
         additionalIncludes: [...trackedAndPushed, ...preexistingRelevant],
       });
-  mergedContents.set(ZIKU_CONFIG_FILE, mergedConfig);
+  mergedContents.set(ZIKU_CONFIG_FILE, asPushContent(mergedConfig));
 
   // ziku.jsonc が既に push 候補にあれば content は mergedContents が採用されるので注入不要。
   if (configAlreadySelected) return { pushableFiles, configWriteBackSafe };
@@ -967,7 +997,7 @@ async function classifyAndResolveConflicts(params: {
   templateDir: string;
   lock: LockState;
   patterns: { include: string[]; exclude: string[] };
-  mergedContents: Map<string, string>;
+  mergedContents: Map<string, PushContent>;
 }): Promise<{
   pushableFilePaths: Set<string>;
   unresolvedConflicts: Set<string>;
@@ -1020,7 +1050,7 @@ async function classifyAndResolveConflicts(params: {
       targetDir: params.targetDir,
       templateDir: params.templateDir,
     });
-    params.mergedContents.set(ZIKU_CONFIG_FILE, merged);
+    params.mergedContents.set(ZIKU_CONFIG_FILE, asPushContent(merged));
   }
 
   const unresolvedConflicts = new Set<string>();
@@ -1062,7 +1092,7 @@ async function resolveConflicts(
     targetDir: string;
     templateDir: string;
     lock: LockState;
-    mergedContents: Map<string, string>;
+    mergedContents: Map<string, PushContent>;
   },
 ): Promise<string[]> {
   const baseSha = baseCommitSha(ctx.lock);
@@ -1086,17 +1116,15 @@ async function resolveConflicts(
       const unresolved: string[] = [];
 
       for (const file of conflicts) {
-        // ベースがない場合は 3-way マージ不可 → unresolved
-        // 旧実装ではファイル単位で baseContent の truthy チェックをしていたが、
-        // mergeOneFile 内で readFileSafe が空文字列を返すため、ベースに
-        // 特定ファイルがない場合は空ベースでのマージ（= conflict マーカー付き）になる。
-        // hasConflicts=true → unresolved に分類されるので PR に壊れた内容は送られない。
+        // ベースが取れなければ 3-way マージが成立しない → 送らずに未解決とする。
+        // ベースに特定のファイルだけが無いケースは mergeOneFile が空ベースとして扱い、
+        // 結果は Conflicted になるので、ここを抜けても壊れた内容は PR に載らない。
         if (!baseResult) {
           unresolved.push(file);
           continue;
         }
 
-        const result = await Effect.runPromise(
+        const { outcome } = await Effect.runPromise(
           mergeOneFile({
             file,
             targetDir: ctx.targetDir,
@@ -1105,12 +1133,15 @@ async function resolveConflicts(
           }),
         );
 
-        if (!result.hasConflicts) {
-          ctx.mergedContents.set(file, result.content);
-          autoMerged.push(file);
-        } else {
-          unresolved.push(file);
-        }
+        match(outcome)
+          .with({ _tag: "Clean" }, ({ content }) => {
+            ctx.mergedContents.set(file, mergedAsPushContent(content));
+            autoMerged.push(file);
+          })
+          .with({ _tag: "Conflicted" }, () => {
+            unresolved.push(file);
+          })
+          .exhaustive();
       }
 
       if (autoMerged.length > 0) {

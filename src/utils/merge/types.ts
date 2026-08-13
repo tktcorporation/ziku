@@ -1,6 +1,13 @@
 import { z } from "zod/v4";
+import { findConflictRegions } from "./conflict-markers";
 
 // ---- Branded types: base/local/template の取り違えをコンパイル時に検出 ----
+//
+// 入力側の 3 つの brand（BaseContent / LocalContent / TemplateContent）が守るのは
+// 「引数の取り違え」だけで、値そのものには何の性質も要求しない。だから任意の string を
+// そのままブランドする `asBaseContent` のような関数を公開してよい。
+// 出力側の brand（MergedContent / ConflictedContent）は逆に「内容がどうであるか」を
+// 表すため、検証を通った経路以外から作れてはならない（下の MergeOutcome を参照）。
 
 /**
  * 3-way マージにおけるベース（共通祖先）のファイル内容。
@@ -35,12 +42,72 @@ export function asTemplateContent(s: string): TemplateContent {
   return TemplateContent.parse(s);
 }
 
-/** 3-way マージの結果 */
-export interface MergeResult {
-  /** マージ後のファイル内容 */
-  content: string;
-  /** コンフリクトマーカーが含まれるか */
-  hasConflicts: boolean;
+// ---- 3-way マージの結果 ----
+
+/**
+ * コンフリクトマーカーを含まないことが検証済みのファイル内容。
+ *
+ * ziku はマージ結果をテンプレートへの PR に載せる。マーカー入りのテキストがそこへ紛れると、
+ * テンプレートを使う全プロジェクトへ壊れたファイルが配られる。内容とフラグを別々の
+ * フィールドで持つと「マーカー入りなのにコンフリクト無し」という値が作れてしまうため、
+ * 「マーカーが無い」という性質を型そのものに載せる。
+ *
+ * この型を作れるのは `classifyMergeOutcome` だけで、任意の string からブランドする関数は
+ * 公開しない。素通しの変換を 1 つ用意した時点で「検証済み」という意味が失われる。
+ */
+const MergedContentSchema = z.string().brand("MergedContent");
+export type MergedContent = z.infer<typeof MergedContentSchema>;
+
+/**
+ * コンフリクトマーカーを含むことが確定したファイル内容。
+ *
+ * ユーザーが手で解決するためにローカルへ書き出す先はあるが、テンプレートへ送る経路は無い。
+ * `MergedContent` と別の型にすることで、送信対象へ渡した時点でコンパイルエラーになる。
+ */
+const ConflictedContentSchema = z.string().brand("ConflictedContent");
+export type ConflictedContent = z.infer<typeof ConflictedContentSchema>;
+
+/** 未解決のコンフリクトブロック 1 つ。 */
+export interface ConflictRegion {
+  /** ブロック開始行（`<<<<<<<` の行番号、1 始まり）。ユーザーに解決箇所を示すために持つ。 */
+  readonly startLine: number;
+}
+
+/** 1 つ以上の未解決ブロック。「コンフリクトしたが対象ブロックがゼロ」を作れなくする。 */
+export type ConflictRegions = readonly [ConflictRegion, ...ConflictRegion[]];
+
+/**
+ * 3-way マージの結果。
+ *
+ * 内容の性質（マーカーの有無）を判別タグと brand の両方に載せ、分岐を通らずに内容へ
+ * 触れられないようにする。呼び出し側は `match().exhaustive()` で 2 つの結末を扱う。
+ */
+export type MergeOutcome =
+  | { readonly _tag: "Clean"; readonly content: MergedContent }
+  | {
+      readonly _tag: "Conflicted";
+      readonly content: ConflictedContent;
+      readonly regions: ConflictRegions;
+    };
+
+/**
+ * マージ結果の文字列を検査して `MergeOutcome` にする。`MergedContent` の唯一の生成経路。
+ *
+ * マージアルゴリズムが「コンフリクトを出力したか」ではなく、実際の内容を走査して判定する。
+ * 前回のコンフリクトを解決しないまま再マージした場合のように、アルゴリズムが新しい
+ * ブロックを作らなくても内容にマーカーが残っていることがあり、そのまま Clean 扱いすると
+ * マーカーがテンプレートへ流れる。
+ */
+export function classifyMergeOutcome(content: string): MergeOutcome {
+  const [first, ...rest] = findConflictRegions(content);
+  if (first === undefined) {
+    return { _tag: "Clean", content: MergedContentSchema.parse(content) };
+  }
+  return {
+    _tag: "Conflicted",
+    content: ConflictedContentSchema.parse(content),
+    regions: [first, ...rest],
+  };
 }
 
 /**

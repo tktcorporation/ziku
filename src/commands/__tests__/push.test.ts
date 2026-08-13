@@ -155,6 +155,9 @@ const { detectUntrackedFiles } = await import("../../utils/untracked");
 const { log, logDiffSummary } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
 const { classifyFiles, mergeOneFile, downloadBaseForMerge } = await import("../../utils/merge");
+// マージ結果の判定は本物を使う（"../../utils/merge" のモックは index 経由の import だけを
+// 置き換えるので、実装モジュールを直接読み込めば素の関数が得られる）。
+const { classifyMergeOutcome } = await import("../../utils/merge/types");
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
 const mockDetectDiff = vi.mocked(detectDiff);
 const mockGetGitHubToken = vi.mocked(getGitHubToken);
@@ -1349,7 +1352,7 @@ describe("pushCommand", () => {
 
       // mergeOneFile のモック（自動マージ成功）
       mockMergeOneFile.mockReturnValueOnce(
-        Effect.succeed({ file: "file.txt", content: "merged content", hasConflicts: false }),
+        Effect.succeed({ file: "file.txt", outcome: classifyMergeOutcome("merged content") }),
       );
 
       const pushableFile = {
@@ -1402,6 +1405,95 @@ describe("pushCommand", () => {
           ]),
         }),
       );
+    });
+
+    it("未解決の衝突があっても PR に載る内容にコンフリクトマーカーが混入しない", async () => {
+      // 型では `MergedContent` からしか送信内容を作れないが、送信対象の組み立てには
+      // ローカル内容を使う経路もあるため、実際の PR ペイロードでも確認する。
+      const { effect } = mockContext({
+        lock: lockWith({
+          hashes: { "clean.txt": "abc123", "conflicted.txt": "def456" },
+          commitSha: "abc123def456",
+        }),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      vol.fromJSON({
+        "/test/clean.txt": "local clean",
+        "/test/conflicted.txt": "local conflicted",
+        "/tmp/template/clean.txt": "template clean",
+        "/tmp/template/conflicted.txt": "template conflicted",
+        "/tmp/base-template/clean.txt": "base clean",
+        "/tmp/base-template/conflicted.txt": "base conflicted",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: ["clean.txt", "conflicted.txt"],
+        newFiles: [],
+        deletedFiles: [],
+        deletedWithLocalEdits: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      mockDownloadBaseForMerge.mockReturnValueOnce(
+        Effect.succeed({ templateDir: "/tmp/base-template", cleanup: vi.fn() }),
+      );
+
+      mockMergeOneFile.mockReturnValueOnce(
+        Effect.succeed({ file: "clean.txt", outcome: classifyMergeOutcome("merged clean") }),
+      );
+      mockMergeOneFile.mockReturnValueOnce(
+        Effect.succeed({
+          file: "conflicted.txt",
+          outcome: classifyMergeOutcome(
+            "<<<<<<< LOCAL\nlocal conflicted\n=======\ntemplate conflicted\n>>>>>>> TEMPLATE",
+          ),
+        }),
+      );
+
+      const cleanDiff = {
+        path: "clean.txt",
+        type: "modified" as const,
+        localContent: "local clean",
+        templateContent: "template clean",
+      };
+      const conflictedDiff = {
+        path: "conflicted.txt",
+        type: "modified" as const,
+        localContent: "local conflicted",
+        templateContent: "template conflicted",
+      };
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [cleanDiff, conflictedDiff],
+        summary: { added: 0, modified: 2, deleted: 0, unchanged: 0 },
+      });
+
+      // 未解決の衝突は既定で未選択（selectPushFiles の既定集合と同じ）
+      mockSelectPushFiles.mockResolvedValueOnce([cleanDiff]);
+      mockConfirmAction.mockResolvedValueOnce(true);
+      mockGetGitHubToken.mockReturnValue("ghp_token");
+      mockCreatePullRequest.mockResolvedValueOnce({
+        url: "https://github.com/owner/repo/pull/1",
+        branch: "update-template-123",
+        number: 1,
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: false, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      const prArg = mockCreatePullRequest.mock.calls[0]?.[1] as {
+        files: { path: string; content: string }[];
+      };
+      expect(prArg.files.map((f) => f.path)).toEqual(["clean.txt"]);
+      for (const file of prArg.files) {
+        expect(file.content).not.toMatch(/^[<|=>]{7}/m);
+      }
     });
 
     it("ziku.jsonc の conflict は中断せず要素レベルマージで PR に統合される（base なし → 和集合）", async () => {
@@ -1511,8 +1603,9 @@ describe("pushCommand", () => {
       mockMergeOneFile.mockReturnValueOnce(
         Effect.succeed({
           file: "deleted-file.txt",
-          content: "<<<<<<< LOCAL\n=======\ntemplate content updated\n>>>>>>> TEMPLATE",
-          hasConflicts: true,
+          outcome: classifyMergeOutcome(
+            "<<<<<<< LOCAL\n=======\ntemplate content updated\n>>>>>>> TEMPLATE",
+          ),
         }),
       );
 

@@ -217,11 +217,11 @@ vi.mock("../../utils/merge", () => ({
     deletedLocally: [],
     unchanged: [],
   })),
-  threeWayMerge: vi.fn(() => ({ content: "merged", hasConflicts: false })),
+  threeWayMerge: vi.fn(() => ({ _tag: "Clean", content: "merged" })),
   asBaseContent: vi.fn((s: string) => s),
   asLocalContent: vi.fn((s: string) => s),
   asTemplateContent: vi.fn((s: string) => s),
-  hasConflictMarkers: vi.fn(() => ({ found: false })),
+  findConflictRegions: vi.fn(() => []),
 }));
 
 vi.mock("../../utils/untracked", () => ({

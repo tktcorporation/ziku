@@ -1,5 +1,5 @@
 import { textThreeWayMerge } from "./text-merge";
-import type { MergeResult, ThreeWayMergeParams } from "./types";
+import { type MergeOutcome, type ThreeWayMergeParams, classifyMergeOutcome } from "./types";
 
 /**
  * 3-way マージを実行する。
@@ -16,10 +16,12 @@ export function threeWayMerge({
   local,
   template,
   filePath,
-}: ThreeWayMergeParams): MergeResult {
-  // ローカルとテンプレートが同一なら即座に返す
+}: ThreeWayMergeParams): MergeOutcome {
+  // ローカルとテンプレートが同一ならマージするものが無い。それでも内容の検査は通す。
+  // 両側が未解決のマーカーを含んだまま一致していることがあり、素通しさせると
+  // 「マーカー入りだがクリーン」な結果になる。
   if (String(local) === String(template)) {
-    return { content: local, hasConflicts: false };
+    return classifyMergeOutcome(local);
   }
 
   return textThreeWayMerge(base, local, template, filePath);

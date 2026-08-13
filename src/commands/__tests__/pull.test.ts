@@ -67,10 +67,9 @@ vi.mock("../../utils/merge", async () => {
   const errorsMod = await import("../../errors");
   return {
     classifyFiles: vi.fn(),
-    hasConflictMarkers: vi.fn((content: string) => ({
-      found: content.includes("<<<<<<<"),
-      lines: [],
-    })),
+    findConflictRegions: vi.fn((content: string) =>
+      content.includes("<<<<<<<") ? [{ startLine: 1 }] : [],
+    ),
     // conflict-io の共通ユーティリティ（pull.ts はこれらを経由して merge する）
     readFileSafe: vi.fn((path: string) =>
       effectMod.Effect.tryPromise(() => fsMod.readFile(path, "utf-8")).pipe(
@@ -142,6 +141,9 @@ const { loadTemplateConfig } = await import("../../utils/template-config");
 const { hashFiles } = await import("../../utils/hash");
 const { classifyFiles, mergeOneFile, writeFileEnsureDir, downloadBaseForMerge } =
   await import("../../utils/merge");
+// マージ結果の判定は本物を使う（"../../utils/merge" のモックは index 経由の import だけを
+// 置き換えるので、実装モジュールを直接読み込めば素の関数が得られる）。
+const { classifyMergeOutcome } = await import("../../utils/merge/types");
 const { log } = await import("../../ui/renderer");
 
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
@@ -217,10 +219,15 @@ function mockContext(overrides?: {
 
 /**
  * mergeOneFile の mock を設定するヘルパー。
- * file 名と MergeResult を受け取り、Effect.succeed を返す。
+ *
+ * マージ結果の内容から `MergeOutcome` を組み立てる。判定を本物の
+ * `classifyMergeOutcome` に任せることで、「マーカー入りなのに Clean」という
+ * 実装では作れない値をテストが作ってしまうのを防ぐ。
  */
-function mockMergeResult(file: string, content: string, hasConflicts: boolean) {
-  mockMergeOneFile.mockReturnValueOnce(Effect.succeed({ file, content, hasConflicts }));
+function mockMergeResult(file: string, content: string) {
+  mockMergeOneFile.mockReturnValueOnce(
+    Effect.succeed({ file, outcome: classifyMergeOutcome(content) }),
+  );
 }
 
 describe("pullCommand", () => {
@@ -565,7 +572,6 @@ describe("pullCommand", () => {
       mockMergeResult(
         ".mcp.json",
         "<<<<<<< LOCAL\nlocal content\n=======\ntemplate content\n>>>>>>> TEMPLATE",
-        true,
       );
 
       await (pullCommand.run as any)({
@@ -949,11 +955,7 @@ describe("pullCommand", () => {
         unchanged: [],
       });
 
-      mockMergeResult(
-        ".mcp.json",
-        "<<<<<<< LOCAL\nlocal\n=======\ntemplate\n>>>>>>> TEMPLATE",
-        true,
-      );
+      mockMergeResult(".mcp.json", "<<<<<<< LOCAL\nlocal\n=======\ntemplate\n>>>>>>> TEMPLATE");
 
       await (pullCommand.run as any)({
         args: { dir: "/test", force: false, continue: false },
@@ -1122,7 +1124,7 @@ describe("pullCommand", () => {
         Effect.succeed({ templateDir: "/tmp/base", cleanup: baseCleanup }),
       );
 
-      mockMergeResult("settings.json", '{"merged": true}', false);
+      mockMergeResult("settings.json", '{"merged": true}');
 
       await (pullCommand.run as any)({
         args: { dir: "/test", force: false },
@@ -1181,8 +1183,8 @@ describe("pullCommand", () => {
         unchanged: [],
       });
 
-      // 自動マージ成功（hasConflicts: false）
-      mockMergeResult(".mcp.json", "auto-merged content", false);
+      // 自動マージ成功
+      mockMergeResult(".mcp.json", "auto-merged content");
 
       await (pullCommand.run as any)({
         args: { dir: "/test", force: false },
@@ -1220,13 +1222,9 @@ describe("pullCommand", () => {
       });
 
       // a.json: 自動マージ成功
-      mockMergeResult("a.json", "merged a", false);
+      mockMergeResult("a.json", "merged a");
       // b.txt: コンフリクト（テキストマーカー）
-      mockMergeResult(
-        "b.txt",
-        "<<<<<<< LOCAL\nlocal b\n=======\ntemplate b\n>>>>>>> TEMPLATE",
-        true,
-      );
+      mockMergeResult("b.txt", "<<<<<<< LOCAL\nlocal b\n=======\ntemplate b\n>>>>>>> TEMPLATE");
 
       await (pullCommand.run as any)({
         args: { dir: "/test", force: false },
@@ -1270,8 +1268,8 @@ describe("pullCommand", () => {
         unchanged: [],
       });
 
-      mockMergeResult("a.json", "merged a", false);
-      mockMergeResult("b.json", "merged b", false);
+      mockMergeResult("a.json", "merged a");
+      mockMergeResult("b.json", "merged b");
 
       await (pullCommand.run as any)({
         args: { dir: "/test", force: false },
@@ -1316,7 +1314,6 @@ describe("pullCommand", () => {
       mockMergeResult(
         "config.json",
         '<<<<<<< LOCAL\n{"version": "2.0"}\n=======\n{"version": "3.0"}\n>>>>>>> TEMPLATE',
-        true,
       );
 
       await (pullCommand.run as any)({
@@ -1396,7 +1393,6 @@ describe("pullCommand", () => {
       mockMergeResult(
         ".claude/rules/worktree.md",
         "<<<<<<< LOCAL\n=======\ntemplate content updated\n>>>>>>> TEMPLATE",
-        true,
       );
 
       // ENOENT で落ちずに正常終了することを検証
@@ -1481,7 +1477,7 @@ describe("pullCommand", () => {
         unchanged: [],
       });
 
-      mockMergeResult(".mcp.json", "merged content", false);
+      mockMergeResult(".mcp.json", "merged content");
 
       await (pullCommand.run as any)({
         args: { dir: "/test", force: false, dryRun: true },
@@ -1517,7 +1513,6 @@ describe("pullCommand", () => {
       mockMergeResult(
         ".mcp.json",
         "<<<<<<< LOCAL\nlocal content\n=======\ntemplate content\n>>>>>>> TEMPLATE",
-        true,
       );
 
       await (pullCommand.run as any)({

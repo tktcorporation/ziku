@@ -15,7 +15,7 @@ import type { LockState } from "../../modules/schemas";
 import { FileNotFoundError } from "../../errors";
 import { buildCommitPinnedSource, downloadTemplateToTemp } from "../template";
 import { log } from "../../ui/renderer";
-import type { MergeResult } from "./types";
+import type { MergeOutcome } from "./types";
 import { asBaseContent, asLocalContent, asTemplateContent } from "./types";
 import { threeWayMerge } from "./three-way-merge";
 
@@ -58,8 +58,9 @@ export interface MergeOneFileInput {
   readonly baseTemplateDir?: string;
 }
 
-export interface MergeOneFileOutput extends MergeResult {
+export interface MergeOneFileOutput {
   readonly file: string;
+  readonly outcome: MergeOutcome;
 }
 
 /**
@@ -89,14 +90,14 @@ export const mergeOneFile = (input: MergeOneFileInput): Effect.Effect<MergeOneFi
         )
       : "";
 
-    const result = threeWayMerge({
+    const outcome = threeWayMerge({
       base: asBaseContent(baseContent),
       local: asLocalContent(localContent),
       template: asTemplateContent(templateContent),
       filePath: input.file,
     });
 
-    return { ...result, file: input.file };
+    return { file: input.file, outcome };
   }).pipe(
     // template の FileNotFoundError は classifyFiles の不変条件違反 → defect
     Effect.catchTag("FileNotFoundError", (e) => Effect.die(e)),

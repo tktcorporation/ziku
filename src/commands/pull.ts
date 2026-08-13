@@ -2,6 +2,7 @@ import { readFile, rm } from "node:fs/promises";
 import { defineCommand } from "citty";
 import { Effect, Option } from "effect";
 import { join, resolve } from "pathe";
+import { match } from "ts-pattern";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
 import type { ConflictPaths, MergingLockState, ResumableLockState } from "../modules/schemas";
@@ -20,10 +21,11 @@ import { loadCommandContext, runCommandEffect, toZikuError } from "../services/c
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 import { hashContent, hashFiles } from "../utils/hash";
+import type { ConflictRegion } from "../utils/merge";
 import {
   classifyFiles,
   downloadBaseForMerge,
-  hasConflictMarkers,
+  findConflictRegions,
   mergeOneFile,
   readFileSafe,
   writeFileEnsureDir,
@@ -471,7 +473,7 @@ async function resolveConflicts(
   await withFinally(
     async () => {
       for (const file of conflicts) {
-        const result = await Effect.runPromise(
+        const { outcome } = await Effect.runPromise(
           mergeOneFile({
             file,
             targetDir: ctx.targetDir,
@@ -480,21 +482,26 @@ async function resolveConflicts(
           }),
         );
 
-        // dry-run ではマージ結果をディスクへ書かない（プレビューのみ）。
+        // マーカー入りの結果もローカルへは書き出す。ユーザーが手で解決する対象なので、
+        // 書かずに済ませるとどこが衝突したのか分からなくなる。
+        // dry-run はプレビューなのでディスクへ触れない。
         if (!dryRun) {
-          await Effect.runPromise(writeFileEnsureDir(join(ctx.targetDir, file), result.content));
+          await Effect.runPromise(writeFileEnsureDir(join(ctx.targetDir, file), outcome.content));
         }
 
-        if (result.hasConflicts) {
-          unresolvedConflicts.push(file);
-          log.warn(
-            dryRun
-              ? `Conflict in ${pc.cyan(file)} — would need manual resolution`
-              : `Conflict in ${pc.cyan(file)} — manual resolution needed`,
-          );
-        } else {
-          log.success(`${dryRun ? "Would auto-merge" : "Auto-merged"}: ${pc.cyan(file)}`);
-        }
+        match(outcome)
+          .with({ _tag: "Clean" }, () => {
+            log.success(`${dryRun ? "Would auto-merge" : "Auto-merged"}: ${pc.cyan(file)}`);
+          })
+          .with({ _tag: "Conflicted" }, ({ regions }) => {
+            unresolvedConflicts.push(file);
+            log.warn(
+              dryRun
+                ? `Conflict in ${pc.cyan(file)} ${formatRegions(regions)} — would need manual resolution`
+                : `Conflict in ${pc.cyan(file)} ${formatRegions(regions)} — manual resolution needed`,
+            );
+          })
+          .exhaustive();
       }
 
       if (unresolvedConflicts.length > 0 && !dryRun) {
@@ -505,6 +512,17 @@ async function resolveConflicts(
   );
 
   return unresolvedConflicts;
+}
+
+/**
+ * 未解決ブロックの位置をユーザー向けに整形する。
+ *
+ * 行番号を添えるのは、マーカーが 1 ファイルに複数ブロック残ることがあり、
+ * ファイル名だけでは編集すべき箇所が分からないため。
+ */
+function formatRegions(regions: readonly ConflictRegion[]): string {
+  const label = regions.length === 1 ? "line" : "lines";
+  return pc.dim(`(${label} ${regions.map((r) => r.startLine).join(", ")})`);
 }
 
 /**
@@ -599,19 +617,21 @@ async function runContinue(
 ): Promise<void> {
   const conflicts = lock.merge.conflicts;
 
-  const stillConflicted: string[] = [];
+  // 解決済みかどうかはディスクの現在の内容だけが決める。ユーザーが手で編集した後なので、
+  // マージ時点で得た位置情報は既にずれている。読み直して今のブロック位置を提示する。
+  const stillConflicted: Array<{ file: string; regions: readonly ConflictRegion[] }> = [];
   for (const file of conflicts) {
     const contentOption = await Effect.runPromise(
       readFileSafe(join(targetDir, file)).pipe(Effect.option),
     );
-    if (Option.isSome(contentOption) && hasConflictMarkers(contentOption.value).found) {
-      stillConflicted.push(file);
-    }
+    if (Option.isNone(contentOption)) continue;
+    const regions = findConflictRegions(contentOption.value);
+    if (regions.length > 0) stillConflicted.push({ file, regions });
   }
 
   if (stillConflicted.length > 0) {
-    for (const file of stillConflicted) {
-      log.warn(`Still has conflict markers: ${pc.cyan(file)}`);
+    for (const { file, regions } of stillConflicted) {
+      log.warn(`Still has conflict markers: ${pc.cyan(file)} ${formatRegions(regions)}`);
     }
     throw new ZikuError(
       "Unresolved conflicts remain",
