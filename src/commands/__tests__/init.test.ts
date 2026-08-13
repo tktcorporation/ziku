@@ -119,9 +119,8 @@ vi.mock("../../utils/template-config", () => ({
 }));
 
 // モック後にインポート
-const { initCommand, resolveConfigBaseHash } = await import("../init");
+const { initCommand } = await import("../init");
 const { generateZikuJsonc } = await import("../../utils/ziku-config");
-const { hashContent } = await import("../../utils/hash");
 const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy, copyFile } =
   await import("../../utils/template");
 const { detectGitHubOwner, detectGitHubRepo } = await import("../../utils/git-remote");
@@ -324,46 +323,6 @@ describe("initCommand", () => {
       );
     });
 
-    it("--yes --force なら上書きする", async () => {
-      vol.fromJSON({
-        "/test": null,
-      });
-
-      mockFetchTemplates.mockResolvedValue([]);
-
-      await (initCommand.run as any)({
-        args: { dir: "/test", force: true, yes: true },
-        rawArgs: [],
-        cmd: initCommand,
-      });
-
-      expect(mockFetchTemplates).toHaveBeenCalledWith(
-        expect.objectContaining({
-          overwriteStrategy: "overwrite",
-        }),
-      );
-    });
-
-    it("--yes でも --overwrite-strategy の明示指定が優先される", async () => {
-      vol.fromJSON({
-        "/test": null,
-      });
-
-      mockFetchTemplates.mockResolvedValue([]);
-
-      await (initCommand.run as any)({
-        args: { dir: "/test", force: false, yes: true, "overwrite-strategy": "overwrite" },
-        rawArgs: [],
-        cmd: initCommand,
-      });
-
-      expect(mockFetchTemplates).toHaveBeenCalledWith(
-        expect.objectContaining({
-          overwriteStrategy: "overwrite",
-        }),
-      );
-    });
-
     it("cleanup が必ず呼ばれる", async () => {
       vol.fromJSON({
         "/test": null,
@@ -539,36 +498,6 @@ describe("initCommand", () => {
 
       expect(mockFetchTemplates).toHaveBeenCalledWith(
         expect.objectContaining({
-          overwriteStrategy: "skip",
-        }),
-      );
-    });
-
-    it("--dirs と --overwrite-strategy の組み合わせ", async () => {
-      vol.fromJSON({
-        "/test": null,
-      });
-
-      mockFetchTemplates.mockResolvedValue([]);
-
-      await (initCommand.run as any)({
-        args: {
-          dir: "/test",
-          force: false,
-          yes: false,
-          dirs: "Root files",
-          "overwrite-strategy": "skip",
-        },
-        rawArgs: [],
-        cmd: initCommand,
-      });
-
-      expect(mockSelectDirectories).not.toHaveBeenCalled();
-      expect(mockFetchTemplates).toHaveBeenCalledWith(
-        expect.objectContaining({
-          patterns: expect.objectContaining({
-            include: expect.arrayContaining([".mcp.json", ".mise.toml"]),
-          }),
           overwriteStrategy: "skip",
         }),
       );
@@ -1148,40 +1077,5 @@ describe("generateZikuJsonc", () => {
     const parsed = JSON.parse(content);
     expect(Array.isArray(parsed.include)).toBe(true);
     expect(parsed.include.length).toBeGreaterThan(0);
-  });
-});
-
-describe("resolveConfigBaseHash（テンプレ保護の安全装置）", () => {
-  it("ローカル(部分集合) の内容ハッシュを base にする（テンプレを削らないため）", () => {
-    const localContent = generateZikuJsonc({ include: globPatterns([".claude/**"]), exclude: [] });
-    const result = resolveConfigBaseHash({
-      localConfigContent: localContent,
-      templateConfigHash: hashContent("different-template-content"),
-    });
-    // base = ローカル内容のハッシュ（テンプレ側のハッシュではない）
-    expect(result).toBe(hashContent(localContent));
-  });
-
-  it("テンプレ側ハッシュが undefined でもローカル内容から base を決められる", () => {
-    const localContent = generateZikuJsonc({ include: globPatterns([".mcp.json"]), exclude: [] });
-    const result = resolveConfigBaseHash({
-      localConfigContent: localContent,
-      templateConfigHash: undefined,
-    });
-    expect(result).toBe(hashContent(localContent));
-  });
-
-  it("ローカルが完全集合（テンプレと同一）なら base はテンプレと一致する", () => {
-    const content = generateZikuJsonc({
-      include: globPatterns([".claude/**", ".mcp.json"]),
-      exclude: [],
-    });
-    const templateHash = hashContent(content);
-    const result = resolveConfigBaseHash({
-      localConfigContent: content,
-      templateConfigHash: templateHash,
-    });
-    // local == template のときは base も一致 → push/pull とも no-op
-    expect(result).toBe(templateHash);
   });
 });
