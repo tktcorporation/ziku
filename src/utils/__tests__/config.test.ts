@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ValidationError } from "../../errors";
 import type { LockState } from "../../modules/schemas";
 import { baseCommitSha, baseHashesOf, markSynced } from "../../modules/schemas";
-import { toZikuError } from "../../services/command-context";
+import { toZikuError, toZikuFailure } from "../../services/command-context";
 
 // fs モジュールをモック
 vi.mock("node:fs/promises", async () => {
@@ -403,7 +403,14 @@ describe("loadLock", () => {
       Option.some(expect.objectContaining({ _tag: "ValidationError", path: LOCK_FILE })),
     );
 
-    const zikuError = toZikuError(Option.getOrThrow(failure as Option.Option<ValidationError>));
+    // 「見つからない」ではなく検証失敗として分類され、作り直しを促すこと
+    const validationError = Option.getOrThrow(failure as Option.Option<ValidationError>);
+    expect(toZikuFailure(validationError).reason).toMatchObject({
+      kind: "ConfigInvalid",
+      path: LOCK_FILE,
+    });
+
+    const zikuError = toZikuError(validationError);
     expect(zikuError.message).toContain(LOCK_FILE);
     expect(zikuError.hint).toContain("cannot read");
     expect(zikuError.hint).toContain("ziku init");

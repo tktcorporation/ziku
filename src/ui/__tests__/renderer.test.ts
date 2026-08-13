@@ -21,6 +21,7 @@ import * as p from "@clack/prompts";
 import {
   intro,
   log,
+  logUnexpectedError,
   logZikuError,
   logDiffSummary,
   logFileResults,
@@ -211,6 +212,40 @@ describe("renderer", () => {
       logZikuError({ message: "not found" });
       expect(p.log.error).toHaveBeenCalledWith("not found");
       expect(p.log.message).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("logUnexpectedError", () => {
+    it("スタックトレースと cause の連鎖をそのまま見せる", () => {
+      const root = new Error("socket hang up");
+      const wrapper = new Error("request failed", { cause: root });
+
+      logUnexpectedError(wrapper);
+
+      expect(p.log.error).toHaveBeenCalledWith("Unexpected error — this is a bug in ziku.");
+      const body = vi.mocked(p.log.message).mock.calls[0][0] as string;
+      expect(body).toContain("request failed");
+      expect(body).toContain("Caused by:");
+      expect(body).toContain("socket hang up");
+      expect(body).toContain("renderer.test.ts");
+    });
+
+    it("Error でない値も文字列にして見せる", () => {
+      logUnexpectedError("boom");
+
+      const body = vi.mocked(p.log.message).mock.calls[0][0] as string;
+      expect(body).toBe("boom");
+    });
+
+    it("cause が循環していても打ち切る", () => {
+      const a = new Error("a");
+      const b = new Error("b", { cause: a });
+      a.cause = b;
+
+      logUnexpectedError(a);
+
+      const body = vi.mocked(p.log.message).mock.calls[0][0] as string;
+      expect(body).toContain("(truncated)");
     });
   });
 });

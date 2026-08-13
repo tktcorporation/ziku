@@ -164,12 +164,47 @@ export function logDiffSummary(files: { path: string; type: string }[]): void {
   p.log.message([...lines, "", summaryParts].join("\n"));
 }
 
-/** ZikuError を整形表示する。トップレベルエラーハンドラから呼ばれる。 */
+/** 予期された失敗を整形表示する。トップレベルエラーハンドラから呼ばれる。 */
 export function logZikuError(error: { message: string; hint?: string }): void {
   p.log.error(error.message);
   if (error.hint) {
     p.log.message(pc.dim(error.hint));
   }
+}
+
+/** 原因の連鎖をたどる深さの上限。cause が循環していても止まるようにする。 */
+const CAUSE_CHAIN_LIMIT = 5;
+
+/**
+ * 予期しないエラーを表示する。トップレベルエラーハンドラから呼ばれる。
+ *
+ * 予期された失敗と違い、ユーザーが取れる行動が分からない。原因を握り潰さず、
+ * スタックトレースと cause の連鎖をそのまま見せて報告できる状態にする。
+ */
+export function logUnexpectedError(error: unknown): void {
+  p.log.error("Unexpected error — this is a bug in ziku.");
+  p.log.message(describeUnexpected(error));
+  p.log.message(pc.dim("Please report it at https://github.com/tktcorporation/ziku/issues"));
+}
+
+/** エラーとその cause 連鎖を、スタックトレース付きの 1 つのテキストにまとめる。 */
+function describeUnexpected(error: unknown): string {
+  const lines: string[] = [];
+  let current: unknown = error;
+
+  for (let depth = 0; depth < CAUSE_CHAIN_LIMIT; depth++) {
+    const prefix = depth === 0 ? "" : "Caused by: ";
+    if (!(current instanceof Error)) {
+      lines.push(`${prefix}${String(current)}`);
+      return lines.join("\n");
+    }
+    lines.push(`${prefix}${current.stack ?? `${current.name}: ${current.message}`}`);
+    if (current.cause === undefined) return lines.join("\n");
+    current = current.cause;
+  }
+
+  lines.push("Caused by: ... (truncated)");
+  return lines.join("\n");
 }
 
 export { pc };

@@ -1,7 +1,7 @@
 import { vol } from "memfs";
 import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ZikuError, FileNotFoundError } from "../../errors";
+import { FileNotFoundError } from "../../errors";
 import type { TemplateSource } from "../../modules/schemas";
 import { createPendingLock } from "../../modules/schemas";
 
@@ -17,7 +17,7 @@ vi.mock("node:fs/promises", async () => {
 });
 
 // loadCommandContext をモック（DI の恩恵: 低レベルモック不要）
-// runCommandEffect / toZikuError は実際の実装を使い、loadCommandContext だけモックする
+// runCommandEffect / toZikuFailure は実際の実装を使い、loadCommandContext だけモックする
 vi.mock("../../services/command-context", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../services/command-context")>();
   return {
@@ -146,7 +146,7 @@ describe("diffCommand", () => {
   });
 
   describe("run", () => {
-    it(".ziku/ziku.jsonc が存在しない場合は ZikuError をスロー", async () => {
+    it(".ziku/ziku.jsonc が存在しない場合は NotInitialized をスロー", async () => {
       mockLoadCommandContext.mockReturnValue(
         Effect.fail(new FileNotFoundError({ path: ".ziku/ziku.jsonc" })),
       );
@@ -157,7 +157,12 @@ describe("diffCommand", () => {
           rawArgs: [],
           cmd: diffCommand,
         }),
-      ).rejects.toThrow(ZikuError);
+      ).rejects.toMatchObject({
+        _tag: "ZikuFailure",
+        message: ".ziku/ziku.jsonc not found.",
+        hint: "Run 'ziku init' first.",
+        reason: { kind: "NotInitialized", path: ".ziku/ziku.jsonc" },
+      });
     });
 
     it("patterns が空の場合は警告", async () => {

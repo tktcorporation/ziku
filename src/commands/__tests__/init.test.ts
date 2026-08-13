@@ -1,7 +1,6 @@
 import { vol } from "memfs";
 import { Effect } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ZikuError } from "../../errors";
 import { baseHashesOf, lockSchema } from "../../modules/schemas";
 
 // fs モジュールをモック
@@ -432,7 +431,7 @@ describe("initCommand", () => {
       );
     });
 
-    it("--dirs で無効なディレクトリ名を指定するとエラー", async () => {
+    it("--dirs で無効なディレクトリ名を指定すると InvalidArgument", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -448,7 +447,10 @@ describe("initCommand", () => {
           rawArgs: [],
           cmd: initCommand,
         }),
-      ).rejects.toThrow(ZikuError);
+      ).rejects.toMatchObject({
+        _tag: "ZikuFailure",
+        reason: { kind: "InvalidArgument", argument: "--dirs", value: "invalid-dir" },
+      });
 
       expect(mockFetchTemplates).not.toHaveBeenCalled();
     });
@@ -508,7 +510,7 @@ describe("initCommand", () => {
       );
     });
 
-    it("--overwrite-strategy に無効な値を指定するとエラー", async () => {
+    it("--overwrite-strategy に無効な値を指定すると InvalidArgument", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -524,7 +526,14 @@ describe("initCommand", () => {
           rawArgs: [],
           cmd: initCommand,
         }),
-      ).rejects.toThrow(ZikuError);
+      ).rejects.toMatchObject({
+        _tag: "ZikuFailure",
+        reason: {
+          kind: "InvalidArgument",
+          argument: "--overwrite-strategy",
+          value: "invalid",
+        },
+      });
 
       expect(mockFetchTemplates).not.toHaveBeenCalled();
     });

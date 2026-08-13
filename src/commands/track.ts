@@ -1,6 +1,6 @@
 import { defineCommand } from "citty";
 import { resolve } from "pathe";
-import { ZikuError } from "../errors";
+import { zikuFailure } from "../errors";
 import { intro, log, outro, pc } from "../ui/renderer";
 import {
   ZIKU_CONFIG_FILE,
@@ -84,10 +84,7 @@ export const trackCommand = defineCommand({
     const targetDir = resolve(args.dir);
 
     if (!zikuConfigExists(targetDir)) {
-      throw new ZikuError(
-        ".ziku/ziku.jsonc not found.",
-        "Run 'ziku init' first to set up the project.",
-      );
+      throw zikuFailure({ kind: "NotInitialized", path: ZIKU_CONFIG_FILE });
     }
 
     if (args.list) {
@@ -100,10 +97,12 @@ export const trackCommand = defineCommand({
     const patterns = args._;
 
     if (patterns.length === 0) {
-      throw new ZikuError(
-        "No patterns specified.",
-        "Usage: ziku track <patterns...>\nExample: ziku track '.cloud/rules/*.md' '.cloud/config.json'",
-      );
+      throw zikuFailure({
+        kind: "MissingArgument",
+        argument: "patterns",
+        usage:
+          "Usage: ziku track <patterns...>\nExample: ziku track '.cloud/rules/*.md' '.cloud/config.json'",
+      });
     }
 
     const { config, rawContent } = await loadZikuConfig(targetDir);

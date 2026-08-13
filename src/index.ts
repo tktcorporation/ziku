@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import * as p from "@clack/prompts";
-import { defineCommand, runMain } from "citty";
-import { Effect } from "effect";
+import { defineCommand, runCommand, runMain } from "citty";
+import type { ArgsDef, CommandDef } from "citty";
+import { Cause, Effect, Exit } from "effect";
+import { P, match } from "ts-pattern";
 import { version } from "../package.json";
 import { diffCommand } from "./commands/diff";
 import { initCommand } from "./commands/init";
@@ -10,8 +12,8 @@ import { pushCommand } from "./commands/push";
 import { setupCommand } from "./commands/setup";
 import { statusCommand } from "./commands/status";
 import { trackCommand } from "./commands/track";
-import { ZikuError } from "./errors";
-import { intro, logZikuError, pc } from "./ui/renderer";
+import { ZikuError, ZikuFailure } from "./errors";
+import { intro, logUnexpectedError, logZikuError, pc } from "./ui/renderer";
 
 const main = defineCommand({
   meta: {
@@ -93,54 +95,111 @@ async function promptCommand(): Promise<void> {
   }
 
   const selectedCommand = commandMap[command];
-  await runMain(selectedCommand as typeof diffCommand);
+  await runCli(selectedCommand as typeof diffCommand, []);
 }
 
 /**
- * トップレベルエラーハンドラ
+ * citty が usage / version の描画に入る引数か判定する。
  *
- * 背景: 各コマンドで throw された ZikuError をここでキャッチし、
- * @clack/prompts で統一的に表示する。process.exit(1) はこの 1 箇所のみ。
+ * citty の判定条件をそのまま写している。`-v` は diff の `--verbose` の別名でもあるため、
+ * 単独で渡されたときだけバージョン表示として扱う。ここを緩めると `ziku diff -v` が
+ * バージョン表示側の経路に流れ、失敗の報告経路を失う。
+ */
+function isUsageOrVersionRequest(rawArgs: string[]): boolean {
+  if (rawArgs.some((arg) => arg === "--help" || arg === "-h")) return true;
+  return rawArgs.length === 1 && (rawArgs[0] === "--version" || rawArgs[0] === "-v");
+}
+
+/**
+ * citty のコマンドを実行する。
+ *
+ * 実行系で `runMain` を使わない理由: `runMain` は例外を自前で握って `console.error` に
+ * オブジェクトをダンプして終了するため、失敗がトップレベルハンドラに届かず、
+ * ユーザーには内部表現がそのまま見えてしまう。`runCommand` は例外をそのまま投げる。
+ *
+ * usage / version の描画だけは `runMain` に任せる。サブコマンドを解決して usage を
+ * 描く処理は citty の内部にしかなく、こちらで再実装すると表示がずれる。
+ */
+async function runCli<T extends ArgsDef>(cmd: CommandDef<T>, rawArgs: string[]): Promise<void> {
+  if (isUsageOrVersionRequest(rawArgs)) {
+    await runMain(cmd, { rawArgs });
+    return;
+  }
+  await runCommand(cmd, { rawArgs });
+}
+
+/** 引数から実行するコマンドを選び、citty に渡す。 */
+async function dispatch(): Promise<void> {
+  const args = process.argv.slice(2);
+  const hasSubCommand =
+    args.length > 0 &&
+    [
+      "init",
+      "setup",
+      "push",
+      "pull",
+      "diff",
+      "status",
+      "track",
+      "--help",
+      "-h",
+      "--version",
+      "-v",
+    ].includes(args[0]);
+
+  if (!hasSubCommand && args.length > 0 && !args[0].startsWith("-")) {
+    // npx ziku . のような形式は init コマンドとして実行
+    await runCli(initCommand, args);
+    return;
+  }
+  if (!hasSubCommand && args.length === 0) {
+    // 引数なしの場合はコマンド選択プロンプトを表示
+    await promptCommand();
+    return;
+  }
+  await runCli(main, args);
+}
+
+/**
+ * citty が引数の解釈で投げるエラーか判定する。
+ *
+ * 未知のサブコマンドや必須引数の欠落は ziku の不具合ではなくユーザーの入力ミスなので、
+ * 予期しないエラーとしてスタックトレースを出すのではなく、使い方を案内する。
+ */
+function isUsageError(error: unknown): error is Error {
+  return error instanceof Error && error.name === "CLIError";
+}
+
+/**
+ * 失敗を表示する。
+ *
+ * ziku が予期した失敗（ZikuFailure / ZikuError）と、引数の解釈で弾かれた入力は
+ * message + hint だけを見せる。それ以外は ziku 側の不具合なので、原因を握り潰さず
+ * スタックトレースごと見せる。
+ */
+function report(error: unknown): void {
+  match(error)
+    .with(P.union(P.instanceOf(ZikuFailure), P.instanceOf(ZikuError)), logZikuError)
+    .when(isUsageError, (e) =>
+      logZikuError({ message: e.message, hint: "Run `ziku --help` to see available commands." }),
+    )
+    .otherwise(logUnexpectedError);
+}
+
+/**
+ * トップレベルエラーハンドラ。
+ *
+ * `runPromiseExit` は失敗でも reject しないため、どのコマンドがどう失敗しても
+ * unhandled rejection にならない。`Cause.squash` で失敗値と defect（Zod の例外や
+ * Effect.orDie で落ちたもの）を同じ経路に集め、表示してから終了コード 1 で終える。
+ * process.exit(1) はこの 1 箇所のみ。
  */
 async function run(): Promise<void> {
-  await Effect.runPromise(
-    Effect.tryPromise(async () => {
-      const args = process.argv.slice(2);
-      const hasSubCommand =
-        args.length > 0 &&
-        [
-          "init",
-          "setup",
-          "push",
-          "pull",
-          "diff",
-          "status",
-          "track",
-          "--help",
-          "-h",
-          "--version",
-          "-v",
-        ].includes(args[0]);
+  const exit = await Effect.runPromiseExit(Effect.promise(dispatch));
+  if (Exit.isSuccess(exit)) return;
 
-      if (!hasSubCommand && args.length > 0 && !args[0].startsWith("-")) {
-        // npx ziku . のような形式は init コマンドとして実行
-        await runMain(initCommand);
-      } else if (!hasSubCommand && args.length === 0) {
-        // 引数なしの場合はコマンド選択プロンプトを表示
-        await promptCommand();
-      } else {
-        await runMain(main);
-      }
-    }).pipe(
-      Effect.catchAll((error) => {
-        if (error instanceof ZikuError) {
-          logZikuError(error);
-          return Effect.sync(() => process.exit(1));
-        }
-        return Effect.fail(error);
-      }),
-    ),
-  );
+  report(Cause.squash(exit.cause));
+  process.exit(1);
 }
 
 void run();

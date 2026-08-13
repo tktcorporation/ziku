@@ -10,8 +10,8 @@
 import { Cause, Context, Effect, Exit, Layer, Option, Scope } from "effect";
 import { match } from "ts-pattern";
 import type { ZikuConfig, LockState, TemplateSource } from "../modules/schemas";
-import { FileNotFoundError, ParseError, ZikuError } from "../errors";
-import type { TemplateError, ValidationError } from "../errors";
+import { FileNotFoundError, ParseError, ZikuError, zikuFailure } from "../errors";
+import type { TemplateError, ValidationError, ZikuFailure } from "../errors";
 import { loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
 import { loadLock } from "../utils/lock";
 import { resolveTemplateDirScoped } from "../utils/template-resolve";
@@ -54,22 +54,27 @@ export class CommandContext extends Context.Tag("CommandContext")<
   CommandContextShape
 >() {}
 
+/** loadCommandContext / loadLock が返しうる、ユーティリティ層の失敗。 */
+export type ContextLoadError = FileNotFoundError | ParseError | ValidationError | TemplateError;
+
 // ─── Effect ヘルパー ───
 
 /**
  * コマンドのエントリポイントで Effect を実行する。
  *
- * 背景: Effect.runPromise は失敗を FiberFailure でラップするため、
- * 既存の ZikuError catch パターン（index.ts のトップレベルハンドラ）と相性が悪い。
- * この関数は Exit から ZikuError を取り出して re-throw することで、
- * 既存のエラーハンドリングフローを維持する。
+ * Effect.runPromise は失敗を FiberFailure でラップするため、そのままでは
+ * トップレベルハンドラ（index.ts）が失敗の種類を判別できない。この関数は Exit から
+ * 失敗値を取り出して素通しで再スローし、`ZikuFailure` の `reason` と `cause` を
+ * 呼び出し元まで届ける。
  *
  * 使い方:
  *   await runCommandEffect(
- *     loadCommandContext(targetDir).pipe(Effect.mapError(toZikuError)),
+ *     loadCommandContext(targetDir).pipe(Effect.mapError(toZikuFailure)),
  *   );
  */
-export async function runCommandEffect<A>(effect: Effect.Effect<A, ZikuError>): Promise<A> {
+export async function runCommandEffect<A>(
+  effect: Effect.Effect<A, ZikuFailure | ZikuError>,
+): Promise<A> {
   const exit = await Effect.runPromiseExit(effect);
   if (Exit.isSuccess(exit)) return exit.value;
 
@@ -89,10 +94,7 @@ export async function runCommandEffect<A>(effect: Effect.Effect<A, ZikuError>): 
  */
 export function loadCommandContext(
   targetDir: string,
-): Effect.Effect<
-  CommandContextShape,
-  FileNotFoundError | ParseError | ValidationError | TemplateError
-> {
+): Effect.Effect<CommandContextShape, ContextLoadError> {
   return Effect.gen(function* () {
     if (!zikuConfigExists(targetDir)) {
       return yield* new FileNotFoundError({ path: ".ziku/ziku.jsonc" });
@@ -117,7 +119,7 @@ export function loadCommandContext(
     // finalizer (tracker 登録解除 + rmSync) を走らせる。これがないと
     // process exit まで temp dir と tracker 状態が残る。
     //
-    // 成功時: 呼び出し側 (各コマンド) は従来どおり withFinally(work, cleanup) で使える。
+    // 成功時: 呼び出し側 (各コマンド) は withCleanup / withFinally に cleanup を渡す。
     // cleanup を呼び忘れた場合でも、登録された tempDir は temp-tracker の
     // process.on('exit') で同期削除される (二重防衛)。
     const scope = yield* Scope.make();
@@ -152,38 +154,43 @@ export function loadCommandContext(
  */
 export function makeCommandContextLayer(
   targetDir: string,
-): Layer.Layer<CommandContext, FileNotFoundError | ParseError | ValidationError | TemplateError> {
+): Layer.Layer<CommandContext, ContextLoadError> {
   return Layer.effect(CommandContext, loadCommandContext(targetDir));
 }
 
 /**
- * loadCommandContext のエラーを ZikuError に変換するヘルパー。
+ * ユーティリティ層の失敗を `FailureReason` へ分類する。
  *
- * 各コマンドで繰り返される mapError パターンを DRY 化。
- *
- * スキーマ違反（ValidationError）はファイル不在と別文言にする。読めない設定ファイルを
+ * スキーマ違反（ValidationError）はファイル不在と別ケースにする。読めない設定ファイルを
  * 「見つからない」と報告すると、ユーザーは存在するファイルを探し続けることになる。
+ *
+ * 元の例外は cause で繋ぐ。分類しても発生源を追えるようにするため。
  */
-export function toZikuError(
-  err: FileNotFoundError | ParseError | ValidationError | TemplateError,
-): ZikuError {
+export function toZikuFailure(err: ContextLoadError): ZikuFailure {
   return match(err)
-    .with(
-      { _tag: "FileNotFoundError" },
-      (e) => new ZikuError(`${e.path} not found.`, "Run 'ziku init' first."),
+    .with({ _tag: "FileNotFoundError" }, (e) =>
+      zikuFailure({ kind: "NotInitialized", path: e.path }),
     )
-    .with(
-      { _tag: "ParseError" },
-      (e) => new ZikuError(`Failed to parse ${e.path}`, String(e.cause)),
+    .with({ _tag: "ParseError" }, (e) =>
+      zikuFailure(
+        { kind: "ConfigUnparsable", path: e.path, detail: String(e.cause) },
+        { cause: e.cause },
+      ),
     )
-    .with(
-      { _tag: "ValidationError" },
-      (e) =>
-        new ZikuError(
-          `Failed to read ${e.path}`,
-          [...e.issues, "Run `ziku init` to recreate it."].join("\n"),
-        ),
+    .with({ _tag: "ValidationError" }, (e) =>
+      zikuFailure({ kind: "ConfigInvalid", path: e.path, issues: e.issues }),
     )
-    .with({ _tag: "TemplateError" }, (e) => new ZikuError("Failed to load template", e.message))
+    .with({ _tag: "TemplateError" }, (e) =>
+      zikuFailure({ kind: "TemplateUnavailable", detail: e.message }, { cause: e.cause }),
+    )
     .exhaustive();
+}
+
+/**
+ * 分類した失敗を `ZikuError` へ落とす。`throw` で失敗を伝えるコマンド
+ * (pull / push / status) が使う。文言は `toZikuFailure` と同じ SSOT から来る。
+ */
+export function toZikuError(err: ContextLoadError): ZikuError {
+  const failure = toZikuFailure(err);
+  return new ZikuError(failure.message, failure.hint);
 }

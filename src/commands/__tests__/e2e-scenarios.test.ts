@@ -13,7 +13,6 @@
 import { vol } from "memfs";
 import { Effect } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ZikuError } from "../../errors";
 import type { TemplateSource } from "../../modules/schemas";
 import {
   baseCommitSha,
@@ -206,23 +205,28 @@ vi.mock("../../utils/diff", () => ({
   hasDiff: vi.fn(() => false),
 }));
 
-vi.mock("../../utils/merge", () => ({
-  classifyFiles: vi.fn(() => ({
-    autoUpdate: [],
-    localOnly: [],
-    conflicts: [],
-    newFiles: [],
-    deletedFiles: [],
-    deletedWithLocalEdits: [],
-    deletedLocally: [],
-    unchanged: [],
-  })),
-  threeWayMerge: vi.fn(() => ({ _tag: "Clean", content: "merged" })),
-  asBaseContent: vi.fn((s: string) => s),
-  asLocalContent: vi.fn((s: string) => s),
-  asTemplateContent: vi.fn((s: string) => s),
-  findConflictRegions: vi.fn(() => []),
-}));
+vi.mock("../../utils/merge", async () => {
+  const effectMod = await import("effect");
+  return {
+    classifyFiles: vi.fn(() => ({
+      autoUpdate: [],
+      localOnly: [],
+      conflicts: [],
+      newFiles: [],
+      deletedFiles: [],
+      deletedWithLocalEdits: [],
+      deletedLocally: [],
+      unchanged: [],
+    })),
+    threeWayMerge: vi.fn(() => ({ _tag: "Clean", content: "merged" })),
+    asBaseContent: vi.fn((s: string) => s),
+    asLocalContent: vi.fn((s: string) => s),
+    asTemplateContent: vi.fn((s: string) => s),
+    findConflictRegions: vi.fn(() => []),
+    // ここで扱うシナリオは衝突を作らないので、常に「未解決なし」を返す。
+    mergeConflictFiles: vi.fn(() => effectMod.Effect.succeed([])),
+  };
+});
 
 vi.mock("../../utils/untracked", () => ({
   detectUntrackedFiles: vi.fn(() => Promise.resolve([])),
@@ -396,7 +400,7 @@ describe("E2E: multi-scenario tests", () => {
       expect(patterns.include).not.toContain(".devcontainer/**");
     });
 
-    it("--dirs に存在しないディレクトリ名 → ZikuError", async () => {
+    it("--dirs に存在しないディレクトリ名 → InvalidArgument", async () => {
       vol.fromJSON({ "/test": null });
 
       await expect(
@@ -405,7 +409,10 @@ describe("E2E: multi-scenario tests", () => {
           rawArgs: [],
           cmd: initCommand,
         }),
-      ).rejects.toThrow(ZikuError);
+      ).rejects.toMatchObject({
+        _tag: "ZikuFailure",
+        reason: { kind: "InvalidArgument", argument: "--dirs" },
+      });
     });
   });
 
@@ -442,7 +449,7 @@ describe("E2E: multi-scenario tests", () => {
       );
     });
 
-    it("--from のリポジトリが存在しない → ZikuError", async () => {
+    it("--from のリポジトリが存在しない → TemplateRepoNotFound", async () => {
       mockCheckRepoExists.mockResolvedValueOnce({ _tag: "NotFound" });
       vol.fromJSON({ "/test": null });
 
@@ -452,7 +459,10 @@ describe("E2E: multi-scenario tests", () => {
           rawArgs: [],
           cmd: initCommand,
         }),
-      ).rejects.toThrow(ZikuError);
+      ).rejects.toMatchObject({
+        _tag: "ZikuFailure",
+        reason: { kind: "TemplateRepoNotFound", repos: ["no-org/no-repo"] },
+      });
     });
   });
 
@@ -492,7 +502,7 @@ describe("E2E: multi-scenario tests", () => {
       );
     });
 
-    it("無効な --overwrite-strategy → ZikuError", async () => {
+    it("無効な --overwrite-strategy → InvalidArgument", async () => {
       vol.fromJSON({
         ...vol.toJSON(),
         "/test": null,
@@ -509,7 +519,10 @@ describe("E2E: multi-scenario tests", () => {
           rawArgs: [],
           cmd: initCommand,
         }),
-      ).rejects.toThrow(ZikuError);
+      ).rejects.toMatchObject({
+        _tag: "ZikuFailure",
+        reason: { kind: "InvalidArgument", argument: "--overwrite-strategy" },
+      });
     });
   });
 
@@ -518,7 +531,7 @@ describe("E2E: multi-scenario tests", () => {
   // ─────────────────────────────────────────────────��───────────
 
   describe("diff: エラーケース", () => {
-    it(".ziku/ziku.jsonc が存在しない → ZikuError", async () => {
+    it(".ziku/ziku.jsonc が存在しない → NotInitialized", async () => {
       vol.fromJSON({
         "/project/.ziku/lock.json": JSON.stringify(baseLock),
         // .ziku/ziku.jsonc なし
@@ -533,7 +546,7 @@ describe("E2E: multi-scenario tests", () => {
       ).rejects.toThrow();
     });
 
-    it("ziku.jsonc が存在しない → ZikuError", async () => {
+    it("ziku.jsonc が存在しない → NotInitialized", async () => {
       vol.fromJSON({
         "/project/.ziku/lock.json": JSON.stringify(baseLock),
         // .ziku/ziku.jsonc なし
@@ -610,7 +623,7 @@ describe("E2E: multi-scenario tests", () => {
       // エラーなく完了すること
     });
 
-    it("ziku.jsonc がない場合 → ZikuError", async () => {
+    it("ziku.jsonc がない場合 → NotInitialized", async () => {
       vol.fromJSON({ "/project": null });
 
       await expect(
@@ -619,10 +632,13 @@ describe("E2E: multi-scenario tests", () => {
           rawArgs: [".new-pattern", "--dir", "/project"],
           cmd: trackCommand,
         }),
-      ).rejects.toThrow(ZikuError);
+      ).rejects.toMatchObject({
+        _tag: "ZikuFailure",
+        reason: { kind: "NotInitialized", path: ".ziku/ziku.jsonc" },
+      });
     });
 
-    it("パターン引数な�� → ZikuError", async () => {
+    it("パターン引数な�� → MissingArgument", async () => {
       vol.fromJSON({
         "/project/.ziku/ziku.jsonc": createZikuJsonc([".mcp.json"]),
       });
@@ -633,7 +649,10 @@ describe("E2E: multi-scenario tests", () => {
           rawArgs: ["--dir", "/project"],
           cmd: trackCommand,
         }),
-      ).rejects.toThrow(ZikuError);
+      ).rejects.toMatchObject({
+        _tag: "ZikuFailure",
+        reason: { kind: "MissingArgument", argument: "patterns" },
+      });
     });
   });
 

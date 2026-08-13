@@ -1,7 +1,8 @@
 import { Octokit } from "@octokit/rest";
 import { Effect, Option } from "effect";
 import { match } from "ts-pattern";
-import { ZikuError } from "../errors";
+import { zikuFailure } from "../errors";
+import type { ZikuFailure } from "../errors";
 import type { BranchRef, PrResult, TemplateRef } from "../modules/schemas";
 
 export interface PushOptions {
@@ -244,7 +245,7 @@ export type RepoExistence =
       /**
        * GitHub が返したメッセージ（例: "Bad credentials"）。
        * 認証トークンを付けて問い合わせたが、401 が返ったケースに使う。
-       * ライフサイクル: checkRepoExists が返し、init/setup は即 ZikuError に変換して
+       * ライフサイクル: checkRepoExists が返し、init/setup は即 ZikuFailure に変換して
        * ユーザーにトークン更新を促す。
        */
       readonly message: string;
@@ -296,7 +297,7 @@ export function checkRepoExists(owner: string, repo: string): Promise<RepoExiste
 }
 
 /**
- * RepoExistence の Unauthorized ケースを ZikuError に変換する。
+ * RepoExistence の Unauthorized ケースを失敗へ変換する。
  *
  * 背景: `GITHUB_TOKEN` / `GH_TOKEN` が失効または無効な場合、GitHub API は 401 を返す。
  * この状態のまま init/setup を続行するとダウンロードや PR 作成で分かりにくいエラーが
@@ -304,29 +305,24 @@ export function checkRepoExists(owner: string, repo: string): Promise<RepoExiste
  */
 export function unauthorizedError(
   r: Extract<RepoExistence, { readonly _tag: "Unauthorized" }>,
-): ZikuError {
-  return new ZikuError(
-    `GitHub authentication failed: ${r.message}`,
-    "GITHUB_TOKEN / GH_TOKEN が無効または失効しています。`gh auth login` で再ログインするか、環境変数を更新してください。",
-  );
+): ZikuFailure {
+  return zikuFailure({ kind: "GitHubAuthRejected", detail: r.message });
 }
 
 /**
- * RepoExistence の RateLimited ケースを ZikuError に変換する。
+ * RepoExistence の RateLimited ケースを失敗へ変換する。
  *
- * 認証状況とリセット時刻を hint に含めることで、ユーザーが
+ * 認証状況とリセット時刻を渡すことで、ユーザーが
  * 「GITHUB_TOKEN を設定する」か「しばらく待つ」かを判断できる。
  */
 export function rateLimitedError(
   r: Extract<RepoExistence, { readonly _tag: "RateLimited" }>,
-): ZikuError {
-  const base = r.authenticated
-    ? "Authenticated quota (5000/hr) exhausted"
-    : "Unauthenticated quota (60/hr) exhausted — set GITHUB_TOKEN or run `gh auth login` to raise it to 5000/hr";
-  const reset = r.resetAt
-    ? ` (resets in ~${Math.max(0, Math.ceil((r.resetAt.getTime() - Date.now()) / 60000))} min)`
-    : "";
-  return new ZikuError("GitHub API rate limit exceeded", `${base}${reset}`);
+): ZikuFailure {
+  return zikuFailure({
+    kind: "GitHubRateLimited",
+    authenticated: r.authenticated,
+    resetAt: r.resetAt,
+  });
 }
 
 /**

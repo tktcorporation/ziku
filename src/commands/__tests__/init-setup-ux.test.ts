@@ -713,7 +713,7 @@ describe("setup: セットアップ UX", () => {
 
     it.each(["a/", "/b", "", "a/b/c"])('不正な値 "%s" はエラーになる', async (from) => {
       await expect(runSetup(["--remote", "--from", from, "--dryRun"])).rejects.toThrow(
-        "Invalid --from format",
+        "Invalid --from:",
       );
       expect(mockCheckRepoExists).not.toHaveBeenCalled();
     });

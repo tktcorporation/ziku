@@ -3,7 +3,8 @@ import { Effect } from "effect";
 import { resolve } from "pathe";
 import { P, match } from "ts-pattern";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
-import { ZikuError } from "../errors";
+import { zikuFailure } from "../errors";
+import type { ZikuFailure } from "../errors";
 import { runCommandEffect } from "../services/command-context";
 import {
   checkRepoExists,
@@ -106,7 +107,7 @@ export const setupCommand = defineCommand({
  * テンプレートリポジトリのルートで `ziku setup` を実行した場合の処理。
  * ziku.jsonc が既にあればスキップ。
  */
-function handleLocalSetup(targetDir: string, dryRun: boolean): Effect.Effect<void, ZikuError> {
+function handleLocalSetup(targetDir: string, dryRun: boolean): Effect.Effect<void, ZikuFailure> {
   return Effect.gen(function* () {
     log.info(`Target: ${pc.cyan(targetDir)}`);
 
@@ -133,9 +134,14 @@ function handleLocalSetup(targetDir: string, dryRun: boolean): Effect.Effect<voi
     yield* Effect.tryPromise({
       try: () => saveZikuConfig(targetDir, content),
       catch: (cause) =>
-        new ZikuError(
-          `Failed to write ${ZIKU_CONFIG_FILE}: ${String(cause)}`,
-          `Check write permissions for ${targetDir}`,
+        zikuFailure(
+          {
+            kind: "FileWriteFailed",
+            path: ZIKU_CONFIG_FILE,
+            directory: targetDir,
+            detail: String(cause),
+          },
+          { cause },
         ),
     });
 
@@ -176,10 +182,7 @@ async function handleRemoteSetup(from: string | undefined, dryRun: boolean): Pro
       log.warn(`Could not verify ${owner}/${repo}${statusPart}: ${u.reason}. Proceeding anyway.`);
     })
     .with({ _tag: "NotFound" }, (): never => {
-      throw new ZikuError(
-        `Repository ${owner}/${repo} not found`,
-        "Check the --from value or create the repository first",
-      );
+      throw zikuFailure({ kind: "TemplateRepoNotFound", repos: [`${owner}/${repo}`] });
     })
     .with({ _tag: "RateLimited" }, (r): never => {
       throw rateLimitedError(r);
@@ -211,10 +214,7 @@ async function handleRemoteSetup(from: string | undefined, dryRun: boolean): Pro
 
   const token = getGitHubToken();
   if (!token) {
-    throw new ZikuError(
-      "GitHub token required to create a PR",
-      "Set GITHUB_TOKEN or GH_TOKEN, or run: gh auth login",
-    );
+    throw zikuFailure({ kind: "GitHubTokenMissing", operation: "create a PR" });
   }
 
   const content = generateZikuJsonc({
@@ -259,10 +259,7 @@ function resolveRemoteTarget(from: string | undefined): { owner: string; repo: s
     return { owner: detectedOwner, repo: DEFAULT_TEMPLATE_REPO };
   }
 
-  throw new ZikuError(
-    "Cannot detect template source",
-    "Specify --from <owner> or --from <owner/repo>",
-  );
+  throw zikuFailure({ kind: "TemplateSourceUndetectable" });
 }
 
 /**
@@ -273,10 +270,12 @@ function resolveRemoteTarget(from: string | undefined): { owner: string; repo: s
  * 存在しない owner / repo への API 呼び出しになるため入口で弾く。
  */
 function parseFromArg(from: string): { owner: string; repo: string } {
-  const invalid = new ZikuError(
-    `Invalid --from format: "${from}"`,
-    "Expected: owner or owner/repo (e.g., my-org or my-org/my-templates)",
-  );
+  const invalid = zikuFailure({
+    kind: "InvalidArgument",
+    argument: "--from",
+    value: from,
+    expected: "owner or owner/repo (e.g., my-org or my-org/my-templates)",
+  });
 
   const segments = from.split("/");
 

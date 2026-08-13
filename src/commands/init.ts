@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, readdirSync, rmdirSync } from "node:fs";
 import { defineCommand } from "citty";
 import { Effect } from "effect";
 import { dirname, join, resolve } from "pathe";
-import { withFinally } from "../effect-helpers";
+import { withCleanup } from "../effect-helpers";
+import { runCommandEffect } from "../services/command-context";
 import { loadTemplateConfig, extractDirectoryEntries } from "../utils/template-config";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
@@ -15,7 +16,8 @@ import type {
 } from "../modules/schemas";
 import { createPendingLock, markSynced } from "../modules/schemas";
 import { match } from "ts-pattern";
-import { ZikuError } from "../errors";
+import { zikuFailure } from "../errors";
+import type { ZikuFailure } from "../errors";
 import {
   inputTemplateSource,
   selectMissingTemplateAction,
@@ -229,151 +231,163 @@ export const initCommand = defineCommand({
     };
 
     // ─── 共通処理: テンプレート適用 ───
-    await withFinally(async () => {
-      // テンプレートの ziku.jsonc を Effect で読み込む
-      const templateConfig = await Effect.runPromise(
-        loadTemplateConfig(templateDir).pipe(
-          Effect.catchTag("TemplateNotConfiguredError", (_err) => {
-            const hint = match(source)
-              .with({ kind: "local" }, (s) => `Add .ziku/ziku.jsonc to ${s.path}`)
-              .with({ kind: "github" }, (s) => `Add .ziku/ziku.jsonc to ${s.owner}/${s.repo}`)
-              .exhaustive();
-            return Effect.fail(new ZikuError(`Template has no .ziku/ziku.jsonc`, hint));
-          }),
-          Effect.catchTag("ParseError", (err) =>
-            Effect.fail(
-              new ZikuError(`Failed to parse template .ziku/ziku.jsonc`, String(err.cause)),
+    // 本体を Effect.promise で包む理由: 本体はテンプレート展開・プロンプト・ファイル書き込みを
+    // Promise で連ねており、失敗は型に現れず throw で抜ける。Effect.tryPromise の catch で
+    // 拾うとエラーチャネルが unknown に潰れるので、defect として運び runCommandEffect が
+    // 投げられた値をそのまま再スローする。
+    await runCommandEffect(
+      withCleanup(
+        Effect.promise(async () => {
+          // テンプレートの ziku.jsonc を Effect で読み込む
+          const templateConfig = await runCommandEffect(
+            loadTemplateConfig(templateDir).pipe(
+              Effect.catchTag("TemplateNotConfiguredError", (_err) => {
+                const templateRef = match(source)
+                  .with({ kind: "local" }, (s) => s.path)
+                  .with({ kind: "github" }, (s) => `${s.owner}/${s.repo}`)
+                  .exhaustive();
+                return Effect.fail(zikuFailure({ kind: "TemplateNotConfigured", templateRef }));
+              }),
+              Effect.catchTag("ParseError", (err) =>
+                Effect.fail(
+                  zikuFailure(
+                    { kind: "ConfigUnparsable", path: err.path, detail: String(err.cause) },
+                    { cause: err.cause },
+                  ),
+                ),
+              ),
             ),
-          ),
-        ),
-      );
+          );
 
-      const flatPatterns = await resolveTemplatePatterns(
-        templateConfig,
-        args.yes as boolean,
-        args.dirs as string | undefined,
-      );
+          const flatPatterns = await resolveTemplatePatterns(
+            templateConfig,
+            args.yes as boolean,
+            args.dirs as string | undefined,
+          );
 
-      if (flatPatterns.include.length === 0) {
-        log.warn("No patterns to apply");
-        return;
-      }
+          if (flatPatterns.include.length === 0) {
+            log.warn("No patterns to apply");
+            return;
+          }
 
-      // 上書き戦略の解決
-      const effectiveStrategy: OverwriteStrategy = await resolveEffectiveStrategy(
-        args.force as boolean,
-        args["overwrite-strategy"] as string | undefined,
-        args.yes as boolean,
-        zikuConfigExists(targetDir),
-      );
+          // 上書き戦略の解決
+          const effectiveStrategy: OverwriteStrategy = await resolveEffectiveStrategy(
+            args.force as boolean,
+            args["overwrite-strategy"] as string | undefined,
+            args.yes as boolean,
+            zikuConfigExists(targetDir),
+          );
 
-      // Step 2: ファイルをコピー
-      log.step("Applying templates...");
+          // Step 2: ファイルをコピー
+          log.step("Applying templates...");
 
-      const templateResults = await fetchTemplates({
-        targetDir,
-        overwriteStrategy: effectiveStrategy,
-        patterns: flatPatterns,
-        templateDir,
-        dryRun,
-      });
+          const templateResults = await fetchTemplates({
+            targetDir,
+            overwriteStrategy: effectiveStrategy,
+            patterns: flatPatterns,
+            templateDir,
+            dryRun,
+          });
 
-      const allResults: FileOperationResult[] = [...templateResults];
+          const allResults: FileOperationResult[] = [...templateResults];
 
-      // devcontainer.env.example を戦略に従って作成
-      const hasDevcontainer = flatPatterns.include.some((p) => p.startsWith(".devcontainer/"));
-      if (hasDevcontainer) {
-        const envResult = await createEnvExample(targetDir, effectiveStrategy, dryRun);
-        allResults.push(envResult);
-      }
+          // devcontainer.env.example を戦略に従って作成
+          const hasDevcontainer = flatPatterns.include.some((p) => p.startsWith(".devcontainer/"));
+          if (hasDevcontainer) {
+            const envResult = await createEnvExample(targetDir, effectiveStrategy, dryRun);
+            allResults.push(envResult);
+          }
 
-      // テンプレートファイルのハッシュを計算（pull 時の差分検出用）。
-      // ziku.jsonc 自体も追跡ファイルになったため withConfigTracked で含める。
-      const baseHashes = await hashFiles(
-        templateDir,
-        withConfigTracked(flatPatterns.include),
-        flatPatterns.exclude,
-      );
+          // テンプレートファイルのハッシュを計算（pull 時の差分検出用）。
+          // ziku.jsonc 自体も追跡ファイルになったため withConfigTracked で含める。
+          const baseHashes = await hashFiles(
+            templateDir,
+            withConfigTracked(flatPatterns.include),
+            flatPatterns.exclude,
+          );
 
-      // ziku.jsonc の base（共通祖先）を決める。init は「テンプレートのパターンの部分集合」
-      // だけを選んで導入できるため、ローカル ziku.jsonc はテンプレより少ないことがある。
-      // base をどちらに置くかで初回 push/pull の安全性が決まる → resolveConfigBaseHash が
-      // そのポリシーを担う（テンプレートを壊さないための安全装置）。
-      //
-      // ただしテンプレートに ziku.jsonc が存在する場合（= hashFiles が値を返した場合）のみ
-      // base を記録する。テンプレに無いのに base を記録すると、次回 pull で
-      // {base 有・local 有・template 無} → deletedFiles と判定され、ローカルの制御ファイル
-      // ziku.jsonc が削除されてしまう（codex P1）。テンプレに無い場合は base 未記録のまま
-      // にしておき、ziku.jsonc は localOnly 扱いになる。
-      if (baseHashes[ZIKU_CONFIG_FILE] !== undefined) {
-        const localConfigContent = generateZikuJsonc({
-          include: flatPatterns.include,
-          exclude: flatPatterns.exclude,
-        });
-        baseHashes[ZIKU_CONFIG_FILE] = resolveConfigBaseHash({
-          localConfigContent,
-          templateConfigHash: baseHashes[ZIKU_CONFIG_FILE],
-        });
-      }
+          // ziku.jsonc の base（共通祖先）を決める。init は「テンプレートのパターンの部分集合」
+          // だけを選んで導入できるため、ローカル ziku.jsonc はテンプレより少ないことがある。
+          // base をどちらに置くかで初回 push/pull の安全性が決まる → resolveConfigBaseHash が
+          // そのポリシーを担う（テンプレートを壊さないための安全装置）。
+          //
+          // ただしテンプレートに ziku.jsonc が存在する場合（= hashFiles が値を返した場合）のみ
+          // base を記録する。テンプレに無いのに base を記録すると、次回 pull で
+          // {base 有・local 有・template 無} → deletedFiles と判定され、ローカルの制御ファイル
+          // ziku.jsonc が削除されてしまう（codex P1）。テンプレに無い場合は base 未記録のまま
+          // にしておき、ziku.jsonc は localOnly 扱いになる。
+          if (baseHashes[ZIKU_CONFIG_FILE] !== undefined) {
+            const localConfigContent = generateZikuJsonc({
+              include: flatPatterns.include,
+              exclude: flatPatterns.exclude,
+            });
+            baseHashes[ZIKU_CONFIG_FILE] = resolveConfigBaseHash({
+              localConfigContent,
+              templateConfigHash: baseHashes[ZIKU_CONFIG_FILE],
+            });
+          }
 
-      // ベースのコミット SHA: GitHub ソースの場合のみ取得。
-      // テンプレートを取得した ref とベースの SHA が食い違うと、3-way マージのベースが
-      // 別ブランチのツリーになるため ref をそのまま渡す。
-      const baseCommit = await match(source)
-        .with({ kind: "github" }, (s) => resolveSourceCommitSha(s.owner, s.repo, s.ref))
-        .with({ kind: "local" }, () => Promise.resolve(undefined))
-        .exhaustive();
+          // ベースのコミット SHA: GitHub ソースの場合のみ取得。
+          // テンプレートを取得した ref とベースの SHA が食い違うと、3-way マージのベースが
+          // 別ブランチのツリーになるため ref をそのまま渡す。
+          const baseCommit = await match(source)
+            .with({ kind: "github" }, (s) => resolveSourceCommitSha(s.owner, s.repo, s.ref))
+            .with({ kind: "local" }, () => Promise.resolve(undefined))
+            .exhaustive();
 
-      // .ziku/ziku.jsonc を書き出し（パターン定義のみ、source なし）
-      const zikuJsoncResult = await writeZikuJsonc(targetDir, {
-        patterns: flatPatterns,
-        strategy: effectiveStrategy,
-        dryRun,
-      });
-      allResults.push(zikuJsoncResult);
+          // .ziku/ziku.jsonc を書き出し（パターン定義のみ、source なし）
+          const zikuJsoncResult = await writeZikuJsonc(targetDir, {
+            patterns: flatPatterns,
+            strategy: effectiveStrategy,
+            dryRun,
+          });
+          allResults.push(zikuJsoncResult);
 
-      // .ziku/lock.json を書き出し（source + 同期状態）
-      const lockResult = await writeLockFile(targetDir, {
-        source,
-        baseHashes,
-        baseCommit,
-        dryRun,
-      });
-      allResults.push(lockResult);
+          // .ziku/lock.json を書き出し（source + 同期状態）
+          const lockResult = await writeLockFile(targetDir, {
+            source,
+            baseHashes,
+            baseCommit,
+            dryRun,
+          });
+          allResults.push(lockResult);
 
-      // ファイル操作結果を表示（サマリー含む）
-      const summary = logFileResults(allResults);
+          // ファイル操作結果を表示（サマリー含む）
+          const summary = logFileResults(allResults);
 
-      // 変更がない場合
-      if (summary.added === 0 && summary.updated === 0) {
-        log.info("No changes were made");
-        return;
-      }
+          // 変更がない場合
+          if (summary.added === 0 && summary.updated === 0) {
+            log.info("No changes were made");
+            return;
+          }
 
-      if (dryRun) {
-        outro(
-          [
-            "Dry run complete — no files were written.",
-            "",
-            pc.dim("Run the same command without --dryRun to apply these changes."),
-          ].join("\n"),
-        );
-        return;
-      }
+          if (dryRun) {
+            outro(
+              [
+                "Dry run complete — no files were written.",
+                "",
+                pc.dim("Run the same command without --dryRun to apply these changes."),
+              ].join("\n"),
+            );
+            return;
+          }
 
-      // 成功メッセージと次のステップ
-      outro(
-        [
-          "Setup complete!",
-          "",
-          pc.bold("Next steps:"),
-          `  ${pc.cyan("git add . && git commit -m 'chore: add ziku config'")}`,
-          `  ${pc.dim("Commit the changes")}`,
-          `  ${pc.cyan("npx ziku diff")}`,
-          `  ${pc.dim("Check for updates from upstream")}`,
-        ].join("\n"),
-      );
-    }, cleanupWithTargetDir);
+          // 成功メッセージと次のステップ
+          outro(
+            [
+              "Setup complete!",
+              "",
+              pc.bold("Next steps:"),
+              `  ${pc.cyan("git add . && git commit -m 'chore: add ziku config'")}`,
+              `  ${pc.dim("Commit the changes")}`,
+              `  ${pc.cyan("npx ziku diff")}`,
+              `  ${pc.dim("Check for updates from upstream")}`,
+            ].join("\n"),
+          );
+        }),
+        cleanupWithTargetDir,
+      ),
+    );
   },
 });
 
@@ -583,10 +597,12 @@ async function selectDirsFromTemplate(
     const validLabels = entries.map((e) => e.label);
     const invalidLabels = requestedLabels.filter((l) => !validLabels.includes(l));
     if (invalidLabels.length > 0) {
-      throw new ZikuError(
-        `Unknown directory(ies): ${invalidLabels.join(", ")}`,
-        `Available directories: ${validLabels.join(", ")}`,
-      );
+      throw zikuFailure({
+        kind: "InvalidArgument",
+        argument: "--dirs",
+        value: invalidLabels.join(", "),
+        expected: `one of ${validLabels.join(", ")}`,
+      });
     }
     return entries.filter((e) => requestedLabels.includes(e.label)).flatMap((e) => e.patterns);
   }
@@ -611,10 +627,12 @@ async function resolveEffectiveStrategy(
 
   if (strategyArg) {
     if (strategyArg !== "overwrite" && strategyArg !== "skip" && strategyArg !== "prompt") {
-      throw new ZikuError(
-        `Invalid overwrite strategy: ${strategyArg}`,
-        "Must be: overwrite, skip, or prompt",
-      );
+      throw zikuFailure({
+        kind: "InvalidArgument",
+        argument: "--overwrite-strategy",
+        value: strategyArg,
+        expected: "overwrite, skip, or prompt",
+      });
     }
     return strategyArg;
   }
@@ -742,10 +760,10 @@ async function resolveExplicitSource(
         return resolved;
       })
       .with({ _tag: "NotFound" }, (): never => {
-        throw new ZikuError(
-          `Template repository "${resolved.sourceOwner}/${resolved.sourceRepo}" not found`,
-          "Check the --from value or create the repository first",
-        );
+        throw zikuFailure({
+          kind: "TemplateRepoNotFound",
+          repos: [`${resolved.sourceOwner}/${resolved.sourceRepo}`],
+        });
       })
       .with({ _tag: "RateLimited" }, (r): never => {
         throw rateLimitedError(r);
@@ -781,10 +799,10 @@ async function resolveExplicitSource(
     if (results[i]._tag === "Unknown") candidateRepos.push(DEFAULT_TEMPLATE_REPOS[i]);
   }
   if (candidateRepos.length === 0) {
-    throw new ZikuError(
-      `No template repository found for "${resolved.sourceOwner}" (checked: ${DEFAULT_TEMPLATE_REPOS.join(", ")})`,
-      "Check the --from value or create the repository first",
-    );
+    throw zikuFailure({
+      kind: "TemplateRepoNotFound",
+      repos: DEFAULT_TEMPLATE_REPOS.map((repo) => `${resolved.sourceOwner}/${repo}`),
+    });
   }
 
   // Unknown のみの候補には警告を出す（ユーザーが次のステップで何が起きているか分かるように）
@@ -886,23 +904,19 @@ function resolveNonInteractive(
     };
   }
   if (deduplicatedCandidates.length > 1) {
-    const candidateList = deduplicatedCandidates.map((c) => `${c.owner}/${c.repo}`).join(", ");
-    throw new ZikuError(
-      `Multiple template candidates found: ${candidateList}`,
-      "Specify --from <owner> or --from <owner/repo> to disambiguate",
-    );
+    throw zikuFailure({
+      kind: "AmbiguousTemplateSource",
+      candidates: deduplicatedCandidates.map((c) => `${c.owner}/${c.repo}`),
+    });
   }
   if (candidateEntries.length > 0) {
     const firstCandidate = candidateEntries[0];
-    throw new ZikuError(
-      `Template repository "${firstCandidate.owner}/${firstCandidate.repo}" not found`,
-      "Create it first, or specify --from <owner> or --from <owner/repo>",
-    );
+    throw zikuFailure({
+      kind: "TemplateRepoNotFound",
+      repos: [`${firstCandidate.owner}/${firstCandidate.repo}`],
+    });
   }
-  throw new ZikuError(
-    "Cannot detect template source: no git remote origin found",
-    "Specify --from <owner> or --from <owner/repo>",
-  );
+  throw zikuFailure({ kind: "TemplateSourceUndetectable" });
 }
 
 /**
@@ -951,18 +965,15 @@ async function handleMissingTemplate(
   return match(action)
     .with("create-repo", async () => {
       if (dryRun) {
-        throw new ZikuError(
-          `Would create template repository ${owner}/${repo}, but --dryRun prevents remote changes`,
-          "Run without --dryRun to create it, or specify an existing template with --from",
-        );
+        throw zikuFailure({
+          kind: "DryRunBlocked",
+          operation: `Would create template repository ${owner}/${repo}`,
+        });
       }
 
       const token = getGitHubToken();
       if (!token) {
-        throw new ZikuError(
-          "GitHub token required to create a repository",
-          "Set GITHUB_TOKEN or GH_TOKEN, or run: gh auth login",
-        );
+        throw zikuFailure({ kind: "GitHubTokenMissing", operation: "create a repository" });
       }
 
       log.step(`Creating ${pc.cyan(`${owner}/${repo}`)}...`);
@@ -979,6 +990,16 @@ async function handleMissingTemplate(
     .exhaustive();
 }
 
+/** `--from` の値が owner / owner/repo のどちらとしても読めないときの失敗。 */
+function invalidFromArg(from: string): ZikuFailure {
+  return zikuFailure({
+    kind: "InvalidArgument",
+    argument: "--from",
+    value: from,
+    expected: "owner or owner/repo (e.g., my-org or my-org/my-templates)",
+  });
+}
+
 /**
  * --from 引数をパースする。
  *
@@ -990,10 +1011,7 @@ function parseFromArg(from: string): { sourceOwner: string; sourceRepo: string }
   if (slashIndex === -1) {
     // オーナー名のみ → デフォルトの .github リポジトリを補完
     if (!from.trim()) {
-      throw new ZikuError(
-        `Invalid --from format: "${from}"`,
-        "Expected: owner or owner/repo (e.g., my-org or my-org/my-templates)",
-      );
+      throw invalidFromArg(from);
     }
     return {
       sourceOwner: from,
@@ -1001,10 +1019,7 @@ function parseFromArg(from: string): { sourceOwner: string; sourceRepo: string }
     };
   }
   if (slashIndex === 0 || slashIndex === from.length - 1) {
-    throw new ZikuError(
-      `Invalid --from format: "${from}"`,
-      "Expected: owner or owner/repo (e.g., my-org or my-org/my-templates)",
-    );
+    throw invalidFromArg(from);
   }
   return {
     sourceOwner: from.slice(0, slashIndex),
