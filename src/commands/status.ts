@@ -1,6 +1,6 @@
 import { defineCommand } from "citty";
 import { Effect, Option } from "effect";
-import { withFinally } from "../effect-helpers";
+import { withCleanup } from "../effect-helpers";
 import { loadCommandContext, runCommandEffect, toZikuFailure } from "../services/command-context";
 import type { LockState } from "../modules/schemas";
 import { baseHashesOf } from "../modules/schemas";
@@ -120,64 +120,72 @@ export const statusCommand = defineCommand({
 
     log.info(`Template: ${pc.cyan(templateDir)}${source.kind === "local" ? " (local)" : ""}`);
 
-    await withFinally(async () => {
-      const include = config.include;
-      const exclude = config.exclude ?? [];
+    // 本体を Effect.promise で包む理由: 本体は Promise を返す I/O を並べるので、失敗は型に
+    // 現れず throw で抜ける。Effect.tryPromise の catch で拾うとエラーチャネルが unknown に
+    // 潰れるので、defect として運び runCommandEffect が投げられた値をそのまま再スローする。
+    await runCommandEffect(
+      withCleanup(
+        Effect.promise(async () => {
+          const include = config.include;
+          const exclude = config.exclude ?? [];
 
-      if (include.length === 0) {
-        log.warn("No patterns configured");
-        outro("Nothing to compare.");
-        return;
-      }
+          if (include.length === 0) {
+            log.warn("No patterns configured");
+            outro("Nothing to compare.");
+            return;
+          }
 
-      // テンプレ側で追加された include/exclude パターンを取り込んだ後でハッシュ比較する。
-      // これをしないと、テンプレに新規パターンが追加されている状況で status が
-      // 「in sync」と誤判定し、その後 `pull` で大量の新ファイルが降ってくる現象が起きる
-      // (pull.ts と同じマージ処理を走らせて整合させる)。
-      const { mergedInclude, mergedExclude, newInclude, patternsUpdated } =
-        await mergeTemplatePatterns(templateDir, include, exclude);
+          // テンプレ側で追加された include/exclude パターンを取り込んだ後でハッシュ比較する。
+          // これをしないと、テンプレに新規パターンが追加されている状況で status が
+          // 「in sync」と誤判定し、その後 `pull` で大量の新ファイルが降ってくる現象が起きる
+          // (pull.ts と同じマージ処理を走らせて整合させる)。
+          const { mergedInclude, mergedExclude, newInclude, patternsUpdated } =
+            await mergeTemplatePatterns(templateDir, include, exclude);
 
-      if (newInclude.length > 0) {
-        log.info(
-          `Template added ${newInclude.length} new pattern(s) — files matching these will appear as 'new file:' below:`,
-        );
-        for (const p of newInclude) {
-          log.message(`  ${pc.green("+")} ${p}`);
-        }
-      }
+          if (newInclude.length > 0) {
+            log.info(
+              `Template added ${newInclude.length} new pattern(s) — files matching these will appear as 'new file:' below:`,
+            );
+            for (const p of newInclude) {
+              log.message(`  ${pc.green("+")} ${p}`);
+            }
+          }
 
-      const { plan } = await withSpinner("Comparing local with template...", () =>
-        analyzeSync({
-          targetDir,
-          templateDir,
-          baseHashes: baseHashesOf(lock),
-          // ziku.jsonc 自体も追跡ファイルとして差分検出に含める（push/pull と一貫させ、
-          // config ドリフトを status に反映する）。
-          include: withConfigTracked(mergedInclude),
-          exclude: mergedExclude,
+          const { plan } = await withSpinner("Comparing local with template...", () =>
+            analyzeSync({
+              targetDir,
+              templateDir,
+              baseHashes: baseHashesOf(lock),
+              // ziku.jsonc 自体も追跡ファイルとして差分検出に含める（push/pull と一貫させ、
+              // config ドリフトを status に反映する）。
+              include: withConfigTracked(mergedInclude),
+              exclude: mergedExclude,
+            }),
+          );
+
+          // ziku.jsonc は加法 union で同期されるため、ハッシュ差分ではなく union 観点の実差分で
+          // 入れるバケツを決め直してから表示に載せる（判断は zikuConfigStatusCategory）。
+          const drift = await analyzeConfigDrift(targetDir, templateDir);
+          const buckets = categorizeForStatus(
+            withZikuConfigAt(plan.files, zikuConfigStatusCategory(drift)),
+          );
+          const untracked = await detectUntrackedFiles({
+            targetDir,
+            patterns: { include: mergedInclude, exclude: mergedExclude },
+          });
+          // patternsUpdated を渡すことで、ファイル差分はゼロでも「テンプレが新パターンを追加」
+          // しているケースで pull を強制推奨する (push は raw config.include を読むため、
+          // パターン追加を反映するには pull が必要 — codex review #71)。
+          const recommendation = decideRecommendation(buckets, lock, patternsUpdated);
+
+          const model: StatusViewModel = { buckets, untracked, recommendation };
+          log.message(renderStatusLong(model));
+          // recommendation を outro として強調表示する。renderStatusLong には含めず
+          // ここで一元化することで、メッセージの SSOT を保つ。
+          outro(recommendationLine(recommendation));
         }),
-      );
-
-      // ziku.jsonc は加法 union で同期されるため、ハッシュ差分ではなく union 観点の実差分で
-      // 入れるバケツを決め直してから表示に載せる（判断は zikuConfigStatusCategory）。
-      const drift = await analyzeConfigDrift(targetDir, templateDir);
-      const buckets = categorizeForStatus(
-        withZikuConfigAt(plan.files, zikuConfigStatusCategory(drift)),
-      );
-      const untracked = await detectUntrackedFiles({
-        targetDir,
-        patterns: { include: mergedInclude, exclude: mergedExclude },
-      });
-      // patternsUpdated を渡すことで、ファイル差分はゼロでも「テンプレが新パターンを追加」
-      // しているケースで pull を強制推奨する (push は raw config.include を読むため、
-      // パターン追加を反映するには pull が必要 — codex review #71)。
-      const recommendation = decideRecommendation(buckets, lock, patternsUpdated);
-
-      const model: StatusViewModel = { buckets, untracked, recommendation };
-      log.message(renderStatusLong(model));
-      // recommendation を outro として強調表示する。renderStatusLong には含めず
-      // ここで一元化することで、メッセージの SSOT を保つ。
-      outro(recommendationLine(recommendation));
-    }, cleanup);
+        cleanup,
+      ),
+    );
   },
 });

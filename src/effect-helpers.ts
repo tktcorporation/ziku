@@ -5,7 +5,7 @@
  * 形をしている。その片付けを `Effect.ensuring` に載せ、成功・失敗・中断のいずれでも
  * 走ることを保証する。
  */
-import { Cause, Effect, Exit } from "effect";
+import { Effect } from "effect";
 
 /**
  * `work` の後始末として `cleanup` を必ず実行する。
@@ -28,20 +28,4 @@ export function withCleanup<A, E, R>(
       }),
     ),
   );
-}
-
-/**
- * `withCleanup` の Promise 版。`throw` で失敗を伝えるコマンド (pull / push / status) が使う。
- *
- * 本体は Effect を返さない async 関数なので、失敗は型で表現できずそのまま throw で
- * 抜ける。Effect 側では defect として扱い、投げられた値を素通しで再スローする
- * （包み直すと呼び出し側の `instanceof` 判定と cause が壊れる）。
- */
-export async function withFinally<T>(
-  fn: () => Promise<T>,
-  cleanup: () => void | Promise<void>,
-): Promise<T> {
-  const exit = await Effect.runPromiseExit(withCleanup(Effect.promise(fn), cleanup));
-  if (Exit.isSuccess(exit)) return exit.value;
-  throw Cause.squash(exit.cause);
 }

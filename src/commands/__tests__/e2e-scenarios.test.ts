@@ -662,7 +662,7 @@ describe("E2E: multi-scenario tests", () => {
   // ──────────��────────────────────��─────────────────────────────
 
   describe("pull: エラーケース", () => {
-    it(".ziku/ziku.jsonc がない → ZikuError", async () => {
+    it(".ziku/ziku.jsonc がない → 失敗する", async () => {
       vol.fromJSON({
         "/project/.ziku/lock.json": JSON.stringify(baseLock),
       });

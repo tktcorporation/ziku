@@ -31,7 +31,7 @@ vi.mock("node:fs/promises", async () => {
 });
 
 // loadCommandContext をモック（DI の恩恵: 低レベルモック不要）
-// runCommandEffect / toZikuError は実際の実装を使い、loadCommandContext だけモックする
+// runCommandEffect / toZikuFailure は実際の実装を使い、loadCommandContext だけモックする
 vi.mock("../../services/command-context", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../services/command-context")>();
   return {
@@ -468,7 +468,7 @@ describe("pushCommand", () => {
     });
 
     it("無効な .ziku/lock.json 形式の場合はエラー", async () => {
-      // ParseError は toZikuError で対象ファイル名付きのメッセージに変換される
+      // ParseError は toZikuFailure で対象ファイル名付きのメッセージに変換される
       const { ParseError } = await import("../../errors");
       mockLoadCommandContext.mockReturnValue(
         Effect.fail(new ParseError({ path: ".ziku/lock.json", cause: "invalid format" })),
@@ -722,6 +722,39 @@ describe("pushCommand", () => {
       );
     });
 
+    it("タグに固定されたテンプレートへは PR を出さず、lock の直し方を案内する", async () => {
+      const taggedSource: TemplateSource = {
+        kind: "github",
+        owner: "tktcorporation",
+        repo: ".github",
+        ref: { kind: "tag", name: "v1.0.0" },
+      };
+      const { effect, cleanup } = mockContext({
+        source: taggedSource,
+        lock: lockWith({ source: taggedSource }),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      setupPushableFiles([
+        { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
+      ]);
+      mockGetGitHubToken.mockReturnValue("ghp_token");
+
+      await expect(
+        (pushCommand.run as any)({
+          args: { dir: "/test", dryRun: false, yes: true, edit: false },
+          rawArgs: [],
+          cmd: pushCommand,
+        }),
+      ).rejects.toMatchObject({
+        reason: { kind: "TemplateRefNotBranch", refKind: "tag" },
+        hint: expect.stringContaining("source.ref"),
+      });
+
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+      expect(cleanup).toHaveBeenCalled();
+    });
+
     it("ファイル選択をキャンセルすると PR を作成しない", async () => {
       setupPushableFiles([
         { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
@@ -767,6 +800,24 @@ describe("pushCommand", () => {
       expect(mockCreatePullRequest).toHaveBeenCalled();
       const pushedPaths = mockCreatePullRequest.mock.calls[0]?.[1].files.map((f) => f.path);
       expect(pushedPaths).toEqual(expect.arrayContaining(["file.txt", "other.txt"]));
+    });
+
+    it("--yes でトークンが無ければ入力を促さず、渡し方を案内して中断する", async () => {
+      setupPushableFiles([
+        { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
+      ]);
+      mockGetGitHubToken.mockReturnValue(undefined);
+
+      const failure = await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: true, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      }).catch((e: unknown) => e);
+
+      // プロンプトを省くフラグの下で入力を待つと、対話端末を持たない実行が止まる
+      expect(mockInputGitHubToken).not.toHaveBeenCalled();
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+      expect(failure).toMatchObject({ reason: { kind: "GitHubTokenMissing" } });
     });
 
     it("--yes --include-deletions の既定集合は削除ファイルも含む", async () => {
@@ -1099,7 +1150,7 @@ describe("pushCommand", () => {
       expect(mockCreatePullRequest).toHaveBeenCalled();
     });
 
-    it("コンフリクト解決待ちの場合はエラー", async () => {
+    it("コンフリクト解決待ちの場合は、解決待ちのファイルを挙げて pull の再開へ誘導する", async () => {
       const { effect } = mockContext({
         lock: markMerging(validLock, { hashes: {} }, [repoRelPath(".mcp.json")]),
       });
@@ -1111,7 +1162,10 @@ describe("pushCommand", () => {
           rawArgs: [],
           cmd: pushCommand,
         }),
-      ).rejects.toThrow("Unresolved merge conflicts");
+      ).rejects.toMatchObject({
+        reason: { kind: "MergePaused", conflicts: [".mcp.json"] },
+        hint: expect.stringMatching(/ziku pull --continue[\s\S]*\.mcp\.json/),
+      });
     });
 
     it("ローカルソースの場合はファイルを直接テンプレートにコピー", async () => {
@@ -1371,7 +1425,7 @@ describe("pushCommand", () => {
     });
 
     it("未解決の衝突を --files で明示指定すると中断し、ファイル名と ziku pull を案内する", async () => {
-      const { effect } = mockContext({
+      const { effect, cleanup } = mockContext({
         lock: lockWith({
           hashes: {
             "file.txt": "abc123",
@@ -1415,12 +1469,14 @@ describe("pushCommand", () => {
           cmd: pushCommand,
         }),
       ).rejects.toMatchObject({
-        name: "ZikuError",
+        reason: { kind: "PushBlockedByConflicts", files: ["file.txt"] },
         message: expect.stringContaining("couldn't be auto-merged"),
         hint: expect.stringMatching(/file\.txt[\s\S]*ziku pull/),
       });
 
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
+      // 中断してもテンプレートの一時ディレクトリは解放される
+      expect(cleanup).toHaveBeenCalled();
     });
 
     it("対話で未解決の衝突を選択すると中断する（--files 以外の経路）", async () => {
@@ -1465,7 +1521,7 @@ describe("pushCommand", () => {
           cmd: pushCommand,
         }),
       ).rejects.toMatchObject({
-        name: "ZikuError",
+        reason: { kind: "PushBlockedByConflicts", files: ["file.txt"] },
         message: expect.stringContaining("couldn't be auto-merged"),
         hint: expect.stringMatching(/file\.txt[\s\S]*ziku pull/),
       });

@@ -15,22 +15,6 @@
 import { Data } from "effect";
 import { match } from "ts-pattern";
 
-/**
- * ユーザー向けエラー。`hint` でリカバリ方法を提示する。
- *
- * `push` が使う。トップレベルハンドラ (`index.ts`) が `ZikuFailure` と同じ経路で表示する。
- * 理由で分岐できないため、新規の失敗は `ZikuFailure` で表す。
- */
-export class ZikuError extends Error {
-  constructor(
-    message: string,
-    public hint?: string,
-  ) {
-    super(message);
-    this.name = "ZikuError";
-  }
-}
-
 // ────────────────────────────────────────────────────────────────
 // 失敗理由の判別 union
 // ────────────────────────────────────────────────────────────────
@@ -100,6 +84,21 @@ export type FailureReason =
       readonly kind: "ConflictsUnresolved";
       readonly files: readonly { readonly path: string; readonly lines: readonly number[] }[];
     }
+  /**
+   * 自動マージできなかったファイルを push 対象に選んだ。
+   *
+   * 取る行動は「`ziku pull` でテンプレートの変更を取り込み、衝突を解いてから push し直す」。
+   * `MergePaused` と違いマージはまだ始まっていないので、案内するのは `--continue` ではなく
+   * `pull` そのものになる。
+   */
+  | { readonly kind: "PushBlockedByConflicts"; readonly files: readonly string[] }
+  /**
+   * PR の宛先ブランチが決まらない。テンプレートがタグ・コミットに固定されている。
+   *
+   * 取る行動は lock の `source.ref` をブランチへ書き換えること。テンプレートの取得自体は
+   * 成功しているので、取得元を選び直す `TemplateUnavailable` 系とは行動が違う。
+   */
+  | { readonly kind: "TemplateRefNotBranch"; readonly refKind: "tag" | "commit" }
   /** ローカルへの書き込みに失敗した。権限や書き込み先の状態を疑う。 */
   | {
       readonly kind: "FileWriteFailed";
@@ -197,6 +196,16 @@ export function describeFailure(reason: FailureReason): FailureDisplay {
       hint: `Remove the conflict markers from these files, then run \`ziku pull --continue\` again:\n${bulletList(
         r.files.map((f) => `${f.path} ${describeConflictLines(f.lines)}`),
       )}`,
+    }))
+    .with({ kind: "PushBlockedByConflicts" }, (r) => ({
+      message: `${r.files.length} selected file(s) have conflicts that couldn't be auto-merged`,
+      hint: `Resolve these conflicts before pushing:\n${bulletList(
+        r.files,
+      )}\n\nRun \`ziku pull\` to bring in the template changes and resolve the conflicts, then push again.`,
+    }))
+    .with({ kind: "TemplateRefNotBranch" }, (r) => ({
+      message: `Cannot open a pull request against a template pinned to a ${r.refKind}`,
+      hint: `Point .ziku/lock.json's source.ref at a branch (for example { "kind": "branch", "name": "main" }) and run push again.`,
     }))
     .with({ kind: "FileWriteFailed" }, (r) => ({
       message: `Failed to write ${r.path}: ${r.detail}`,

@@ -190,14 +190,6 @@ base の不在は「2-way でしか判断できない」という同一の状況
 
 ## 6. Phase 5 — エラー型と CLI の一貫性
 
-### 6.1 `ZikuError` を判別 union に置き換える
-
-`ZikuError` は `hint?: string` を足しただけの `Error` サブクラスで、呼び出し側が分岐できない。TaggedError を 7 個定義しながら 3 個（`ValidationError` / `GitHubApiError` / `GitError`）が未使用なのはこの歪みの表れで、Zod 検証失敗が `FileNotFoundError` に潰されて「ファイルが無い」と誤報告される原因にもなっている。
-
-失敗理由の判別 union を定義し、ユーザー向けメッセージへの変換を `match().exhaustive()` 1 箇所にする。`runCommandEffect` が error channel を `ZikuError` 1 本に潰している関門も、この union を通す形に変える。
-
-`withFinally` は `catch: (e) => e` で error channel を `unknown` にし、失敗を throw に戻すため、各コマンドの中核が非型付きになっている。`Effect.ensuring` に置き換えて型を保つ。
-
 ### 6.2 フラグの意味を揃える
 
 `-f` が 3 通りの意味を持つ（init は破壊的上書き、pull は確認スキップ、push は `--yes` の別名）。push の `--yes` は確認スキップに加えて未追跡ファイルの追跡選択自体をスキップし、対象から静かに落とす。

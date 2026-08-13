@@ -4,8 +4,9 @@ import { defineCommand } from "citty";
 import { Effect } from "effect";
 import { dirname } from "pathe";
 import { P, match } from "ts-pattern";
-import { withFinally } from "../effect-helpers";
-import { ZikuError, zikuFailure } from "../errors";
+import { withCleanup } from "../effect-helpers";
+import type { ZikuFailure } from "../errors";
+import { zikuFailure } from "../errors";
 import type {
   AbsPath,
   FileDiff,
@@ -26,7 +27,7 @@ import {
   withConfigTracked,
   withoutConfigTracked,
 } from "../utils/ziku-config";
-import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
+import { loadCommandContext, runCommandEffect, toZikuFailure } from "../services/command-context";
 import { mergeConflictFiles } from "../utils/merge";
 import { analyzeSync } from "../utils/sync-analysis";
 import { transportTextToBytes } from "../utils/file-content";
@@ -135,20 +136,17 @@ interface PushTarget extends PushPayload {
 }
 
 /**
- * PR の宛先ブランチを決め、ブランチへ向けられないソースは中断する。
+ * PR の宛先ブランチを決め、ブランチへ向けられないソースは失敗として返す。
  *
  * タグ・コミットへ固定されたテンプレートは PR の宛先が定まらない。lock を直せば解決する
- * ので、直し方をエラーに載せる。
+ * ので、直し方を失敗理由に載せる。
  */
-function prBaseBranchOrFail(source: GitHubSource): string {
+function prBaseBranch(source: GitHubSource): Effect.Effect<string, ZikuFailure> {
   return match(resolvePrBaseBranch(source))
-    .with({ _tag: "Branch" }, ({ name }) => name)
-    .with({ _tag: "UnsupportedRef" }, (): never => {
-      throw new ZikuError(
-        "Cannot open a pull request against a template pinned to a tag or commit",
-        `Point .ziku/lock.json's source.ref at a branch (for example { "kind": "branch", "name": "main" }) and run push again.`,
-      );
-    })
+    .with({ _tag: "Branch" }, ({ name }) => Effect.succeed(name))
+    .with({ _tag: "UnsupportedRef" }, ({ kind }) =>
+      Effect.fail(zikuFailure({ kind: "TemplateRefNotBranch", refKind: kind })),
+    )
     .exhaustive();
 }
 
@@ -165,13 +163,25 @@ function pushToGitHub(
   target: PushTarget,
   ctx: CommandContextShape,
   args: { message?: string; edit?: boolean; yes?: boolean },
-): Effect.Effect<boolean, ZikuError> {
-  return Effect.tryPromise({
-    try: async () => {
-      let token = getGitHubToken();
-      if (!token) {
-        token = await inputGitHubToken();
-      }
+): Effect.Effect<boolean, ZikuFailure> {
+  return Effect.gen(function* () {
+    // 宛先ブランチはトークンの入力や README 更新より先に決める。宛先が定まらないまま
+    // 対話とローカルの書き換えを進めると、必ず中断する作業をユーザーにさせることになる。
+    const baseBranch = yield* prBaseBranch(ghSource);
+
+    // トークンの入力を促してよいのは対話実行のときだけ。プロンプトを省くフラグの下で
+    // 入力を待つと、対話端末を持たない実行がそこで止まる。取れないなら失敗として返し、
+    // 環境変数で渡す方法を案内する。
+    const presetToken = getGitHubToken();
+    if (!presetToken && args.yes) {
+      return yield* zikuFailure({ kind: "GitHubTokenMissing", operation: "create a pull request" });
+    }
+
+    // 本体を Effect.promise で包む理由: GitHub API 呼び出しやプロンプトの失敗は
+    // ユーザーが対処を選べる失敗ではない。文言に潰さず defect として運び、
+    // トップレベルが原因ごと見せる。
+    return yield* Effect.promise(async () => {
+      const token = presetToken || (await inputGitHubToken());
 
       const suggestedTitle = generatePrTitle([...target.pushableFiles]);
       const suggestedBody = generatePrBody([...target.pushableFiles]);
@@ -197,7 +207,6 @@ function pushToGitHub(
       }
 
       // サマリー表示
-      const baseBranch = prBaseBranchOrFail(ghSource);
       const baseSha = baseCommitSha(ctx.lock);
       const baseHashStr = baseSha ? `  ${pc.dim(`since ${baseSha.slice(0, 7)}`)}` : "";
       logPushSummary(
@@ -241,8 +250,7 @@ function pushToGitHub(
       );
       outro(`Review and merge at ${pc.cyan(result.url)}`);
       return true;
-    },
-    catch: (e) => (e instanceof ZikuError ? e : new ZikuError("Push failed", String(e))),
+    });
   });
 }
 
@@ -266,74 +274,73 @@ function pushToLocal(
   args: { yes?: boolean },
   patterns: { include: readonly GlobPattern[]; exclude: readonly GlobPattern[] },
   configWriteBack: boolean,
-): Effect.Effect<boolean, ZikuError> {
-  return Effect.tryPromise({
-    try: async () => {
-      logPushSummary(
-        localSource.path,
-        "(local)",
-        "",
-        `push ${target.files.length + target.deletions.length} file(s)`,
-        target,
-        target.files,
-      );
+): Effect.Effect<boolean> {
+  // ファイルコピーや lock 更新の失敗はユーザーが対処を選べる失敗ではないので、
+  // 文言に潰さず defect として運ぶ（`pushToGitHub` と同じ扱い）。
+  return Effect.promise(async () => {
+    logPushSummary(
+      localSource.path,
+      "(local)",
+      "",
+      `push ${target.files.length + target.deletions.length} file(s)`,
+      target,
+      target.files,
+    );
 
-      if (!args.yes) {
-        const confirmed = await confirmAction("Push to local template?", { initialValue: true });
-        if (!confirmed) {
-          log.info("Cancelled.");
-          return false;
-        }
+    if (!args.yes) {
+      const confirmed = await confirmAction("Push to local template?", { initialValue: true });
+      if (!confirmed) {
+        log.info("Cancelled.");
+        return false;
       }
+    }
 
-      log.step("Pushing to local template...");
+    log.step("Pushing to local template...");
 
-      for (const file of target.files) {
-        const destPath = joinAbs(localSource.path, file.path);
-        const destDir = dirname(destPath);
-        if (!existsSync(destDir)) {
-          await mkdir(destDir, { recursive: true });
-        }
-        // 内容はバイト列へ戻してから書く。バイナリは latin1 の文字列として運ばれており、
-        // utf-8 として書くと 1 文字が 2 バイトへ膨らんで別のファイルになる。
-        await writeFile(destPath, transportTextToBytes(file.content));
-        log.message(`  ${pc.green("+")} ${file.path}`);
+    for (const file of target.files) {
+      const destPath = joinAbs(localSource.path, file.path);
+      const destDir = dirname(destPath);
+      if (!existsSync(destDir)) {
+        await mkdir(destDir, { recursive: true });
       }
+      // 内容はバイト列へ戻してから書く。バイナリは latin1 の文字列として運ばれており、
+      // utf-8 として書くと 1 文字が 2 バイトへ膨らんで別のファイルになる。
+      await writeFile(destPath, transportTextToBytes(file.content));
+      log.message(`  ${pc.green("+")} ${file.path}`);
+    }
 
-      // 削除対象ファイルを処理
-      for (const file of target.deletions) {
-        const destPath = joinAbs(localSource.path, file.path);
-        if (existsSync(destPath)) {
-          await rm(destPath, { force: true });
-          log.message(`  ${pc.red("-")} ${file.path}`);
-        }
+    // 削除対象ファイルを処理
+    for (const file of target.deletions) {
+      const destPath = joinAbs(localSource.path, file.path);
+      if (existsSync(destPath)) {
+        await rm(destPath, { force: true });
+        log.message(`  ${pc.red("-")} ${file.path}`);
       }
+    }
 
-      // ziku.jsonc が衝突解決で union マージされた場合、push される内容はローカルの生
-      // 内容ではなく union 結果になる。ローカルを更新しないと、テンプレ・ローカルが
-      // 乖離したまま baseHashes をテンプレ（union）へ進めてしまい、次回 push で
-      // ローカルが localOnly 判定 → テンプレ側の追加分を上書きで落とす。
-      // ローカルにも merged 内容を書き戻して local==template==base を保つ。
-      // スコープ限定 union を送った場合に書き戻せない理由は `configWriteBackSafe` を参照。
-      const mergedConfig = target.files.find((f) => isZikuConfigPath(f.path));
-      if (mergedConfig && configWriteBack) {
-        const localConfigPath = joinAbs(projectDir, ZIKU_CONFIG_FILE);
-        await mkdir(dirname(localConfigPath), { recursive: true });
-        await writeFile(localConfigPath, mergedConfig.content, "utf-8");
-      }
+    // ziku.jsonc が衝突解決で union マージされた場合、push される内容はローカルの生
+    // 内容ではなく union 結果になる。ローカルを更新しないと、テンプレ・ローカルが
+    // 乖離したまま baseHashes をテンプレ（union）へ進めてしまい、次回 push で
+    // ローカルが localOnly 判定 → テンプレ側の追加分を上書きで落とす。
+    // ローカルにも merged 内容を書き戻して local==template==base を保つ。
+    // スコープ限定 union を送った場合に書き戻せない理由は `configWriteBackSafe` を参照。
+    const mergedConfig = target.files.find((f) => isZikuConfigPath(f.path));
+    if (mergedConfig && configWriteBack) {
+      const localConfigPath = joinAbs(projectDir, ZIKU_CONFIG_FILE);
+      await mkdir(dirname(localConfigPath), { recursive: true });
+      await writeFile(localConfigPath, mergedConfig.content, "utf-8");
+    }
 
-      // lock.json の baseHashes を更新（テンプレート側のハッシュを再計算）。
-      // 新規追跡ファイルと ziku.jsonc を含む effectivePatterns で計算するため、
-      // 追跡したファイルも ziku.jsonc も baseHashes に入る（push 後はテンプレと一致する）。
-      const baseHashes = await hashFiles(localSource.path, patterns.include, patterns.exclude);
-      await saveLock(projectDir, markSynced(ctx.lock, { hashes: baseHashes }));
+    // lock.json の baseHashes を更新（テンプレート側のハッシュを再計算）。
+    // 新規追跡ファイルと ziku.jsonc を含む effectivePatterns で計算するため、
+    // 追跡したファイルも ziku.jsonc も baseHashes に入る（push 後はテンプレと一致する）。
+    const baseHashes = await hashFiles(localSource.path, patterns.include, patterns.exclude);
+    await saveLock(projectDir, markSynced(ctx.lock, { hashes: baseHashes }));
 
-      const totalCount = target.files.length + target.deletions.length;
-      log.success(`Pushed ${totalCount} file(s) to ${pc.cyan(localSource.path)}`);
-      outro("Push complete");
-      return true;
-    },
-    catch: (e) => (e instanceof ZikuError ? e : new ZikuError("Push failed", String(e))),
+    const totalCount = target.files.length + target.deletions.length;
+    log.success(`Pushed ${totalCount} file(s) to ${pc.cyan(localSource.path)}`);
+    outro("Push complete");
+    return true;
   });
 }
 
@@ -478,17 +485,15 @@ export const pushCommand = defineCommand({
     const targetDir = absPath(args.dir);
 
     const ctx = await runCommandEffect(
-      loadCommandContext(targetDir).pipe(Effect.mapError(toZikuError)),
+      loadCommandContext(targetDir).pipe(Effect.mapError(toZikuFailure)),
     );
     const { config, lock, cleanup } = ctx;
 
+    // 解決待ちのマージが残っている間は push できない。取る行動は pull を再開して衝突を
+    // 解くことなので、pull が同じ状態で出すのと同じ理由で報告する。
     if (lock.sync === "merging") {
       await cleanup();
-      throw new ZikuError(
-        "Unresolved merge conflicts from `ziku pull`",
-        "Resolve conflicts in these files, then run `ziku pull --continue`:\n" +
-          lock.merge.conflicts.map((f) => `  • ${f}`).join("\n"),
-      );
+      throw zikuFailure({ kind: "MergePaused", conflicts: lock.merge.conflicts });
     }
 
     const patterns = {
@@ -516,7 +521,15 @@ export const pushCommand = defineCommand({
       includeDeletions: args.includeDeletions as boolean,
     };
 
-    await withFinally(() => pushProject({ ctx, targetDir, patterns, args: pushArgs }), cleanup);
+    // 本体を Effect.promise で包む理由: 本体は Promise を返す I/O を並べるので、失敗は型に
+    // 現れず throw で抜ける。Effect.tryPromise の catch で拾うとエラーチャネルが unknown に
+    // 潰れるので、defect として運び runCommandEffect が投げられた値をそのまま再スローする。
+    await runCommandEffect(
+      withCleanup(
+        Effect.promise(() => pushProject({ ctx, targetDir, patterns, args: pushArgs })),
+        cleanup,
+      ),
+    );
   },
 });
 
@@ -598,7 +611,7 @@ async function pushProject(params: {
   // 未解決の衝突を含めて push しようとした場合は確定的に中断する（解決してから push）。
   const blocking = selectedUnresolvedConflicts(selected, unresolvedConflicts);
   if (blocking.length > 0) {
-    throw unresolvedConflictError(blocking.map((f) => f.path));
+    throw unresolvedConflictFailure(blocking.map((f) => f.path));
   }
 
   // 送信対象のファイルに必要な include パターンを、同じ push でテンプレの ziku.jsonc へ届ける。
@@ -804,10 +817,10 @@ async function persistNewlyTracked(
   const patterns = patternsToPersist(newlyTrackedPaths, pushedPaths);
   if (patterns.length === 0) return;
 
-  // 分類済みの失敗（不在 / 構文エラー / スキーマ違反）を ZikuError へ落としてから投げる。
+  // 分類済みの失敗（不在 / 構文エラー / スキーマ違反）を FailureReason へ落としてから投げる。
   // 素の runPromise だと FiberFailure に包まれ、トップレベルが理由を判別できない。
   const { rawContent } = await runCommandEffect(
-    loadZikuConfig(targetDir).pipe(Effect.mapError(toZikuError)),
+    loadZikuConfig(targetDir).pipe(Effect.mapError(toZikuFailure)),
   );
   const updated = addIncludePattern(rawContent, patterns);
   if (updated === rawContent) return;
@@ -1090,17 +1103,12 @@ async function resolveConflicts(
 }
 
 /**
- * 未解決の衝突を push 対象に含めようとしたときの中断エラーを生成する。
+ * 未解決の衝突を push 対象に含めようとしたときの失敗を生成する。
  *
  * 未解決ファイルはマージ結果ではなくローカルの内容がそのまま push され、テンプレートの
  * 更新を黙って上書きしてしまう（mergedContents に保存されないため localContent が使われる）。
  * これを防ぐため、未解決ファイルが選択された場合は確定的に中断し、`ziku pull` での解決を促す。
  */
-function unresolvedConflictError(files: RepoRelPath[]): ZikuError {
-  return new ZikuError(
-    `${files.length} selected file(s) have conflicts that couldn't be auto-merged`,
-    "Resolve these conflicts before pushing:\n" +
-      files.map((f) => `  • ${f}`).join("\n") +
-      "\n\nRun `ziku pull` to bring in the template changes and resolve the conflicts, then push again.",
-  );
+function unresolvedConflictFailure(files: RepoRelPath[]): ZikuFailure {
+  return zikuFailure({ kind: "PushBlockedByConflicts", files });
 }

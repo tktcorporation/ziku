@@ -126,16 +126,6 @@ describe("トップレベルエラーハンドラ", () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
-  it("ZikuError も同じ経路で表示する", async () => {
-    await runCli((e) => new e.ZikuError("Push failed", "Resolve conflicts first"));
-
-    expect(shownFailure()).toEqual({
-      message: "Push failed",
-      hint: "Resolve conflicts first",
-    });
-    expect(exitSpy).toHaveBeenCalledWith(1);
-  });
-
   it("予期しないエラーは unhandled rejection にせず、原因を見せて終了コード 1", async () => {
     const unexpected = new TypeError("Cannot read properties of undefined");
     const unhandled = vi.fn();

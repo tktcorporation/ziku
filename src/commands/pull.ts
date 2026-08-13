@@ -2,7 +2,7 @@ import { readFile, rm } from "node:fs/promises";
 import { defineCommand } from "citty";
 import { Effect, Option } from "effect";
 import { match } from "ts-pattern";
-import { withFinally } from "../effect-helpers";
+import { withCleanup } from "../effect-helpers";
 import type { ZikuFailure } from "../errors";
 import { describeConflictLines, zikuFailure } from "../errors";
 import type {
@@ -162,149 +162,157 @@ export const pullCommand = defineCommand({
       return;
     }
 
-    await withFinally(async () => {
-      // mergeTemplatePatterns は「テンプレ側で追加されたパターン配下のファイルも
-      // 差分検出の対象に含める」ための include 和集合（discovery 用）を計算する。
-      // ziku.jsonc 自体の内容同期は、下の resolveConfigMerge が加法 union で行う。
-      const { mergedInclude, mergedExclude, newInclude } = await mergeTemplatePatterns(
-        templateDir,
-        include,
-        exclude,
-      );
+    // 本体を Effect.promise で包む理由: 本体は Promise を返す I/O を並べるので、失敗は型に
+    // 現れず throw で抜ける。Effect.tryPromise の catch で拾うとエラーチャネルが unknown に
+    // 潰れるので、defect として運び runCommandEffect が投げられた値をそのまま再スローする。
+    await runCommandEffect(
+      withCleanup(
+        Effect.promise(async () => {
+          // mergeTemplatePatterns は「テンプレ側で追加されたパターン配下のファイルも
+          // 差分検出の対象に含める」ための include 和集合（discovery 用）を計算する。
+          // ziku.jsonc 自体の内容同期は、下の resolveConfigMerge が加法 union で行う。
+          const { mergedInclude, mergedExclude, newInclude } = await mergeTemplatePatterns(
+            templateDir,
+            include,
+            exclude,
+          );
 
-      // テンプレ側で追加された include パターンをユーザー向けに通知。
-      // mergeTemplatePatterns 自体は副作用フリーなので、ログはここで行う。
-      logNewIncludeNotice(newInclude);
+          // テンプレ側で追加された include パターンをユーザー向けに通知。
+          // mergeTemplatePatterns 自体は副作用フリーなので、ログはここで行う。
+          logNewIncludeNotice(newInclude);
 
-      log.step("Analyzing changes...");
+          log.step("Analyzing changes...");
 
-      const { plan, hashes } = await analyzeSync({
-        targetDir,
-        templateDir,
-        baseHashes: baseHashesOf(lock),
-        // ziku.jsonc 自体を追跡対象に含め、他ファイルと同じ差分検出に乗せる。
-        include: withConfigTracked(mergedInclude),
-        exclude: mergedExclude,
-      });
+          const { plan, hashes } = await analyzeSync({
+            targetDir,
+            templateDir,
+            baseHashes: baseHashesOf(lock),
+            // ziku.jsonc 自体を追跡対象に含め、他ファイルと同じ差分検出に乗せる。
+            include: withConfigTracked(mergedInclude),
+            exclude: mergedExclude,
+          });
 
-      // ziku.jsonc の扱いは分類カテゴリではなく sync-plan の判断に従う。汎用の applyFiles
-      // （テンプレ丸ごとコピー）や diff3 マージに乗せると、テンプレ側で削除されたパターンが
-      // ローカルへ伝播し「削除は自動伝播しない」方針に反する。plan.files には ziku.jsonc が
-      // 入らないため、以降の適用・削除処理へ紛れ込むことはない。
-      const configSync = await resolveConfigMerge(
-        targetDir,
-        templateDir,
-        zikuConfigPullAction(plan.config),
-      );
-      const { autoUpdate, conflicts, deletedFiles, deletedWithLocalEdits } = plan.files;
+          // ziku.jsonc の扱いは分類カテゴリではなく sync-plan の判断に従う。汎用の applyFiles
+          // （テンプレ丸ごとコピー）や diff3 マージに乗せると、テンプレ側で削除されたパターンが
+          // ローカルへ伝播し「削除は自動伝播しない」方針に反する。plan.files には ziku.jsonc が
+          // 入らないため、以降の適用・削除処理へ紛れ込むことはない。
+          const configSync = await resolveConfigMerge(
+            targetDir,
+            templateDir,
+            zikuConfigPullAction(plan.config),
+          );
+          const { autoUpdate, conflicts, deletedFiles, deletedWithLocalEdits } = plan.files;
 
-      // union マージを行ったときは lock の base[ziku.jsonc] をローカル最終内容（union）に
-      // 揃える。templateHashes 側に寄せると、テンプレが削除したパターンを後続 push が
-      // localOnly として再追加してしまう。
-      const baseHashesForLock: HashMap =
-        configSync.baseHash !== undefined
-          ? { ...hashes.templateHashes, [ZIKU_CONFIG_FILE]: configSync.baseHash }
-          : hashes.templateHashes;
+          // union マージを行ったときは lock の base[ziku.jsonc] をローカル最終内容（union）に
+          // 揃える。templateHashes 側に寄せると、テンプレが削除したパターンを後続 push が
+          // localOnly として再追加してしまう。
+          const baseHashesForLock: HashMap =
+            configSync.baseHash !== undefined
+              ? { ...hashes.templateHashes, [ZIKU_CONFIG_FILE]: configSync.baseHash }
+              : hashes.templateHashes;
 
-      const totalChanges =
-        autoUpdate.length +
-        plan.files.newFiles.length +
-        conflicts.length +
-        deletedFiles.length +
-        deletedWithLocalEdits.length +
-        (configSync.write !== undefined ? 1 : 0);
+          const totalChanges =
+            autoUpdate.length +
+            plan.files.newFiles.length +
+            conflicts.length +
+            deletedFiles.length +
+            deletedWithLocalEdits.length +
+            (configSync.write !== undefined ? 1 : 0);
 
-      // ファイル変更が無くても、ziku.jsonc の base を union に揃える必要がある場合
-      // （例: conflict だが union==local で書き込み不要）は lock を更新しないと、
-      // 古い base が残って status/push が誤判定する。その場合は early-return しない。
-      const configBaseChanged =
-        configSync.baseHash !== undefined &&
-        configSync.baseHash !== hashes.baseHashes[ZIKU_CONFIG_FILE];
+          // ファイル変更が無くても、ziku.jsonc の base を union に揃える必要がある場合
+          // （例: conflict だが union==local で書き込み不要）は lock を更新しないと、
+          // 古い base が残って status/push が誤判定する。その場合は early-return しない。
+          const configBaseChanged =
+            configSync.baseHash !== undefined &&
+            configSync.baseHash !== hashes.baseHashes[ZIKU_CONFIG_FILE];
 
-      if (totalChanges === 0 && !configBaseChanged) {
-        log.success("Already up to date");
-        outro("No changes needed");
-        return;
-      }
+          if (totalChanges === 0 && !configBaseChanged) {
+            log.success("Already up to date");
+            outro("No changes needed");
+            return;
+          }
 
-      if (totalChanges > 0) {
-        logPullSummary(plan.files);
-      }
+          if (totalChanges > 0) {
+            logPullSummary(plan.files);
+          }
 
-      if (args.dryRun) {
-        await previewPull({
-          targetDir,
-          templateDir,
-          lock,
-          conflicts,
-          deletedFiles,
-          deletedWithLocalEdits,
-          configWrite: configSync.write,
-          flags: approvalFlags,
-        });
-        return;
-      }
+          if (args.dryRun) {
+            await previewPull({
+              targetDir,
+              templateDir,
+              lock,
+              conflicts,
+              deletedFiles,
+              deletedWithLocalEdits,
+              configWrite: configSync.write,
+              flags: approvalFlags,
+            });
+            return;
+          }
 
-      // 自動更新・新規追加・ziku.jsonc union 同期をまとめて適用
-      await applyPullUpdates({
-        autoUpdate,
-        newFiles: plan.files.newFiles,
-        configWrite: configSync.write,
-        targetDir,
-        templateDir,
-      });
+          // 自動更新・新規追加・ziku.jsonc union 同期をまとめて適用
+          await applyPullUpdates({
+            autoUpdate,
+            newFiles: plan.files.newFiles,
+            configWrite: configSync.write,
+            targetDir,
+            templateDir,
+          });
 
-      // コンフリクト解決
-      const unresolvedConflicts = await resolveConflicts(conflicts, {
-        targetDir,
-        templateDir,
-        lock,
-      });
-
-      const [firstConflict, ...restConflicts] = unresolvedConflicts;
-      if (firstConflict !== undefined) {
-        const pendingConflicts: ConflictPaths = [firstConflict, ...restConflicts];
-        const latestRefOption = await Effect.runPromise(resolveBaseRef);
-        await saveLock(
-          targetDir,
-          markMerging(
+          // コンフリクト解決
+          const unresolvedConflicts = await resolveConflicts(conflicts, {
+            targetDir,
+            templateDir,
             lock,
-            {
+          });
+
+          const [firstConflict, ...restConflicts] = unresolvedConflicts;
+          if (firstConflict !== undefined) {
+            const pendingConflicts: ConflictPaths = [firstConflict, ...restConflicts];
+            const latestRefOption = await Effect.runPromise(resolveBaseRef);
+            await saveLock(
+              targetDir,
+              markMerging(
+                lock,
+                {
+                  hashes: baseHashesForLock,
+                  // SHA を解決できなかった場合は既存のベース SHA を引き継ぐ。ハッシュだけ
+                  // 前進させて SHA を落とすと、次回のマージがベースツリーを取り直せなくなる。
+                  commitSha: Option.getOrUndefined(latestRefOption) ?? baseCommitSha(lock),
+                },
+                pendingConflicts,
+              ),
+            );
+            outro("Merge paused — resolve conflicts then run `ziku pull --continue`");
+            return;
+          }
+
+          // 削除されたファイルを処理（plan.files に ziku.jsonc は入らない）
+          if (deletedFiles.length > 0) {
+            await handleDeletedFiles(deletedFiles, targetDir, approvalFlags);
+          }
+
+          if (deletedWithLocalEdits.length > 0) {
+            await handleDeletedWithLocalEdits(deletedWithLocalEdits, targetDir, approvalFlags);
+          }
+
+          const latestRefOption = await Effect.runPromise(resolveBaseRef);
+
+          // SHA を解決できなかった場合は、既存のベース SHA を引き継ぐ。ハッシュだけ前進させて
+          // SHA を落とすと、次回のマージがベースツリーを取り直せなくなる。
+          await saveLock(
+            targetDir,
+            markSynced(lock, {
               hashes: baseHashesForLock,
-              // SHA を解決できなかった場合は既存のベース SHA を引き継ぐ。ハッシュだけ
-              // 前進させて SHA を落とすと、次回のマージがベースツリーを取り直せなくなる。
               commitSha: Option.getOrUndefined(latestRefOption) ?? baseCommitSha(lock),
-            },
-            pendingConflicts,
-          ),
-        );
-        outro("Merge paused — resolve conflicts then run `ziku pull --continue`");
-        return;
-      }
+            }),
+          );
 
-      // 削除されたファイルを処理（plan.files に ziku.jsonc は入らない）
-      if (deletedFiles.length > 0) {
-        await handleDeletedFiles(deletedFiles, targetDir, approvalFlags);
-      }
-
-      if (deletedWithLocalEdits.length > 0) {
-        await handleDeletedWithLocalEdits(deletedWithLocalEdits, targetDir, approvalFlags);
-      }
-
-      const latestRefOption = await Effect.runPromise(resolveBaseRef);
-
-      // SHA を解決できなかった場合は、既存のベース SHA を引き継ぐ。ハッシュだけ前進させて
-      // SHA を落とすと、次回のマージがベースツリーを取り直せなくなる。
-      await saveLock(
-        targetDir,
-        markSynced(lock, {
-          hashes: baseHashesForLock,
-          commitSha: Option.getOrUndefined(latestRefOption) ?? baseCommitSha(lock),
+          outro("Pull complete");
         }),
-      );
-
-      outro("Pull complete");
-    }, cleanup);
+        cleanup,
+      ),
+    );
   },
 });
 

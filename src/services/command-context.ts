@@ -10,7 +10,7 @@
 import { Cause, Context, Effect, Exit, Layer, Option, Scope } from "effect";
 import { match } from "ts-pattern";
 import type { AbsPath, CommitSha, ZikuConfig, LockState, TemplateSource } from "../modules/schemas";
-import { ZikuError, zikuFailure } from "../errors";
+import { zikuFailure } from "../errors";
 import type {
   FileNotFoundError,
   ParseError,
@@ -78,9 +78,7 @@ export type ContextLoadError = FileNotFoundError | ParseError | ValidationError 
  *     loadCommandContext(targetDir).pipe(Effect.mapError(toZikuFailure)),
  *   );
  */
-export async function runCommandEffect<A>(
-  effect: Effect.Effect<A, ZikuFailure | ZikuError>,
-): Promise<A> {
+export async function runCommandEffect<A>(effect: Effect.Effect<A, ZikuFailure>): Promise<A> {
   const exit = await Effect.runPromiseExit(effect);
   if (Exit.isSuccess(exit)) return exit.value;
 
@@ -119,7 +117,7 @@ export function loadCommandContext(
     // finalizer (tracker 登録解除 + rmSync) を走らせる。これがないと
     // process exit まで temp dir と tracker 状態が残る。
     //
-    // 成功時: 呼び出し側 (各コマンド) は withCleanup / withFinally に cleanup を渡す。
+    // 成功時: 呼び出し側 (各コマンド) は withCleanup に cleanup を渡す。
     // cleanup を呼び忘れた場合でも、登録された tempDir は temp-tracker の
     // process.on('exit') で同期削除される (二重防衛)。
     const scope = yield* Scope.make();
@@ -184,13 +182,4 @@ export function toZikuFailure(err: ContextLoadError): ZikuFailure {
       zikuFailure({ kind: "TemplateUnavailable", detail: e.message }, { cause: e.cause }),
     )
     .exhaustive();
-}
-
-/**
- * 分類した失敗を `ZikuError` へ落とす。理由で分岐せず文言だけを使う `push` のための
- * アダプタ。文言は `toZikuFailure` と同じ SSOT から来る。
- */
-export function toZikuError(err: ContextLoadError): ZikuError {
-  const failure = toZikuFailure(err);
-  return new ZikuError(failure.message, failure.hint);
 }

@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ParseError, ValidationError } from "../../errors";
 import type { LockState, ZikuConfig } from "../../modules/schemas";
 import { baseCommitSha, baseHashesOf, markSynced } from "../../modules/schemas";
-import { toZikuError, toZikuFailure } from "../../services/command-context";
+import { toZikuFailure } from "../../services/command-context";
 import {
   absPath,
   commitSha,
@@ -162,10 +162,11 @@ describe("loadZikuConfig", () => {
     expect(validationError.issues[0]).toContain("array");
 
     // 「パースに失敗」ではなく「読めない設定」として、作り直しを促すこと
-    const zikuError = toZikuError(validationError);
-    expect(zikuError.message).toBe(`Failed to read ${ZIKU_CONFIG_FILE}`);
-    expect(zikuError.hint).toContain("include: ");
-    expect(zikuError.hint).toContain("ziku init");
+    const failureValue = toZikuFailure(validationError);
+    expect(failureValue.reason).toMatchObject({ kind: "ConfigInvalid", path: ZIKU_CONFIG_FILE });
+    expect(failureValue.message).toBe(`Failed to read ${ZIKU_CONFIG_FILE}`);
+    expect(failureValue.hint).toContain("include: ");
+    expect(failureValue.hint).toContain("ziku init");
   });
 });
 
@@ -526,15 +527,11 @@ describe("loadLock", () => {
 
     // 「見つからない」ではなく検証失敗として分類され、作り直しを促すこと
     const validationError = Option.getOrThrow(failure as Option.Option<ValidationError>);
-    expect(toZikuFailure(validationError).reason).toMatchObject({
-      kind: "ConfigInvalid",
-      path: LOCK_FILE,
-    });
-
-    const zikuError = toZikuError(validationError);
-    expect(zikuError.message).toContain(LOCK_FILE);
-    expect(zikuError.hint).toContain("cannot read");
-    expect(zikuError.hint).toContain("ziku init");
+    const failureValue = toZikuFailure(validationError);
+    expect(failureValue.reason).toMatchObject({ kind: "ConfigInvalid", path: LOCK_FILE });
+    expect(failureValue.message).toContain(LOCK_FILE);
+    expect(failureValue.hint).toContain("cannot read");
+    expect(failureValue.hint).toContain("ziku init");
   });
 });
 

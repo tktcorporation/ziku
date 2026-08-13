@@ -1,26 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { FailureReason } from "../errors";
-import { ZikuError, ZikuFailure, describeFailure, zikuFailure } from "../errors";
-
-describe("ZikuError", () => {
-  it("should create error with message", () => {
-    const error = new ZikuError("something went wrong");
-    expect(error.message).toBe("something went wrong");
-    expect(error.name).toBe("ZikuError");
-    expect(error.hint).toBeUndefined();
-  });
-
-  it("should create error with hint", () => {
-    const error = new ZikuError("config not found", "Run 'ziku init' first.");
-    expect(error.message).toBe("config not found");
-    expect(error.hint).toBe("Run 'ziku init' first.");
-  });
-
-  it("should be instanceof Error", () => {
-    const error = new ZikuError("test");
-    expect(error).toBeInstanceOf(Error);
-  });
-});
+import { ZikuFailure, describeFailure, zikuFailure } from "../errors";
 
 describe("describeFailure", () => {
   // 各ケースが「何が起きたか」と「次に何をするか」の両方をユーザーに渡すことを確認する。
@@ -110,6 +90,16 @@ describe("describeFailure", () => {
       hint: /\.mcp\.json \(lines 3, 12\)/,
     },
     {
+      reason: { kind: "PushBlockedByConflicts", files: [".mcp.json", "AGENTS.md"] },
+      message: "2 selected file(s) have conflicts that couldn't be auto-merged",
+      hint: /• \.mcp\.json[\s\S]*• AGENTS\.md[\s\S]*ziku pull/,
+    },
+    {
+      reason: { kind: "TemplateRefNotBranch", refKind: "tag" },
+      message: "Cannot open a pull request against a template pinned to a tag",
+      hint: /source\.ref/,
+    },
+    {
       reason: {
         kind: "FileWriteFailed",
         path: ".ziku/ziku.jsonc",
@@ -144,6 +134,13 @@ describe("describeFailure", () => {
         files: [{ path: "a.txt", lines: [1] }],
       }).hint,
     ).toContain("`ziku pull --continue` again");
+  });
+
+  it("push を止めた衝突は、マージの再開ではなく `ziku pull` から始めるよう案内する", () => {
+    // マージがまだ始まっていないので `--continue` では進めない。
+    const hint = describeFailure({ kind: "PushBlockedByConflicts", files: ["a.txt"] }).hint;
+    expect(hint).toContain("Run `ziku pull`");
+    expect(hint).not.toContain("--continue");
   });
 
   it("未解決ブロックが 1 つだけなら line と単数で数える", () => {

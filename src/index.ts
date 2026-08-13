@@ -12,7 +12,7 @@ import { pushCommand } from "./commands/push";
 import { setupCommand } from "./commands/setup";
 import { statusCommand } from "./commands/status";
 import { trackCommand } from "./commands/track";
-import { ZikuError, ZikuFailure, zikuFailure } from "./errors";
+import { ZikuFailure, zikuFailure } from "./errors";
 import { intro, logUnexpectedError, logZikuError, pc } from "./ui/renderer";
 
 const main = defineCommand({
@@ -261,13 +261,12 @@ function isUsageError(error: unknown): error is Error {
 /**
  * 失敗を表示する。
  *
- * ziku が予期した失敗（ZikuFailure / ZikuError）と、引数の解釈で弾かれた入力は
- * message + hint だけを見せる。それ以外は ziku 側の不具合なので、原因を握り潰さず
- * スタックトレースごと見せる。
+ * ziku が予期した失敗（ZikuFailure）と、引数の解釈で弾かれた入力は message + hint だけを
+ * 見せる。それ以外は ziku 側の不具合なので、原因を握り潰さずスタックトレースごと見せる。
  */
 function report(error: unknown): void {
   match(error)
-    .with(P.union(P.instanceOf(ZikuFailure), P.instanceOf(ZikuError)), logZikuError)
+    .with(P.instanceOf(ZikuFailure), logZikuError)
     .when(isUsageError, (e) =>
       logZikuError({ message: e.message, hint: "Run `ziku --help` to see available commands." }),
     )

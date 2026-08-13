@@ -5,7 +5,7 @@
  * ローカル or GitHub からテンプレートを取得 → クリーンアップ」を DRY 化する。
  *
  * 設計: Effect.Scope を返すことで、呼び出し側は Effect.scoped で囲うだけで
- * cleanup が型レベルで強制される。withFinally による命令的な cleanup は不要。
+ * cleanup が型レベルで強制される。命令的な cleanup 呼び出しは不要。
  */
 import { Effect } from "effect";
 import type { Scope } from "effect";
