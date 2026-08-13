@@ -61,7 +61,15 @@ vi.mock("../../utils/github", async () => {
     scaffoldTemplateRepo: vi.fn(() =>
       Promise.resolve({ url: "https://github.com/detected-org/.github" }),
     ),
+    createPullRequest: vi.fn(() =>
+      Promise.resolve({
+        url: "https://github.com/org/repo/pull/1",
+        number: 1,
+        branch: "ziku/setup",
+      }),
+    ),
     rateLimitedError: actual.rateLimitedError,
+    unauthorizedError: actual.unauthorizedError,
   };
 });
 
@@ -71,6 +79,7 @@ vi.mock("../../ui/prompts", () => ({
   selectMissingTemplateAction: vi.fn(),
   selectTemplateCandidate: vi.fn(),
   inputTemplateSource: vi.fn(),
+  confirmAction: vi.fn(),
 }));
 
 vi.mock("../../ui/renderer", () => ({
@@ -88,6 +97,7 @@ vi.mock("../../ui/renderer", () => ({
     cyan: (s: string) => s,
     bold: (s: string) => s,
     dim: (s: string) => s,
+    green: (s: string) => s,
   },
   withSpinner: vi.fn(async (_text: string, fn: () => Promise<unknown>) => fn()),
   logFileResults: vi.fn(() => ({ added: 1, updated: 0, skipped: 0 })),
@@ -130,7 +140,9 @@ vi.mock("../../utils/template-config", () => ({
 }));
 
 // モック後にインポート
+const { runCommand } = await import("citty");
 const { initCommand } = await import("../init");
+const { setupCommand } = await import("../setup");
 const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy, copyFile } =
   await import("../../utils/template");
 const { detectGitHubOwner } = await import("../../utils/git-remote");
@@ -140,12 +152,14 @@ const {
   selectMissingTemplateAction,
   selectTemplateCandidate,
   inputTemplateSource,
+  confirmAction,
 } = await import("../../ui/prompts");
-const { log } = await import("../../ui/renderer");
+const { log, outro } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
 const {
   checkRepoExists,
   checkRepoSetup,
+  createPullRequest,
   getAuthenticatedUserLogin,
   getGitHubToken,
   scaffoldTemplateRepo,
@@ -170,6 +184,10 @@ const mockGetAuthenticatedUserLogin = vi.mocked(getAuthenticatedUserLogin);
 const mockGetGitHubToken = vi.mocked(getGitHubToken);
 const mockScaffoldTemplateRepo = vi.mocked(scaffoldTemplateRepo);
 const mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
+const mockCreatePullRequest = vi.mocked(createPullRequest);
+const mockConfirmAction = vi.mocked(confirmAction);
+const mockOutro = vi.mocked(outro);
+const mockLog = vi.mocked(log);
 
 // コマンド実行ヘルパー
 async function runInit(args: Record<string, unknown>) {
@@ -594,6 +612,115 @@ describe("init: セットアップ UX", () => {
         expect.any(String),
         "gh:my-org/my-templates",
       );
+    });
+  });
+});
+
+describe("setup: セットアップ UX", () => {
+  /** setup コマンドを CLI と同じ引数解釈で実行する */
+  function runSetup(rawArgs: string[]): Promise<unknown> {
+    return runCommand(setupCommand, { rawArgs });
+  }
+
+  /** 生成された .ziku/ziku.jsonc の include パターン */
+  function readIncludePatterns(dir: string): string[] {
+    const saved = vol.readFileSync(`${dir}/.ziku/ziku.jsonc`, "utf8") as string;
+    return JSON.parse(saved.replaceAll(/^\s*\/\/.*$/gm, "")).include;
+  }
+
+  beforeEach(() => {
+    vol.reset();
+    vi.resetAllMocks();
+    mockDetectGitHubOwner.mockReturnValue("detected-org");
+    mockCheckRepoExists.mockResolvedValue({ _tag: "Exists" });
+    mockGetGitHubToken.mockReturnValue("ghp_test_token");
+    mockConfirmAction.mockResolvedValue(true);
+    mockCreatePullRequest.mockResolvedValue({
+      url: "https://github.com/org/repo/pull/1",
+      number: 1,
+      branch: "ziku/setup",
+    });
+  });
+
+  describe("ローカルモード", () => {
+    it(".ziku/ziku.jsonc を作成する", async () => {
+      await runSetup(["/template"]);
+
+      expect(readIncludePatterns("/template")).toContain(".claude/rules/*.md");
+    });
+
+    it("--dryRun ではファイルを書かず、作成される内容を表示する", async () => {
+      await runSetup(["/template", "--dryRun"]);
+
+      expect(vol.existsSync("/template/.ziku/ziku.jsonc")).toBe(false);
+      expect(mockLog.message).toHaveBeenCalledWith(expect.stringContaining(".claude/rules/*.md"));
+      expect(mockOutro).toHaveBeenCalledWith(expect.stringContaining("was not written"));
+    });
+
+    it("エイリアス -n でもファイルを書かない", async () => {
+      await runSetup(["/template", "-n"]);
+
+      expect(vol.existsSync("/template/.ziku/ziku.jsonc")).toBe(false);
+    });
+
+    it("既に .ziku/ziku.jsonc があれば上書きしない", async () => {
+      vol.fromJSON({
+        "/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"], exclude: [] }),
+      });
+
+      await runSetup(["/template"]);
+
+      expect(readIncludePatterns("/template")).toEqual([".mcp.json"]);
+    });
+  });
+
+  describe("リモートモード", () => {
+    it("PR を作成する", async () => {
+      await runSetup(["--remote", "--from", "my-org/my-templates"]);
+
+      expect(mockCreatePullRequest).toHaveBeenCalledWith(
+        "ghp_test_token",
+        expect.objectContaining({ owner: "my-org", repo: "my-templates" }),
+      );
+    });
+
+    it("--dryRun では PR を作らず、作成される内容を表示する", async () => {
+      await runSetup(["--remote", "--from", "my-org/my-templates", "--dryRun"]);
+
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+      expect(mockConfirmAction).not.toHaveBeenCalled();
+      expect(mockLog.message).toHaveBeenCalledWith(expect.stringContaining("my-org/my-templates"));
+      expect(mockLog.message).toHaveBeenCalledWith(expect.stringContaining(".claude/rules/*.md"));
+      expect(mockOutro).toHaveBeenCalledWith(expect.stringContaining("no PR was created"));
+    });
+
+    it("--dryRun でも対象リポジトリの不在はエラーにする", async () => {
+      mockCheckRepoExists.mockResolvedValue({ _tag: "NotFound" });
+
+      await expect(runSetup(["--remote", "--from", "my-org/gone", "--dryRun"])).rejects.toThrow(
+        "not found",
+      );
+    });
+  });
+
+  describe("--from の検証", () => {
+    it("owner のみならデフォルトリポジトリを補完する", async () => {
+      await runSetup(["--remote", "--from", "my-org", "--dryRun"]);
+
+      expect(mockCheckRepoExists).toHaveBeenCalledWith("my-org", ".ziku");
+    });
+
+    it.each(["a/", "/b", "", "a/b/c"])('不正な値 "%s" はエラーになる', async (from) => {
+      await expect(runSetup(["--remote", "--from", from, "--dryRun"])).rejects.toThrow(
+        "Invalid --from format",
+      );
+      expect(mockCheckRepoExists).not.toHaveBeenCalled();
+    });
+
+    it("--from 未指定なら git remote から owner を検出する", async () => {
+      await runSetup(["--remote", "--dryRun"]);
+
+      expect(mockCheckRepoExists).toHaveBeenCalledWith("detected-org", ".ziku");
     });
   });
 });

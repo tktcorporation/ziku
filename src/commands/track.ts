@@ -38,12 +38,22 @@ export const trackLifecycle: CommandLifecycle = {
   ],
 };
 
+/**
+ * 追跡パターンを ziku.jsonc の include に追加するコマンド。
+ *
+ * パターンを位置引数、プロジェクトディレクトリを `--dir` で受け取る。他コマンドが
+ * ディレクトリを位置引数に置いているのとは非対称だが、track の主役は可変長のパターン列で、
+ * 先頭の位置引数をディレクトリに割り当てると `ziku track '.claude/rules/*.md'` の
+ * パターンがディレクトリとして解釈されてしまう。パターン側を位置引数に取る。
+ */
 export const trackCommand = defineCommand({
   meta: {
     name: "track",
     description: "Add file patterns to the tracking whitelist in ziku.jsonc",
   },
   args: {
+    // citty は位置引数の定義 1 つにつき 1 値しか束縛しないため、この定義は usage 表示用。
+    // 実際に使うパターン列は run() の args._（パース済み位置引数の全件）から取る。
     patterns: {
       type: "positional",
       description: "File paths or glob patterns to track (e.g., .cloud/rules/*.md)",
@@ -85,7 +95,9 @@ export const trackCommand = defineCommand({
       return;
     }
 
-    const patterns = parsePatternArgs();
+    // args._ には citty がパースした位置引数だけが入る。`--dir foo` のようなフラグの値も
+    // citty 側で取り除かれるため、パース規則をコマンド側に持たなくてよい。
+    const patterns = args._;
 
     if (patterns.length === 0) {
       throw new ZikuError(
@@ -141,41 +153,4 @@ async function listTrackedPatterns(targetDir: string): Promise<void> {
     }
   }
   outro("Done.");
-}
-
-/**
- * process.argv から track サブコマンド以降のパターン引数を抽出する。
- * フラグ引数（--list, --dir 等）は除外する。
- */
-function parsePatternArgs(): string[] {
-  const rawArgs = process.argv.slice(2);
-  const trackIdx = rawArgs.indexOf("track");
-  const argsAfterTrack = trackIdx === -1 ? rawArgs : rawArgs.slice(trackIdx + 1);
-
-  const patterns: string[] = [];
-  let i = 0;
-  while (i < argsAfterTrack.length) {
-    const arg = argsAfterTrack[i];
-    if (
-      arg === "--list" ||
-      arg === "-l" ||
-      arg === "--help" ||
-      arg === "-h" ||
-      arg === "--dryRun" ||
-      arg === "-n"
-    ) {
-      i++;
-      continue;
-    }
-    if (arg === "--dir" || arg === "-d") {
-      i += 2;
-      continue;
-    }
-    if (!arg.startsWith("-")) {
-      patterns.push(arg);
-    }
-    i++;
-  }
-
-  return patterns;
 }

@@ -1,9 +1,10 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { defineCommand } from "citty";
-import { join, resolve } from "pathe";
-import { match } from "ts-pattern";
+import { Effect } from "effect";
+import { resolve } from "pathe";
+import { P, match } from "ts-pattern";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { ZikuError } from "../errors";
+import { runCommandEffect } from "../services/command-context";
 import {
   checkRepoExists,
   getGitHubToken,
@@ -12,7 +13,12 @@ import {
   unauthorizedError,
 } from "../utils/github";
 import { detectGitHubOwner, DEFAULT_TEMPLATE_REPO } from "../utils/git-remote";
-import { ZIKU_CONFIG_FILE, generateZikuJsonc } from "../utils/ziku-config";
+import {
+  ZIKU_CONFIG_FILE,
+  generateZikuJsonc,
+  saveZikuConfig,
+  zikuConfigExists,
+} from "../utils/ziku-config";
 import { confirmAction } from "../ui/prompts";
 import { intro, log, outro, pc } from "../ui/renderer";
 
@@ -72,17 +78,25 @@ export const setupCommand = defineCommand({
       type: "string",
       description: "Remote template repository as owner/repo (used with --remote)",
     },
+    dryRun: {
+      type: "boolean",
+      alias: "n",
+      description: "Preview what would be created, without writing files or opening a PR",
+      default: false,
+    },
   },
   async run({ args }) {
     intro("setup");
 
+    const dryRun = args.dryRun as boolean;
+
     if (args.remote) {
-      await handleRemoteSetup(args.from as string | undefined);
+      await handleRemoteSetup(args.from as string | undefined, dryRun);
       return;
     }
 
     const targetDir = resolve(args.dir);
-    handleLocalSetup(targetDir);
+    await runCommandEffect(handleLocalSetup(targetDir, dryRun));
   },
 });
 
@@ -92,46 +106,63 @@ export const setupCommand = defineCommand({
  * テンプレートリポジトリのルートで `ziku setup` を実行した場合の処理。
  * ziku.jsonc が既にあればスキップ。
  */
-function handleLocalSetup(targetDir: string): void {
-  log.info(`Target: ${pc.cyan(targetDir)}`);
+function handleLocalSetup(targetDir: string, dryRun: boolean): Effect.Effect<void, ZikuError> {
+  return Effect.gen(function* () {
+    log.info(`Target: ${pc.cyan(targetDir)}`);
 
-  const configPath = join(targetDir, ZIKU_CONFIG_FILE);
-  if (existsSync(configPath)) {
-    log.success(".ziku/ziku.jsonc already exists");
-    outro("Template repository is already configured.");
-    return;
-  }
+    if (zikuConfigExists(targetDir)) {
+      log.success(".ziku/ziku.jsonc already exists");
+      outro("Template repository is already configured.");
+      return;
+    }
 
-  log.step("Generating .ziku/ziku.jsonc...");
+    const content = generateZikuJsonc({
+      include: DEFAULT_INCLUDE_PATTERNS,
+      exclude: [],
+    });
 
-  const content = generateZikuJsonc({
-    include: DEFAULT_INCLUDE_PATTERNS,
-    exclude: [],
+    if (dryRun) {
+      log.info("Dry run mode");
+      log.message(previewIncludePatterns(`Would create ${ZIKU_CONFIG_FILE} with:`));
+      outro(`Dry run complete — ${ZIKU_CONFIG_FILE} was not written`);
+      return;
+    }
+
+    log.step("Generating .ziku/ziku.jsonc...");
+
+    yield* Effect.tryPromise({
+      try: () => saveZikuConfig(targetDir, content),
+      catch: (cause) =>
+        new ZikuError(
+          `Failed to write ${ZIKU_CONFIG_FILE}: ${String(cause)}`,
+          `Check write permissions for ${targetDir}`,
+        ),
+    });
+
+    log.success("Created .ziku/ziku.jsonc");
+
+    outro(
+      [
+        "Template initialized!",
+        "",
+        pc.bold("Next steps:"),
+        `  ${pc.cyan("1.")} Review and customize ${pc.dim(".ziku/ziku.jsonc")}`,
+        `  ${pc.cyan("2.")} ${pc.cyan("git add .ziku/ && git commit -m 'chore: add ziku config'")}`,
+        `  ${pc.dim("Then other projects can use this template with")} ${pc.cyan("npx ziku init")}`,
+      ].join("\n"),
+    );
   });
-  const zikuDir = join(targetDir, ".ziku");
-  if (!existsSync(zikuDir)) {
-    mkdirSync(zikuDir, { recursive: true });
-  }
-  writeFileSync(configPath, content);
+}
 
-  log.success("Created .ziku/ziku.jsonc");
-
-  outro(
-    [
-      "Template initialized!",
-      "",
-      pc.bold("Next steps:"),
-      `  ${pc.cyan("1.")} Review and customize ${pc.dim(".ziku/ziku.jsonc")}`,
-      `  ${pc.cyan("2.")} ${pc.cyan("git add .ziku/ && git commit -m 'chore: add ziku config'")}`,
-      `  ${pc.dim("Then other projects can use this template with")} ${pc.cyan("npx ziku init")}`,
-    ].join("\n"),
-  );
+/** --dryRun のプレビュー本文: 生成される include パターンを列挙する */
+function previewIncludePatterns(heading: string): string {
+  return [heading, ...DEFAULT_INCLUDE_PATTERNS.map((p) => `  ${pc.green("+")} ${p}`)].join("\n");
 }
 
 /**
  * リモートのテンプレートリポジトリに ziku.jsonc を追加する PR を作成する。
  */
-async function handleRemoteSetup(from: string | undefined): Promise<void> {
+async function handleRemoteSetup(from: string | undefined, dryRun: boolean): Promise<void> {
   const { owner, repo } = resolveRemoteTarget(from);
 
   log.info(`Template: ${pc.cyan(`${owner}/${repo}`)}`);
@@ -157,6 +188,17 @@ async function handleRemoteSetup(from: string | undefined): Promise<void> {
       throw unauthorizedError(u);
     })
     .exhaustive();
+
+  if (dryRun) {
+    log.info("Dry run mode");
+    log.message(
+      previewIncludePatterns(
+        `Would open a PR on ${owner}/${repo} adding ${ZIKU_CONFIG_FILE} with:`,
+      ),
+    );
+    outro("Dry run complete — no PR was created");
+    return;
+  }
 
   const confirmed = await confirmAction(
     `Create a PR to add .ziku/ziku.jsonc to ${owner}/${repo}?`,
@@ -205,12 +247,11 @@ async function handleRemoteSetup(from: string | undefined): Promise<void> {
  * --from 引数またはgit remoteからリモートテンプレートのowner/repoを解決する。
  */
 function resolveRemoteTarget(from: string | undefined): { owner: string; repo: string } {
-  if (from) {
-    const slashIndex = from.indexOf("/");
-    if (slashIndex === -1) {
-      return { owner: from, repo: DEFAULT_TEMPLATE_REPO };
-    }
-    return { owner: from.slice(0, slashIndex), repo: from.slice(slashIndex + 1) };
+  // 空文字列も検証対象にするため、値の有無は undefined で判定する。
+  // `--from ""` を「未指定」として git remote 検出へ流すと、意図と違うリポジトリに
+  // PR を作りにいく。
+  if (from !== undefined) {
+    return parseFromArg(from);
   }
 
   const detectedOwner = detectGitHubOwner();
@@ -222,4 +263,33 @@ function resolveRemoteTarget(from: string | undefined): { owner: string; repo: s
     "Cannot detect template source",
     "Specify --from <owner> or --from <owner/repo>",
   );
+}
+
+/**
+ * `--from` の値を owner / repo へ分解する。
+ *
+ * 受け付ける形式は `owner`（リポジトリ名はデフォルトで補完）と `owner/repo` の 2 つだけ。
+ * 空のセグメント（`a/`、`/b`、``）とスラッシュ 2 つ以上（`a/b/c`）は、そのまま渡すと
+ * 存在しない owner / repo への API 呼び出しになるため入口で弾く。
+ */
+function parseFromArg(from: string): { owner: string; repo: string } {
+  const invalid = new ZikuError(
+    `Invalid --from format: "${from}"`,
+    "Expected: owner or owner/repo (e.g., my-org or my-org/my-templates)",
+  );
+
+  const segments = from.split("/");
+
+  return match(segments)
+    .with([P.string], ([owner]) => {
+      if (!owner.trim()) throw invalid;
+      return { owner, repo: DEFAULT_TEMPLATE_REPO };
+    })
+    .with([P.string, P.string], ([owner, repo]) => {
+      if (!owner.trim() || !repo.trim()) throw invalid;
+      return { owner, repo };
+    })
+    .otherwise((): never => {
+      throw invalid;
+    });
 }

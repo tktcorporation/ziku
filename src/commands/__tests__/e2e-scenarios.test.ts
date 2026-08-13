@@ -550,16 +550,16 @@ describe("E2E: multi-scenario tests", () => {
         "/project/.ziku/ziku.jsonc": initial,
       });
 
-      const originalArgv = process.argv;
-      process.argv = ["node", "ziku", "track", ".github/workflows/*.yml", "--dir", "/project"];
-
       await (trackCommand.run as any)({
-        args: { dir: "/project", list: false, patterns: ".github/workflows/*.yml" },
-        rawArgs: [],
+        args: {
+          _: [".github/workflows/*.yml"],
+          dir: "/project",
+          list: false,
+          patterns: ".github/workflows/*.yml",
+        },
+        rawArgs: [".github/workflows/*.yml", "--dir", "/project"],
         cmd: trackCommand,
       });
-
-      process.argv = originalArgv;
 
       // ファイルが更新されていること
       const content = vol.readFileSync("/project/.ziku/ziku.jsonc", "utf-8") as string;
@@ -573,16 +573,11 @@ describe("E2E: multi-scenario tests", () => {
         "/project/.ziku/ziku.jsonc": createZikuJsonc([".mcp.json"]),
       });
 
-      const originalArgv = process.argv;
-      process.argv = ["node", "ziku", "track", ".mcp.json", "--dir", "/project"];
-
       await (trackCommand.run as any)({
-        args: { dir: "/project", list: false, patterns: ".mcp.json" },
-        rawArgs: [],
+        args: { _: [".mcp.json"], dir: "/project", list: false, patterns: ".mcp.json" },
+        rawArgs: [".mcp.json", "--dir", "/project"],
         cmd: trackCommand,
       });
-
-      process.argv = originalArgv;
 
       // info が呼ばれること（既に追跡済み）
       expect(mockLog.info).toHaveBeenCalledWith(expect.stringContaining("already tracked"));
@@ -597,8 +592,8 @@ describe("E2E: multi-scenario tests", () => {
       });
 
       await (trackCommand.run as any)({
-        args: { dir: "/project", list: true, patterns: "" },
-        rawArgs: [],
+        args: { _: [], dir: "/project", list: true },
+        rawArgs: ["--list", "--dir", "/project"],
         cmd: trackCommand,
       });
 
@@ -610,8 +605,8 @@ describe("E2E: multi-scenario tests", () => {
 
       await expect(
         (trackCommand.run as any)({
-          args: { dir: "/project", list: false, patterns: ".new-pattern" },
-          rawArgs: [],
+          args: { _: [".new-pattern"], dir: "/project", list: false, patterns: ".new-pattern" },
+          rawArgs: [".new-pattern", "--dir", "/project"],
           cmd: trackCommand,
         }),
       ).rejects.toThrow(ZikuError);
@@ -622,18 +617,13 @@ describe("E2E: multi-scenario tests", () => {
         "/project/.ziku/ziku.jsonc": createZikuJsonc([".mcp.json"]),
       });
 
-      const originalArgv = process.argv;
-      process.argv = ["node", "ziku", "track", "--dir", "/project"];
-
       await expect(
         (trackCommand.run as any)({
-          args: { dir: "/project", list: false, patterns: "" },
-          rawArgs: [],
+          args: { _: [], dir: "/project", list: false },
+          rawArgs: ["--dir", "/project"],
           cmd: trackCommand,
         }),
       ).rejects.toThrow(ZikuError);
-
-      process.argv = originalArgv;
     });
   });
 
@@ -695,16 +685,16 @@ describe("E2E: multi-scenario tests", () => {
         "/project/.ziku/lock.json": JSON.stringify(baseLock),
       });
 
-      const originalArgv = process.argv;
-      process.argv = ["node", "ziku", "track", ".github/workflows/ci.yml", "--dir", "/project"];
-
       await (trackCommand.run as any)({
-        args: { dir: "/project", list: false, patterns: ".github/workflows/ci.yml" },
-        rawArgs: [],
+        args: {
+          _: [".github/workflows/ci.yml"],
+          dir: "/project",
+          list: false,
+          patterns: ".github/workflows/ci.yml",
+        },
+        rawArgs: [".github/workflows/ci.yml", "--dir", "/project"],
         cmd: trackCommand,
       });
-
-      process.argv = originalArgv;
 
       // ziku.jsonc が更新されたことを確認
       const updatedContent = vol.readFileSync("/project/.ziku/ziku.jsonc", "utf-8") as string;

@@ -286,15 +286,11 @@ function _runDiff(dir: string) {
 }
 
 function runTrack(dir: string, patterns: string[]) {
-  const originalArgv = process.argv;
-  process.argv = ["node", "ziku", "track", ...patterns, "--dir", dir];
-  const promise = (trackCommand.run as any)({
-    args: { dir, list: false, patterns: patterns[0] },
-    rawArgs: [],
+  // citty は位置引数の全件を args._ に載せる（track はここからパターン列を取る）
+  return (trackCommand.run as any)({
+    args: { _: patterns, dir, list: false, patterns: patterns[0] },
+    rawArgs: [...patterns, "--dir", dir],
     cmd: trackCommand,
-  });
-  return promise.finally(() => {
-    process.argv = originalArgv;
   });
 }
 

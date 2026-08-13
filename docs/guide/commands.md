@@ -21,6 +21,7 @@ OPTIONS
 
        --remote    Create a PR to set up a remote template repository instead of local (Default: false)
   --from=<from>    Remote template repository as owner/repo (used with --remote)
+   -n, --dryRun    Preview what would be created, without writing files or opening a PR (Default: false)
 ```
 
 ## `init`
