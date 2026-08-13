@@ -566,7 +566,11 @@ describe("pullCommand", () => {
       });
 
       // writeFileEnsureDir が呼ばれることを確認
-      expect(mockWriteFileEnsureDir).toHaveBeenCalledWith("/test/.mcp.json", '{"new": true}');
+      // テンプレートからのコピーはバイト列のまま運ぶ（バイナリを壊さないため）
+      expect(mockWriteFileEnsureDir).toHaveBeenCalledWith(
+        "/test/.mcp.json",
+        Buffer.from('{"new": true}'),
+      );
       expect(mockLog.success).toHaveBeenCalledWith("Updated 1 file(s)");
     });
 
@@ -593,7 +597,10 @@ describe("pullCommand", () => {
         cmd: pullCommand,
       });
 
-      expect(mockWriteFileEnsureDir).toHaveBeenCalledWith("/test/.new-file", "new content");
+      expect(mockWriteFileEnsureDir).toHaveBeenCalledWith(
+        "/test/.new-file",
+        Buffer.from("new content"),
+      );
       expect(mockLog.success).toHaveBeenCalledWith("Added 1 new file(s)");
     });
 
@@ -1488,7 +1495,7 @@ describe("pullCommand", () => {
       // writeFileEnsureDir がディレクトリ作成含めて呼ばれる
       expect(mockWriteFileEnsureDir).toHaveBeenCalledWith(
         "/test/.devcontainer/config.json",
-        '{"key": "value"}',
+        Buffer.from('{"key": "value"}'),
       );
     });
 

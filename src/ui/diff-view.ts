@@ -11,6 +11,7 @@ import { diffWords } from "diff";
 import pc from "picocolors";
 import { match } from "ts-pattern";
 import type { DiffType, FileDiff } from "../modules/schemas";
+import { isBinaryFileDiff } from "../utils/file-content";
 import { generateUnifiedDiff } from "../utils/diff";
 
 // ─── unified diff の行種別 ─────────────────────────────────────
@@ -46,10 +47,16 @@ function isAdditionLine(line: string): boolean {
 
 // ─── 統計計算 ──────────────────────────────────────────────────
 
-export interface DiffStats {
-  readonly additions: number;
-  readonly deletions: number;
-}
+/**
+ * 差分の規模。
+ *
+ * バイナリには行という単位が無いので、加減算の行数を持たない。数値としては 0 で固定し、
+ * 種別をタグで区別する。0 を持たせるのは、統計を数値として読む表示経路（ファイル選択の
+ * ヒント）が種別を知らなくても壊れないため。「バイナリなのに 10 行追加」は作れない。
+ */
+export type DiffStats =
+  | { readonly kind: "text"; readonly additions: number; readonly deletions: number }
+  | { readonly kind: "binary"; readonly additions: 0; readonly deletions: 0 };
 
 /**
  * テキストの実際の行数をカウントする。
@@ -66,16 +73,20 @@ function countLines(content: string): number {
 
 /** ファイルの差分統計を計算 */
 export function calculateDiffStats(fileDiff: FileDiff): DiffStats {
+  // バイナリは種別を先に切る。行数を数えると、デコードできないバイト列を行に切った
+  // 結果という無意味な数字が出る。
+  if (isBinaryFileDiff(fileDiff)) return BINARY_STATS;
+
   return match(fileDiff)
-    .with({ type: "unchanged" }, () => ({ additions: 0, deletions: 0 }))
-    .with({ type: "deleted" }, (f) => ({
-      additions: 0,
-      deletions: countLines(f.templateContent),
-    }))
-    .with({ type: "added" }, (f) => ({
-      additions: countLines(f.localContent),
-      deletions: 0,
-    }))
+    .with({ type: "unchanged" }, () => ({ kind: "text", additions: 0, deletions: 0 }) as const)
+    .with(
+      { type: "deleted" },
+      (f) => ({ kind: "text", additions: 0, deletions: countLines(f.templateContent) }) as const,
+    )
+    .with(
+      { type: "added" },
+      (f) => ({ kind: "text", additions: countLines(f.localContent), deletions: 0 }) as const,
+    )
     .with({ type: "modified" }, (f) => {
       let additions = 0;
       let deletions = 0;
@@ -83,17 +94,24 @@ export function calculateDiffStats(fileDiff: FileDiff): DiffStats {
         if (line.startsWith("+")) additions++;
         else if (line.startsWith("-")) deletions++;
       }
-      return { additions, deletions };
+      return { kind: "text", additions, deletions } as const;
     })
     .exhaustive();
 }
 
+const BINARY_STATS = { kind: "binary", additions: 0, deletions: 0 } as const;
+
 /** 統計フォーマット (+10 -5) */
 export function formatStats(stats: DiffStats): string {
-  const parts: string[] = [];
-  if (stats.additions > 0) parts.push(pc.green(`+${stats.additions}`));
-  if (stats.deletions > 0) parts.push(pc.red(`-${stats.deletions}`));
-  return parts.length === 0 ? pc.dim("(no changes)") : parts.join(" ");
+  return match(stats)
+    .with({ kind: "binary" }, () => pc.dim("(binary)"))
+    .with({ kind: "text" }, (s) => {
+      const parts: string[] = [];
+      if (s.additions > 0) parts.push(pc.green(`+${s.additions}`));
+      if (s.deletions > 0) parts.push(pc.red(`-${s.deletions}`));
+      return parts.length === 0 ? pc.dim("(no changes)") : parts.join(" ");
+    })
+    .exhaustive();
 }
 
 // ─── 種別の表示 ────────────────────────────────────────────────

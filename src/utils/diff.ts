@@ -1,9 +1,9 @@
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { createPatch } from "diff";
 import { join } from "pathe";
 import { match } from "ts-pattern";
 import type { DiffResult, FileDiff } from "../modules/schemas";
+import { isBinaryFileDiff, readFileContent, toTransportText } from "./file-content";
 import { filterByGitignore, loadMergedGitignore } from "./gitignore";
 import type { FlatPatterns } from "./patterns";
 import { resolvePatterns } from "./patterns";
@@ -57,8 +57,8 @@ export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
     // 内容の読み取りは種別が決まってから行う。「存在する側だけを読む」ことを
     // 分岐と一体にしておかないと、読めなかった側を後から埋める処理が必要になる。
     if (localExists && templateExists) {
-      const localContent = await readFile(localPath, "utf-8");
-      const templateContent = await readFile(templatePath, "utf-8");
+      const localContent = await readContent(localPath);
+      const templateContent = await readContent(templatePath);
       files.push(
         localContent === templateContent
           ? { path: filePath, type: "unchanged", localContent, templateContent }
@@ -69,14 +69,14 @@ export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
       files.push({
         path: filePath,
         type: "added",
-        localContent: await readFile(localPath, "utf-8"),
+        localContent: await readContent(localPath),
       });
     } else if (templateExists) {
       // テンプレートのみ → 削除（ローカルにはない）
       files.push({
         path: filePath,
         type: "deleted",
-        templateContent: await readFile(templatePath, "utf-8"),
+        templateContent: await readContent(templatePath),
       });
     }
     // どちらにも存在しないパスは差分ではない。パターン解決は実在するファイルだけを
@@ -84,6 +84,18 @@ export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
   }
 
   return { files: files.toSorted((a, b) => a.path.localeCompare(b.path)) };
+}
+
+/**
+ * 差分の 1 ファイル分の内容を読む。
+ *
+ * バイト列として読んでから種別を判定する。バイナリを utf-8 としてデコードすると不正バイトが
+ * U+FFFD へ潰れ、内容の違うファイルが同じ文字列になって「差分なし」と判定される。差分の型
+ * （`FileDiff`）は内容を `string` で持つので、バイナリはバイト列を保つエンコードで載せる
+ * （`src/utils/file-content.ts`）。
+ */
+async function readContent(path: string): Promise<string> {
+  return toTransportText(await readFileContent(path));
 }
 
 /**
@@ -117,14 +129,33 @@ export function generateUnifiedDiff(fileDiff: FileDiff): string {
   // 内容が読めなかった場合の穴埋めではない。
   return match(fileDiff)
     .with({ type: "added" }, (f) =>
-      createPatch(f.path, "", f.localContent, "template", "local", options),
+      isBinaryFileDiff(f)
+        ? binaryNotice(MISSING_SIDE, `local/${f.path}`)
+        : createPatch(f.path, "", f.localContent, "template", "local", options),
     )
     .with({ type: "modified" }, (f) =>
-      createPatch(f.path, f.templateContent, f.localContent, "template", "local", options),
+      isBinaryFileDiff(f)
+        ? binaryNotice(`template/${f.path}`, `local/${f.path}`)
+        : createPatch(f.path, f.templateContent, f.localContent, "template", "local", options),
     )
     .with({ type: "deleted" }, (f) =>
-      createPatch(f.path, f.templateContent, "", "template", "local", options),
+      isBinaryFileDiff(f)
+        ? binaryNotice(`template/${f.path}`, MISSING_SIDE)
+        : createPatch(f.path, f.templateContent, "", "template", "local", options),
     )
     .with({ type: "unchanged" }, () => "")
     .exhaustive();
+}
+
+/** 片側にファイルが無いことを示す名前。git が同じ状況で使う表記に揃える。 */
+const MISSING_SIDE = "/dev/null";
+
+/**
+ * バイナリの差分を 1 行で示す。
+ *
+ * 内容は出さない。バイナリを行として並べても読めず、端末の表示も壊れる。
+ * git が同じ状況で出す `Binary files ... differ` と同じ形にして、意味を推測させない。
+ */
+function binaryNotice(from: string, to: string): string {
+  return `Binary files ${from} and ${to} differ\n`;
 }

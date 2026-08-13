@@ -1,6 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "pathe";
+import { afterEach, describe, expect, it } from "vitest";
 import type { FileDiff } from "../../modules/schemas";
-import { generateUnifiedDiff } from "../diff";
+import { detectDiff, generateUnifiedDiff } from "../diff";
+
+/** バイナリの内容を差分の string チャネルへ載せた形（バイト保存の latin1）。 */
+function asDiffContent(bytes: number[]): string {
+  return Buffer.from(bytes).toString("latin1");
+}
 
 describe("diff", () => {
   describe("generateUnifiedDiff", () => {
@@ -121,6 +129,105 @@ describe("diff", () => {
 
       // 変更行の前後に 3 行ずつ
       expect(contextLines).toEqual([" line7", " line8", " line9", " line11", " line12", " line13"]);
+    });
+  });
+  describe("generateUnifiedDiff - バイナリ", () => {
+    it("バイナリの変更は内容を出さず 1 行で示す", () => {
+      const fileDiff: FileDiff = {
+        path: "assets/icon.png",
+        type: "modified",
+        templateContent: asDiffContent([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]),
+        localContent: asDiffContent([0x89, 0x50, 0x4e, 0x47, 0x00, 0x02]),
+      };
+
+      const result = generateUnifiedDiff(fileDiff);
+
+      expect(result).toBe(
+        "Binary files template/assets/icon.png and local/assets/icon.png differ\n",
+      );
+      expect(result).not.toContain("\u0000");
+      expect(result).not.toContain("@@");
+    });
+
+    it("ローカルにだけあるバイナリは追加として 1 行で示す", () => {
+      const fileDiff: FileDiff = {
+        path: "assets/font.woff2",
+        type: "added",
+        localContent: asDiffContent([0x77, 0x4f, 0x46, 0x32, 0x00]),
+      };
+
+      expect(generateUnifiedDiff(fileDiff)).toBe(
+        "Binary files /dev/null and local/assets/font.woff2 differ\n",
+      );
+    });
+
+    it("テンプレートにだけあるバイナリは削除として 1 行で示す", () => {
+      const fileDiff: FileDiff = {
+        path: "assets/font.woff2",
+        type: "deleted",
+        templateContent: asDiffContent([0x77, 0x4f, 0x46, 0x32, 0x00]),
+      };
+
+      expect(generateUnifiedDiff(fileDiff)).toBe(
+        "Binary files template/assets/font.woff2 and /dev/null differ\n",
+      );
+    });
+
+    it("内容が同じバイナリには差分を出さない", () => {
+      const content = asDiffContent([0x00, 0x01, 0x02]);
+      const fileDiff: FileDiff = {
+        path: "assets/icon.png",
+        type: "unchanged",
+        templateContent: content,
+        localContent: content,
+      };
+
+      expect(generateUnifiedDiff(fileDiff)).toBe("");
+    });
+  });
+  describe("detectDiff - バイナリ", () => {
+    const tempDirs: string[] = [];
+
+    afterEach(async () => {
+      for (const dir of tempDirs) await rm(dir, { recursive: true, force: true });
+      tempDirs.length = 0;
+    });
+
+    async function dirs(): Promise<{ targetDir: string; templateDir: string }> {
+      const root = await mkdtemp(join(tmpdir(), "ziku-test-diff-binary-"));
+      tempDirs.push(root);
+      const targetDir = join(root, "local");
+      const templateDir = join(root, "template");
+      await mkdir(targetDir, { recursive: true });
+      await mkdir(templateDir, { recursive: true });
+      return { targetDir, templateDir };
+    }
+
+    const patterns = { include: ["**"], exclude: [] };
+
+    it("内容の違うバイナリを modified として検出する", async () => {
+      const { targetDir, templateDir } = await dirs();
+      // utf-8 デコードを挟むと、どちらの不正バイトも U+FFFD へ潰れて同じ内容に見える
+      await writeFile(join(targetDir, "icon.png"), Buffer.from([0x00, 0xff, 0x41]));
+      await writeFile(join(templateDir, "icon.png"), Buffer.from([0x00, 0xfe, 0x41]));
+
+      const result = await detectDiff({ targetDir, templateDir, patterns });
+
+      expect(result.files.map((f) => [f.path, f.type])).toEqual([["icon.png", "modified"]]);
+      expect(generateUnifiedDiff(result.files[0])).toBe(
+        "Binary files template/icon.png and local/icon.png differ\n",
+      );
+    });
+
+    it("同一バイト列のバイナリは unchanged として検出する", async () => {
+      const { targetDir, templateDir } = await dirs();
+      const bytes = Buffer.from([0x00, 0xff, 0x41]);
+      await writeFile(join(targetDir, "icon.png"), bytes);
+      await writeFile(join(templateDir, "icon.png"), bytes);
+
+      const result = await detectDiff({ targetDir, templateDir, patterns });
+
+      expect(result.files.map((f) => [f.path, f.type])).toEqual([["icon.png", "unchanged"]]);
     });
   });
 });

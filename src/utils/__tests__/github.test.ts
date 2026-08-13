@@ -151,6 +151,35 @@ describe("createPullRequest", () => {
     expect(result.branch).toMatch(/^ziku-sync-\d+$/);
   });
 
+  it("バイナリはバイト列のまま base64 へ載せる", async () => {
+    // 差分の string チャネルに載ったバイナリ（バイト保存の latin1）
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0x1a]);
+
+    await createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [{ path: "assets/icon.png", content: bytes.toString("latin1") }],
+      title: "Test PR",
+    });
+
+    const sent = mockReposCreateOrUpdateFileContents.mock.calls[0][0] as { content: string };
+    expect(Buffer.from(sent.content, "base64").equals(bytes)).toBe(true);
+  });
+
+  it("テキストは utf-8 のバイト列として base64 へ載せる", async () => {
+    const content = "日本語のテキスト\n";
+
+    await createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [{ path: "README.md", content }],
+      title: "Test PR",
+    });
+
+    const sent = mockReposCreateOrUpdateFileContents.mock.calls[0][0] as { content: string };
+    expect(Buffer.from(sent.content, "base64").toString("utf-8")).toBe(content);
+  });
+
   it("既存の fork を使用する", async () => {
     mockReposGet.mockResolvedValue({
       data: { name: "repo" },

@@ -453,16 +453,11 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
         },
       ],
     } as any);
-    mockSelectPushFiles.mockResolvedValueOnce([
-      {
-        path: ".claude/rules/testing.md",
-        type: "added",
-        localContent: "# Testing Guide\nWrite tests first.",
-      },
-    ] as any);
 
     await runPush("/projectA");
 
+    // 非対話 push（--yes）はファイル選択プロンプトを出さずに既定集合を送る
+    expect(mockSelectPushFiles).not.toHaveBeenCalled();
     expect(mockCreatePullRequest).toHaveBeenCalledTimes(1);
     const prFiles1 = mockCreatePullRequest.mock.calls[0][1].files;
     expect(prFiles1.some((f: any) => f.path === ".claude/rules/testing.md")).toBe(true);
@@ -506,13 +501,6 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
         },
       ],
     } as any);
-    mockSelectPushFiles.mockResolvedValueOnce([
-      {
-        path: ".eslintrc.json",
-        type: "added",
-        localContent: '{"extends": ["next"]}',
-      },
-    ] as any);
 
     await runPush("/projectA");
 
@@ -754,17 +742,11 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
         },
       ],
     } as any);
-    mockSelectPushFiles.mockResolvedValueOnce([
-      {
-        path: ".claude/rules/testing.md",
-        type: "added",
-        localContent: "# Testing Guide\nWrite tests first.",
-      },
-    ] as any);
 
     await runPush("/projectA");
 
     // ローカル push: PR は作成されず、テンプレートに直接コピーされる
+    expect(mockSelectPushFiles).not.toHaveBeenCalled();
     expect(mockCreatePullRequest).not.toHaveBeenCalled();
     expect(vol.existsSync("/template/.claude/rules/testing.md")).toBe(true);
     expect(vol.readFileSync("/template/.claude/rules/testing.md", "utf8")).toBe(
@@ -794,9 +776,6 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
     mockDetectDiff.mockResolvedValueOnce({
       files: [{ path: ".eslintrc.json", type: "added", localContent: '{"extends": ["next"]}' }],
     } as any);
-    mockSelectPushFiles.mockResolvedValueOnce([
-      { path: ".eslintrc.json", type: "added", localContent: '{"extends": ["next"]}' },
-    ] as any);
 
     await runPush("/projectA");
 

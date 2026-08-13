@@ -350,6 +350,37 @@ describe("conflict-io", () => {
       expect(keptByPush.size).toBe(0);
     });
 
+    it("バイナリファイルはマージを試みず未解決になる", async () => {
+      const targetDir = await temp("loop-binary-target");
+      const templateDir = await temp("loop-binary-template");
+
+      // PNG のシグネチャ。NUL を含むのでバイナリと判定される
+      const localBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x00, 0x01]);
+      const templateBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x00, 0x02]);
+      await writeFile(join(targetDir, "icon.png"), localBytes);
+      await writeFile(join(templateDir, "icon.png"), templateBytes);
+      await writeFiles(targetDir, { "a.txt": "local a" });
+      await writeFiles(templateDir, { "a.txt": "template a" });
+
+      const seen: MergeOneFileOutput[] = [];
+      const unresolved = await Effect.runPromise(
+        mergeConflictFiles({
+          conflicts: ["icon.png", "a.txt"],
+          targetDir,
+          templateDir,
+          lock: localSourceLock(templateDir),
+          onFileResult: (result) => Effect.sync(() => void seen.push(result)),
+        }),
+      );
+
+      expect(unresolved).toEqual(["icon.png", "a.txt"]);
+      // バイナリはマージ経路に入らないので結末が作られない（テキストは NoBase として渡る）
+      expect(seen.map((r) => r.file)).toEqual(["a.txt"]);
+      // ローカルのバイト列は 1 バイトも変わらない
+      const afterMerge = await readFile(join(targetDir, "icon.png"));
+      expect(afterMerge.equals(localBytes)).toBe(true);
+    });
+
     it("対象が空なら base を取得せずに空配列を返す", async () => {
       const targetDir = await temp("loop-empty-target");
       const templateDir = await temp("loop-empty-template");

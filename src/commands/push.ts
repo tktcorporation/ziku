@@ -21,6 +21,7 @@ import { loadCommandContext, runCommandEffect, toZikuError } from "../services/c
 import type { MergedContent } from "../utils/merge";
 import { mergeConflictFiles } from "../utils/merge";
 import { analyzeSync } from "../utils/sync-analysis";
+import { transportTextToBytes } from "../utils/file-content";
 import {
   computeMergedZikuConfig,
   computeScopedZikuConfig,
@@ -287,7 +288,9 @@ function pushToLocal(
         if (!existsSync(destDir)) {
           await mkdir(destDir, { recursive: true });
         }
-        await writeFile(destPath, file.content, "utf-8");
+        // 内容はバイト列へ戻してから書く。バイナリは latin1 の文字列として運ばれており、
+        // utf-8 として書くと 1 文字が 2 バイトへ膨らんで別のファイルになる。
+        await writeFile(destPath, transportTextToBytes(file.content));
         log.message(`  ${pc.green("+")} ${file.path}`);
       }
 
@@ -662,6 +665,7 @@ export const pushCommand = defineCommand({
         filesArg: args.files as string | undefined,
         includeDeletions: args.includeDeletions as boolean,
         conflictedPaths: unresolvedConflicts,
+        yes: args.yes as boolean,
       });
       if (pushableFiles.length === 0) return;
 
@@ -1009,7 +1013,12 @@ function defaultPushSelection(
 
 /**
  * push 対象ファイルを選択する。
- * --files 指定時はフィルタリング、未指定時はインタラクティブ選択。
+ *
+ * `--files` 指定時はフィルタリング、`--yes` 指定時は既定集合、いずれも無ければ対話選択。
+ * `--yes` で対話に落とすと、対話端末を持たない実行（CI）が入力待ちのまま何も送らずに
+ * 終了し、成功したように見える。プロンプトを省くフラグである以上、ここも省いて
+ * dry-run のプレビューと同じ集合を送る。
+ *
  * 選択結果が空の場合はログを出力して空配列を返す。
  */
 async function selectFilesToPush(
@@ -1018,6 +1027,7 @@ async function selectFilesToPush(
     filesArg: string | undefined;
     includeDeletions: boolean;
     conflictedPaths: Set<string>;
+    yes: boolean;
   },
 ): Promise<FileDiff[]> {
   if (opts.filesArg) {
@@ -1029,6 +1039,16 @@ async function selectFilesToPush(
     }
     log.info(`${filtered.length} file(s) selected via --files`);
     return filtered;
+  }
+
+  if (opts.yes) {
+    const selected = defaultPushSelection(candidates, opts);
+    if (selected.length === 0) {
+      log.info("No files to push.");
+      return [];
+    }
+    log.info(`${selected.length} file(s) selected (--yes skips the selection prompt)`);
+    return selected;
   }
 
   log.step("Selecting files...");

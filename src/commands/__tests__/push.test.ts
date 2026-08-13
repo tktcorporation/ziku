@@ -253,6 +253,18 @@ const emptyDiff = {
   files: [],
 };
 
+/** 何も push 対象にしない分類結果。`classifyFiles` の既定戻り値。 */
+const emptyClassification = {
+  autoUpdate: [],
+  localOnly: [],
+  conflicts: [],
+  newFiles: [],
+  deletedFiles: [],
+  deletedWithLocalEdits: [],
+  deletedLocally: [],
+  unchanged: [],
+};
+
 /**
  * テスト用の CommandContext を生成するヘルパー。
  * DI のおかげでテンプレートダウンロードや設定読み込みのモックが不要。
@@ -300,16 +312,54 @@ function setupPushableFiles(files: FileDiff[]) {
   mockDetectDiff.mockResolvedValueOnce({ files });
 }
 
+/**
+ * モックを毎テストの初期状態へ戻す。
+ *
+ * `vi.clearAllMocks()` が消すのは呼び出し履歴だけで、`mockResolvedValueOnce` /
+ * `mockReturnValueOnce` のキューは残る。push はフラグ次第で呼ぶ関数が変わる
+ * （`--files` / `--yes` は選択プロンプトを呼ばない）ため、消費されなかったキューが
+ * 次のテストに漏れて無関係なテストを壊す。キューごと落とす `mockReset()` を使い、
+ * モジュールモックが持っていた既定の戻り値をここで貼り直す。
+ */
+function resetPushMocks(): void {
+  vi.clearAllMocks();
+
+  for (const mock of [
+    mockLoadCommandContext,
+    mockSelectPushFiles,
+    mockConfirmAction,
+    mockCreatePullRequest,
+    mockGetGitHubToken,
+    mockInputGitHubToken,
+    mockInputPrTitle,
+    mockInputPrBody,
+    mockMergeOneFile,
+  ]) {
+    mock.mockReset();
+  }
+
+  mockClassifyFiles.mockReset();
+  mockClassifyFiles.mockReturnValue(emptyClassification);
+  mockDetectDiff.mockReset();
+  mockDetectDiff.mockResolvedValue(emptyDiff);
+  mockDetectUntrackedFiles.mockReset();
+  mockDetectUntrackedFiles.mockResolvedValue([]);
+  mockSelectUntrackedToTrack.mockReset();
+  mockSelectUntrackedToTrack.mockResolvedValue([]);
+  mockDownloadBaseForMerge.mockReset();
+  mockDownloadBaseForMerge.mockReturnValue(Effect.succeed(null));
+  mockHashFiles.mockReset();
+  mockHashFiles.mockResolvedValue({});
+}
+
 describe("pushCommand", () => {
   beforeEach(() => {
     vol.reset();
-    vi.clearAllMocks();
+    resetPushMocks();
 
     // デフォルトのモック設定: 正常な CommandContext を返す
     const { effect } = mockContext();
     mockLoadCommandContext.mockReturnValue(effect);
-
-    mockDetectDiff.mockResolvedValue(emptyDiff);
   });
 
   describe("meta", () => {
@@ -681,10 +731,7 @@ describe("pushCommand", () => {
           { path: "plain.txt", type: "added", localContent: "plain" },
         ],
       });
-      mockSelectPushFiles.mockResolvedValueOnce([
-        { path: "edited.md", type: "added", localContent: "local edits" },
-        { path: "plain.txt", type: "added", localContent: "plain" },
-      ]);
+      // --yes なので既定集合（追加された 2 ファイル）がそのまま push 対象になる
       mockGetGitHubToken.mockReturnValue("ghp_token");
       mockCreatePullRequest.mockResolvedValueOnce({
         url: "https://github.com/owner/repo/pull/1",
@@ -720,6 +767,127 @@ describe("pushCommand", () => {
       });
 
       expect(mockLog.info).toHaveBeenCalledWith("No files selected. Cancelled.");
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
+    it("--yes は選択プロンプトを出さず既定集合を push する", async () => {
+      setupPushableFiles([
+        { path: "file.txt", type: "added", localContent: "content" },
+        { path: "other.txt", type: "modified", localContent: "new", templateContent: "old" },
+      ]);
+      mockGetGitHubToken.mockReturnValue("ghp_token");
+      mockCreatePullRequest.mockResolvedValueOnce({
+        url: "https://github.com/owner/repo/pull/1",
+        branch: "update-template-123",
+        number: 1,
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: true, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      // 対話端末を持たない実行で選択を待つと、何も送らないまま成功に見える
+      expect(mockSelectPushFiles).not.toHaveBeenCalled();
+      expect(mockCreatePullRequest).toHaveBeenCalled();
+      const pushedPaths = mockCreatePullRequest.mock.calls[0]?.[1].files.map((f) => f.path);
+      expect(pushedPaths).toEqual(expect.arrayContaining(["file.txt", "other.txt"]));
+    });
+
+    it("--yes の既定集合は削除ファイルを外す", async () => {
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: ["keep.txt"],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedWithLocalEdits: [],
+        deletedLocally: ["gone.txt"],
+        unchanged: [],
+      });
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [
+          { path: "keep.txt", type: "added", localContent: "k" },
+          { path: "gone.txt", type: "deleted", templateContent: "g" },
+        ],
+      });
+      mockGetGitHubToken.mockReturnValue("ghp_token");
+      mockCreatePullRequest.mockResolvedValueOnce({
+        url: "https://github.com/owner/repo/pull/1",
+        branch: "update-template-123",
+        number: 1,
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: true, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      const prArg = mockCreatePullRequest.mock.calls[0]?.[1];
+      expect(prArg?.files.map((f) => f.path)).toEqual(["keep.txt"]);
+      expect(prArg?.deletions).toEqual([]);
+    });
+
+    it("--yes --include-deletions の既定集合は削除ファイルも含む", async () => {
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: ["keep.txt"],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedWithLocalEdits: [],
+        deletedLocally: ["gone.txt"],
+        unchanged: [],
+      });
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [
+          { path: "keep.txt", type: "added", localContent: "k" },
+          { path: "gone.txt", type: "deleted", templateContent: "g" },
+        ],
+      });
+      mockGetGitHubToken.mockReturnValue("ghp_token");
+      mockCreatePullRequest.mockResolvedValueOnce({
+        url: "https://github.com/owner/repo/pull/1",
+        branch: "update-template-123",
+        number: 1,
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: true, edit: false, includeDeletions: true },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      const prArg = mockCreatePullRequest.mock.calls[0]?.[1];
+      expect(prArg?.files.map((f) => f.path)).toEqual(["keep.txt"]);
+      expect(prArg?.deletions?.map((d) => d.path)).toEqual(["gone.txt"]);
+    });
+
+    it("--yes の既定集合が空なら push せずに終わる", async () => {
+      // 削除だけの変更を --include-deletions なしで push すると、既定集合は空になる
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedWithLocalEdits: [],
+        deletedLocally: ["gone.txt"],
+        unchanged: [],
+      });
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [{ path: "gone.txt", type: "deleted", templateContent: "g" }],
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: true, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      expect(mockLog.info).toHaveBeenCalledWith("No files to push.");
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
@@ -969,7 +1137,6 @@ describe("pushCommand", () => {
       };
 
       setupPushableFiles([pushableFile]);
-      mockSelectPushFiles.mockResolvedValueOnce([pushableFile]);
       mockGetGitHubToken.mockReturnValue("ghp_token");
       mockCreatePullRequest.mockResolvedValueOnce({
         url: "https://github.com/owner/repo/pull/1",
@@ -983,8 +1150,8 @@ describe("pushCommand", () => {
         cmd: pushCommand,
       });
 
-      // --yes: タイトル入力・確認プロンプトをスキップ（ファイル選択は常に表示）
-      expect(mockSelectPushFiles).toHaveBeenCalled();
+      // --yes: ファイル選択・タイトル入力・確認プロンプトをすべてスキップする
+      expect(mockSelectPushFiles).not.toHaveBeenCalled();
       expect(mockInputPrTitle).not.toHaveBeenCalled();
       expect(mockInputPrBody).not.toHaveBeenCalled();
       expect(mockConfirmAction).not.toHaveBeenCalled();
@@ -1126,7 +1293,6 @@ describe("pushCommand", () => {
       mockDetectDiff.mockResolvedValueOnce({
         files: [pushableFile],
       });
-      mockSelectPushFiles.mockResolvedValueOnce([pushableFile]);
 
       await (pushCommand.run as any)({
         args: { dir: "/test", dryRun: false, yes: true, edit: false },
@@ -1682,7 +1848,7 @@ describe("pushCommand", () => {
       // ベースの SHA なし → 3-way マージ不可 → unresolved
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
-        localOnly: [],
+        localOnly: ["safe.txt"],
         conflicts: ["file.txt"],
         newFiles: [],
         deletedFiles: [],
@@ -1692,6 +1858,7 @@ describe("pushCommand", () => {
       });
       mockDetectDiff.mockResolvedValueOnce({
         files: [
+          { path: "safe.txt", type: "added", localContent: "safe" },
           {
             path: "file.txt",
             type: "modified",
@@ -1700,24 +1867,24 @@ describe("pushCommand", () => {
           },
         ],
       });
-      // 衝突ファイルは既定で未選択（フォールバック selector が除外する）
-      mockSelectPushFiles.mockResolvedValueOnce([]);
+      mockGetGitHubToken.mockReturnValue("ghp_token");
+      mockCreatePullRequest.mockResolvedValueOnce({
+        url: "https://github.com/owner/repo/pull/1",
+        branch: "update-template-123",
+        number: 1,
+      });
 
-      // --yes でも暗黙の上書き push はしない。衝突ファイルは選択 selector に
-      // conflictedPaths として渡され、既定で未選択になる。
+      // --yes は選択プロンプトを省くが、暗黙の上書き push はしない。既定集合が
+      // 未解決の衝突を外すので、巻き添えにならない safe.txt だけが送られる。
       await (pushCommand.run as any)({
         args: { dir: "/test", dryRun: false, yes: true, edit: false },
         rawArgs: [],
         cmd: pushCommand,
       });
 
-      // selector に衝突ファイルが「コンフリクト」として渡される
-      const selectOpts = mockSelectPushFiles.mock.calls[0]?.[1] as
-        | { conflictedPaths?: Set<string> }
-        | undefined;
-      expect(selectOpts?.conflictedPaths?.has("file.txt")).toBe(true);
-      // 衝突は push されない
-      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+      expect(mockSelectPushFiles).not.toHaveBeenCalled();
+      const prArg = mockCreatePullRequest.mock.calls[0]?.[1];
+      expect(prArg?.files.map((f) => f.path)).toEqual(["safe.txt"]);
     });
 
     it("baseHashes がない場合でもコンフリクト検出を実行（空の baseHashes で分類）", async () => {
@@ -1833,10 +2000,9 @@ describe("pushCommand", () => {
 describe("未追跡ファイルの追跡フロー", () => {
   beforeEach(() => {
     vol.reset();
-    vi.clearAllMocks();
+    resetPushMocks();
     const { effect } = mockContext();
     mockLoadCommandContext.mockReturnValue(effect);
-    mockDetectDiff.mockResolvedValue(emptyDiff);
   });
 
   /** /test/.ziku/ziku.jsonc を初期 include 付きで memfs に用意する */
@@ -2128,10 +2294,9 @@ describe("未追跡ファイルの追跡フロー", () => {
 describe("--files でファイル本体だけを指定した場合の ziku.jsonc 自動同梱（#90）", () => {
   beforeEach(() => {
     vol.reset();
-    vi.clearAllMocks();
+    resetPushMocks();
     const { effect } = mockContext();
     mockLoadCommandContext.mockReturnValue(effect);
-    mockDetectDiff.mockResolvedValue(emptyDiff);
   });
 
   /** /test/.ziku/ziku.jsonc を指定 include 付きで memfs に用意する（`ziku track` 済み想定） */

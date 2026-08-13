@@ -14,7 +14,9 @@ import { match, P } from "ts-pattern";
 import type { LockState } from "../../modules/schemas";
 import { FileNotFoundError } from "../../errors";
 import { buildCommitPinnedSource, downloadTemplateToTemp } from "../template";
-import { log } from "../../ui/renderer";
+import type { FileContent } from "../file-content";
+import { readFileContent } from "../file-content";
+import { log, pc } from "../../ui/renderer";
 import type { FileMergeOutcome } from "./types";
 import { asBaseContent, asLocalContent, asTemplateContent } from "./types";
 import { threeWayMerge } from "./three-way-merge";
@@ -33,10 +35,27 @@ export const readFileSafe = (path: string): Effect.Effect<string, FileNotFoundEr
   );
 
 /**
+ * ファイルをバイト列として読み、テキストかバイナリかを判定して返す。
+ *
+ * 存在しないファイルは「テキストの空内容」として扱う。マージ対象の不在は
+ * `mergeOneFile` が扱う正常な入力（削除された側）であり、種別の判定は不要なため。
+ */
+const readFileKind = (path: string): Effect.Effect<FileContent> =>
+  Effect.tryPromise(() => readFileContent(path)).pipe(
+    Effect.orElseSucceed(() => ({ kind: "text", content: "" }) as const),
+  );
+
+/**
  * ファイルを書き込む。親ディレクトリがなければ自動作成する。
  * ローカルでファイルもディレクトリも削除されていた場合の復元に使う。
+ *
+ * バイト列も受け取る。テンプレートからのコピーは内容を解釈せずそのまま置くので、
+ * utf-8 の文字列を経由させるとバイナリが U+FFFD へ潰れて壊れる。
  */
-export const writeFileEnsureDir = (path: string, content: string): Effect.Effect<void> =>
+export const writeFileEnsureDir = (
+  path: string,
+  content: string | Uint8Array,
+): Effect.Effect<void> =>
   Effect.gen(function* () {
     const dir = dirname(path);
     if (!existsSync(dir)) {
@@ -187,6 +206,8 @@ export interface MergeConflictFilesInput {
   /**
    * 1 ファイル分の結末を受け取るハンドラ。ローカルへの書き込み・メモリへの保持・ログなど、
    * コマンドごとに異なる後処理をここで行う。ハンドラの結果は未解決判定に影響しない。
+   *
+   * バイナリファイルではマージを試みないので呼ばれない（下の未解決の扱いを参照）。
    */
   readonly onFileResult: (result: MergeOneFileOutput) => Effect.Effect<void>;
 }
@@ -201,6 +222,9 @@ export interface MergeConflictFilesInput {
  *   決める余地は無い。
  * - 未解決の判定は「自動マージがクリーンに完了しなかった」で、`onFileResult` が何を
  *   しても変わらない。
+ * - ローカルかテンプレートがバイナリのファイルはマージを試みずに未解決になる。行という
+ *   単位が無く、マージ結果に相当する内容を作れないため、`onFileResult` も呼ばない。
+ *   ユーザーへの案内はここで出す。
  *
  * 戻り値の順序は `conflicts` の順序を保つ。
  */
@@ -222,6 +246,14 @@ export const mergeConflictFiles = (
     return yield* Effect.gen(function* () {
       const unresolved: string[] = [];
       for (const file of input.conflicts) {
+        if (yield* isBinaryConflict(input, file)) {
+          log.warn(
+            `Cannot auto-merge ${pc.cyan(file)} — binary files have no lines to merge. ` +
+              `Keep the local file or copy the template version over it.`,
+          );
+          unresolved.push(file);
+          continue;
+        }
         const result = yield* mergeOneFile({
           file,
           targetDir: input.targetDir,
@@ -233,6 +265,20 @@ export const mergeConflictFiles = (
       }
       return unresolved;
     }).pipe(Effect.ensuring(Effect.sync(() => downloaded?.cleanup())));
+  });
+
+/**
+ * ローカルとテンプレートのどちらかがバイナリか。
+ *
+ * 3-way マージは行単位のテキスト処理なので、バイナリに適用しても意味のある結果にならない。
+ * 行に切って比べた結果をマーカーで囲んで書き戻せば、元のバイト列が壊れるだけになる。
+ * どちらか一方でもバイナリなら、内容を突き合わせずにユーザーへ判断を渡す。
+ */
+const isBinaryConflict = (input: MergeConflictFilesInput, file: string): Effect.Effect<boolean> =>
+  Effect.gen(function* () {
+    const local = yield* readFileKind(join(input.targetDir, file));
+    const template = yield* readFileKind(join(input.templateDir, file));
+    return local.kind === "binary" || template.kind === "binary";
   });
 
 /** 自動マージだけで確定したか。マーカーが残った結果とベース不在は解決していない。 */

@@ -457,11 +457,14 @@ function describeDeletedFilesPreview(count: number, flags: PullApprovalFlags): s
 /**
  * テンプレートからファイルをコピーする共通処理。
  * autoUpdate と newFiles で同じロジックを使う（DRY）。
+ *
+ * 内容をバイト列のまま運ぶ。テンプレートの画像やフォントを utf-8 の文字列として
+ * 読み書きすると、不正バイトが U+FFFD へ置き換わってファイルが壊れる。
  */
 async function applyFiles(files: string[], templateDir: string, targetDir: string): Promise<void> {
   for (const file of files) {
-    const content = await readFile(join(templateDir, file), "utf-8");
-    await Effect.runPromise(writeFileEnsureDir(join(targetDir, file), content));
+    const bytes = await readFile(join(templateDir, file));
+    await Effect.runPromise(writeFileEnsureDir(join(targetDir, file), bytes));
   }
 }
 

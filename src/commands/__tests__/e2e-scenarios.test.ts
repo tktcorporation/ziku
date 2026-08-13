@@ -876,13 +876,6 @@ describe("E2E: multi-scenario tests", () => {
           },
         ],
       } as any);
-      mockSelectPushFiles.mockResolvedValueOnce([
-        {
-          path: ".claude/rules/testing.md",
-          type: "added",
-          localContent: "# Testing Guide",
-        },
-      ] as any);
       // push 後の baseHashes 更新用
       mockHashFiles.mockResolvedValueOnce({
         ".mcp.json": "hash-mcp",
@@ -898,6 +891,8 @@ describe("E2E: multi-scenario tests", () => {
 
       // テンプレートにファイルがコピーされた
       expect(vol.existsSync("/template/.claude/rules/testing.md")).toBe(true);
+      // 非対話 push（--yes）はファイル選択プロンプトを出さずに既定集合を送る
+      expect(mockSelectPushFiles).not.toHaveBeenCalled();
       // PR は作成されない（ローカルソース）
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
 

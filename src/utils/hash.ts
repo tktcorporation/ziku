@@ -6,13 +6,29 @@ import { glob } from "tinyglobby";
 import { ZIKU_CONFIG_FILE } from "./ziku-config";
 
 /**
- * ファイル内容の SHA-256 ハッシュを計算する。
+ * テキスト内容の SHA-256 ハッシュを計算する。
  *
  * 背景: pull 時に「ローカルが変更されたか」「テンプレートが更新されたか」を
  * ファイル全体のコピーを保持せずに判定するため、ハッシュで比較する。
+ *
+ * 文字列は utf-8 のバイト列として食わせるので、同じ内容のファイルを
+ * {@link hashBytes} で計算した値と一致する。
  */
 export function hashContent(content: string): string {
   return createHash("sha256").update(content, "utf-8").digest("hex");
+}
+
+/**
+ * バイト列の SHA-256 ハッシュを計算する。
+ *
+ * ファイルのハッシュはバイト列から計算する。utf-8 としてデコードしてから計算すると、
+ * テキストとして解釈できないバイトが U+FFFD へ置換され、内容の異なるバイナリが同じ
+ * ハッシュになる。同じ理由で、改行コードや BOM の正規化もここでは行わない。それらが違う
+ * ファイルはバイト列として実際に違うので、差分として検出されるのが正しい挙動になる
+ * （正規化するのはマージ処理の内部だけ。`src/utils/text-shape.ts` を参照）。
+ */
+export function hashBytes(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 /**
@@ -48,8 +64,7 @@ export async function hashFiles(
 
   const hashes: Record<string, string> = {};
   for (const file of fileSet) {
-    const content = await readFile(join(dir, file), "utf-8");
-    hashes[file] = hashContent(content);
+    hashes[file] = hashBytes(await readFile(join(dir, file)));
   }
   return hashes;
 }

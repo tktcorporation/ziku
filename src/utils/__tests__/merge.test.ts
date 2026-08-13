@@ -501,6 +501,88 @@ describe("merge", () => {
     });
   });
 
+  describe("threeWayMerge - 改行コードと BOM", () => {
+    it("CRLF のファイルはマージ後も CRLF のまま", () => {
+      const base = "line1\r\noriginal\r\nline3\r\n";
+      const local = "line1\r\nlocal-change\r\nline3\r\n";
+      const template = "line1\r\noriginal\r\nline3\r\ntemplate-added\r\n";
+
+      const result = merge(base, local, template);
+
+      expect(result._tag).toBe("Clean");
+      expect(result.content).toBe("line1\r\nlocal-change\r\nline3\r\ntemplate-added\r\n");
+      expect(result.content).not.toMatch(/[^\r]\n/);
+    });
+
+    it("改行コードだけが違う両側は差分にならず、内容の変更だけがマージされる", () => {
+      const base = "line1\r\nline2\r\n";
+      const local = "line1\r\nline2\r\n";
+      const template = "line1\nline2\ntemplate-added\n";
+
+      const result = merge(base, local, template);
+
+      // 全行が衝突するのではなく、テンプレートが加えた 1 行だけが反映される
+      expect(result._tag).toBe("Clean");
+      expect(result.content).toBe("line1\r\nline2\r\ntemplate-added\r\n");
+    });
+
+    it("両側の内容が同一で改行コードだけ違う場合はローカルの改行コードを保つ", () => {
+      const result = merge("line1\n", "line1\r\n", "line1\n");
+
+      expect(result._tag).toBe("Clean");
+      expect(result.content).toBe("line1\r\n");
+    });
+
+    it("生成するコンフリクトマーカーもファイルの改行コードに合わせる", () => {
+      const base = "line1\r\noriginal\r\n";
+      const local = "line1\r\nlocal-change\r\n";
+      const template = "line1\r\ntemplate-change\r\n";
+
+      const result = merge(base, local, template);
+
+      expect(result._tag).toBe("Conflicted");
+      expect(result.content).toContain("<<<<<<< LOCAL\r\n");
+      expect(result.content).toContain(">>>>>>> TEMPLATE\r\n");
+      expect(result.content).not.toMatch(/[^\r]\n/);
+    });
+
+    it("BOM 付きのファイルはマージ後も BOM を保つ", () => {
+      const base = "\uFEFFline1\nline2\nline3\n";
+      const local = "\uFEFFline1\nlocal-change\nline3\n";
+      const template = "line1\nline2\nline3\ntemplate-added\n";
+
+      const result = merge(base, local, template);
+
+      expect(result._tag).toBe("Clean");
+      expect(result.content.startsWith("\uFEFF")).toBe(true);
+      // BOM は 1 つだけで、内容の途中には現れない
+      expect(result.content.slice(1)).not.toContain("\uFEFF");
+      expect(result.content).toContain("local-change");
+      expect(result.content).toContain("template-added");
+    });
+
+    it("BOM の有無だけが違う両側は差分にならない", () => {
+      const result = merge("line1\n", "\uFEFFline1\n", "line1\nadded\n");
+
+      expect(result._tag).toBe("Clean");
+      expect(result.content).toBe("\uFEFFline1\nadded\n");
+    });
+
+    it("BOM 付きファイルの 1 行目から始まるコンフリクトも未解決として検出される", () => {
+      const base = "\uFEFForiginal\ntail\n";
+      const local = "\uFEFFlocal-change\ntail\n";
+      const template = "\uFEFFtemplate-change\ntail\n";
+
+      const result = merge(base, local, template);
+
+      expect(result._tag).toBe("Conflicted");
+      if (result._tag !== "Conflicted") return;
+      expect(result.regions[0].startLine).toBe(1);
+      // BOM はファイル先頭に戻り、マーカーの内側には入らない
+      expect(result.content.startsWith("\uFEFF<<<<<<< LOCAL")).toBe(true);
+    });
+  });
+
   describe("MergeOutcome", () => {
     it("コンフリクトしたマージは Conflicted になり、regions が実際のマーカー位置を指す", () => {
       const base = "line1\nline2\nline3\n";

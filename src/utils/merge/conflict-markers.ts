@@ -7,6 +7,7 @@
  * 通らない／マーカー入りの内容が同期されるといった非対称な壊れ方をする。
  */
 import { match, P } from "ts-pattern";
+import { stripBom } from "../text-shape";
 import type { ConflictRegion } from "./types";
 
 /** マーカーの最小長。git の既定と同じ 7 文字。 */
@@ -160,12 +161,16 @@ function stepScan(state: ScanState, marker: Marker, lineNumber: number): ScanSte
  * ブロックの内側では、開始マーカーより短いマーカー行は本文として扱う。マージ結果は
  * 内容中の最長マーカーより長いマーカーで囲まれているので、この長さ比較で
  * 「内容として書かれたマーカー」と「ziku が生成したマーカー」を区別できる。
+ *
+ * 先頭の BOM はエンコーディングの目印であって 1 行目の内容ではないので、走査前に取り除く。
+ * 残したまま比べると、1 行目から始まるブロックの開始マーカーが本文として読まれ、未解決の
+ * ファイルが解決済みとして通ってしまう。
  */
 export function findConflictRegions(content: string): ConflictRegion[] {
   const regions: ConflictRegion[] = [];
   let state: ScanState = OUTSIDE;
 
-  const contentLines = content.split("\n");
+  const contentLines = stripBom(content).split("\n");
   for (let i = 0; i < contentLines.length; i++) {
     const marker = parseMarkerLine(contentLines[i]);
     if (marker === undefined) continue;

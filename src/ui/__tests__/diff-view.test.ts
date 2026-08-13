@@ -36,6 +36,11 @@ function highlighted(line: string): string {
   return [...line.matchAll(/<bg>(.*?)<\/bg>/g)].map((m) => m[1]).join("");
 }
 
+/** バイナリの内容を差分の string チャネルへ載せた形（バイト保存の latin1）。 */
+function asDiffContent(bytes: number[]): string {
+  return Buffer.from(bytes).toString("latin1");
+}
+
 describe("diff-view", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -50,6 +55,7 @@ describe("diff-view", () => {
         templateContent: "same\n",
       };
       expect(calculateDiffStats(file)).toEqual({
+        kind: "text",
         additions: 0,
         deletions: 0,
       });
@@ -62,6 +68,7 @@ describe("diff-view", () => {
         localContent: "line1\nline2\nline3",
       };
       expect(calculateDiffStats(file)).toEqual({
+        kind: "text",
         additions: 3,
         deletions: 0,
       });
@@ -75,6 +82,7 @@ describe("diff-view", () => {
       };
       // 末尾改行があっても 3行（以前は split("\n").length で 4 を返していた）
       expect(calculateDiffStats(file)).toEqual({
+        kind: "text",
         additions: 3,
         deletions: 0,
       });
@@ -87,6 +95,7 @@ describe("diff-view", () => {
         templateContent: "line1\nline2",
       };
       expect(calculateDiffStats(file)).toEqual({
+        kind: "text",
         additions: 0,
         deletions: 2,
       });
@@ -99,6 +108,7 @@ describe("diff-view", () => {
         templateContent: "line1\nline2\n",
       };
       expect(calculateDiffStats(file)).toEqual({
+        kind: "text",
         additions: 0,
         deletions: 2,
       });
@@ -164,6 +174,7 @@ describe("diff-view", () => {
         localContent: "",
       };
       expect(calculateDiffStats(file)).toEqual({
+        kind: "text",
         additions: 0,
         deletions: 0,
       });
@@ -176,6 +187,7 @@ describe("diff-view", () => {
         templateContent: "",
       };
       expect(calculateDiffStats(file)).toEqual({
+        kind: "text",
         additions: 0,
         deletions: 0,
       });
@@ -188,6 +200,7 @@ describe("diff-view", () => {
         localContent: "single line",
       };
       expect(calculateDiffStats(file)).toEqual({
+        kind: "text",
         additions: 1,
         deletions: 0,
       });
@@ -200,6 +213,7 @@ describe("diff-view", () => {
         localContent: "",
       };
       expect(calculateDiffStats(file)).toEqual({
+        kind: "text",
         additions: 0,
         deletions: 0,
       });
@@ -213,6 +227,7 @@ describe("diff-view", () => {
       };
       // "\n" は空行1つ → しかし実質的に空ファイル
       expect(calculateDiffStats(file)).toEqual({
+        kind: "text",
         additions: 0,
         deletions: 0,
       });
@@ -227,6 +242,7 @@ describe("diff-view", () => {
         localContent: "title: a\nbody\n",
       };
       expect(calculateDiffStats(file)).toEqual({
+        kind: "text",
         additions: 0,
         deletions: 2,
       });
@@ -240,6 +256,7 @@ describe("diff-view", () => {
         localContent: "---\ntitle: a\n---\nbody\n",
       };
       expect(calculateDiffStats(file)).toEqual({
+        kind: "text",
         additions: 2,
         deletions: 0,
       });
@@ -313,23 +330,23 @@ describe("diff-view", () => {
 
   describe("formatStats", () => {
     it("should format additions only", () => {
-      const result = formatStats({ additions: 5, deletions: 0 });
+      const result = formatStats({ kind: "text", additions: 5, deletions: 0 });
       expect(result).toContain("+5");
     });
 
     it("should format deletions only", () => {
-      const result = formatStats({ additions: 0, deletions: 3 });
+      const result = formatStats({ kind: "text", additions: 0, deletions: 3 });
       expect(result).toContain("-3");
     });
 
     it("should format both additions and deletions", () => {
-      const result = formatStats({ additions: 3, deletions: 2 });
+      const result = formatStats({ kind: "text", additions: 3, deletions: 2 });
       expect(result).toContain("+3");
       expect(result).toContain("-2");
     });
 
     it("should return no changes for zero stats", () => {
-      const result = formatStats({ additions: 0, deletions: 0 });
+      const result = formatStats({ kind: "text", additions: 0, deletions: 0 });
       expect(result).toContain("no changes");
     });
   });
@@ -429,6 +446,42 @@ describe("diff-view", () => {
       renderFileDiff(file);
       expect(p.log.step).toHaveBeenCalledTimes(1);
       expect(p.log.message).toHaveBeenCalledTimes(1);
+    });
+  });
+  describe("バイナリ", () => {
+    const binaryFile: FileDiff = {
+      path: "assets/icon.png",
+      type: "modified",
+      templateContent: asDiffContent([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]),
+      localContent: asDiffContent([0x89, 0x50, 0x4e, 0x47, 0x00, 0x02]),
+    };
+
+    it("行数ではなくバイナリであることを統計として返す", () => {
+      expect(calculateDiffStats(binaryFile)).toEqual({
+        kind: "binary",
+        additions: 0,
+        deletions: 0,
+      });
+    });
+
+    it("統計の表示は行数ではなく binary と出す", () => {
+      expect(formatStats(calculateDiffStats(binaryFile))).toContain("binary");
+    });
+
+    it("ファイル選択のラベルに内容が出ない", () => {
+      const label = getFileLabel(binaryFile);
+      expect(label).toContain("assets/icon.png");
+      expect(label).toContain("binary");
+      expect(label).not.toContain("\u0000");
+    });
+
+    it("diff 表示に内容が出ず、差分がある事実だけを出す", () => {
+      renderFileDiff(binaryFile);
+
+      const rendered = vi.mocked(p.log.message).mock.calls[0][0] as string;
+      expect(rendered).toContain("Binary files");
+      expect(rendered).not.toContain("\u0000");
+      expect(rendered).not.toContain("PNG");
     });
   });
 });

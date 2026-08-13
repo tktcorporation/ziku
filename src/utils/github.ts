@@ -4,10 +4,16 @@ import { match } from "ts-pattern";
 import { zikuFailure } from "../errors";
 import type { ZikuFailure } from "../errors";
 import type { BranchRef, PrResult, TemplateRef } from "../modules/schemas";
+import { transportTextToBytes } from "./file-content";
 
 export interface PushOptions {
   owner: string;
   repo: string;
+  /**
+   * PR に載せるファイル。`content` はテキストなら utf-8、バイナリならバイト列を保つ
+   * エンコードで載っている（`src/utils/file-content.ts`）。GitHub API へ渡す前に
+   * 元のバイト列へ戻す。
+   */
   files: Array<{ path: string; content: string }>;
   /** テンプレートから削除するファイル（PR にファイル削除コミットを含める） */
   deletions?: Array<{ path: string }>;
@@ -89,7 +95,9 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
       repo: forkRepo,
       path: file.path,
       message: `Update ${file.path}`,
-      content: Buffer.from(file.content).toString("base64"),
+      // base64 は入力のバイト列をそのまま符号化する。バイナリを utf-8 として符号化すると
+      // 1 文字が複数バイトへ膨らみ、PR には壊れたファイルが載る。
+      content: transportTextToBytes(file.content).toString("base64"),
       branch: branchName,
       sha: shaMap.get(file.path),
     });
