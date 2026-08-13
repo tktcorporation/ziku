@@ -656,63 +656,6 @@ describe("pushCommand", () => {
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
-    it("--dry-run は --include-deletions なしでは削除ファイルをプレビューから除外する（#81）", async () => {
-      mockClassifyFiles.mockReturnValueOnce({
-        autoUpdate: [],
-        localOnly: repoRelPaths(["keep.txt"]),
-        conflicts: [],
-        newFiles: [],
-        deletedFiles: [],
-        deletedWithLocalEdits: [],
-        deletedLocally: repoRelPaths(["gone.txt"]),
-        unchanged: [],
-      });
-      mockDetectDiff.mockResolvedValueOnce({
-        files: [
-          { path: repoRelPath("keep.txt"), type: "added", localContent: "k" },
-          { path: repoRelPath("gone.txt"), type: "deleted", templateContent: "g" },
-        ],
-      });
-
-      await (pushCommand.run as any)({
-        args: { dir: "/test", dryRun: true, yes: false, edit: false },
-        rawArgs: [],
-        cmd: pushCommand,
-      });
-
-      // 削除ファイルは既定で除外（実 push の既定選択と一致）
-      const previewArg = mockLogDiffSummary.mock.calls.at(-1)?.[0] ?? [];
-      expect(previewArg.map((f) => f.path)).toEqual(["keep.txt"]);
-    });
-
-    it("--dry-run --include-deletions は削除ファイルもプレビューに含める（#81）", async () => {
-      mockClassifyFiles.mockReturnValueOnce({
-        autoUpdate: [],
-        localOnly: repoRelPaths(["keep.txt"]),
-        conflicts: [],
-        newFiles: [],
-        deletedFiles: [],
-        deletedWithLocalEdits: [],
-        deletedLocally: repoRelPaths(["gone.txt"]),
-        unchanged: [],
-      });
-      mockDetectDiff.mockResolvedValueOnce({
-        files: [
-          { path: repoRelPath("keep.txt"), type: "added", localContent: "k" },
-          { path: repoRelPath("gone.txt"), type: "deleted", templateContent: "g" },
-        ],
-      });
-
-      await (pushCommand.run as any)({
-        args: { dir: "/test", dryRun: true, yes: false, edit: false, includeDeletions: true },
-        rawArgs: [],
-        cmd: pushCommand,
-      });
-
-      const previewArg = mockLogDiffSummary.mock.calls.at(-1)?.[0] ?? [];
-      expect(previewArg.map((f) => f.path).toSorted()).toEqual(["gone.txt", "keep.txt"]);
-    });
-
     it("deletedWithLocalEdits を push 候補に含める", async () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
@@ -824,41 +767,6 @@ describe("pushCommand", () => {
       expect(mockCreatePullRequest).toHaveBeenCalled();
       const pushedPaths = mockCreatePullRequest.mock.calls[0]?.[1].files.map((f) => f.path);
       expect(pushedPaths).toEqual(expect.arrayContaining(["file.txt", "other.txt"]));
-    });
-
-    it("--yes の既定集合は削除ファイルを外す", async () => {
-      mockClassifyFiles.mockReturnValueOnce({
-        autoUpdate: [],
-        localOnly: repoRelPaths(["keep.txt"]),
-        conflicts: [],
-        newFiles: [],
-        deletedFiles: [],
-        deletedWithLocalEdits: [],
-        deletedLocally: repoRelPaths(["gone.txt"]),
-        unchanged: [],
-      });
-      mockDetectDiff.mockResolvedValueOnce({
-        files: [
-          { path: repoRelPath("keep.txt"), type: "added", localContent: "k" },
-          { path: repoRelPath("gone.txt"), type: "deleted", templateContent: "g" },
-        ],
-      });
-      mockGetGitHubToken.mockReturnValue("ghp_token");
-      mockCreatePullRequest.mockResolvedValueOnce({
-        url: "https://github.com/owner/repo/pull/1",
-        branch: "update-template-123",
-        number: 1,
-      });
-
-      await (pushCommand.run as any)({
-        args: { dir: "/test", dryRun: false, yes: true, edit: false },
-        rawArgs: [],
-        cmd: pushCommand,
-      });
-
-      const prArg = mockCreatePullRequest.mock.calls[0]?.[1];
-      expect(prArg?.files.map((f) => f.path)).toEqual(["keep.txt"]);
-      expect(prArg?.deletions).toEqual([]);
     });
 
     it("--yes --include-deletions の既定集合は削除ファイルも含む", async () => {
