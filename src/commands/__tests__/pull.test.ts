@@ -320,7 +320,7 @@ describe("pullCommand", () => {
 
       await expect(
         (pullCommand.run as any)({
-          args: { dir: "/test", force: false },
+          args: { dir: "/test", force: false, yes: false },
           rawArgs: [],
           cmd: pullCommand,
         }),
@@ -342,7 +342,7 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -384,7 +384,7 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -422,7 +422,7 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -458,7 +458,7 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -495,7 +495,7 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: true },
+        args: { dir: "/test", force: true, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -530,7 +530,7 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -560,7 +560,7 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -588,7 +588,7 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -621,7 +621,7 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -673,7 +673,7 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -705,7 +705,7 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: true },
+        args: { dir: "/test", force: true, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -730,7 +730,7 @@ describe("pullCommand", () => {
       mockSelectDeletedFiles.mockResolvedValueOnce([]);
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -755,13 +755,93 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: true },
+        args: { dir: "/test", force: true, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
 
       expect(mockSelectDeletedFiles).not.toHaveBeenCalled();
       expect(vol.existsSync("/test/old-file.txt")).toBe(false);
+    });
+
+    it("--yes は削除を承認しないので、テンプレから消えたファイルを残す", async () => {
+      vol.fromJSON({
+        "/test/old-file.txt": "old content",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: ["old-file.txt"],
+        deletedWithLocalEdits: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // プロンプトは省くが、承認が無いので削除はしない
+      expect(mockSelectDeletedFiles).not.toHaveBeenCalled();
+      expect(vol.existsSync("/test/old-file.txt")).toBe(true);
+      expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining("Re-run with --force"));
+    });
+
+    it("--force --yes でも削除は行われる（承認済みなので確認は不要）", async () => {
+      vol.fromJSON({
+        "/test/old-file.txt": "old content",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: ["old-file.txt"],
+        deletedWithLocalEdits: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: true, yes: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockSelectDeletedFiles).not.toHaveBeenCalled();
+      expect(vol.existsSync("/test/old-file.txt")).toBe(false);
+    });
+
+    it("--yes では deletedWithLocalEdits を削除せず、選択も求めない", async () => {
+      vol.fromJSON({
+        "/test/edited.md": "local edits",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedWithLocalEdits: ["edited.md"],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockSelectDeletedFilesWithLocalEdits).not.toHaveBeenCalled();
+      expect(vol.existsSync("/test/edited.md")).toBe(true);
     });
 
     it("--force では deletedWithLocalEdits を削除せず、選択も求めない", async () => {
@@ -781,12 +861,12 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: true },
+        args: { dir: "/test", force: true, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
 
-      // --force は確認のスキップであって、ローカルの編集を捨てる承認ではない。
+      // --force はテンプレート由来の削除の承認であって、ローカルの編集を捨てる承認ではない。
       // 非対話を意図する実行でプロンプトを出すと CI が入力待ちで止まるため、
       // 選択を求めず全て残す側に倒す。
       expect(mockSelectDeletedFilesWithLocalEdits).not.toHaveBeenCalled();
@@ -813,7 +893,7 @@ describe("pullCommand", () => {
       mockSelectDeletedFilesWithLocalEdits.mockResolvedValueOnce(["chosen.md"]);
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -841,7 +921,7 @@ describe("pullCommand", () => {
       mockSelectDeletedFiles.mockResolvedValueOnce(["a.txt"]);
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -876,7 +956,7 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -913,7 +993,7 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -950,7 +1030,7 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -978,7 +1058,7 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -1007,7 +1087,7 @@ describe("pullCommand", () => {
       mockMergeResult(".mcp.json", "<<<<<<< LOCAL\nlocal\n=======\ntemplate\n>>>>>>> TEMPLATE");
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false, continue: false },
+        args: { dir: "/test", force: false, yes: false, continue: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -1040,7 +1120,7 @@ describe("pullCommand", () => {
 
       await expect(
         (pullCommand.run as any)({
-          args: { dir: "/test", force: false, continue: false },
+          args: { dir: "/test", force: false, yes: false, continue: false },
           rawArgs: [],
           cmd: pullCommand,
         }),
@@ -1058,7 +1138,7 @@ describe("pullCommand", () => {
 
       await expect(
         (pullCommand.run as any)({
-          args: { dir: "/test", force: false, continue: true },
+          args: { dir: "/test", force: false, yes: false, continue: true },
           rawArgs: [],
           cmd: pullCommand,
         }),
@@ -1081,7 +1161,7 @@ describe("pullCommand", () => {
 
       await expect(
         (pullCommand.run as any)({
-          args: { dir: "/test", force: false, continue: true },
+          args: { dir: "/test", force: false, yes: false, continue: true },
           rawArgs: [],
           cmd: pullCommand,
         }),
@@ -1103,7 +1183,7 @@ describe("pullCommand", () => {
       );
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false, continue: true },
+        args: { dir: "/test", force: false, yes: false, continue: true },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -1136,7 +1216,7 @@ describe("pullCommand", () => {
       );
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false, continue: true, dryRun: true },
+        args: { dir: "/test", force: false, yes: false, continue: true, dryRun: true },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -1176,7 +1256,7 @@ describe("pullCommand", () => {
       mockMergeResult("settings.json", '{"merged": true}');
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -1206,7 +1286,7 @@ describe("pullCommand", () => {
 
       await expect(
         (pullCommand.run as any)({
-          args: { dir: "/test", force: false },
+          args: { dir: "/test", force: false, yes: false },
           rawArgs: [],
           cmd: pullCommand,
         }),
@@ -1237,7 +1317,7 @@ describe("pullCommand", () => {
       mockMergeResult(".mcp.json", "auto-merged content");
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -1278,7 +1358,7 @@ describe("pullCommand", () => {
       mockMergeResult("b.txt", "<<<<<<< LOCAL\nlocal b\n=======\ntemplate b\n>>>>>>> TEMPLATE");
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -1324,7 +1404,7 @@ describe("pullCommand", () => {
       mockMergeResult("b.json", "merged b");
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -1370,7 +1450,7 @@ describe("pullCommand", () => {
       );
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -1400,7 +1480,7 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -1450,7 +1530,7 @@ describe("pullCommand", () => {
 
       // ENOENT で落ちずに正常終了することを検証
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false },
+        args: { dir: "/test", force: false, yes: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -1501,7 +1581,7 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false, dryRun: true },
+        args: { dir: "/test", force: false, yes: false, dryRun: true },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -1534,7 +1614,7 @@ describe("pullCommand", () => {
       mockMergeResult(".mcp.json", "merged content");
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false, dryRun: true },
+        args: { dir: "/test", force: false, yes: false, dryRun: true },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -1571,7 +1651,7 @@ describe("pullCommand", () => {
       );
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false, dryRun: true },
+        args: { dir: "/test", force: false, yes: false, dryRun: true },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -1600,7 +1680,7 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false, dryRun: true },
+        args: { dir: "/test", force: false, yes: false, dryRun: true },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -1627,7 +1707,7 @@ describe("pullCommand", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/test", force: false, dryRun: true },
+        args: { dir: "/test", force: false, yes: false, dryRun: true },
         rawArgs: [],
         cmd: pullCommand,
       });

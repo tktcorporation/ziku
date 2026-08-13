@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "pathe";
 import { P, match } from "ts-pattern";
 import { z } from "zod/v4";
 import { withFinally } from "../effect-helpers";
-import { ZikuError } from "../errors";
+import { ZikuError, zikuFailure } from "../errors";
 import type { FileDiff, GitHubSource, LocalSource, LockState } from "../modules/schemas";
 import { baseCommitSha, baseHashesOf, markSynced } from "../modules/schemas";
 import { LOCK_FILE, saveLock } from "../utils/lock";
@@ -444,6 +444,33 @@ function formatFileStat(file: FileDiff): string {
 
 // ─── メインコマンド ───
 
+/**
+ * push が受け付けなくなったフラグを検出して中断する。
+ *
+ * `-f` / `--force` は確認プロンプトの省略を指していた。フラグの意味を「`--force` =
+ * 破壊的操作の承認 / `--yes` = 対話の省略」に揃えた結果、push には承認すべき破壊的操作が
+ * 無く、`--force` の居場所も無くなった。
+ *
+ * citty は未知のフラグを黙って無視する。無視させると「確認を飛ばしたつもりが飛んでおらず、
+ * 非対話実行が入力待ちで止まる」ため、実行前に何を使えばよいかを案内して終了する。
+ * 判定は `args` ではなく `rawArgs` を見る。定義していないフラグは `args` に現れないうえ、
+ * 案内のためだけに `--force` を定義すると `--help` に受け付けないフラグが並ぶことになる。
+ */
+function rejectRemovedFlags(rawArgs: readonly string[]): void {
+  const removed = rawArgs.find(
+    (arg) => arg === "-f" || arg === "--force" || arg.startsWith("--force="),
+  );
+  if (removed === undefined) return;
+
+  throw zikuFailure({
+    kind: "InvalidArgument",
+    argument: "flag",
+    value: removed,
+    expected:
+      "`--yes` (`-y`) to skip confirmation prompts. `ziku push` no longer accepts `-f` / `--force` — `--force` means approving destructive operations, and push has none.",
+  });
+}
+
 export const pushCommand = defineCommand({
   meta: {
     name: "push",
@@ -468,8 +495,9 @@ export const pushCommand = defineCommand({
     },
     yes: {
       type: "boolean",
-      alias: ["y", "f"],
-      description: "Skip confirmation prompts",
+      alias: "y",
+      description:
+        "Skip prompts (untracked files are reported and left out instead of being selected for tracking)",
       default: false,
     },
     edit: {
@@ -487,7 +515,9 @@ export const pushCommand = defineCommand({
       default: false,
     },
   },
-  async run({ args }) {
+  async run({ args, rawArgs }) {
+    rejectRemovedFlags(rawArgs);
+
     intro("push");
 
     const targetDir = resolve(args.dir);
@@ -717,6 +747,10 @@ export const pushCommand = defineCommand({
  * 非対話（--yes）/ プレビュー（--dry-run）時は暗黙追加せず、除外されるファイルを通知する。
  * 暗黙の include 膨張を避けるため、設定変更は人間の明示操作（選択）に限定する。
  *
+ * `--yes` は「対話の省略」であって「追跡しない指定」ではないため、省略の結果として
+ * push から外れたファイルを黙って落とさない。何件が・なぜ外れたか・追跡するには何をするかを
+ * 通知に載せる（フラグ名からは追跡選択の省略まで読み取れないため）。
+ *
  * @returns effectivePatterns（追跡選択を反映したパターン。以降の hash/classify/diff に使う）と
  *   newlyTrackedPaths（push 成功後に永続化する候補パス。非対話時は空）。
  */
@@ -748,7 +782,7 @@ async function resolveUntrackedTracking(
     // 恒久的に弾かれたと誤読されないよう headline を分ける。
     const headline = args.dryRun
       ? `${untrackedCount} untracked file(s) outside the sync whitelist (dry-run: tracking skipped):`
-      : `${untrackedCount} untracked file(s) excluded from push (outside the sync whitelist):`;
+      : `${untrackedCount} untracked file(s) left out of this push — --yes skips the tracking prompt, so they stay outside the sync whitelist:`;
     logUntrackedFilesNotice(untrackedByFolder, untrackedCount, { headline });
     return { effectivePatterns: patterns, newlyTrackedPaths: [] };
   }

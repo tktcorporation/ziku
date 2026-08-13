@@ -69,7 +69,7 @@ export const pullLifecycle: CommandLifecycle = {
   ],
   notes: [
     "`ziku.jsonc` 自体が追跡ファイルとして加法 union マージされる。テンプレ側で追加されたパターンはユーザーの `ziku.jsonc` へ取り込まれる（push と双方向に同期）。パターンの削除は自動伝播しない（安全側）。",
-    "テンプレートで削除されたファイルは `--force` で自動削除、またはユーザーが選択的に削除できる。ただしローカルに編集があるものは対象外で、対話実行では明示的に選んだものだけを削除し、`--force` では削除せず残す。",
+    "テンプレートで削除されたファイルは、対話実行ではユーザーが選択的に削除できる。`--force` は削除の承認なので全て削除し、`--yes` はプロンプトを省くだけなので全て残す。ローカルに編集があるものはどちらのフラグでも削除せず、対話実行で明示的に選んだものだけを削除する。",
   ],
 };
 
@@ -87,7 +87,13 @@ export const pullCommand = defineCommand({
     force: {
       type: "boolean",
       alias: "f",
-      description: "Skip confirmations",
+      description: "Approve deleting local files that were removed from the template",
+      default: false,
+    },
+    yes: {
+      type: "boolean",
+      alias: "y",
+      description: "Skip prompts (files removed from the template are kept, not deleted)",
       default: false,
     },
     continue: {
@@ -106,6 +112,9 @@ export const pullCommand = defineCommand({
     intro("pull");
 
     const targetDir = resolve(args.dir);
+    // 既定値付きの boolean 引数なので、citty のパース結果は常に真偽値が入る。
+    // `as boolean` で潰さずそのまま渡し、フラグ名を変えたときに型で気付けるようにする。
+    const approvalFlags: PullApprovalFlags = { force: args.force, yes: args.yes };
 
     // --continue モードは lock.json のみ必要（テンプレート不要）
     if (args.continue) {
@@ -238,7 +247,7 @@ export const pullCommand = defineCommand({
           deletedFiles,
           deletedWithLocalEdits,
           configWrite: configSync.write,
-          force: args.force as boolean,
+          flags: approvalFlags,
         });
         return;
       }
@@ -282,11 +291,11 @@ export const pullCommand = defineCommand({
 
       // 削除されたファイルを処理（ziku.jsonc は除外済み）
       if (deletedFiles.length > 0) {
-        await handleDeletedFiles(deletedFiles, targetDir, args.force as boolean);
+        await handleDeletedFiles(deletedFiles, targetDir, approvalFlags);
       }
 
       if (deletedWithLocalEdits.length > 0) {
-        await handleDeletedWithLocalEdits(deletedWithLocalEdits, targetDir, args.force as boolean);
+        await handleDeletedWithLocalEdits(deletedWithLocalEdits, targetDir, approvalFlags);
       }
 
       // ziku.jsonc は上の classification で他ファイルと同様に同期済み
@@ -396,7 +405,7 @@ async function previewPull(params: {
   deletedFiles: string[];
   deletedWithLocalEdits: string[];
   configWrite: string | undefined;
-  force: boolean;
+  flags: PullApprovalFlags;
 }): Promise<void> {
   log.info("Dry run mode");
 
@@ -414,20 +423,35 @@ async function previewPull(params: {
   if (previewUnresolved.length > 0) {
     log.warn("Pull would pause here — resolve these conflicts, then run `ziku pull --continue`.");
   } else if (params.deletedFiles.length > 0) {
-    log.info(
-      `${params.deletedFiles.length} file(s) removed from the template would be candidates for deletion.`,
-    );
+    log.info(describeDeletedFilesPreview(params.deletedFiles.length, params.flags));
   }
 
   if (params.deletedWithLocalEdits.length > 0) {
+    const count = params.deletedWithLocalEdits.length;
     log.warn(
-      params.force
-        ? `${params.deletedWithLocalEdits.length} file(s) removed from the template have local edits — pull would keep them (--force never discards local edits).`
-        : `${params.deletedWithLocalEdits.length} file(s) removed from the template have local edits — pull would ask you to pick which to delete (never deleted automatically).`,
+      keepsLocalEditsWithoutAsking(params.flags)
+        ? `${count} file(s) removed from the template have local edits — pull would keep them (local edits are never discarded automatically).`
+        : `${count} file(s) removed from the template have local edits — pull would ask you to pick which to delete (never deleted automatically).`,
     );
   }
 
   outro("Dry run complete — no changes were made");
+}
+
+/** dry-run で、テンプレートから消えたファイル（ローカル編集なし）がどう扱われるかを伝える。 */
+function describeDeletedFilesPreview(count: number, flags: PullApprovalFlags): string {
+  return match(resolveDeletionPolicy(flags))
+    .with("deleteAll", () => `${count} file(s) removed from the template would be deleted.`)
+    .with(
+      "keepAll",
+      () =>
+        `${count} file(s) removed from the template would be kept — --yes does not approve deletion (use --force).`,
+    )
+    .with(
+      "askUser",
+      () => `${count} file(s) removed from the template would be candidates for deletion.`,
+    )
+    .exhaustive();
 }
 
 /**
@@ -536,17 +560,61 @@ function formatRegions(regions: readonly ConflictRegion[]): string {
 }
 
 /**
- * テンプレートで削除され、ローカルも base のままのファイルを処理する。
- * ローカルの編集が無いので、`--force` では確認を省いて削除できる。
+ * `--force`（破壊的操作の承認）と `--yes`（対話の省略）の組み合わせ。
+ * 削除候補の扱いはこの 2 つだけで決まる。
  */
+interface PullApprovalFlags {
+  readonly force: boolean;
+  readonly yes: boolean;
+}
+
+/** 削除候補に対して取る行動。 */
+type DeletionPolicy = "deleteAll" | "keepAll" | "askUser";
+
+/**
+ * テンプレートで削除され、ローカルも base のままのファイルの扱いを決める。
+ *
+ * 失われるのはテンプレートから再取得できる内容だけなので、`--force` はこの削除の承認に
+ * なる。承認済みの対象について改めて選択を求めても意味が無いので全件削除する。
+ * `--yes` はプロンプトを省くだけで削除を承認しないため、全件残す。
+ */
+function resolveDeletionPolicy(flags: PullApprovalFlags): DeletionPolicy {
+  return match(flags)
+    .with({ force: true }, () => "deleteAll" as const)
+    .with({ force: false, yes: true }, () => "keepAll" as const)
+    .with({ force: false, yes: false }, () => "askUser" as const)
+    .exhaustive();
+}
+
+/**
+ * ローカルに編集があるファイルを、選択を求めずに残すか。
+ *
+ * どちらのフラグも非対話実行を意図する指定なので、プロンプトを出さずに残す側へ倒す。
+ * 削除するかどうかの判断そのものは `handleDeletedWithLocalEdits` の JSDoc を参照。
+ */
+function keepsLocalEditsWithoutAsking(flags: PullApprovalFlags): boolean {
+  return flags.force || flags.yes;
+}
+
+/** テンプレートで削除され、ローカルも base のままのファイルを処理する。 */
 async function handleDeletedFiles(
   deletedFiles: string[],
   targetDir: string,
-  force: boolean,
+  flags: PullApprovalFlags,
 ): Promise<void> {
-  const filesToDelete = force
-    ? (log.info(`Deleting ${deletedFiles.length} file(s) removed from template...`), deletedFiles)
-    : await selectDeletedFiles(deletedFiles);
+  const filesToDelete = await match(resolveDeletionPolicy(flags))
+    .with("deleteAll", (): string[] => {
+      log.info(`Deleting ${deletedFiles.length} file(s) removed from template...`);
+      return deletedFiles;
+    })
+    .with("keepAll", (): string[] => {
+      log.warn(
+        `Kept ${deletedFiles.length} file(s) removed from the template — --yes skips prompts but does not approve deletion. Re-run with --force to delete them.`,
+      );
+      return [];
+    })
+    .with("askUser", () => selectDeletedFiles(deletedFiles))
+    .exhaustive();
 
   await deleteSelectedFiles(filesToDelete, targetDir);
 }
@@ -554,20 +622,20 @@ async function handleDeletedFiles(
 /**
  * テンプレートで削除され、ローカルに編集があるファイルを処理する。
  *
- * `--force` は "Skip confirmations" であって「ローカルの編集を捨てる承認」ではないため、
- * このカテゴリを自動削除はしない。対話実行では明示的に選択させ、`--force`（非対話を
- * 意図する実行）では選択プロンプトを出さずに全て残す。CI で入力待ちのまま止まるのを
- * 避けつつ、確認を省く側ではなく編集を守る側へ倒す。
+ * このカテゴリはどちらのフラグでも自動削除しない。テンプレートから消えているため削除すると
+ * ローカルの編集はどこからも復元できず、`--force`（テンプレート由来の削除の承認）はその
+ * 損失までは承認していない。非対話を意図する実行（`--force` / `--yes`）では選択プロンプトも
+ * 出さずに全て残す。CI で入力待ちのまま止まるのを避けつつ、編集を守る側へ倒す。
  * 残ったファイルは以降「ローカルにしかないファイル」として push 候補になる。
  */
 async function handleDeletedWithLocalEdits(
   files: string[],
   targetDir: string,
-  force: boolean,
+  flags: PullApprovalFlags,
 ): Promise<void> {
-  if (force) {
+  if (keepsLocalEditsWithoutAsking(flags)) {
     log.warn(
-      `Kept ${files.length} file(s) removed from the template because they have local edits. Run 'ziku pull' without --force to choose which to delete.`,
+      `Kept ${files.length} file(s) removed from the template because they have local edits. Run 'ziku pull' without --force / --yes to choose which to delete.`,
     );
     return;
   }

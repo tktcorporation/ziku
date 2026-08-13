@@ -667,7 +667,7 @@ describe("E2E: multi-scenario tests", () => {
 
       await expect(
         (pullCommand.run as any)({
-          args: { dir: "/project", force: false, continue: false },
+          args: { dir: "/project", force: false, yes: false, continue: false },
           rawArgs: [],
           cmd: pullCommand,
         }),
@@ -946,7 +946,7 @@ describe("E2E: multi-scenario tests", () => {
       vol.writeFileSync("/project/.ziku/lock.json", JSON.stringify(updatedLock, null, 2));
 
       await (pullCommand.run as any)({
-        args: { dir: "/project", force: true, continue: false },
+        args: { dir: "/project", force: true, yes: false, continue: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -1012,7 +1012,7 @@ describe("E2E: multi-scenario tests", () => {
       mockSelectDeletedFiles.mockResolvedValueOnce([".claude/rules/deprecated-a.md"]);
 
       await (pullCommand.run as any)({
-        args: { dir: "/project", force: false, continue: false },
+        args: { dir: "/project", force: false, yes: false, continue: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -1077,7 +1077,7 @@ describe("E2E: multi-scenario tests", () => {
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/project", force: true, continue: false },
+        args: { dir: "/project", force: true, yes: false, continue: false },
         rawArgs: [],
         cmd: pullCommand,
       });

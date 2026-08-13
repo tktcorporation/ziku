@@ -337,9 +337,47 @@ describe("pushCommand", () => {
       expect(args.yes.default).toBe(false);
     });
 
+    it("yes の別名は -y だけ（-f は force 用の記号なので割り当てない）", () => {
+      const args = pushCommand.args as { yes: { alias: string | string[] } };
+      expect(args.yes.alias).toBe("y");
+    });
+
     it("edit 引数のデフォルト値は false", () => {
       const args = pushCommand.args as { edit: { default: boolean } };
       expect(args.edit.default).toBe(false);
+    });
+  });
+
+  describe("受け付けなくなったフラグ", () => {
+    it.each(["-f", "--force", "--force=true"])("%s は案内を出して中断する", async (flag) => {
+      await expect(
+        (pushCommand.run as any)({
+          args: { dir: "/test", dryRun: false, yes: false, edit: false },
+          rawArgs: [flag],
+          cmd: pushCommand,
+        }),
+      ).rejects.toThrow(`Invalid flag: "${flag}"`);
+    });
+
+    it("案内は代わりに使うフラグを示す", async () => {
+      const error = await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: false, edit: false },
+        rawArgs: ["-f"],
+        cmd: pushCommand,
+      }).catch((e: { hint: string }) => e);
+
+      expect(error.hint).toContain("--yes");
+      expect(error.hint).toContain("no longer accepts");
+    });
+
+    it("フラグを渡さなければ通常どおり実行する", async () => {
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: false, edit: false },
+        rawArgs: ["--dir", "/test"],
+        cmd: pushCommand,
+      });
+
+      expect(mockLog.info).toHaveBeenCalledWith("No changes to push");
     });
   });
 
@@ -1992,12 +2030,14 @@ describe("未追跡ファイルの追跡フロー", () => {
 
     // 選択プロンプトは出さない
     expect(mockSelectUntrackedToTrack).not.toHaveBeenCalled();
-    // 除外を通知する
-    expect(mockLogUntrackedFilesNotice).toHaveBeenCalledWith(
-      untrackedDocsFile,
-      1,
-      expect.objectContaining({ headline: expect.stringContaining("excluded from push") }),
-    );
+    // 何件が・なぜ push から外れたかを通知する（--yes は追跡選択も省くため）
+    const [, , notice] = vi.mocked(mockLogUntrackedFilesNotice).mock.calls[0] as [
+      unknown,
+      unknown,
+      { headline: string },
+    ];
+    expect(notice.headline).toContain("1 untracked file(s) left out of this push");
+    expect(notice.headline).toContain("--yes skips the tracking prompt");
     // include は変化しない
     expect(readTrackedInclude()).toEqual([".github/**"]);
   });

@@ -111,13 +111,14 @@ export const initCommand = defineCommand({
     },
     force: {
       type: "boolean",
-      description: "Overwrite existing files",
+      description: "Approve overwriting existing files with the template version",
       default: false,
     },
     yes: {
       type: "boolean",
       alias: "y",
-      description: "Non-interactive mode (accept all defaults)",
+      description:
+        "Skip prompts (apply every template directory; existing files are kept, not overwritten)",
       default: false,
     },
     dirs: {
@@ -616,6 +617,11 @@ async function selectDirsFromTemplate(
  * 上書き戦略を CLI 引数・フラグから解決する。
  *
  * 優先順位: --force > --overwrite-strategy > --yes > インタラクティブ選択
+ *
+ * `--yes` が `skip` を選ぶのは、`--yes` が「プロンプトを省く」だけのフラグで、既存ファイルを
+ * 失う承認を含まないため。既存の内容を捨ててよいかはユーザーにしか決められないので、
+ * 承認が無い非対話実行では既存ファイルを残す側に倒す。上書きしたい場合は `--force`
+ * （破壊的操作の承認）か `--overwrite-strategy overwrite`（明示指定）を使う。
  */
 async function resolveEffectiveStrategy(
   force: boolean,
@@ -637,7 +643,7 @@ async function resolveEffectiveStrategy(
     return strategyArg;
   }
 
-  if (nonInteractive) return "overwrite";
+  if (nonInteractive) return "skip";
 
   return await selectOverwriteStrategy({ isReinit: configExists });
 }

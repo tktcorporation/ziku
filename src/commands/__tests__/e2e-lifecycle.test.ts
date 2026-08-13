@@ -261,9 +261,16 @@ function runPush(dir: string) {
   });
 }
 
-function runPull(dir: string) {
+/**
+ * pull を実行する。
+ *
+ * 既定は非対話（`--yes`）。テンプレートで削除されたファイルの扱いだけはフラグで変わるため
+ * （`--yes` は残す / `--force` は削除する / どちらも無ければ選択プロンプト）、そのステップは
+ * 呼び出し側でフラグを指定する。
+ */
+function runPull(dir: string, flags: { force?: boolean; yes?: boolean } = {}) {
   return (pullCommand.run as any)({
-    args: { dir, force: false, yes: true },
+    args: { dir, force: flags.force ?? false, yes: flags.yes ?? true },
     rawArgs: [],
     cmd: pullCommand,
   });
@@ -894,10 +901,10 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
       unchanged: [".claude/rules/style.md", ".claude/rules/testing.md", ".mcp.json"],
     });
 
-    // selectDeletedFiles: --force ではないが、モックで全選択を返す
+    // 対話実行（--force / --yes なし）で削除対象を選ばせる。モックは全選択を返す。
     mockSelectDeletedFiles.mockResolvedValueOnce([".eslintrc.json"]);
 
-    await runPull("/projectB");
+    await runPull("/projectB", { yes: false });
 
     // .eslintrc.json がプロジェクトB から削除された
     expect(vol.existsSync("/projectB/.eslintrc.json")).toBe(false);
@@ -930,7 +937,7 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
 
     mockSelectDeletedFiles.mockResolvedValueOnce([".eslintrc.json"]);
 
-    await runPull("/projectA");
+    await runPull("/projectA", { yes: false });
 
     expect(vol.existsSync("/projectA/.eslintrc.json")).toBe(false);
     expect(vol.existsSync("/projectA/.claude/rules/style.md")).toBe(true);

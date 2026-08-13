@@ -300,6 +300,68 @@ describe("initCommand", () => {
       );
     });
 
+    it("--yes だけでは既存ファイルを上書きしない（skip 戦略）", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      mockFetchTemplates.mockResolvedValue([]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      // --yes はプロンプトを省くだけで、既存の内容を失う承認は含まない
+      expect(mockSelectOverwriteStrategy).not.toHaveBeenCalled();
+      expect(mockFetchTemplates).toHaveBeenCalledWith(
+        expect.objectContaining({
+          overwriteStrategy: "skip",
+        }),
+      );
+    });
+
+    it("--yes --force なら上書きする", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      mockFetchTemplates.mockResolvedValue([]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: true, yes: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(mockFetchTemplates).toHaveBeenCalledWith(
+        expect.objectContaining({
+          overwriteStrategy: "overwrite",
+        }),
+      );
+    });
+
+    it("--yes でも --overwrite-strategy の明示指定が優先される", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      mockFetchTemplates.mockResolvedValue([]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true, "overwrite-strategy": "overwrite" },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(mockFetchTemplates).toHaveBeenCalledWith(
+        expect.objectContaining({
+          overwriteStrategy: "overwrite",
+        }),
+      );
+    });
+
     it("cleanup が必ず呼ばれる", async () => {
       vol.fromJSON({
         "/test": null,

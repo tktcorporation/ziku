@@ -12,7 +12,7 @@ import { pushCommand } from "./commands/push";
 import { setupCommand } from "./commands/setup";
 import { statusCommand } from "./commands/status";
 import { trackCommand } from "./commands/track";
-import { ZikuError, ZikuFailure } from "./errors";
+import { ZikuError, ZikuFailure, zikuFailure } from "./errors";
 import { intro, logUnexpectedError, logZikuError, pc } from "./ui/renderer";
 
 const main = defineCommand({
@@ -21,6 +21,9 @@ const main = defineCommand({
     version,
     description: "Dev environment template manager",
   },
+  // `satisfies` で SUBCOMMAND_NAMES との一致を型に検査させる。citty へ登録したのに
+  // 名前一覧へ足し忘れる（= メニューに出ない・打ち間違い判定の対象外になる）ことと、
+  // 逆に一覧だけに書いて登録し忘れることの両方がコンパイルエラーになる。
   subCommands: {
     init: initCommand,
     setup: setupCommand,
@@ -29,29 +32,64 @@ const main = defineCommand({
     diff: diffCommand,
     status: statusCommand,
     track: trackCommand,
-  },
+  } satisfies Record<SubCommandName, unknown>,
 });
 
-type CommandType =
-  | typeof initCommand
-  | typeof pushCommand
-  | typeof pullCommand
-  | typeof diffCommand
-  | typeof statusCommand;
+/**
+ * ziku が持つサブコマンド名。
+ *
+ * 引数解釈（第 1 引数がサブコマンドか / その打ち間違いか）と対話メニューの両方が
+ * この 1 本を見る。片方にだけコマンドを足すと、メニューから辿れないコマンドや
+ * 打ち間違い判定の対象外になるコマンドが生まれる。
+ */
+const SUBCOMMAND_NAMES = ["init", "setup", "push", "pull", "diff", "status", "track"] as const;
 
-const commandMap: Record<"init" | "push" | "pull" | "diff" | "status", CommandType> = {
-  init: initCommand,
-  push: pushCommand,
-  pull: pullCommand,
-  diff: diffCommand,
-  status: statusCommand,
+type SubCommandName = (typeof SUBCOMMAND_NAMES)[number];
+
+function isSubCommandName(value: string): value is SubCommandName {
+  return (SUBCOMMAND_NAMES as readonly string[]).includes(value);
+}
+
+/**
+ * 対話メニューに出す各コマンドの一行説明。
+ *
+ * `Record<SubCommandName, string>` なのでコマンドを追加すると説明の追加が強制され、
+ * メニューに載り損ねることがない。
+ */
+const COMMAND_HINTS: Record<SubCommandName, string> = {
+  init: "Apply template to your project",
+  setup: "Turn a repository into a ziku template",
+  push: "Push local changes to the template",
+  pull: "Pull latest template updates",
+  diff: "Show differences from template",
+  status: "Show pending pull/push and recommend next action",
+  track: "Add file patterns to the sync whitelist (needs patterns: ziku track <pattern>)",
 };
+
+/**
+ * 選択されたサブコマンドを引数なしで実行する。
+ *
+ * 名前からコマンド定義への対応を `Record` に畳まない理由: コマンドごとに args スキーマ
+ * （`ArgsDef`）が違うため、1 つの `Record` に入れると全コマンドが 1 つの型へ潰れ、
+ * `runCli` の型引数が実際の定義とずれる。名前ごとに `runCli` を呼び分ければ、
+ * 各コマンドの `ArgsDef` がそのまま推論される。
+ */
+function runSelectedCommand(name: SubCommandName): Promise<void> {
+  return match(name)
+    .with("init", () => runCli(initCommand, []))
+    .with("setup", () => runCli(setupCommand, []))
+    .with("push", () => runCli(pushCommand, []))
+    .with("pull", () => runCli(pullCommand, []))
+    .with("diff", () => runCli(diffCommand, []))
+    .with("status", () => runCli(statusCommand, []))
+    .with("track", () => runCli(trackCommand, []))
+    .exhaustive();
+}
 
 /**
  * コマンド選択プロンプト
  *
  * 背景: 引数なしで実行された場合に、ユーザーにコマンドを選択してもらう。
- * @inquirer/prompts の select を @clack/prompts に置き換え。
  */
 async function promptCommand(): Promise<void> {
   intro();
@@ -60,33 +98,11 @@ async function promptCommand(): Promise<void> {
 
   const command = await p.select({
     message: "What would you like to do?",
-    options: [
-      {
-        value: "init" as const,
-        label: "init",
-        hint: "Apply template to your project",
-      },
-      {
-        value: "push" as const,
-        label: "push",
-        hint: "Push local changes as a PR",
-      },
-      {
-        value: "pull" as const,
-        label: "pull",
-        hint: "Pull latest template updates",
-      },
-      {
-        value: "diff" as const,
-        label: "diff",
-        hint: "Show differences from template",
-      },
-      {
-        value: "status" as const,
-        label: "status",
-        hint: "Show pending pull/push and recommend next action",
-      },
-    ],
+    options: SUBCOMMAND_NAMES.map((name) => ({
+      value: name,
+      label: name,
+      hint: COMMAND_HINTS[name],
+    })),
   });
 
   if (p.isCancel(command)) {
@@ -94,8 +110,7 @@ async function promptCommand(): Promise<void> {
     process.exit(0);
   }
 
-  const selectedCommand = commandMap[command];
-  await runCli(selectedCommand as typeof diffCommand, []);
+  await runSelectedCommand(command);
 }
 
 /**
@@ -128,36 +143,109 @@ async function runCli<T extends ArgsDef>(cmd: CommandDef<T>, rawArgs: string[]):
   await runCommand(cmd, { rawArgs });
 }
 
+/**
+ * サブコマンド名の打ち間違いとみなす編集距離の上限。
+ *
+ * 2 は「1 文字の脱字・余分・入れ替えが 2 箇所まで」に相当する。サブコマンド名は 4〜6 文字
+ * なので、これ以上広げると無関係なディレクトリ名まで打ち間違い扱いになる。
+ */
+const MAX_SUBCOMMAND_TYPO_DISTANCE = 2;
+
+/**
+ * 引数がディレクトリ指定であることが表記から確定するか判定する。
+ *
+ * `npx ziku .` / `npx ziku ./my-project` を init として動かすための判定。パス区切りや
+ * カレント／親ディレクトリ、ホーム記法を含む文字列はサブコマンド名になりえないので、
+ * 打ち間違い判定にかけずそのまま init のディレクトリとして渡す。
+ */
+function looksLikePath(value: string): boolean {
+  return (
+    value === "." ||
+    value === ".." ||
+    value.startsWith("~") ||
+    value.includes("/") ||
+    value.includes("\\")
+  );
+}
+
+/** 2 つの文字列の Levenshtein 距離（挿入・削除・置換の最小回数）。 */
+function editDistance(a: string, b: string): number {
+  // 直前の行だけを保持する DP。row[j] は「a の先頭 i 文字」と「b の先頭 j 文字」の距離。
+  let row = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const next = [i];
+    for (let j = 1; j <= b.length; j++) {
+      const substitution = row[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1);
+      next[j] = Math.min(next[j - 1] + 1, row[j] + 1, substitution);
+    }
+    row = next;
+  }
+  return row[b.length];
+}
+
+/**
+ * サブコマンド名の打ち間違い候補を返す。候補が無ければ空配列。
+ *
+ * 第 1 引数がサブコマンド名でもフラグでもないとき、ziku はそれを init の対象ディレクトリ
+ * として扱う。この経路は `ziku pul` のような打ち間違いも受け取り、存在しないディレクトリを
+ * 作ってテンプレートを展開してしまう。init へ流す前にここで候補を探す。
+ *
+ * 判定基準:
+ * 1. `looksLikePath` が真ならディレクトリ指定が確定なので候補なし
+ * 2. 小文字化した入力とサブコマンド名の編集距離が `MAX_SUBCOMMAND_TYPO_DISTANCE` 以下なら候補
+ * 3. 候補が複数あるときは距離が最小のものだけを返す
+ *
+ * 打ち間違いではなく本当にその名前のディレクトリを作りたい場合のために、案内側では
+ * `ziku init <name>` という逃げ道を示す。
+ */
+function nearestSubCommands(value: string): SubCommandName[] {
+  if (looksLikePath(value)) return [];
+
+  const normalized = value.toLowerCase();
+  const candidates = SUBCOMMAND_NAMES.map((name) => ({
+    name,
+    distance: editDistance(normalized, name),
+  })).filter((c) => c.distance <= MAX_SUBCOMMAND_TYPO_DISTANCE);
+
+  const best = Math.min(...candidates.map((c) => c.distance));
+  return candidates.filter((c) => c.distance === best).map((c) => c.name);
+}
+
+/** 打ち間違い候補を提示して中断する失敗値を作る。 */
+function typoFailure(value: string, suggestions: SubCommandName[]): ZikuFailure {
+  const commands = suggestions.map((s) => `\`ziku ${s}\``).join(" or ");
+  return zikuFailure({
+    kind: "InvalidArgument",
+    argument: "command",
+    value,
+    expected: `${commands}. To create a project directory named "${value}" instead, run \`ziku init ${value}\`.`,
+  });
+}
+
 /** 引数から実行するコマンドを選び、citty に渡す。 */
 async function dispatch(): Promise<void> {
   const args = process.argv.slice(2);
-  const hasSubCommand =
-    args.length > 0 &&
-    [
-      "init",
-      "setup",
-      "push",
-      "pull",
-      "diff",
-      "status",
-      "track",
-      "--help",
-      "-h",
-      "--version",
-      "-v",
-    ].includes(args[0]);
+  const [first] = args;
 
-  if (!hasSubCommand && args.length > 0 && !args[0].startsWith("-")) {
-    // npx ziku . のような形式は init コマンドとして実行
-    await runCli(initCommand, args);
-    return;
-  }
-  if (!hasSubCommand && args.length === 0) {
-    // 引数なしの場合はコマンド選択プロンプトを表示
+  // 引数なしの場合はコマンド選択プロンプトを表示
+  if (first === undefined) {
     await promptCommand();
     return;
   }
-  await runCli(main, args);
+
+  // サブコマンド名とフラグ（`--help` / `--version` を含む）は citty の解決に任せる
+  if (first.startsWith("-") || isSubCommandName(first)) {
+    await runCli(main, args);
+    return;
+  }
+
+  const suggestions = nearestSubCommands(first);
+  if (suggestions.length > 0) {
+    throw typoFailure(first, suggestions);
+  }
+
+  // npx ziku . のような形式は init コマンドとして実行
+  await runCli(initCommand, args);
 }
 
 /**
