@@ -11,6 +11,7 @@
  * 呼び出し元がそれを見て `log.info` するなり、`status` のように暗黙に取り込むなりを選ぶ。
  */
 import { Effect, Option } from "effect";
+import { unionPatterns } from "./patterns";
 import { loadTemplateConfig } from "./template-config";
 
 export interface MergedTemplatePatterns {
@@ -29,8 +30,9 @@ export interface MergedTemplatePatterns {
 /**
  * テンプレートの `ziku.jsonc` を読み込み、ローカルパターンとマージした結果を返す。
  *
- * - テンプレ側に `ziku.jsonc` が無ければ、ローカルをそのまま返す（`patternsUpdated: false`）。
- * - 重複パターンは include / exclude それぞれで除去する。
+ * マージは `unionPatterns` の和集合なので、ローカルのパターンは順序ごと保たれ、
+ * テンプレ側の追加分だけが末尾に付く。テンプレ側に `ziku.jsonc` が無い場合は
+ * 「追加分ゼロ」として扱い、ローカルのパターンだけが残る。
  *
  * 戻り値の `newInclude` / `newExclude` を呼び出し側が見て、ログ表示や永続化を決める。
  */
@@ -43,26 +45,19 @@ export async function mergeTemplatePatterns(
     loadTemplateConfig(templateDir).pipe(Effect.option),
   );
 
-  if (Option.isNone(templateConfigOption)) {
-    return {
-      mergedInclude: include,
-      mergedExclude: exclude,
-      newInclude: [],
-      newExclude: [],
-      patternsUpdated: false,
-    };
-  }
+  const templatePatterns = Option.match(templateConfigOption, {
+    onNone: () => ({ include: [] as string[], exclude: [] as string[] }),
+    onSome: (config) => ({ include: config.include, exclude: config.exclude ?? [] }),
+  });
 
-  const templateConfig = templateConfigOption.value;
-  const newInclude = templateConfig.include.filter((p) => !include.includes(p));
-  const newExclude = (templateConfig.exclude ?? []).filter((p) => !exclude.includes(p));
-  const patternsUpdated = newInclude.length > 0 || newExclude.length > 0;
+  const mergedInclude = unionPatterns(include, templatePatterns.include);
+  const mergedExclude = unionPatterns(exclude, templatePatterns.exclude);
 
   return {
-    mergedInclude: patternsUpdated ? [...include, ...newInclude] : include,
-    mergedExclude: patternsUpdated ? [...exclude, ...newExclude] : exclude,
-    newInclude,
-    newExclude,
-    patternsUpdated,
+    mergedInclude: mergedInclude.merged,
+    mergedExclude: mergedExclude.merged,
+    newInclude: mergedInclude.added,
+    newExclude: mergedExclude.added,
+    patternsUpdated: mergedInclude.added.length > 0 || mergedExclude.added.length > 0,
   };
 }

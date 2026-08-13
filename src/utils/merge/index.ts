@@ -12,6 +12,7 @@
  *   text-merge.ts      - 行レベルの 3-way マージ（node-diff3）
  *   three-way-merge.ts - マージのエントリポイント
  *   file-detection.ts  - ファイル形式の判定と構造検証
+ *   conflict-io.ts     - ファイル I/O・ベースツリー取得・コンフリクト解決ループ
  */
 export type {
   BaseContent,
@@ -20,6 +21,7 @@ export type {
   ConflictRegion,
   ConflictRegions,
   FileClassification,
+  FileMergeOutcome,
   LocalContent,
   MergedContent,
   MergeOutcome,
@@ -34,6 +36,12 @@ export {
   readFileSafe,
   writeFileEnsureDir,
   mergeOneFile,
+  mergeConflictFiles,
   downloadBaseForMerge,
 } from "./conflict-io";
-export type { MergeOneFileInput, MergeOneFileOutput } from "./conflict-io";
+export type {
+  MergeBaseSource,
+  MergeConflictFilesInput,
+  MergeOneFileInput,
+  MergeOneFileOutput,
+} from "./conflict-io";

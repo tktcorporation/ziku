@@ -20,16 +20,15 @@ import { ZIKU_CONFIG_FILE, withConfigTracked, zikuConfigExists } from "../utils/
 import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
-import { hashContent, hashFiles } from "../utils/hash";
-import type { ConflictRegion } from "../utils/merge";
+import { hashContent } from "../utils/hash";
+import type { ConflictRegion, FileMergeOutcome } from "../utils/merge";
 import {
-  classifyFiles,
-  downloadBaseForMerge,
   findConflictRegions,
-  mergeOneFile,
+  mergeConflictFiles,
   readFileSafe,
   writeFileEnsureDir,
 } from "../utils/merge";
+import { analyzeSync } from "../utils/sync-analysis";
 import { mergeTemplatePatterns } from "../utils/template-patterns";
 import { computeMergedZikuConfig } from "../utils/config-merge";
 
@@ -165,15 +164,14 @@ export const pullCommand = defineCommand({
 
       log.step("Analyzing changes...");
 
-      // ziku.jsonc 自体を追跡対象に含め、他ファイルと同じ 3-way マージで同期する。
-      const effectiveInclude = withConfigTracked(mergedInclude);
-      const [templateHashes, localHashes] = await Promise.all([
-        hashFiles(templateDir, effectiveInclude, mergedExclude),
-        hashFiles(targetDir, effectiveInclude, mergedExclude),
-      ]);
-      const baseHashes = baseHashesOf(lock);
-
-      const classification = classifyFiles({ baseHashes, localHashes, templateHashes });
+      const { classification, hashes } = await analyzeSync({
+        targetDir,
+        templateDir,
+        baseHashes: baseHashesOf(lock),
+        // ziku.jsonc 自体を追跡対象に含め、他ファイルと同じ 3-way マージで同期する。
+        include: withConfigTracked(mergedInclude),
+        exclude: mergedExclude,
+      });
 
       // ziku.jsonc は常に加法 union で同期する（autoUpdate も conflict も）。
       // 汎用の applyFiles（テンプレ丸ごとコピー）や diff3 マージに乗せると、テンプレ側で
@@ -197,8 +195,8 @@ export const pullCommand = defineCommand({
       // 再追加してしまう（codex P2）。
       const baseHashesForLock: Record<string, string> =
         configSync.baseHash !== undefined
-          ? { ...templateHashes, [ZIKU_CONFIG_FILE]: configSync.baseHash }
-          : templateHashes;
+          ? { ...hashes.templateHashes, [ZIKU_CONFIG_FILE]: configSync.baseHash }
+          : hashes.templateHashes;
 
       const totalChanges =
         autoUpdate.length +
@@ -212,7 +210,8 @@ export const pullCommand = defineCommand({
       // （例: conflict だが union==local で書き込み不要）は lock を更新しないと、
       // 古い base が残って status/push が誤判定する（codex P2）。その場合は early-return しない。
       const configBaseChanged =
-        configSync.baseHash !== undefined && configSync.baseHash !== baseHashes[ZIKU_CONFIG_FILE];
+        configSync.baseHash !== undefined &&
+        configSync.baseHash !== hashes.baseHashes[ZIKU_CONFIG_FILE];
 
       if (totalChanges === 0 && !configBaseChanged) {
         log.success("Already up to date");
@@ -443,11 +442,10 @@ async function applyFiles(files: string[], templateDir: string, targetDir: strin
 }
 
 /**
- * コンフリクトファイルを 3-way マージで解決する。
- * 未解決のコンフリクトパスを返す。
+ * コンフリクトファイルのマージを試み、未解決のパスを返す。
  *
- * ファイル読み込み・マージ・ベースダウンロードは conflict-io の共通ユーティリティを使い、
- * pull 固有の処理（ローカルへの書き込み・解決待ち状態の記録）だけをここで行う。
+ * ループとベース取得は `mergeConflictFiles` が持つ。ここが担うのは pull 固有の後処理、
+ * つまり「マージできた内容をローカルへ書き戻し、結末をユーザーへ伝える」ことだけ。
  */
 async function resolveConflicts(
   conflicts: string[],
@@ -457,61 +455,73 @@ async function resolveConflicts(
     lock: ResumableLockState;
     dryRun?: boolean;
   },
-): Promise<string[]> {
-  if (conflicts.length === 0) return [];
-
+): Promise<readonly string[]> {
   const dryRun = ctx.dryRun ?? false;
-  const unresolvedConflicts: string[] = [];
 
-  const baseResult = await Effect.runPromise(
-    downloadBaseForMerge({
-      lock: ctx.lock,
+  const unresolvedConflicts = await Effect.runPromise(
+    mergeConflictFiles({
+      conflicts,
       targetDir: ctx.targetDir,
+      templateDir: ctx.templateDir,
+      lock: ctx.lock,
+      onFileResult: ({ file, outcome }) =>
+        applyMergeOutcome({ file, outcome, targetDir: ctx.targetDir, dryRun }),
     }),
   );
 
-  await withFinally(
-    async () => {
-      for (const file of conflicts) {
-        const { outcome } = await Effect.runPromise(
-          mergeOneFile({
-            file,
-            targetDir: ctx.targetDir,
-            templateDir: ctx.templateDir,
-            baseTemplateDir: baseResult?.templateDir,
-          }),
-        );
-
-        // マーカー入りの結果もローカルへは書き出す。ユーザーが手で解決する対象なので、
-        // 書かずに済ませるとどこが衝突したのか分からなくなる。
-        // dry-run はプレビューなのでディスクへ触れない。
-        if (!dryRun) {
-          await Effect.runPromise(writeFileEnsureDir(join(ctx.targetDir, file), outcome.content));
-        }
-
-        match(outcome)
-          .with({ _tag: "Clean" }, () => {
-            log.success(`${dryRun ? "Would auto-merge" : "Auto-merged"}: ${pc.cyan(file)}`);
-          })
-          .with({ _tag: "Conflicted" }, ({ regions }) => {
-            unresolvedConflicts.push(file);
-            log.warn(
-              dryRun
-                ? `Conflict in ${pc.cyan(file)} ${formatRegions(regions)} — would need manual resolution`
-                : `Conflict in ${pc.cyan(file)} ${formatRegions(regions)} — manual resolution needed`,
-            );
-          })
-          .exhaustive();
-      }
-
-      if (unresolvedConflicts.length > 0 && !dryRun) {
-        log.warn("Some files have conflicts. Resolve them, then run `ziku pull --continue`");
-      }
-    },
-    () => baseResult?.cleanup?.(),
-  );
+  if (unresolvedConflicts.length > 0 && !dryRun) {
+    log.warn("Some files have conflicts. Resolve them, then run `ziku pull --continue`");
+  }
 
   return unresolvedConflicts;
+}
+
+/**
+ * マージの結末をローカルへ反映し、ユーザーへ伝える。
+ *
+ * マーカー入りの内容もローカルへ書き出す。ユーザーが手で解決する対象なので、書かずに
+ * 済ませるとどこが衝突したのか分からなくなる。一方ベース不在（`NoBase`）ではマージ自体を
+ * 試みていないため書き出す内容が無く、ローカルのファイルには一切触れない。
+ * dry-run はプレビューなのでどの結末でもディスクへ触れない。
+ */
+function applyMergeOutcome(params: {
+  file: string;
+  outcome: FileMergeOutcome;
+  targetDir: string;
+  dryRun: boolean;
+}): Effect.Effect<void> {
+  const { file, outcome, targetDir, dryRun } = params;
+  const writeMerged = (content: string): Effect.Effect<void> =>
+    dryRun ? Effect.void : writeFileEnsureDir(join(targetDir, file), content);
+
+  return match(outcome)
+    .with({ _tag: "Clean" }, ({ content }) =>
+      Effect.gen(function* () {
+        yield* writeMerged(content);
+        log.success(`${dryRun ? "Would auto-merge" : "Auto-merged"}: ${pc.cyan(file)}`);
+      }),
+    )
+    .with({ _tag: "Conflicted" }, ({ content, regions }) =>
+      Effect.gen(function* () {
+        yield* writeMerged(content);
+        log.warn(
+          dryRun
+            ? `Conflict in ${pc.cyan(file)} ${formatRegions(regions)} — would need manual resolution`
+            : `Conflict in ${pc.cyan(file)} ${formatRegions(regions)} — manual resolution needed`,
+        );
+      }),
+    )
+    .with({ _tag: "NoBase" }, () =>
+      Effect.sync(() => {
+        const reason = `Cannot auto-merge ${pc.cyan(file)} — the base version is unavailable, so local and template changes can't be told apart`;
+        log.warn(
+          dryRun
+            ? `${reason} — would need manual resolution`
+            : `${reason}. Compare it with the template and edit it yourself.`,
+        );
+      }),
+    )
+    .exhaustive();
 }
 
 /**

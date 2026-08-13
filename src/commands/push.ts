@@ -19,7 +19,8 @@ import {
 } from "../utils/ziku-config";
 import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
 import type { MergedContent } from "../utils/merge";
-import { classifyFiles, downloadBaseForMerge, mergeOneFile } from "../utils/merge";
+import { mergeConflictFiles } from "../utils/merge";
+import { analyzeSync } from "../utils/sync-analysis";
 import {
   computeMergedZikuConfig,
   computeScopedZikuConfig,
@@ -1004,21 +1005,12 @@ async function classifyAndResolveConflicts(params: {
   /** テンプレートが削除したがローカルに編集があるファイル。push はその削除を取り消す。 */
   deletedWithLocalEdits: Set<string>;
 }> {
-  const templateHashes = await hashFiles(
-    params.templateDir,
-    params.patterns.include,
-    params.patterns.exclude,
-  );
-  const localHashes = await hashFiles(
-    params.targetDir,
-    params.patterns.include,
-    params.patterns.exclude,
-  );
-
-  const classification = classifyFiles({
+  const { classification } = await analyzeSync({
+    targetDir: params.targetDir,
+    templateDir: params.templateDir,
     baseHashes: baseHashesOf(params.lock),
-    localHashes,
-    templateHashes,
+    include: params.patterns.include,
+    exclude: params.patterns.exclude,
   });
 
   const pushableFilePaths = new Set<string>();
@@ -1074,9 +1066,9 @@ async function classifyAndResolveConflicts(params: {
 /**
  * push 時のコンフリクト解決（auto-merge の試行）。
  *
- * ファイル読み込み・マージ・ベースダウンロードは conflict-io の共通ユーティリティを使い、
- * push 固有の処理（mergedContents への保存）だけをここで行う。
- * pull との違い: ローカルに書き込まず、auto-merge 成功分のみ mergedContents に保存する。
+ * ループとベース取得は `mergeConflictFiles` が持つ。ここが担うのは push 固有の後処理、
+ * つまり「クリーンにマージできた内容だけをメモリ上の `mergedContents` に保持する」こと。
+ * ローカルのファイルには触れない（pull と違い、テンプレートへ送る内容を組み立てるだけ）。
  *
  * 自動マージできなかったファイルのパス一覧を返す。ここでは中断しない。
  * 「未解決の衝突が 1 つでもあれば push 全体を止める」のではなく、未解決ファイルを
@@ -1094,7 +1086,7 @@ async function resolveConflicts(
     lock: LockState;
     mergedContents: Map<string, PushContent>;
   },
-): Promise<string[]> {
+): Promise<readonly string[]> {
   const baseSha = baseCommitSha(ctx.lock);
   const baseInfo = baseSha
     ? `since ${pc.bold(baseSha.slice(0, 7))} (your last sync)`
@@ -1103,56 +1095,35 @@ async function resolveConflicts(
     `Template updated ${baseInfo} — ${conflicts.length} conflict(s) detected, attempting auto-merge...`,
   );
 
-  const baseResult = await Effect.runPromise(
-    downloadBaseForMerge({
-      lock: ctx.lock,
+  const autoMerged: string[] = [];
+
+  const unresolved = await Effect.runPromise(
+    mergeConflictFiles({
+      conflicts,
       targetDir: ctx.targetDir,
+      templateDir: ctx.templateDir,
+      lock: ctx.lock,
+      onFileResult: ({ file, outcome }) =>
+        Effect.sync(() => {
+          match(outcome)
+            .with({ _tag: "Clean" }, ({ content }) => {
+              ctx.mergedContents.set(file, mergedAsPushContent(content));
+              autoMerged.push(file);
+            })
+            // 未解決の内容はテンプレートへ送らない。ローカルの内容がそのまま push されて
+            // テンプレートの更新を上書きするのを防ぐため、呼び出し側が選択時に中断する。
+            .with({ _tag: P.union("Conflicted", "NoBase") }, () => undefined)
+            .exhaustive();
+        }),
     }),
   );
 
-  return withFinally(
-    async () => {
-      const autoMerged: string[] = [];
-      const unresolved: string[] = [];
+  if (autoMerged.length > 0) {
+    log.success(`Auto-merged ${autoMerged.length} file(s):`);
+    for (const f of autoMerged) log.message(`  ${pc.green("✓")} ${f}`);
+  }
 
-      for (const file of conflicts) {
-        // ベースが取れなければ 3-way マージが成立しない → 送らずに未解決とする。
-        // ベースに特定のファイルだけが無いケースは mergeOneFile が空ベースとして扱い、
-        // 結果は Conflicted になるので、ここを抜けても壊れた内容は PR に載らない。
-        if (!baseResult) {
-          unresolved.push(file);
-          continue;
-        }
-
-        const { outcome } = await Effect.runPromise(
-          mergeOneFile({
-            file,
-            targetDir: ctx.targetDir,
-            templateDir: ctx.templateDir,
-            baseTemplateDir: baseResult.templateDir,
-          }),
-        );
-
-        match(outcome)
-          .with({ _tag: "Clean" }, ({ content }) => {
-            ctx.mergedContents.set(file, mergedAsPushContent(content));
-            autoMerged.push(file);
-          })
-          .with({ _tag: "Conflicted" }, () => {
-            unresolved.push(file);
-          })
-          .exhaustive();
-      }
-
-      if (autoMerged.length > 0) {
-        log.success(`Auto-merged ${autoMerged.length} file(s):`);
-        for (const f of autoMerged) log.message(`  ${pc.green("✓")} ${f}`);
-      }
-
-      return unresolved;
-    },
-    () => baseResult?.cleanup?.(),
-  );
+  return unresolved;
 }
 
 /**

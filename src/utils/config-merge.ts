@@ -25,6 +25,7 @@ import { readFile } from "node:fs/promises";
 import { parse } from "jsonc-parser";
 import { join } from "pathe";
 import type { ZikuConfig } from "../modules/schemas";
+import { unionPatterns } from "./patterns";
 import { ZIKU_CONFIG_FILE, generateZikuJsonc } from "./ziku-config";
 
 export interface ConfigPatterns {
@@ -33,23 +34,6 @@ export interface ConfigPatterns {
 }
 
 const EMPTY_PATTERNS: ConfigPatterns = { include: [], exclude: [] };
-
-/**
- * 配列を出現順を保ったまま重複除去して結合する（local → template の順）。
- */
-function unionOrdered(...lists: string[][]): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const list of lists) {
-    for (const item of list) {
-      if (!seen.has(item)) {
-        seen.add(item);
-        result.push(item);
-      }
-    }
-  }
-  return result;
-}
 
 /**
  * include / exclude を要素レベルで加法マージ（和集合）する純粋関数。
@@ -62,8 +46,8 @@ export function mergeConfigPatterns(opts: {
   template: ConfigPatterns;
 }): ConfigPatterns {
   return {
-    include: unionOrdered(opts.local.include, opts.template.include),
-    exclude: unionOrdered(opts.local.exclude, opts.template.exclude),
+    include: unionPatterns(opts.local.include, opts.template.include).merged,
+    exclude: unionPatterns(opts.local.exclude, opts.template.exclude).merged,
   };
 }
 

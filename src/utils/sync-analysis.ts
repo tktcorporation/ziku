@@ -36,14 +36,18 @@ export interface SyncAnalysis {
 /**
  * ローカル / テンプレート / lock(base) の3者を比較し、ファイルを分類する。
  *
- * 背景: pull/push/status で重複していた「hashFiles ×2 → classifyFiles」の手順を
- * 単一エントリポイントに集約する SSOT。3つのハッシュマップの取り違え（#148 と類似のリスク）を
- * 型レベルで抑え、各コマンドの実装ぶれを防ぐ。
+ * 呼び出し側が前提にしてよいこと:
+ * - ローカルとテンプレートのハッシュは同じ `include` / `exclude` で走査した結果である。
+ *   走査条件が片側だけずれると、対象外のファイルが「片側にしか無い」と分類されてしまう。
+ * - 分類は `hashes` に入っている 3 つのマップだけから導かれる。同じハッシュを渡せば
+ *   どのコマンドから呼んでも同じ分類になる。
+ * - 返す `hashes.templateHashes` は分類に使ったものそのもので、次の同期ベースとして
+ *   lock へ書ける。
  *
  * I/O バウンドな2つの hashFiles を Promise.all で並列化する。
  *
  * 規約メモ: hashFiles が plain async のため本関数も plain async に揃えている。
- * 将来 hashFiles を Effect 化する際は本関数も Effect.gen に書き直すこと。
+ * hashFiles を Effect 化する際は本関数も Effect.gen に書き直すこと。
  */
 export async function analyzeSync(options: AnalyzeSyncOptions): Promise<SyncAnalysis> {
   const { targetDir, templateDir, baseHashes, include, exclude } = options;

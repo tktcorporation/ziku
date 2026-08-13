@@ -9,8 +9,31 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { Effect } from "effect";
 import { join } from "pathe";
 import { afterEach, describe, expect, it } from "vitest";
-import { mergeOneFile, readFileSafe, writeFileEnsureDir } from "../merge";
+import type { FileMergeOutcome, MergeOneFileOutput } from "../merge";
+import { mergeConflictFiles, mergeOneFile, readFileSafe, writeFileEnsureDir } from "../merge";
+import type { LockState } from "../../modules/schemas";
+import { createPendingLock } from "../../modules/schemas";
 import { tmpdir } from "node:os";
+
+/**
+ * マージできた内容を取り出す。ベース不在（NoBase）には内容が無いので、
+ * 内容を検証するテストがベース不在の結末をすり抜けないよう明示的に失敗させる。
+ */
+function mergedContentOf(outcome: FileMergeOutcome): string {
+  if (outcome._tag === "NoBase") {
+    throw new Error("expected a merge attempt, but the base was unavailable");
+  }
+  return outcome.content;
+}
+
+/** ベースツリーを取り直せない lock（ローカルテンプレート）。 */
+function localSourceLock(templatePath: string): LockState {
+  return createPendingLock({
+    version: "0.1.0",
+    installedAt: "2024-01-01T00:00:00.000Z",
+    source: { kind: "local", path: templatePath },
+  });
+}
 
 /** テストごとにユニークな一時ディレクトリを作成 */
 async function createTempDir(label: string): Promise<string> {
@@ -121,11 +144,16 @@ describe("conflict-io", () => {
       await writeFiles(templateDir, { "config.json": '{"key": "value"}' });
 
       const result = await Effect.runPromise(
-        mergeOneFile({ file: "config.json", targetDir, templateDir }),
+        mergeOneFile({
+          file: "config.json",
+          targetDir,
+          templateDir,
+          base: { kind: "with-base", dir: templateDir },
+        }),
       );
 
       expect(result.outcome._tag).toBe("Clean");
-      expect(result.outcome.content).toBe('{"key": "value"}');
+      expect(mergedContentOf(result.outcome)).toBe('{"key": "value"}');
       expect(result.file).toBe("config.json");
     });
 
@@ -148,13 +176,13 @@ describe("conflict-io", () => {
           file: "file.txt",
           targetDir,
           templateDir,
-          baseTemplateDir: baseDir,
+          base: { kind: "with-base", dir: baseDir },
         }),
       );
 
       expect(result.outcome._tag).toBe("Clean");
-      expect(result.outcome.content).toContain("line1-local");
-      expect(result.outcome.content).toContain("line5-template");
+      expect(mergedContentOf(result.outcome)).toContain("line1-local");
+      expect(mergedContentOf(result.outcome)).toContain("line5-template");
     });
 
     it("3-way マージ: 同じ行を両方が変更 → コンフリクトマーカー", async () => {
@@ -171,15 +199,15 @@ describe("conflict-io", () => {
           file: "file.txt",
           targetDir,
           templateDir,
-          baseTemplateDir: baseDir,
+          base: { kind: "with-base", dir: baseDir },
         }),
       );
 
       expect(result.outcome._tag).toBe("Conflicted");
-      expect(result.outcome.content).toContain("<<<<<<< LOCAL");
-      expect(result.outcome.content).toContain("local-change");
-      expect(result.outcome.content).toContain("template-change");
-      expect(result.outcome.content).toContain(">>>>>>> TEMPLATE");
+      expect(mergedContentOf(result.outcome)).toContain("<<<<<<< LOCAL");
+      expect(mergedContentOf(result.outcome)).toContain("local-change");
+      expect(mergedContentOf(result.outcome)).toContain("template-change");
+      expect(mergedContentOf(result.outcome)).toContain(">>>>>>> TEMPLATE");
     });
 
     it("delete/modify conflict: ローカルにファイルが存在しなくても ENOENT にならない", async () => {
@@ -197,15 +225,15 @@ describe("conflict-io", () => {
           file: ".claude/rules/worktree.md",
           targetDir,
           templateDir,
-          baseTemplateDir: baseDir,
+          base: { kind: "with-base", dir: baseDir },
         }),
       );
 
       // local が空文字列 → delete/modify conflict としてマーカーが入る
       expect(result.outcome._tag).toBe("Conflicted");
       expect(result.file).toBe(".claude/rules/worktree.md");
-      expect(result.outcome.content).toContain("<<<<<<< LOCAL");
-      expect(result.outcome.content).toContain(">>>>>>> TEMPLATE");
+      expect(mergedContentOf(result.outcome)).toContain("<<<<<<< LOCAL");
+      expect(mergedContentOf(result.outcome)).toContain(">>>>>>> TEMPLATE");
     });
 
     it("delete/modify conflict: ローカルにファイルもディレクトリも存在しなくても動作する", async () => {
@@ -222,7 +250,7 @@ describe("conflict-io", () => {
           file: "deep/nested/file.md",
           targetDir,
           templateDir,
-          baseTemplateDir: baseDir,
+          base: { kind: "with-base", dir: baseDir },
         }),
       );
 
@@ -230,21 +258,118 @@ describe("conflict-io", () => {
       expect(result.file).toBe("deep/nested/file.md");
     });
 
-    it("base がない場合（初回 pull）: ローカルとテンプレートが異なれば conflict", async () => {
+    it("base を取得できない場合: 自動マージを試みず NoBase を返す（マーカー入りの内容を作らない）", async () => {
       const targetDir = await temp("merge-nobase-target");
       const templateDir = await temp("merge-nobase-template");
 
       await writeFiles(targetDir, { "settings.json": '{"local": true}' });
       await writeFiles(templateDir, { "settings.json": '{"template": true}' });
-      // baseTemplateDir を渡さない
 
       const result = await Effect.runPromise(
-        mergeOneFile({ file: "settings.json", targetDir, templateDir }),
+        mergeOneFile({
+          file: "settings.json",
+          targetDir,
+          templateDir,
+          base: { kind: "no-base" },
+        }),
       );
 
-      // base が空 → 全内容が「両方から追加された」扱い → conflict
-      expect(result.outcome._tag).toBe("Conflicted");
-      expect(result.outcome.content).toContain("<<<<<<< LOCAL");
+      // 共通祖先が無いので 2-way でしか比較できない。空ベースで代用して全行を
+      // 衝突させた「マージ結果」は作らず、試みなかったことを結末として返す。
+      expect(result.outcome).toEqual({ _tag: "NoBase" });
+      // ローカルのファイルは触られない
+      expect(await readFile(join(targetDir, "settings.json"), "utf-8")).toBe('{"local": true}');
+    });
+  });
+
+  describe("mergeConflictFiles", () => {
+    it("base を取得できない lock では全ファイルを未解決として返す", async () => {
+      const targetDir = await temp("loop-nobase-target");
+      const templateDir = await temp("loop-nobase-template");
+
+      await writeFiles(targetDir, { "a.txt": "local a", "b.txt": "local b" });
+      await writeFiles(templateDir, { "a.txt": "template a", "b.txt": "template b" });
+
+      const seen: MergeOneFileOutput[] = [];
+      const unresolved = await Effect.runPromise(
+        mergeConflictFiles({
+          conflicts: ["a.txt", "b.txt"],
+          targetDir,
+          templateDir,
+          lock: localSourceLock(templateDir),
+          onFileResult: (result) => Effect.sync(() => void seen.push(result)),
+        }),
+      );
+
+      expect(unresolved).toEqual(["a.txt", "b.txt"]);
+      expect(seen.map((r) => r.outcome)).toEqual([{ _tag: "NoBase" }, { _tag: "NoBase" }]);
+    });
+
+    it("base 不在時の未解決判定はハンドラの内容に依らない（pull と push が同じ集合を受け取る）", async () => {
+      const targetDir = await temp("loop-same-target");
+      const templateDir = await temp("loop-same-template");
+
+      await writeFiles(targetDir, { "a.txt": "local a" });
+      await writeFiles(templateDir, { "a.txt": "template a" });
+
+      const lock = localSourceLock(templateDir);
+      // pull 相当: 結果をローカルへ書き戻そうとするハンドラ
+      const writtenByPull: string[] = [];
+      const pullUnresolved = await Effect.runPromise(
+        mergeConflictFiles({
+          conflicts: ["a.txt"],
+          targetDir,
+          templateDir,
+          lock,
+          onFileResult: ({ file, outcome }) =>
+            Effect.sync(() => {
+              if (outcome._tag !== "NoBase") writtenByPull.push(file);
+            }),
+        }),
+      );
+
+      // push 相当: クリーンな結果だけをメモリへ保持するハンドラ
+      const keptByPush = new Map<string, string>();
+      const pushUnresolved = await Effect.runPromise(
+        mergeConflictFiles({
+          conflicts: ["a.txt"],
+          targetDir,
+          templateDir,
+          lock,
+          onFileResult: ({ file, outcome }) =>
+            Effect.sync(() => {
+              if (outcome._tag === "Clean") keptByPush.set(file, outcome.content);
+            }),
+        }),
+      );
+
+      expect(pullUnresolved).toEqual(pushUnresolved);
+      expect(pullUnresolved).toEqual(["a.txt"]);
+      // どちらの側にもマージ結果は渡らない
+      expect(writtenByPull).toEqual([]);
+      expect(keptByPush.size).toBe(0);
+    });
+
+    it("対象が空なら base を取得せずに空配列を返す", async () => {
+      const targetDir = await temp("loop-empty-target");
+      const templateDir = await temp("loop-empty-template");
+
+      const onFileResult = (): Effect.Effect<void> =>
+        Effect.sync(() => {
+          throw new Error("onFileResult should not be called");
+        });
+
+      const unresolved = await Effect.runPromise(
+        mergeConflictFiles({
+          conflicts: [],
+          targetDir,
+          templateDir,
+          lock: localSourceLock(templateDir),
+          onFileResult,
+        }),
+      );
+
+      expect(unresolved).toEqual([]);
     });
   });
 });

@@ -14,6 +14,7 @@ import {
   markSynced,
   templateRefToString,
 } from "../../modules/schemas";
+import type { FileMergeOutcome, MergeConflictFilesInput } from "../../utils/merge";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -69,6 +70,16 @@ vi.mock("../../utils/hash", () => ({
 // utils/merge をモック
 vi.mock("../../utils/merge", async () => {
   const effectMod = await import("effect");
+
+  const mergeOneFile = vi.fn();
+  type BaseDownload = { templateDir: string; cleanup: () => void } | null;
+  const downloadBaseForMerge = vi.fn(
+    (_opts: {
+      lock: import("../../modules/schemas").LockState;
+      targetDir: string;
+    }): import("effect").Effect.Effect<BaseDownload> => effectMod.Effect.succeed(null),
+  );
+
   return {
     classifyFiles: vi.fn(() => ({
       autoUpdate: [],
@@ -81,8 +92,37 @@ vi.mock("../../utils/merge", async () => {
       unchanged: [],
     })),
     // conflict-io の共通ユーティリティ
-    mergeOneFile: vi.fn(),
-    downloadBaseForMerge: vi.fn(() => effectMod.Effect.succeed(null)),
+    mergeOneFile,
+    downloadBaseForMerge,
+    // ベース取得と 1 ファイル単位のマージは上の 2 つのモックへ委ね、ループだけを再現する。
+    // 「ベースを取得できなければ内容を読まず全て未解決」という本体の規則は、push 側の
+    // 後処理（送る内容に採用するか / 除外するか）を検証するために代替側でも同じにしておく。
+    mergeConflictFiles: vi.fn((input: MergeConflictFilesInput) =>
+      effectMod.Effect.gen(function* () {
+        const unresolved: string[] = [];
+        if (input.conflicts.length === 0) return unresolved;
+
+        const downloaded = yield* downloadBaseForMerge({
+          lock: input.lock,
+          targetDir: input.targetDir,
+        });
+        for (const file of input.conflicts) {
+          const outcome: FileMergeOutcome =
+            downloaded === null
+              ? { _tag: "NoBase" }
+              : (yield* mergeOneFile({
+                  file,
+                  targetDir: input.targetDir,
+                  templateDir: input.templateDir,
+                  base: { kind: "with-base", dir: downloaded.templateDir },
+                })).outcome;
+          yield* input.onFileResult({ file, outcome });
+          if (outcome._tag !== "Clean") unresolved.push(file);
+        }
+        downloaded?.cleanup();
+        return unresolved;
+      }),
+    ),
   };
 });
 
@@ -1391,7 +1431,7 @@ describe("pushCommand", () => {
         file: "file.txt",
         targetDir: "/test",
         templateDir: "/tmp/template",
-        baseTemplateDir: "/tmp/base-template",
+        base: { kind: "with-base", dir: "/tmp/base-template" },
       });
 
       expect(mockCreatePullRequest).toHaveBeenCalledWith(

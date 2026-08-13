@@ -16,6 +16,7 @@ vi.mock("tinyglobby", () => ({
 }));
 
 const { analyzeSync } = await import("../sync-analysis");
+const { classifyFiles } = await import("../merge");
 const { hashContent } = await import("../hash");
 const { glob } = await import("tinyglobby");
 const mockedGlob = vi.mocked(glob);
@@ -67,6 +68,27 @@ describe("sync-analysis", () => {
     expect(result.hashes.baseHashes).toEqual({});
     // ローカルにファイルがなく base もないので、すべて newFiles に分類される
     expect(result.classification.newFiles.toSorted()).toEqual(["a.txt", "b.txt"]);
+  });
+
+  it("分類は返す hashes だけから導かれる（同じハッシュなら呼び出し元によらず同じ分類になる）", async () => {
+    vol.fromJSON({
+      "/project/changed.txt": "local",
+      "/project/same.txt": "same",
+      "/template/changed.txt": "template",
+      "/template/same.txt": "same",
+    });
+    mockedGlob.mockResolvedValue(["changed.txt", "same.txt"]);
+
+    const result = await analyzeSync({
+      targetDir: "/project",
+      templateDir: "/template",
+      baseHashes: { "changed.txt": hashContent("base"), "same.txt": hashContent("same") },
+      include: ["**"],
+      exclude: ["ignored/**"],
+    });
+
+    // pull / push / status は同じ 3 つのハッシュマップを渡す限り同じ分類を受け取る。
+    expect(result.classification).toEqual(classifyFiles(result.hashes));
   });
 
   it("classifies unchanged when local equals template equals base", async () => {
