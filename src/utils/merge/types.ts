@@ -165,6 +165,14 @@ export interface FileClassification {
   unchanged: string[];
 }
 
+/**
+ * 分類カテゴリ名。`FileClassification` のキーと対応する。
+ *
+ * 「どのカテゴリに入ったか」を配列から引き剥がして 1 つの値として持ち回るために型を与える
+ * （`src/utils/merge/sync-plan.ts` の `ZikuConfigState`）。
+ */
+export type FileCategory = keyof FileClassification;
+
 export interface ClassifyOptions {
   baseHashes: Record<string, string>;
   localHashes: Record<string, string>;

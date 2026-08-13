@@ -1,8 +1,8 @@
 import { match } from "ts-pattern";
-import type { ClassifyOptions, FileClassification } from "./types";
+import type { ClassifyOptions, FileCategory, FileClassification } from "./types";
 
 /** 分類カテゴリ名。FileClassification のキーと対応する。 */
-type Category = keyof FileClassification;
+type Category = FileCategory;
 
 /** 有無を boolean に変換して3値の存在パターンをタプルで扱う */
 type Presence = { hasBase: boolean; hasLocal: boolean; hasTemplate: boolean };

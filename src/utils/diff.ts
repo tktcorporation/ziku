@@ -7,7 +7,7 @@ import { isBinaryFileDiff, readFileContent, toTransportText } from "./file-conte
 import { filterByGitignore, loadMergedGitignore } from "./gitignore";
 import type { FlatPatterns } from "./patterns";
 import { resolvePatterns } from "./patterns";
-import { ZIKU_CONFIG_FILE } from "./ziku-config";
+import { alwaysTrackedPathsIn } from "./ziku-config";
 
 export interface DiffOptions {
   targetDir: string;
@@ -38,12 +38,12 @@ export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
 
   const allFiles = new Set([...templateFiles, ...localFiles]);
 
-  // ziku.jsonc は ziku 自身の制御ファイル（追跡対象の SSOT）。プロジェクトや
-  // テンプレートが `.ziku/` を gitignore していても、パターン同期のために必ず
-  // 差分対象に含める。これをしないと `ziku track` の変更がテンプレへ届かない（codex P2）。
+  // 常に追跡するファイルは ziku 自身の制御ファイル（追跡対象の SSOT）。プロジェクトや
+  // テンプレートが `.ziku/` を gitignore していても、パターン同期のために必ず差分対象に
+  // 含める。これをしないと `ziku track` の変更がテンプレへ届かない。
   for (const dir of [targetDir, templateDir]) {
-    if (existsSync(join(dir, ZIKU_CONFIG_FILE))) {
-      allFiles.add(ZIKU_CONFIG_FILE);
+    for (const path of alwaysTrackedPathsIn(dir)) {
+      allFiles.add(path);
     }
   }
 

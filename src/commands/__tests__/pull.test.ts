@@ -40,15 +40,14 @@ vi.mock("../../utils/template", () => ({
   ),
 }));
 
-// --continue モードで直接使われるため、モックが引き続き必要
-vi.mock("../../utils/ziku-config", () => ({
-  ZIKU_CONFIG_FILE: ".ziku/ziku.jsonc",
+// --continue モードで直接使われるため、モックが引き続き必要。
+// パス種別の判定（classifySyncPath 等）は分類の仕分けが実際に使うので実装をそのまま通す。
+vi.mock("../../utils/ziku-config", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../utils/ziku-config")>()),
   loadZikuConfig: vi.fn(),
   zikuConfigExists: vi.fn(),
   saveZikuConfig: vi.fn(),
   generateZikuJsonc: vi.fn((c: any) => JSON.stringify(c)),
-  withConfigTracked: (include: string[]) =>
-    include.includes(".ziku/ziku.jsonc") ? include : [...include, ".ziku/ziku.jsonc"],
 }));
 
 vi.mock("../../utils/lock", () => ({

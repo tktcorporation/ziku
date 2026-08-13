@@ -24,7 +24,11 @@ const {
   zikuConfigExists,
   generateZikuJsonc,
   addIncludePattern,
+  alwaysTrackedPathsIn,
+  classifySyncPath,
+  isZikuConfigPath,
   withConfigTracked,
+  withoutConfigTracked,
   ZIKU_CONFIG_FILE,
 } = await import("../ziku-config");
 
@@ -287,6 +291,61 @@ describe("withConfigTracked", () => {
     const input = [".claude/**"];
     withConfigTracked(input);
     expect(input).toEqual([".claude/**"]);
+  });
+});
+
+describe("classifySyncPath", () => {
+  it("ziku.jsonc だけを zikuConfig 種別として扱う", () => {
+    expect(classifySyncPath(ZIKU_CONFIG_FILE)).toEqual({
+      kind: "zikuConfig",
+      path: ZIKU_CONFIG_FILE,
+    });
+    expect(isZikuConfigPath(ZIKU_CONFIG_FILE)).toBe(true);
+  });
+
+  it("同じ `.ziku/` 配下でも lock.json は通常の同期ファイル扱い", () => {
+    // lock.json はテンプレート取得元 source を持つローカル専用ファイルで、同期対象ではない。
+    // 種別判定がディレクトリではなくパス単位であることを固定する。
+    expect(classifySyncPath(".ziku/lock.json")).toEqual({
+      kind: "syncedFile",
+      path: ".ziku/lock.json",
+    });
+    expect(isZikuConfigPath(".ziku/lock.json")).toBe(false);
+  });
+
+  it("通常のファイルは syncedFile 種別", () => {
+    expect(classifySyncPath(".claude/rules/foo.md").kind).toBe("syncedFile");
+    expect(isZikuConfigPath(".claude/rules/foo.md")).toBe(false);
+  });
+});
+
+describe("withoutConfigTracked", () => {
+  it("常に追跡されるパスだけを取り除く", () => {
+    expect(withoutConfigTracked([".claude/**", ZIKU_CONFIG_FILE, ".ziku/lock.json"])).toEqual([
+      ".claude/**",
+      ".ziku/lock.json",
+    ]);
+  });
+
+  it("withConfigTracked と往復すると元の include に戻る", () => {
+    const include = [".claude/**", ".mcp.json"];
+    expect(withoutConfigTracked(withConfigTracked(include))).toEqual(include);
+  });
+});
+
+describe("alwaysTrackedPathsIn", () => {
+  beforeEach(() => {
+    vol.reset();
+  });
+
+  it("実在する常時追跡パスを返す", () => {
+    vol.fromJSON({ [`/project/${ZIKU_CONFIG_FILE}`]: "{}" });
+    expect(alwaysTrackedPathsIn("/project")).toEqual([ZIKU_CONFIG_FILE]);
+  });
+
+  it("実在しなければ返さない（走査に存在しないファイルを混ぜない）", () => {
+    vol.fromJSON({ "/project/.claude/rules/foo.md": "x" });
+    expect(alwaysTrackedPathsIn("/project")).toEqual([]);
   });
 });
 

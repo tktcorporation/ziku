@@ -1,5 +1,6 @@
 import type { HashMap } from "../modules/schemas";
-import type { FileClassification } from "./merge/types";
+import type { SyncPlan } from "./merge/sync-plan";
+import { partitionSyncPlan } from "./merge/sync-plan";
 import { classifyFiles } from "./merge";
 import { hashFiles } from "./hash";
 
@@ -29,7 +30,13 @@ export interface AnalyzeSyncOptions {
 }
 
 export interface SyncAnalysis {
-  readonly classification: FileClassification;
+  /**
+   * 種別ごとに仕分けた分類結果。
+   *
+   * 生の `FileClassification` を返さないのは、ziku 自身の設定ファイルだけ扱いが違うため。
+   * 仕分けを呼び出し側に任せると、抜き出しがコマンドごとに散る（`merge/sync-plan.ts`）。
+   */
+  readonly plan: SyncPlan;
   readonly hashes: SyncHashes;
 }
 
@@ -61,7 +68,7 @@ export async function analyzeSync(options: AnalyzeSyncOptions): Promise<SyncAnal
     templateHashes,
   });
   return {
-    classification,
+    plan: partitionSyncPlan(classification),
     hashes: { baseHashes, localHashes, templateHashes },
   };
 }

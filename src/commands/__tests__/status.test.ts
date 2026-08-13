@@ -3,6 +3,7 @@ import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZikuError, FileNotFoundError } from "../../errors";
 import type { FileClassification } from "../../utils/merge/types";
+import type { SyncPlan } from "../../utils/merge/sync-plan";
 import type {
   ConflictPaths,
   LockState,
@@ -110,6 +111,14 @@ const mockLoadLock = vi.mocked(loadLock);
 const mockZikuConfigExists = vi.mocked(zikuConfigExists);
 const mockLog = vi.mocked(log);
 const mockOutro = vi.mocked(outro);
+
+/**
+ * テスト用の SyncPlan。ziku.jsonc は analyzeSync の分類に現れない前提
+ * （status は drift から入れるバケツを決めるため、plan.config は Untracked で足りる）。
+ */
+function syncPlanOf(files: FileClassification): SyncPlan {
+  return { files, config: { _tag: "Untracked" } };
+}
 
 /** テスト用の空 FileClassification */
 function emptyClassification(): FileClassification {
@@ -295,7 +304,7 @@ describe("statusCommand", () => {
       const { effect, cleanup } = mockContext();
       mockLoadCommandContext.mockReturnValue(effect);
       mockAnalyzeSync.mockResolvedValueOnce({
-        classification: emptyClassification(),
+        plan: syncPlanOf(emptyClassification()),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
       });
 
@@ -318,7 +327,7 @@ describe("statusCommand", () => {
       const { effect } = mockContext();
       mockLoadCommandContext.mockReturnValue(effect);
       mockAnalyzeSync.mockResolvedValueOnce({
-        classification: { ...emptyClassification(), autoUpdate: ["a.txt"] },
+        plan: syncPlanOf({ ...emptyClassification(), autoUpdate: ["a.txt"] }),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
       });
 
@@ -337,7 +346,7 @@ describe("statusCommand", () => {
       const { effect } = mockContext();
       mockLoadCommandContext.mockReturnValue(effect);
       mockAnalyzeSync.mockResolvedValueOnce({
-        classification: { ...emptyClassification(), localOnly: ["b.txt"] },
+        plan: syncPlanOf({ ...emptyClassification(), localOnly: ["b.txt"] }),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
       });
 
@@ -358,7 +367,7 @@ describe("statusCommand", () => {
       const { effect } = mockContext({ lock: mergingLock(["c.txt"]) });
       mockLoadCommandContext.mockReturnValue(effect);
       mockAnalyzeSync.mockResolvedValueOnce({
-        classification: emptyClassification(),
+        plan: syncPlanOf(emptyClassification()),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
       });
 
@@ -377,11 +386,11 @@ describe("statusCommand", () => {
       const { effect } = mockContext();
       mockLoadCommandContext.mockReturnValue(effect);
       mockAnalyzeSync.mockResolvedValueOnce({
-        classification: {
+        plan: syncPlanOf({
           ...emptyClassification(),
           autoUpdate: ["a.txt"],
           localOnly: ["b.txt"],
-        },
+        }),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
       });
 
@@ -401,7 +410,7 @@ describe("statusCommand", () => {
       const { effect } = mockContext();
       mockLoadCommandContext.mockReturnValue(effect);
       mockAnalyzeSync.mockResolvedValueOnce({
-        classification: { ...emptyClassification(), conflicts: ["c.txt"] },
+        plan: syncPlanOf({ ...emptyClassification(), conflicts: ["c.txt"] }),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
       });
 
@@ -429,7 +438,7 @@ describe("statusCommand", () => {
       });
       mockAnalyzeSync.mockResolvedValueOnce({
         // 新パターンに該当するファイルが無い（テンプレも local も空）
-        classification: emptyClassification(),
+        plan: syncPlanOf(emptyClassification()),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
       });
 
@@ -458,7 +467,7 @@ describe("statusCommand", () => {
         patternsUpdated: true,
       });
       mockAnalyzeSync.mockResolvedValueOnce({
-        classification: emptyClassification(),
+        plan: syncPlanOf(emptyClassification()),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
       });
 
@@ -485,7 +494,7 @@ describe("statusCommand", () => {
       const { effect } = mockContext();
       mockLoadCommandContext.mockReturnValue(effect);
       mockAnalyzeSync.mockResolvedValueOnce({
-        classification: emptyClassification(),
+        plan: syncPlanOf(emptyClassification()),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
       });
       mockDetectUntrackedFiles.mockResolvedValueOnce([

@@ -76,19 +76,28 @@ function sameSet(a: string[], b: string[]): boolean {
 }
 
 /**
+ * `ziku.jsonc` の内容が、どちら向きに同期アクションを必要としているか。
+ *
+ * 加法 union モデルでは「片側だけのパターン削除」は同期アクションにならない（union==その側）
+ * ため、ハッシュ差分ではなくパターン集合の包含関係で判断する。
+ */
+export interface ConfigDrift {
+  /** テンプレにあってローカルに無いパターンがある（pull で取り込む価値あり）。 */
+  readonly pullRelevant: boolean;
+  /** ローカルにあってテンプレに無いパターンがある（push で伝播する価値あり）。 */
+  readonly pushRelevant: boolean;
+}
+
+/**
  * `ziku.jsonc` の「実際に同期アクションが必要か」を union 観点で判定する。
  *
- * - `pullRelevant`: テンプレにあってローカルに無いパターンがある（pull で取り込む価値あり）。
- * - `pushRelevant`: ローカルにあってテンプレに無いパターンがある（push で伝播する価値あり）。
- *
- * 加法 union モデルでは「片側だけのパターン削除」は同期アクションにならない（union==その側）。
- * これを status の推奨判定に使うことで、テンプレ側のパターン削除だけのケースで pull を
- * 無限に推奨してしまう no-op ループを防ぐ（codex P2）。
+ * status の推奨判定に使うことで、テンプレ側のパターン削除だけのケースで pull を
+ * 無限に推奨してしまう no-op ループを防ぐ。
  */
 export async function analyzeConfigDrift(
   targetDir: string,
   templateDir: string,
-): Promise<{ pullRelevant: boolean; pushRelevant: boolean }> {
+): Promise<ConfigDrift> {
   const [local, template] = await Promise.all([
     readPatternsAt(targetDir),
     readPatternsAt(templateDir),

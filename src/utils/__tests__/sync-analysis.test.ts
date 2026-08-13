@@ -17,6 +17,7 @@ vi.mock("tinyglobby", () => ({
 
 const { analyzeSync } = await import("../sync-analysis");
 const { classifyFiles } = await import("../merge");
+const { partitionSyncPlan } = await import("../merge/sync-plan");
 const { hashContent } = await import("../hash");
 const { glob } = await import("tinyglobby");
 const mockedGlob = vi.mocked(glob);
@@ -27,7 +28,7 @@ describe("sync-analysis", () => {
     vi.clearAllMocks();
   });
 
-  it("returns classification and three hash maps", async () => {
+  it("returns a sync plan and three hash maps", async () => {
     vol.fromJSON({
       "/project/foo.txt": "local content",
       "/template/foo.txt": "template content",
@@ -46,7 +47,7 @@ describe("sync-analysis", () => {
     expect(result.hashes.templateHashes["foo.txt"]).toBe(hashContent("template content"));
     expect(result.hashes.baseHashes["foo.txt"]).toBe(hashContent("base content"));
     // base, local, template すべて異なる → conflict カテゴリ
-    expect(result.classification.conflicts).toContain("foo.txt");
+    expect(result.plan.files.conflicts).toContain("foo.txt");
   });
 
   it("treats empty baseHashes as no base (init 直後ケース): すべて newFiles", async () => {
@@ -67,7 +68,7 @@ describe("sync-analysis", () => {
 
     expect(result.hashes.baseHashes).toEqual({});
     // ローカルにファイルがなく base もないので、すべて newFiles に分類される
-    expect(result.classification.newFiles.toSorted()).toEqual(["a.txt", "b.txt"]);
+    expect(result.plan.files.newFiles.toSorted()).toEqual(["a.txt", "b.txt"]);
   });
 
   it("分類は返す hashes だけから導かれる（同じハッシュなら呼び出し元によらず同じ分類になる）", async () => {
@@ -88,7 +89,7 @@ describe("sync-analysis", () => {
     });
 
     // pull / push / status は同じ 3 つのハッシュマップを渡す限り同じ分類を受け取る。
-    expect(result.classification).toEqual(classifyFiles(result.hashes));
+    expect(result.plan).toEqual(partitionSyncPlan(classifyFiles(result.hashes)));
   });
 
   it("classifies unchanged when local equals template equals base", async () => {
@@ -105,6 +106,6 @@ describe("sync-analysis", () => {
       include: ["**"],
     });
 
-    expect(result.classification.unchanged).toContain("same.txt");
+    expect(result.plan.files.unchanged).toContain("same.txt");
   });
 });

@@ -9,30 +9,121 @@ import {
   printParseErrorCode,
 } from "jsonc-parser";
 import { dirname, join } from "pathe";
+import { match } from "ts-pattern";
 import type { ZikuConfig } from "../modules/schemas";
 import { zikuConfigSchema } from "../modules/schemas";
 import { FileNotFoundError, ParseError, ValidationError } from "../errors";
 
 export const ZIKU_CONFIG_FILE = ".ziku/ziku.jsonc";
 
+// ─── 同期対象パスの種別 ───
+
 /**
- * `.ziku/ziku.jsonc` 自体を常に同期対象に含めた include パターンを返す。
+ * 同期対象パスの種別。
  *
- * 背景: `ziku.jsonc`（include/exclude パターン定義）は、これまで pull の片方向
- * 加法マージでしか同期されず、`ziku track` でローカルに追加したパターンが
- * `ziku push` でテンプレートへ伝播しなかった（テンプレ側 ziku.jsonc が更新されず、
- * 新規ファイルが他プロジェクトの init/pull に降りてこない孤児化バグ）。
+ * `.ziku/ziku.jsonc` は同期対象パターンそのものを定義するファイルで、他の追跡ファイルとは
+ * 違う規則で扱う。
  *
- * これを解消するため、push/pull/status の差分検出（hashFiles / detectDiff /
- * analyzeSync）で `ziku.jsonc` を「他の追跡ファイルと同じ 1 ファイル」として扱い、
- * 既存の classify→3-way マージ機構に乗せる。そのための SSOT がこの関数。
+ * - 走査条件（include / exclude / gitignore）にかかわらず同期対象に残す
+ * - 内容はテキストの 3-way マージではなく、パターン要素の加法 union でマージする
+ * - テンプレートが削除してもローカルからは消さない（削除は伝播しない）
  *
- * 注意: `.ziku/**` ではなく `.ziku/ziku.jsonc` のリテラルパス 1 本だけを足す。
- * `.ziku/lock.json`（テンプレート取得元 source を含むローカル専用ファイル）を
- * 同期対象に巻き込まないため。
+ * 型で区別しないと、この規則が消費側それぞれのパス比較として散らばり、「このファイルだけ
+ * 規則が違う」ことを知るのに全消費箇所を読む必要が出る。種別ごとの扱いは
+ * `src/utils/merge/sync-plan.ts` に集約する。
+ */
+export type SyncPath =
+  | { readonly kind: "syncedFile"; readonly path: string }
+  | { readonly kind: "zikuConfig"; readonly path: string };
+
+/**
+ * 特別扱いする種別と、その相対パス。
+ *
+ * `Record` で全種別を必須にしているのは、`SyncPath` に種別を足したときにこの表がコンパイル
+ * エラーになり、パスの登録漏れに気付けるようにするため。
+ */
+const SPECIAL_SYNC_PATHS: Record<Exclude<SyncPath["kind"], "syncedFile">, string> = {
+  zikuConfig: ZIKU_CONFIG_FILE,
+};
+
+/**
+ * 走査条件にかかわらず同期対象へ戻すパス。
+ *
+ * 特別扱いのファイルは、ユーザーが除外していても ziku 自身が同期の前提として必要とする。
+ * `SPECIAL_SYNC_PATHS` から導くので、種別を足せば下の入口すべてが自動的に追随する。
+ */
+const ALWAYS_TRACKED_PATHS: readonly string[] = Object.values(SPECIAL_SYNC_PATHS);
+
+/**
+ * パスの種別を判定する。
+ *
+ * 「このパスは ziku 自身の設定ファイルか」を決めるのはこの関数だけで、他の判定
+ * （{@link isZikuConfigPath}、分類結果の仕分け）はすべてここを経由する。
+ */
+export function classifySyncPath(path: string): SyncPath {
+  if (path === SPECIAL_SYNC_PATHS.zikuConfig) return { kind: "zikuConfig", path };
+  return { kind: "syncedFile", path };
+}
+
+/**
+ * そのパスが ziku 自身の設定ファイルか。
+ *
+ * 分類結果ではなく個々のパス（push 候補の一覧など）から設定ファイルを見つける入口。
+ * 網羅的な分岐で書くことで、種別が増えたときに判定漏れがコンパイルエラーになる。
+ */
+export function isZikuConfigPath(path: string): boolean {
+  return match(classifySyncPath(path))
+    .with({ kind: "zikuConfig" }, () => true)
+    .with({ kind: "syncedFile" }, () => false)
+    .exhaustive();
+}
+
+/**
+ * 特別扱いのファイル自体を常に同期対象に含めた include パターンを返す。
+ *
+ * 背景: `ziku.jsonc`（include/exclude パターン定義）を追跡対象から外すと、`ziku track` で
+ * ローカルに追加したパターンが `ziku push` でテンプレートへ伝播せず、新規ファイルが他
+ * プロジェクトの init/pull に降りてこない。パターン定義自体を「他の追跡ファイルと同じ
+ * 1 ファイル」として扱い、既存の classify→マージ機構に乗せるための入口がこの関数。
+ *
+ * 注意: `.ziku/**` ではなくリテラルパス 1 本だけを足す。`.ziku/lock.json`（テンプレート
+ * 取得元 source を含むローカル専用ファイル）を同期対象に巻き込まないため。
  */
 export function withConfigTracked(include: string[]): string[] {
-  return include.includes(ZIKU_CONFIG_FILE) ? include : [...include, ZIKU_CONFIG_FILE];
+  const missing = ALWAYS_TRACKED_PATHS.filter((path) => !include.includes(path));
+  return missing.length === 0 ? include : [...include, ...missing];
+}
+
+/**
+ * {@link withConfigTracked} が足した合成エントリを取り除いた include パターンを返す。
+ *
+ * 未追跡ファイルの探索のように「ユーザーが明示的に追跡すると決めたパターン」だけを見たい
+ * 入口で使う。合成エントリを混ぜると `.ziku` が探索のスコープ基点とみなされ、同期対象外の
+ * `.ziku/lock.json`（テンプレート取得元 source を含むローカル専用ファイル）まで追跡候補に
+ * 出てしまう。特別扱いのファイルは常に追跡されるので、探索対象から外しても追跡漏れは起きない。
+ */
+export function withoutConfigTracked(include: string[]): string[] {
+  return include.filter((path) => !ALWAYS_TRACKED_PATHS.includes(path));
+}
+
+/**
+ * 走査結果から漏れても同期対象へ戻すパスのうち、`dir` に実在するものを返す。
+ *
+ * 走査の入口はパターン解決・ハッシュ計算・diff 検出の 3 つあり、1 つの関数にはまとめられない。
+ * 落ちる理由も、戻す先の集合も違うため:
+ *
+ * - パターン解決（{@link withConfigTracked}）はディスクを見ない。テンプレート側にしか無い
+ *   ファイルも走査させる必要があり、実在チェックを挟むと初回取得ができなくなる。
+ * - ハッシュ計算は 1 ディレクトリの glob 結果へ戻す。exclude で消えた分が対象で、include に
+ *   明示されているときだけ戻す（設定ファイルを追跡しないパターンで呼ぶ利用者に押し付けない）。
+ * - diff 検出はローカルとテンプレートを突き合わせた集合へ戻す。gitignore で消えた分が対象で、
+ *   include の明示は問わない（`ziku diff` は合成エントリを足さない生の include で走るため）。
+ *
+ * 3 者が共有できるのは「どのパスが対象か」だけなので、その一覧をこの関数と
+ * {@link withConfigTracked} が同じ定数から引く。
+ */
+export function alwaysTrackedPathsIn(dir: string): string[] {
+  return ALWAYS_TRACKED_PATHS.filter((path) => existsSync(join(dir, path)));
 }
 
 export const ZIKU_CONFIG_SCHEMA_URL =

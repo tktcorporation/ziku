@@ -1,9 +1,8 @@
-import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "pathe";
 import { glob } from "tinyglobby";
-import { ZIKU_CONFIG_FILE } from "./ziku-config";
+import { alwaysTrackedPathsIn } from "./ziku-config";
 
 /**
  * テキスト内容の SHA-256 ハッシュを計算する。
@@ -50,16 +49,12 @@ export async function hashFiles(
   const files = await glob(patterns, { cwd: dir, dot: true, ignore: exclude ?? [] });
   const fileSet = new Set(files);
 
-  // ziku.jsonc が include に明示指定されている場合、exclude（glob の ignore）で
+  // 常に追跡するファイルが include に明示指定されている場合、exclude（glob の ignore）で
   // 消されても必ずハッシュ対象に含める。`.ziku/**` や `**/*.jsonc` のような exclude が
   // あると、追跡対象であるはずの制御ファイルが分類経路から外れ、`ziku track` の変更が
-  // 黙って同期されなくなるため（codex P2）。include の明示指定は exclude より優先する。
-  if (
-    patterns.includes(ZIKU_CONFIG_FILE) &&
-    !fileSet.has(ZIKU_CONFIG_FILE) &&
-    existsSync(join(dir, ZIKU_CONFIG_FILE))
-  ) {
-    fileSet.add(ZIKU_CONFIG_FILE);
+  // 黙って同期されなくなる。include の明示指定は exclude より優先する。
+  for (const path of alwaysTrackedPathsIn(dir)) {
+    if (patterns.includes(path)) fileSet.add(path);
   }
 
   const hashes: Record<string, string> = {};

@@ -28,6 +28,8 @@ import {
   readFileSafe,
   writeFileEnsureDir,
 } from "../utils/merge";
+import type { ZikuConfigPullAction } from "../utils/merge/sync-plan";
+import { zikuConfigPullAction } from "../utils/merge/sync-plan";
 import { analyzeSync } from "../utils/sync-analysis";
 import { mergeTemplatePatterns } from "../utils/template-patterns";
 import { computeMergedZikuConfig } from "../utils/config-merge";
@@ -159,8 +161,7 @@ export const pullCommand = defineCommand({
     await withFinally(async () => {
       // mergeTemplatePatterns は「テンプレ側で追加されたパターン配下のファイルも
       // 差分検出の対象に含める」ための include 和集合（discovery 用）を計算する。
-      // ziku.jsonc 自体の内容同期は、下で ziku.jsonc を追跡ファイルとして
-      // classify→3-way マージに乗せることで行う（加法的な上書きは廃止）。
+      // ziku.jsonc 自体の内容同期は、下の resolveConfigMerge が加法 union で行う。
       const { mergedInclude, mergedExclude, newInclude } = await mergeTemplatePatterns(
         templateDir,
         include,
@@ -173,35 +174,29 @@ export const pullCommand = defineCommand({
 
       log.step("Analyzing changes...");
 
-      const { classification, hashes } = await analyzeSync({
+      const { plan, hashes } = await analyzeSync({
         targetDir,
         templateDir,
         baseHashes: baseHashesOf(lock),
-        // ziku.jsonc 自体を追跡対象に含め、他ファイルと同じ 3-way マージで同期する。
+        // ziku.jsonc 自体を追跡対象に含め、他ファイルと同じ差分検出に乗せる。
         include: withConfigTracked(mergedInclude),
         exclude: mergedExclude,
       });
 
-      // ziku.jsonc は常に加法 union で同期する（autoUpdate も conflict も）。
-      // 汎用の applyFiles（テンプレ丸ごとコピー）や diff3 マージに乗せると、テンプレ側で
-      // 削除されたパターンがローカルへ伝播し「削除は自動伝播しない」方針に反する（codex P2）。
-      // よって autoUpdate / conflict から ziku.jsonc を抜き出し、専用の union マージで扱う。
-      const configSync = await resolveConfigMerge(targetDir, templateDir, classification);
-      const autoUpdate = classification.autoUpdate.filter((f) => f !== ZIKU_CONFIG_FILE);
-      const conflicts = classification.conflicts.filter((f) => f !== ZIKU_CONFIG_FILE);
-      // ziku.jsonc は ziku 自身の制御ファイル。テンプレが ziku.jsonc を削除しても、ローカルの
-      // 制御ファイルを消すと以降プロジェクトが壊れる（loadCommandContext が未初期化扱いにする）。
-      // deletedFiles からも除外し、削除は伝播させない（codex P2）。
-      const deletedFiles = classification.deletedFiles.filter((f) => f !== ZIKU_CONFIG_FILE);
-      // ローカル編集付きの削除候補も同じ理由で ziku.jsonc を除外する。ziku.jsonc の同期は
-      // 上の configSync（加法 union）が担い、削除は伝播させない。
-      const deletedWithLocalEdits = classification.deletedWithLocalEdits.filter(
-        (f) => f !== ZIKU_CONFIG_FILE,
+      // ziku.jsonc の扱いは分類カテゴリではなく sync-plan の判断に従う。汎用の applyFiles
+      // （テンプレ丸ごとコピー）や diff3 マージに乗せると、テンプレ側で削除されたパターンが
+      // ローカルへ伝播し「削除は自動伝播しない」方針に反する。plan.files には ziku.jsonc が
+      // 入らないため、以降の適用・削除処理へ紛れ込むことはない。
+      const configSync = await resolveConfigMerge(
+        targetDir,
+        templateDir,
+        zikuConfigPullAction(plan.config),
       );
+      const { autoUpdate, conflicts, deletedFiles, deletedWithLocalEdits } = plan.files;
 
-      // configInPlay のとき lock の base[ziku.jsonc] をローカル最終内容（union）に揃える。
-      // templateHashes 側に寄せると、テンプレが削除したパターンを後続 push が localOnly として
-      // 再追加してしまう（codex P2）。
+      // union マージを行ったときは lock の base[ziku.jsonc] をローカル最終内容（union）に
+      // 揃える。templateHashes 側に寄せると、テンプレが削除したパターンを後続 push が
+      // localOnly として再追加してしまう。
       const baseHashesForLock: Record<string, string> =
         configSync.baseHash !== undefined
           ? { ...hashes.templateHashes, [ZIKU_CONFIG_FILE]: configSync.baseHash }
@@ -209,7 +204,7 @@ export const pullCommand = defineCommand({
 
       const totalChanges =
         autoUpdate.length +
-        classification.newFiles.length +
+        plan.files.newFiles.length +
         conflicts.length +
         deletedFiles.length +
         deletedWithLocalEdits.length +
@@ -217,7 +212,7 @@ export const pullCommand = defineCommand({
 
       // ファイル変更が無くても、ziku.jsonc の base を union に揃える必要がある場合
       // （例: conflict だが union==local で書き込み不要）は lock を更新しないと、
-      // 古い base が残って status/push が誤判定する（codex P2）。その場合は early-return しない。
+      // 古い base が残って status/push が誤判定する。その場合は early-return しない。
       const configBaseChanged =
         configSync.baseHash !== undefined &&
         configSync.baseHash !== hashes.baseHashes[ZIKU_CONFIG_FILE];
@@ -229,13 +224,7 @@ export const pullCommand = defineCommand({
       }
 
       if (totalChanges > 0) {
-        logPullSummary({
-          ...classification,
-          autoUpdate,
-          conflicts,
-          deletedFiles,
-          deletedWithLocalEdits,
-        });
+        logPullSummary(plan.files);
       }
 
       if (args.dryRun) {
@@ -255,7 +244,7 @@ export const pullCommand = defineCommand({
       // 自動更新・新規追加・ziku.jsonc union 同期をまとめて適用
       await applyPullUpdates({
         autoUpdate,
-        newFiles: classification.newFiles,
+        newFiles: plan.files.newFiles,
         configWrite: configSync.write,
         targetDir,
         templateDir,
@@ -289,7 +278,7 @@ export const pullCommand = defineCommand({
         return;
       }
 
-      // 削除されたファイルを処理（ziku.jsonc は除外済み）
+      // 削除されたファイルを処理（plan.files に ziku.jsonc は入らない）
       if (deletedFiles.length > 0) {
         await handleDeletedFiles(deletedFiles, targetDir, approvalFlags);
       }
@@ -297,10 +286,6 @@ export const pullCommand = defineCommand({
       if (deletedWithLocalEdits.length > 0) {
         await handleDeletedWithLocalEdits(deletedWithLocalEdits, targetDir, approvalFlags);
       }
-
-      // ziku.jsonc は上の classification で他ファイルと同様に同期済み
-      // （autoUpdate: テンプレ内容で上書き / conflict: 3-way マージ）。
-      // 旧来の generateZikuJsonc による加法的上書きは廃止した。
 
       const latestRefOption = await Effect.runPromise(resolveBaseRef);
 
@@ -336,28 +321,28 @@ function logNewIncludeNotice(newInclude: string[]): void {
 /**
  * pull における `ziku.jsonc` の加法 union 同期を計算する。
  *
- * - `baseHash`: lock に記録すべき base ハッシュ（= ローカル最終内容 = union）。
- *   ziku.jsonc が classification に関与する場合のみ定義される。base をローカル最終内容に
- *   揃えることで、テンプレ削除パターンを後続 push が再追加するのを防ぐ（codex P2）。
+ * - `baseHash`: lock に記録すべき base ハッシュ（= ローカル最終内容 = union）。union マージを
+ *   行う場合のみ定義される。base をローカル最終内容に揃えることで、テンプレ削除パターンを
+ *   後続 push が再追加するのを防ぐ。
  * - `write`: 実際に書き込む内容。union が現在のローカルと一致する場合（テンプレ削除のみ等）は
  *   undefined（no-op）。これにより再検出ノイズを防ぐ。
  */
-async function resolveConfigMerge(
+function resolveConfigMerge(
   targetDir: string,
   templateDir: string,
-  classification: { autoUpdate: string[]; conflicts: string[] },
+  action: ZikuConfigPullAction,
 ): Promise<{ baseHash?: string; write?: string }> {
-  const inPlay =
-    classification.autoUpdate.includes(ZIKU_CONFIG_FILE) ||
-    classification.conflicts.includes(ZIKU_CONFIG_FILE);
-  if (!inPlay) return {};
-
-  const merged = await computeMergedZikuConfig({ targetDir, templateDir });
-  const currentLocal = await readFile(join(targetDir, ZIKU_CONFIG_FILE), "utf-8");
-  return {
-    baseHash: hashContent(merged),
-    write: merged !== currentLocal ? merged : undefined,
-  };
+  return match(action)
+    .with({ _tag: "Skip" }, () => Promise.resolve({}))
+    .with({ _tag: "UnionMerge" }, async () => {
+      const merged = await computeMergedZikuConfig({ targetDir, templateDir });
+      const currentLocal = await readFile(join(targetDir, ZIKU_CONFIG_FILE), "utf-8");
+      return {
+        baseHash: hashContent(merged),
+        write: merged !== currentLocal ? merged : undefined,
+      };
+    })
+    .exhaustive();
 }
 
 /**

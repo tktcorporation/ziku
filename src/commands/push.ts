@@ -13,13 +13,16 @@ import { LOCK_FILE, saveLock } from "../utils/lock";
 import {
   ZIKU_CONFIG_FILE,
   addIncludePattern,
+  isZikuConfigPath,
   loadZikuConfig,
   saveZikuConfig,
   withConfigTracked,
+  withoutConfigTracked,
 } from "../utils/ziku-config";
 import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
 import type { MergedContent } from "../utils/merge";
 import { mergeConflictFiles } from "../utils/merge";
+import { zikuConfigPushAction } from "../utils/merge/sync-plan";
 import { analyzeSync } from "../utils/sync-analysis";
 import { transportTextToBytes } from "../utils/file-content";
 import {
@@ -314,7 +317,7 @@ function pushToLocal(
       // これをそのままローカルへ書き戻すと、無関係なローカル限定パターンを消してしまう
       // （union は削除しないという原則違反）。configWriteBackSafe=false のときは
       // 書き戻しをスキップする（ローカルは元々正しい内容を保持しているので何もしなくてよい）。
-      const mergedConfig = target.files.find((f) => f.path === ZIKU_CONFIG_FILE);
+      const mergedConfig = target.files.find((f) => isZikuConfigPath(f.path));
       if (mergedConfig && configWriteBackSafe) {
         const localConfigPath = join(projectDir, ZIKU_CONFIG_FILE);
         await mkdir(dirname(localConfigPath), { recursive: true });
@@ -766,13 +769,10 @@ async function resolveUntrackedTracking(
   effectivePatterns: { include: string[]; exclude: string[] };
   newlyTrackedPaths: string[];
 }> {
-  // 未追跡探索には config-tracked の合成エントリ（`.ziku/ziku.jsonc`）を含めない。
-  // これを含めると detectUntrackedFiles が `.ziku` をスコープ基点とみなして `.ziku/**` を
-  // 走査し、同期対象外の `.ziku/lock.json`（取得元 source を含むローカル専用ファイル）まで
-  // 「未追跡」として追跡候補に出してしまう（codex P2）。`ziku.jsonc` 自体は常に追跡される
-  // SSOT なので、未追跡探索の対象から外しても追跡漏れは起きない。
+  // 未追跡探索は、ユーザーが明示的に追跡すると決めたパターンだけを見る（除外の理由は
+  // withoutConfigTracked の JSDoc を参照）。
   const discoveryPatterns = {
-    include: patterns.include.filter((p) => p !== ZIKU_CONFIG_FILE),
+    include: withoutConfigTracked(patterns.include),
     exclude: patterns.exclude,
   };
   const untrackedByFolder = await detectUntrackedFiles({ targetDir, patterns: discoveryPatterns });
@@ -874,7 +874,7 @@ async function applyNewlyTrackedConfigToPush(params: {
   const { targetDir, templateDir, newlyTrackedPaths, pushableFiles, diffFiles, mergedContents } =
     params;
 
-  const configAlreadySelected = pushableFiles.some((f) => f.path === ZIKU_CONFIG_FILE);
+  const configAlreadySelected = pushableFiles.some((f) => isZikuConfigPath(f.path));
 
   const selectedPaths = pushableFiles.map((f) => f.path);
   const selectedPathSet = new Set(selectedPaths);
@@ -912,7 +912,7 @@ async function applyNewlyTrackedConfigToPush(params: {
   if (configAlreadySelected) return { pushableFiles, configWriteBackSafe };
 
   // union がテンプレと同一なら伝える追加パターンは無い（注入しない）。
-  const configDiff = diffFiles.find((f) => f.path === ZIKU_CONFIG_FILE);
+  const configDiff = diffFiles.find((f) => isZikuConfigPath(f.path));
   const templateConfig = configDiff === undefined ? undefined : templateContentOf(configDiff);
   if (mergedConfig === templateConfig) {
     return { pushableFiles, configWriteBackSafe };
@@ -954,7 +954,7 @@ async function warnIfConfigWouldBeAutoIncluded(params: {
   previewFiles: FileDiff[];
 }): Promise<void> {
   const { targetDir, templateDir, previewFiles } = params;
-  if (previewFiles.some((f) => f.path === ZIKU_CONFIG_FILE)) return;
+  if (previewFiles.some((f) => isZikuConfigPath(f.path))) return;
 
   const relevantPatterns = await findLocalOnlyPatternsForPaths({
     targetDir,
@@ -1086,13 +1086,14 @@ async function classifyAndResolveConflicts(params: {
   /** テンプレートが削除したがローカルに編集があるファイル。push はその削除を取り消す。 */
   deletedWithLocalEdits: Set<string>;
 }> {
-  const { classification } = await analyzeSync({
+  const { plan } = await analyzeSync({
     targetDir: params.targetDir,
     templateDir: params.templateDir,
     baseHashes: baseHashesOf(params.lock),
     include: params.patterns.include,
     exclude: params.patterns.exclude,
   });
+  const classification = plan.files;
 
   const pushableFilePaths = new Set<string>();
   for (const file of classification.localOnly) pushableFilePaths.add(file);
@@ -1104,31 +1105,40 @@ async function classifyAndResolveConflicts(params: {
   const deletedWithLocalEdits = new Set(classification.deletedWithLocalEdits);
   for (const file of deletedWithLocalEdits) pushableFilePaths.add(file);
 
-  if (classification.autoUpdate.length > 0) {
+  // ziku.jsonc の扱いは分類カテゴリではなく sync-plan の判断に従う。送る場合も生のローカル
+  // 内容ではなく加法 union を送る。生のローカルを送ると、ローカルがパターンを削除していた
+  // 場合にテンプレ側のパターンも消してしまい「削除は自動伝播しない」方針に反する。union 内容を
+  // mergedContents に入れておくと後段の files 構築で採用され、diff3（mergeOneFile）の対象にも
+  // ならない（plan.files.conflicts に ziku.jsonc は入らない）。
+  const templateOnly = [...classification.autoUpdate];
+  await match(zikuConfigPushAction(plan.config))
+    .with({ _tag: "Skip" }, () => Promise.resolve())
+    .with({ _tag: "TemplateOnly" }, () => {
+      templateOnly.push(ZIKU_CONFIG_FILE);
+      return Promise.resolve();
+    })
+    .with({ _tag: "SendUnion" }, async ({ restoresTemplateDeletion }) => {
+      const merged = await computeMergedZikuConfig({
+        targetDir: params.targetDir,
+        templateDir: params.templateDir,
+      });
+      params.mergedContents.set(ZIKU_CONFIG_FILE, asPushContent(merged));
+      pushableFilePaths.add(ZIKU_CONFIG_FILE);
+      if (restoresTemplateDeletion) deletedWithLocalEdits.add(ZIKU_CONFIG_FILE);
+    })
+    .exhaustive();
+
+  if (templateOnly.length > 0) {
     log.info(
-      `Skipping ${classification.autoUpdate.length} file(s) only changed in template (use \`ziku pull\` to sync):`,
+      `Skipping ${templateOnly.length} file(s) only changed in template (use \`ziku pull\` to sync):`,
     );
-    for (const file of classification.autoUpdate) {
+    for (const file of templateOnly) {
       log.message(`  ${pc.dim("↓")} ${pc.dim(file)}`);
     }
   }
 
-  // ziku.jsonc が push 対象なら、常に加法 union を送る（localOnly でも生のローカル
-  // 内容を送らない）。生のローカルを送ると、ローカルがパターンを削除していた場合に
-  // テンプレ側のパターンも消してしまい「削除は自動伝播しない」方針に反する（codex P2）。
-  // union 内容を mergedContents に入れておくと、後段の files 構築で採用される。
-  // ここで先に処理し、diff3（mergeOneFile）には ziku.jsonc を渡さない。
-  if (pushableFilePaths.has(ZIKU_CONFIG_FILE)) {
-    const merged = await computeMergedZikuConfig({
-      targetDir: params.targetDir,
-      templateDir: params.templateDir,
-    });
-    params.mergedContents.set(ZIKU_CONFIG_FILE, asPushContent(merged));
-  }
-
   const unresolvedConflicts = new Set<string>();
-  // ziku.jsonc は上で union 解決済みなので diff3 の対象から外す。
-  const conflictsToResolve = classification.conflicts.filter((f) => f !== ZIKU_CONFIG_FILE);
+  const conflictsToResolve = classification.conflicts;
   if (conflictsToResolve.length > 0) {
     const unresolved = await resolveConflicts(conflictsToResolve, {
       targetDir: params.targetDir,

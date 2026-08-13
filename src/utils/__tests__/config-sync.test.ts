@@ -19,7 +19,7 @@ import { hashFiles } from "../hash";
 import { classifyFiles } from "../merge";
 import { detectDiff } from "../diff";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../untracked";
-import { ZIKU_CONFIG_FILE, withConfigTracked } from "../ziku-config";
+import { ZIKU_CONFIG_FILE, withConfigTracked, withoutConfigTracked } from "../ziku-config";
 
 async function createTempDir(label: string): Promise<string> {
   const dir = join(
@@ -190,10 +190,8 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
       ".claude/rules.md": "rule",
     });
 
-    // push の resolveUntrackedTracking が行うのと同じく、探索 include から ziku.jsonc を除く
-    const discoveryInclude = withConfigTracked([".claude/**"]).filter(
-      (p) => p !== ZIKU_CONFIG_FILE,
-    );
+    // push の resolveUntrackedTracking と同じ関数で探索 include から合成エントリを除く
+    const discoveryInclude = withoutConfigTracked(withConfigTracked([".claude/**"]));
     const untracked = await detectUntrackedFiles({
       targetDir: dir,
       patterns: { include: discoveryInclude, exclude: [] },
