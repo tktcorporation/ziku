@@ -1,8 +1,8 @@
 import { Cause, Effect, Exit, Option } from "effect";
 import { vol } from "memfs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ValidationError } from "../../errors";
-import type { LockState } from "../../modules/schemas";
+import type { ParseError, ValidationError } from "../../errors";
+import type { LockState, ZikuConfig } from "../../modules/schemas";
 import { baseCommitSha, baseHashesOf, markSynced } from "../../modules/schemas";
 import { toZikuError, toZikuFailure } from "../../services/command-context";
 
@@ -39,6 +39,13 @@ describe("loadZikuConfig", () => {
     vol.reset();
   });
 
+  const runLoad = (dir: string): Promise<{ config: ZikuConfig; rawContent: string }> =>
+    Effect.runPromise(loadZikuConfig(dir));
+  const loadFailure = async (dir: string): Promise<unknown> => {
+    const exit = await Effect.runPromiseExit(loadZikuConfig(dir));
+    return Exit.isFailure(exit) ? Cause.failureOption(exit.cause) : undefined;
+  };
+
   it("正常な .ziku/ziku.jsonc を読み込める", async () => {
     const config = {
       include: [".github/**"],
@@ -48,7 +55,7 @@ describe("loadZikuConfig", () => {
       "/project/.ziku/ziku.jsonc": JSON.stringify(config),
     });
 
-    const result = await loadZikuConfig("/project");
+    const result = await runLoad("/project");
     expect(result.config).toEqual(config);
     expect(typeof result.rawContent).toBe("string");
   });
@@ -64,7 +71,7 @@ describe("loadZikuConfig", () => {
       "/project/.ziku/ziku.jsonc": JSON.stringify(config),
     });
 
-    const result = await loadZikuConfig("/project");
+    const result = await runLoad("/project");
     expect(result.config.$schema).toBe("https://example.com/schema.json");
     expect(result.config.exclude).toEqual(["*.secret"]);
   });
@@ -79,30 +86,74 @@ describe("loadZikuConfig", () => {
       "/project/.ziku/ziku.jsonc": jsonc,
     });
 
-    const result = await loadZikuConfig("/project");
+    const result = await runLoad("/project");
     expect(result.config.include).toEqual([".github/**"]);
     expect(result.rawContent).toBe(jsonc);
   });
 
-  it("ファイルが存在しない場合はエラー", async () => {
-    vol.fromJSON({});
-    await expect(loadZikuConfig("/project")).rejects.toThrow();
-  });
-
-  it("不正な JSON の場合はエラー", async () => {
+  it("末尾カンマ付きの JSONC を読み込める", async () => {
     vol.fromJSON({
-      "/project/.ziku/ziku.jsonc": "{ invalid json }",
+      "/project/.ziku/ziku.jsonc": '{ "include": [".github/**",], }',
     });
-    await expect(loadZikuConfig("/project")).rejects.toThrow();
+
+    const result = await runLoad("/project");
+    expect(result.config.include).toEqual([".github/**"]);
   });
 
-  it("スキーマに合わない場合はエラー (include が欠けている)", async () => {
+  it("ファイルが存在しない場合は FileNotFoundError", async () => {
+    vol.fromJSON({});
+    expect(await loadFailure("/project")).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "FileNotFoundError" })),
+    );
+  });
+
+  it("JSONC として壊れている場合は ParseError", async () => {
+    vol.fromJSON({
+      "/project/.ziku/ziku.jsonc": '{ "include": [ }',
+    });
+
+    const failure = await loadFailure("/project");
+    expect(failure).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "ParseError", path: ZIKU_CONFIG_FILE })),
+    );
+
+    // 構文エラーとして報告され、ファイルのどこが壊れているかが hint に残ること
+    const parseError = Option.getOrThrow(failure as Option.Option<ParseError>);
+    const zikuFailure = toZikuFailure(parseError);
+    expect(zikuFailure.reason).toMatchObject({ kind: "ConfigUnparsable", path: ZIKU_CONFIG_FILE });
+    expect(zikuFailure.hint).toContain("line 1, column");
+  });
+
+  it("スキーマに合わない場合は ValidationError (include が欠けている)", async () => {
     vol.fromJSON({
       "/project/.ziku/ziku.jsonc": JSON.stringify({
         exclude: ["*.secret"],
       }),
     });
-    await expect(loadZikuConfig("/project")).rejects.toThrow();
+    expect(await loadFailure("/project")).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "ValidationError" })),
+    );
+  });
+
+  it("型の違う include は、構文エラーではなく検証失敗としてフィールド名付きで報告される", async () => {
+    vol.fromJSON({
+      "/project/.ziku/ziku.jsonc": JSON.stringify({ include: "not-an-array" }),
+    });
+
+    const failure = await loadFailure("/project");
+    expect(failure).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "ValidationError", path: ZIKU_CONFIG_FILE })),
+    );
+
+    const validationError = Option.getOrThrow(failure as Option.Option<ValidationError>);
+    expect(validationError.issues).toEqual([expect.stringContaining("include: ")]);
+    expect(validationError.issues[0]).toContain("array");
+
+    // 「パースに失敗」ではなく「読めない設定」として、作り直しを促すこと
+    const zikuError = toZikuError(validationError);
+    expect(zikuError.message).toBe(`Failed to read ${ZIKU_CONFIG_FILE}`);
+    expect(zikuError.hint).toContain("include: ");
+    expect(zikuError.hint).toContain("ziku init");
   });
 });
 

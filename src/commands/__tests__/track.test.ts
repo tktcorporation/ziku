@@ -295,4 +295,37 @@ describe("trackCommand", () => {
       expect(messageCall?.[0]).not.toContain(".mcp.json");
     });
   });
+
+  describe("読めない ziku.jsonc の報告", () => {
+    /** 生の内容で ziku.jsonc を用意する（壊れた設定を書くため seedProject とは別立て） */
+    function seedRawConfig(raw: string): void {
+      vol.fromJSON({ "/project/.ziku/ziku.jsonc": raw });
+    }
+
+    it("JSONC として壊れていれば構文エラーとして報告する", async () => {
+      seedRawConfig('{ "include": [ }');
+
+      await expect(runTrack([".env.example", "--dir", "/project"])).rejects.toThrow(
+        "Failed to parse .ziku/ziku.jsonc",
+      );
+    });
+
+    it("スキーマ違反は構文エラーではなく、不正なフィールド名付きで報告する", async () => {
+      seedRawConfig('{ "include": "not-an-array" }');
+
+      await expect(runTrack([".env.example", "--dir", "/project"])).rejects.toMatchObject({
+        message: "Failed to read .ziku/ziku.jsonc",
+        hint: expect.stringContaining("include: "),
+        reason: { kind: "ConfigInvalid" },
+      });
+    });
+
+    it("--list でも同じ分類で報告する", async () => {
+      seedRawConfig('{ "include": "not-an-array" }');
+
+      await expect(runTrack(["--list", "--dir", "/project"])).rejects.toThrow(
+        "Failed to read .ziku/ziku.jsonc",
+      );
+    });
+  });
 });

@@ -115,7 +115,6 @@ function mockContext(
 
 const emptyDiff = {
   files: [],
-  summary: { added: 0, modified: 0, deleted: 0, unchanged: 0 },
 };
 
 describe("diffCommand", () => {
@@ -199,7 +198,6 @@ describe("diffCommand", () => {
 
       const diffWithChanges = {
         files: [{ path: "new-file.txt", type: "added" as const, localContent: "content" }],
-        summary: { added: 1, modified: 0, deleted: 0, unchanged: 0 },
       };
       mockDetectDiff.mockResolvedValueOnce(diffWithChanges);
       mockHasDiff.mockReturnValueOnce(true);
@@ -270,7 +268,6 @@ describe("diffCommand", () => {
 
       const diffWithChanges = {
         files: [{ path: "new-file.txt", type: "added" as const, localContent: "content" }],
-        summary: { added: 1, modified: 0, deleted: 0, unchanged: 0 },
       };
       mockDetectDiff.mockResolvedValueOnce(diffWithChanges);
       mockHasDiff.mockReturnValueOnce(true);
@@ -290,7 +287,6 @@ describe("diffCommand", () => {
 
       const diffWithChanges = {
         files: [{ path: "new-file.txt", type: "added" as const, localContent: "content" }],
-        summary: { added: 1, modified: 0, deleted: 0, unchanged: 0 },
       };
       mockDetectDiff.mockResolvedValueOnce(diffWithChanges);
       mockHasDiff.mockReturnValueOnce(true);
@@ -312,17 +308,18 @@ describe("diffCommand", () => {
         path: "unchanged.txt",
         type: "unchanged" as const,
         localContent: "same",
+        templateContent: "same",
       };
       const addedFile = { path: "added.txt", type: "added" as const, localContent: "new" };
       const modifiedFile = {
         path: "modified.txt",
         type: "modified" as const,
         localContent: "changed",
+        templateContent: "original",
       };
 
       const diffWithMixed = {
         files: [addedFile, unchangedFile, modifiedFile],
-        summary: { added: 1, modified: 1, deleted: 0, unchanged: 1 },
       };
       mockDetectDiff.mockResolvedValueOnce(diffWithMixed);
       mockHasDiff.mockReturnValueOnce(true);

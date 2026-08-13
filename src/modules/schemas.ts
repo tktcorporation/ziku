@@ -412,26 +412,74 @@ export const diffTypeSchema = z.enum([
 ]);
 export type DiffType = z.infer<typeof diffTypeSchema>;
 
-// ファイル差分
-export const fileDiffSchema = z.object({
-  path: z.string(),
-  type: diffTypeSchema,
-  localContent: z.string().optional(),
-  templateContent: z.string().optional(),
-});
+/**
+ * ローカルとテンプレートを突き合わせた 1 ファイル分の差分。
+ *
+ * 種別ごとに、どちら側の内容が存在するかが決まっている。
+ *
+ * | 種別        | 存在する内容                    | その状況                             |
+ * | ----------- | ------------------------------- | ------------------------------------ |
+ * | `added`     | `localContent`                  | ローカルにだけあり、テンプレに無い   |
+ * | `deleted`   | `templateContent`               | テンプレにだけあり、ローカルに無い   |
+ * | `modified`  | `localContent`/`templateContent` | 両方にあり、内容が異なる            |
+ * | `unchanged` | `localContent`/`templateContent` | 両方にあり、内容が同じ              |
+ *
+ * この対応を種別と独立した optional フィールドで表すと、「ローカルにしか無いはずの
+ * `added` にテンプレの内容が載る」「両側にあるはずの `modified` で片側が欠ける」といった
+ * 起こりえない組み合わせが作れてしまう。そうなると内容を読む側は欠損に備えるしかなく、
+ * `?? ""` で空文字列に潰す。空文字列は「中身が空のファイル」と区別できないため、
+ * テンプレ側を空とみなした patch や、行数 0 という嘘の統計がそのまま表示に出る。
+ * 判別 union にすると、存在しない内容へのアクセスがコンパイルエラーになり、
+ * フォールバックを書く余地自体が無くなる。
+ *
+ * 存在しない側のフィールドは「常に undefined」としても宣言しない。宣言すると union 全体で
+ * `diff.templateContent` が読めてしまい、種別で絞り込まずに `?? ""` を書く経路が復活する。
+ * 内容を読むには `match(diff).with({ type: ... })` で種別を絞る必要がある。
+ */
+export const fileDiffSchema = z.discriminatedUnion("type", [
+  z.object({ path: z.string(), type: z.literal("added"), localContent: z.string() }),
+  z.object({ path: z.string(), type: z.literal("deleted"), templateContent: z.string() }),
+  z.object({
+    path: z.string(),
+    type: z.literal("modified"),
+    localContent: z.string(),
+    templateContent: z.string(),
+  }),
+  z.object({
+    path: z.string(),
+    type: z.literal("unchanged"),
+    localContent: z.string(),
+    templateContent: z.string(),
+  }),
+]);
 export type FileDiff = z.infer<typeof fileDiffSchema>;
 
-// 差分結果
+/**
+ * ローカルとテンプレート全体の差分。
+ *
+ * 種別ごとの件数は `files` から数えれば必ず出るため、フィールドとしては持たない。
+ * 集計値を併置すると `files` を絞り込んだ側と集計側が食い違い、「push 対象は 0 件なのに
+ * 変更ありと判定される」ような不整合が作れる。件数が要る場所では `summarizeDiff` を呼ぶ。
+ */
 export const diffResultSchema = z.object({
   files: z.array(fileDiffSchema),
-  summary: z.object({
-    added: z.number(),
-    modified: z.number(),
-    deleted: z.number(),
-    unchanged: z.number(),
-  }),
 });
 export type DiffResult = z.infer<typeof diffResultSchema>;
+
+/** 差分種別ごとのファイル数。`summarizeDiff` が `files` から導出する。 */
+export type DiffSummary = Readonly<Record<DiffType, number>>;
+
+/**
+ * 差分の種別ごとの件数を数える。
+ *
+ * 種別をそのままキーにするので、`DiffType` に種別が増えたときは初期値の
+ * `Record<DiffType, number>` が不足キーとしてコンパイルエラーになる。
+ */
+export function summarizeDiff(files: readonly FileDiff[]): DiffSummary {
+  const counts: Record<DiffType, number> = { added: 0, modified: 0, deleted: 0, unchanged: 0 };
+  for (const file of files) counts[file.type]++;
+  return counts;
+}
 
 // PR 結果
 export const prResultSchema = z.object({

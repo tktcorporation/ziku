@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createPatch } from "diff";
 import { join } from "pathe";
 import { match } from "ts-pattern";
-import type { DiffResult, DiffType, FileDiff } from "../modules/schemas";
+import type { DiffResult, FileDiff } from "../modules/schemas";
 import { filterByGitignore, loadMergedGitignore } from "./gitignore";
 import type { FlatPatterns } from "./patterns";
 import { resolvePatterns } from "./patterns";
@@ -22,10 +22,6 @@ export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
   const { targetDir, templateDir, patterns } = options;
 
   const files: FileDiff[] = [];
-  let added = 0;
-  let modified = 0;
-  let deleted = 0;
-  let unchanged = 0;
 
   // ローカルとテンプレート両方の .gitignore をマージして読み込み
   const gitignore = await loadMergedGitignore([targetDir, templateDir]);
@@ -58,55 +54,43 @@ export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
     const localExists = existsSync(localPath);
     const templateExists = existsSync(templatePath);
 
-    let type: DiffType;
-    let localContent: string | undefined;
-    let templateContent: string | undefined;
-
-    if (localExists) {
-      localContent = await readFile(localPath, "utf-8");
-    }
-    if (templateExists) {
-      templateContent = await readFile(templatePath, "utf-8");
-    }
-
+    // 内容の読み取りは種別が決まってから行う。「存在する側だけを読む」ことを
+    // 分岐と一体にしておかないと、読めなかった側を後から埋める処理が必要になる。
     if (localExists && templateExists) {
-      // 両方に存在 → 内容比較
-      if (localContent === templateContent) {
-        type = "unchanged";
-        unchanged++;
-      } else {
-        type = "modified";
-        modified++;
-      }
-    } else if (localExists && !templateExists) {
+      const localContent = await readFile(localPath, "utf-8");
+      const templateContent = await readFile(templatePath, "utf-8");
+      files.push(
+        localContent === templateContent
+          ? { path: filePath, type: "unchanged", localContent, templateContent }
+          : { path: filePath, type: "modified", localContent, templateContent },
+      );
+    } else if (localExists) {
       // ローカルのみ → 追加（テンプレートにはない）
-      type = "added";
-      added++;
-    } else {
+      files.push({
+        path: filePath,
+        type: "added",
+        localContent: await readFile(localPath, "utf-8"),
+      });
+    } else if (templateExists) {
       // テンプレートのみ → 削除（ローカルにはない）
-      type = "deleted";
-      deleted++;
+      files.push({
+        path: filePath,
+        type: "deleted",
+        templateContent: await readFile(templatePath, "utf-8"),
+      });
     }
-
-    files.push({
-      path: filePath,
-      type,
-      localContent,
-      templateContent,
-    });
+    // どちらにも存在しないパスは差分ではない。パターン解決は実在するファイルだけを
+    // 返すため通常は起きないが、列挙後に消えた場合はここで落とす。
   }
 
-  return {
-    files: files.toSorted((a, b) => a.path.localeCompare(b.path)),
-    summary: { added, modified, deleted, unchanged },
-  };
+  return { files: files.toSorted((a, b) => a.path.localeCompare(b.path)) };
 }
 
 /**
  * 差分があるかどうかを判定
  */
 export function hasDiff(diff: DiffResult): boolean {
-  return diff.summary.added > 0 || diff.summary.modified > 0 || diff.summary.deleted > 0;
+  return diff.files.some((file) => file.type !== "unchanged");
 }
 
 /**
@@ -127,17 +111,20 @@ const DIFF_CONTEXT_LINES = 3;
  * unchanged は表示すべき差分が無いので空文字列を返す。
  */
 export function generateUnifiedDiff(fileDiff: FileDiff): string {
-  const { path, type, localContent, templateContent } = fileDiff;
   const options = { context: DIFF_CONTEXT_LINES };
 
-  return match(type)
-    .with("added", () => createPatch(path, "", localContent ?? "", "template", "local", options))
-    .with("modified", () =>
-      createPatch(path, templateContent ?? "", localContent ?? "", "template", "local", options),
+  // 空文字列を渡すのは「その側にファイルが無い」ことを patch として表すため。
+  // 内容が読めなかった場合の穴埋めではない。
+  return match(fileDiff)
+    .with({ type: "added" }, (f) =>
+      createPatch(f.path, "", f.localContent, "template", "local", options),
     )
-    .with("deleted", () =>
-      createPatch(path, templateContent ?? "", "", "template", "local", options),
+    .with({ type: "modified" }, (f) =>
+      createPatch(f.path, f.templateContent, f.localContent, "template", "local", options),
     )
-    .with("unchanged", () => "")
+    .with({ type: "deleted" }, (f) =>
+      createPatch(f.path, f.templateContent, "", "template", "local", options),
+    )
+    .with({ type: "unchanged" }, () => "")
     .exhaustive();
 }

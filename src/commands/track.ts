@@ -1,6 +1,8 @@
 import { defineCommand } from "citty";
+import { Effect } from "effect";
 import { resolve } from "pathe";
 import { zikuFailure } from "../errors";
+import { runCommandEffect, toZikuFailure } from "../services/command-context";
 import { intro, log, outro, pc } from "../ui/renderer";
 import {
   ZIKU_CONFIG_FILE,
@@ -11,6 +13,7 @@ import {
   zikuConfigExists,
 } from "../utils/ziku-config";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
+import type { ZikuConfig } from "../modules/schemas";
 
 /**
  * track コマンドのファイル操作メタデータ。
@@ -105,7 +108,7 @@ export const trackCommand = defineCommand({
       });
     }
 
-    const { config, rawContent } = await loadZikuConfig(targetDir);
+    const { config, rawContent } = await readConfig(targetDir);
 
     const updatedContent = addIncludePattern(rawContent, patterns);
 
@@ -135,11 +138,21 @@ export const trackCommand = defineCommand({
   },
 });
 
+/**
+ * `.ziku/ziku.jsonc` を読み、失敗を分類済みの `ZikuFailure` として投げる。
+ *
+ * 素の `Effect.runPromise` だと失敗が FiberFailure に包まれ、不在 / 構文エラー /
+ * スキーマ違反の区別がトップレベルまで届かない。
+ */
+function readConfig(targetDir: string): Promise<{ config: ZikuConfig; rawContent: string }> {
+  return runCommandEffect(loadZikuConfig(targetDir).pipe(Effect.mapError(toZikuFailure)));
+}
+
 /** --list モード: 現在追跡中のパターン一覧を表示する */
 async function listTrackedPatterns(targetDir: string): Promise<void> {
   const {
     config: { include, exclude: excludeRaw },
-  } = await loadZikuConfig(targetDir);
+  } = await readConfig(targetDir);
   const exclude = excludeRaw ?? [];
   log.info("Tracked patterns:");
   for (const pattern of include) {

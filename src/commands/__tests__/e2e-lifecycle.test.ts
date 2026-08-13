@@ -143,9 +143,7 @@ vi.mock("../../utils/hash", async (importOriginal) => ({
 }));
 
 vi.mock("../../utils/diff", () => ({
-  detectDiff: vi.fn(() =>
-    Promise.resolve({ files: [], summary: { added: 0, modified: 0, deleted: 0, unchanged: 0 } }),
-  ),
+  detectDiff: vi.fn(() => Promise.resolve({ files: [] })),
 }));
 
 vi.mock("../../utils/merge", async (importOriginal) => {
@@ -447,7 +445,6 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
           localContent: "# Testing Guide\nWrite tests first.",
         },
       ],
-      summary: { added: 1, modified: 0, deleted: 0, unchanged: 2 },
     } as any);
     mockSelectPushFiles.mockResolvedValueOnce([
       {
@@ -501,7 +498,6 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
           localContent: '{"extends": ["next"]}',
         },
       ],
-      summary: { added: 1, modified: 0, deleted: 0, unchanged: 3 },
     } as any);
     mockSelectPushFiles.mockResolvedValueOnce([
       {
@@ -750,7 +746,6 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
           localContent: "# Testing Guide\nWrite tests first.",
         },
       ],
-      summary: { added: 1, modified: 0, deleted: 0, unchanged: 2 },
     } as any);
     mockSelectPushFiles.mockResolvedValueOnce([
       {
@@ -791,7 +786,6 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
     });
     mockDetectDiff.mockResolvedValueOnce({
       files: [{ path: ".eslintrc.json", type: "added", localContent: '{"extends": ["next"]}' }],
-      summary: { added: 1, modified: 0, deleted: 0, unchanged: 3 },
     } as any);
     mockSelectPushFiles.mockResolvedValueOnce([
       { path: ".eslintrc.json", type: "added", localContent: '{"extends": ["next"]}' },

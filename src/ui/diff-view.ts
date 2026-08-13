@@ -66,20 +66,20 @@ function countLines(content: string): number {
 
 /** ファイルの差分統計を計算 */
 export function calculateDiffStats(fileDiff: FileDiff): DiffStats {
-  return match(fileDiff.type)
-    .with("unchanged", () => ({ additions: 0, deletions: 0 }))
-    .with("deleted", () => ({
+  return match(fileDiff)
+    .with({ type: "unchanged" }, () => ({ additions: 0, deletions: 0 }))
+    .with({ type: "deleted" }, (f) => ({
       additions: 0,
-      deletions: countLines(fileDiff.templateContent ?? ""),
+      deletions: countLines(f.templateContent),
     }))
-    .with("added", () => ({
-      additions: countLines(fileDiff.localContent ?? ""),
+    .with({ type: "added" }, (f) => ({
+      additions: countLines(f.localContent),
       deletions: 0,
     }))
-    .with("modified", () => {
+    .with({ type: "modified" }, (f) => {
       let additions = 0;
       let deletions = 0;
-      for (const line of toDiffContentLines(generateUnifiedDiff(fileDiff))) {
+      for (const line of toDiffContentLines(generateUnifiedDiff(f))) {
         if (line.startsWith("+")) additions++;
         else if (line.startsWith("-")) deletions++;
       }

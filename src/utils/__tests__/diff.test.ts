@@ -9,7 +9,6 @@ describe("diff", () => {
         path: "new-file.txt",
         type: "added",
         localContent: "line1\nline2\nline3\n",
-        templateContent: undefined,
       };
 
       const result = generateUnifiedDiff(fileDiff);
@@ -41,7 +40,6 @@ describe("diff", () => {
       const fileDiff: FileDiff = {
         path: "deleted-file.txt",
         type: "deleted",
-        localContent: undefined,
         templateContent: "first\nsecond\n",
       };
 
@@ -72,27 +70,12 @@ describe("diff", () => {
         path: "empty-file.txt",
         type: "added",
         localContent: "",
-        templateContent: undefined,
       };
 
       const result = generateUnifiedDiff(fileDiff);
 
       expect(result).toContain("--- empty-file.txt");
       expect(result).toContain("+++ empty-file.txt");
-    });
-
-    it("内容が undefined の場合でも正しく処理する", () => {
-      const fileDiff: FileDiff = {
-        path: "file.txt",
-        type: "added",
-        localContent: undefined,
-        templateContent: undefined,
-      };
-
-      const result = generateUnifiedDiff(fileDiff);
-
-      // エラーなく空の diff が生成される
-      expect(result).toContain("--- file.txt");
     });
 
     it("複数行の変更を含む diff を生成する", () => {

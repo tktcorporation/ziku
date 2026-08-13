@@ -43,7 +43,12 @@ describe("diff-view", () => {
 
   describe("calculateDiffStats", () => {
     it("should return zeros for unchanged", () => {
-      const file: FileDiff = { path: "a.ts", type: "unchanged" };
+      const file: FileDiff = {
+        path: "a.ts",
+        type: "unchanged",
+        localContent: "same\n",
+        templateContent: "same\n",
+      };
       expect(calculateDiffStats(file)).toEqual({
         additions: 0,
         deletions: 0,
@@ -152,10 +157,11 @@ describe("diff-view", () => {
       expect(stats.deletions).toBeLessThanOrEqual(5);
     });
 
-    it("should handle undefined content for added", () => {
+    it("should report zero lines for an empty added file", () => {
       const file: FileDiff = {
         path: "a.ts",
         type: "added",
+        localContent: "",
       };
       expect(calculateDiffStats(file)).toEqual({
         additions: 0,
@@ -163,10 +169,11 @@ describe("diff-view", () => {
       });
     });
 
-    it("should handle undefined content for deleted", () => {
+    it("should report zero lines for an empty deleted file", () => {
       const file: FileDiff = {
         path: "a.ts",
         type: "deleted",
+        templateContent: "",
       };
       expect(calculateDiffStats(file)).toEqual({
         additions: 0,
@@ -364,7 +371,12 @@ describe("diff-view", () => {
 
   describe("renderFileDiff", () => {
     it("should display header for unchanged files without diff", () => {
-      const file: FileDiff = { path: "a.ts", type: "unchanged" };
+      const file: FileDiff = {
+        path: "a.ts",
+        type: "unchanged",
+        localContent: "same\n",
+        templateContent: "same\n",
+      };
       renderFileDiff(file);
       expect(p.log.step).toHaveBeenCalledTimes(1);
       // unchanged files should not show diff content
@@ -372,7 +384,12 @@ describe("diff-view", () => {
     });
 
     it("should label unchanged files as unchanged, not deleted", () => {
-      const file: FileDiff = { path: "a.ts", type: "unchanged" };
+      const file: FileDiff = {
+        path: "a.ts",
+        type: "unchanged",
+        localContent: "same\n",
+        templateContent: "same\n",
+      };
       renderFileDiff(file);
       const header = vi.mocked(p.log.step).mock.calls[0][0];
       expect(header).toContain("unchanged");

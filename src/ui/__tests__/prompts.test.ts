@@ -102,8 +102,13 @@ describe("prompts", () => {
   describe("selectPushFiles", () => {
     it("should filter files by selection", async () => {
       const files = [
-        { path: "a.ts", type: "added" as const },
-        { path: "b.ts", type: "modified" as const },
+        { path: "a.ts", type: "added" as const, localContent: "local" },
+        {
+          path: "b.ts",
+          type: "modified" as const,
+          localContent: "local",
+          templateContent: "template",
+        },
       ];
       vi.mocked(p.multiselect).mockResolvedValue(["a.ts"]);
       const result = await selectPushFiles(files);
@@ -112,7 +117,7 @@ describe("prompts", () => {
     });
 
     it("should return empty array when nothing selected", async () => {
-      const files = [{ path: "a.ts", type: "added" as const }];
+      const files = [{ path: "a.ts", type: "added" as const, localContent: "local" }];
       vi.mocked(p.multiselect).mockResolvedValue([]);
       const result = await selectPushFiles(files);
       expect(result).toHaveLength(0);
@@ -120,8 +125,18 @@ describe("prompts", () => {
 
     it("conflictedPaths のファイルは初期選択から除外され conflict と表示される", async () => {
       const files = [
-        { path: "a.ts", type: "modified" as const },
-        { path: "bad.ts", type: "modified" as const },
+        {
+          path: "a.ts",
+          type: "modified" as const,
+          localContent: "local",
+          templateContent: "template",
+        },
+        {
+          path: "bad.ts",
+          type: "modified" as const,
+          localContent: "local",
+          templateContent: "template",
+        },
       ];
       vi.mocked(p.multiselect).mockResolvedValue([]);
       await selectPushFiles(files, { conflictedPaths: new Set(["bad.ts"]) });
@@ -168,35 +183,51 @@ describe("prompts", () => {
 
   describe("generatePrTitle", () => {
     it("should generate feat prefix for added-only files", () => {
-      const files: FileDiff[] = [{ path: ".devcontainer/devcontainer.json", type: "added" }];
+      const files: FileDiff[] = [
+        { path: ".devcontainer/devcontainer.json", type: "added", localContent: "local" },
+      ];
       expect(generatePrTitle(files)).toBe("feat: add .devcontainer config");
     });
 
     it("should generate chore prefix for modified files", () => {
-      const files: FileDiff[] = [{ path: ".github/workflows/ci.yml", type: "modified" }];
+      const files: FileDiff[] = [
+        {
+          path: ".github/workflows/ci.yml",
+          type: "modified",
+          localContent: "local",
+          templateContent: "template",
+        },
+      ];
       expect(generatePrTitle(files)).toBe("chore: update .github config");
     });
 
     it("should generate chore prefix for mixed changes", () => {
       const files: FileDiff[] = [
-        { path: ".devcontainer/devcontainer.json", type: "added" },
-        { path: ".github/workflows/ci.yml", type: "modified" },
+        { path: ".devcontainer/devcontainer.json", type: "added", localContent: "local" },
+        {
+          path: ".github/workflows/ci.yml",
+          type: "modified",
+          localContent: "local",
+          templateContent: "template",
+        },
       ];
       expect(generatePrTitle(files)).toBe("chore: update .devcontainer, .github config");
     });
 
     it("should use generic title for many modules", () => {
       const files: FileDiff[] = [
-        { path: ".devcontainer/a.json", type: "added" },
-        { path: ".github/b.yml", type: "added" },
-        { path: ".claude/c.md", type: "added" },
-        { path: ".mcp/d.json", type: "added" },
+        { path: ".devcontainer/a.json", type: "added", localContent: "local" },
+        { path: ".github/b.yml", type: "added", localContent: "local" },
+        { path: ".claude/c.md", type: "added", localContent: "local" },
+        { path: ".mcp/d.json", type: "added", localContent: "local" },
       ];
       expect(generatePrTitle(files)).toBe("feat: update template configuration");
     });
 
     it("should handle root-level files", () => {
-      const files: FileDiff[] = [{ path: ".mcp.json", type: "modified" }];
+      const files: FileDiff[] = [
+        { path: ".mcp.json", type: "modified", localContent: "local", templateContent: "template" },
+      ];
       expect(generatePrTitle(files)).toBe("chore: update .mcp.json config");
     });
   });
@@ -223,14 +254,23 @@ describe("prompts", () => {
 
   describe("generatePrBody", () => {
     it("should list added files", () => {
-      const files: FileDiff[] = [{ path: ".devcontainer/devcontainer.json", type: "added" }];
+      const files: FileDiff[] = [
+        { path: ".devcontainer/devcontainer.json", type: "added", localContent: "local" },
+      ];
       const body = generatePrBody(files);
       expect(body).toContain("**Added:**");
       expect(body).toContain("`.devcontainer/devcontainer.json`");
     });
 
     it("should list modified files", () => {
-      const files: FileDiff[] = [{ path: ".github/workflows/ci.yml", type: "modified" }];
+      const files: FileDiff[] = [
+        {
+          path: ".github/workflows/ci.yml",
+          type: "modified",
+          localContent: "local",
+          templateContent: "template",
+        },
+      ];
       const body = generatePrBody(files);
       expect(body).toContain("**Modified:**");
       expect(body).toContain("`.github/workflows/ci.yml`");
@@ -238,8 +278,8 @@ describe("prompts", () => {
 
     it("should list both added and modified", () => {
       const files: FileDiff[] = [
-        { path: "a.json", type: "added" },
-        { path: "b.yml", type: "modified" },
+        { path: "a.json", type: "added", localContent: "local" },
+        { path: "b.yml", type: "modified", localContent: "local", templateContent: "template" },
       ];
       const body = generatePrBody(files);
       expect(body).toContain("**Added:**");
@@ -247,7 +287,7 @@ describe("prompts", () => {
     });
 
     it("should include ziku attribution", () => {
-      const files: FileDiff[] = [{ path: "a.json", type: "added" }];
+      const files: FileDiff[] = [{ path: "a.json", type: "added", localContent: "local" }];
       const body = generatePrBody(files);
       expect(body).toContain("ziku");
     });

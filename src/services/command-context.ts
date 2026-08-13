@@ -10,9 +10,15 @@
 import { Cause, Context, Effect, Exit, Layer, Option, Scope } from "effect";
 import { match } from "ts-pattern";
 import type { ZikuConfig, LockState, TemplateSource } from "../modules/schemas";
-import { FileNotFoundError, ParseError, ZikuError, zikuFailure } from "../errors";
-import type { TemplateError, ValidationError, ZikuFailure } from "../errors";
-import { loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
+import { ZikuError, zikuFailure } from "../errors";
+import type {
+  FileNotFoundError,
+  ParseError,
+  TemplateError,
+  ValidationError,
+  ZikuFailure,
+} from "../errors";
+import { loadZikuConfig } from "../utils/ziku-config";
 import { loadLock } from "../utils/lock";
 import { resolveTemplateDirScoped } from "../utils/template-resolve";
 import { resolveSourceCommitSha } from "../utils/github";
@@ -96,13 +102,7 @@ export function loadCommandContext(
   targetDir: string,
 ): Effect.Effect<CommandContextShape, ContextLoadError> {
   return Effect.gen(function* () {
-    if (!zikuConfigExists(targetDir)) {
-      return yield* new FileNotFoundError({ path: ".ziku/ziku.jsonc" });
-    }
-    const { config } = yield* Effect.tryPromise({
-      try: () => loadZikuConfig(targetDir),
-      catch: (e) => new ParseError({ path: ".ziku/ziku.jsonc", cause: e }),
-    });
+    const { config } = yield* loadZikuConfig(targetDir);
 
     const lock = yield* loadLock(targetDir);
 

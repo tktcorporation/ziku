@@ -187,17 +187,32 @@ describe("renderer", () => {
 
   describe("logDiffSummary", () => {
     it("should show no changes message when all unchanged", () => {
-      logDiffSummary([{ path: "a.ts", type: "unchanged" }]);
+      logDiffSummary([
+        { path: "a.ts", type: "unchanged", localContent: "same", templateContent: "same" },
+      ]);
       expect(p.log.info).toHaveBeenCalledWith("No changes detected");
     });
 
     it("should display changed files", () => {
       logDiffSummary([
-        { path: "a.ts", type: "added" },
-        { path: "b.ts", type: "modified" },
-        { path: "c.ts", type: "deleted" },
+        { path: "a.ts", type: "added", localContent: "a" },
+        { path: "b.ts", type: "modified", localContent: "b", templateContent: "B" },
+        { path: "c.ts", type: "deleted", templateContent: "c" },
       ]);
       expect(p.log.message).toHaveBeenCalledTimes(1);
+    });
+
+    it("件数は渡された差分から数える", () => {
+      logDiffSummary([
+        { path: "a.ts", type: "added", localContent: "a" },
+        { path: "b.ts", type: "added", localContent: "b" },
+        { path: "c.ts", type: "deleted", templateContent: "c" },
+        { path: "d.ts", type: "unchanged", localContent: "d", templateContent: "d" },
+      ]);
+      const message = vi.mocked(p.log.message).mock.calls[0][0] as string;
+      expect(message).toContain("+2 added");
+      expect(message).toContain("-1 deleted");
+      expect(message).not.toContain("modified");
     });
   });
 

@@ -3,6 +3,7 @@ import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FileNotFoundError } from "../../errors";
 import type {
+  FileDiff,
   GitHubSource,
   LockState,
   ResumableLockState,
@@ -250,7 +251,6 @@ function lockWith(opts: {
 
 const emptyDiff = {
   files: [],
-  summary: { added: 0, modified: 0, deleted: 0, unchanged: 0 },
 };
 
 /**
@@ -283,14 +283,7 @@ function mockContext(overrides?: {
  * メインの push フローでは classifyFiles が pushable files の決定権を持ち、
  * detectDiff はコンテンツ提供のみを担うため、両方の整合性を取る必要がある。
  */
-function setupPushableFiles(
-  files: {
-    path: string;
-    type: "added" | "modified";
-    localContent: string;
-    templateContent?: string;
-  }[],
-) {
+function setupPushableFiles(files: FileDiff[]) {
   // classification: 全ファイルを localOnly に分類（push 対象）
   mockClassifyFiles.mockReturnValueOnce({
     autoUpdate: [],
@@ -304,20 +297,7 @@ function setupPushableFiles(
   });
 
   // detectDiff: ファイル内容を提供
-  mockDetectDiff.mockResolvedValueOnce({
-    files: files.map((f) => ({
-      path: f.path,
-      type: f.type,
-      localContent: f.localContent,
-      templateContent: f.templateContent,
-    })),
-    summary: {
-      added: files.filter((f) => f.type === "added").length,
-      modified: files.filter((f) => f.type === "modified").length,
-      deleted: 0,
-      unchanged: 0,
-    },
-  });
+  mockDetectDiff.mockResolvedValueOnce({ files });
 }
 
 describe("pushCommand", () => {
@@ -464,7 +444,6 @@ describe("pushCommand", () => {
           { path: "a.txt", type: "added", localContent: "a" },
           { path: "b.txt", type: "added", localContent: "b" },
         ],
-        summary: { added: 2, modified: 0, deleted: 0, unchanged: 0 },
       });
 
       await (pushCommand.run as any)({
@@ -474,7 +453,7 @@ describe("pushCommand", () => {
       });
 
       // プレビューは --files で絞った集合のみ（実 push と一致）
-      const previewArg = mockLogDiffSummary.mock.calls.at(-1)?.[0] as Array<{ path: string }>;
+      const previewArg = mockLogDiffSummary.mock.calls.at(-1)?.[0] ?? [];
       expect(previewArg.map((f) => f.path)).toEqual(["a.txt"]);
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
@@ -516,7 +495,6 @@ describe("pushCommand", () => {
           { path: "normal.txt", type: "modified", localContent: "n", templateContent: "nt" },
           { path: "conflict.txt", type: "modified", localContent: "c", templateContent: "ct" },
         ],
-        summary: { added: 0, modified: 2, deleted: 0, unchanged: 0 },
       });
       // downloadBaseForMerge は既定で null を返すため conflict.txt は auto-merge 不可 → unresolved
 
@@ -527,7 +505,7 @@ describe("pushCommand", () => {
       });
 
       // 未解決の衝突 conflict.txt はプレビューに含めない
-      const previewArg = mockLogDiffSummary.mock.calls.at(-1)?.[0] as Array<{ path: string }>;
+      const previewArg = mockLogDiffSummary.mock.calls.at(-1)?.[0] ?? [];
       expect(previewArg.map((f) => f.path)).toEqual(["normal.txt"]);
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
@@ -552,7 +530,6 @@ describe("pushCommand", () => {
         files: [
           { path: "conflict.txt", type: "modified", localContent: "c", templateContent: "ct" },
         ],
-        summary: { added: 0, modified: 1, deleted: 0, unchanged: 0 },
       });
       // downloadBaseForMerge は既定で null を返すため conflict.txt は unresolved
 
@@ -583,7 +560,6 @@ describe("pushCommand", () => {
           { path: "keep.txt", type: "added", localContent: "k" },
           { path: "gone.txt", type: "deleted", templateContent: "g" },
         ],
-        summary: { added: 1, modified: 0, deleted: 1, unchanged: 0 },
       });
 
       await (pushCommand.run as any)({
@@ -593,7 +569,7 @@ describe("pushCommand", () => {
       });
 
       // 削除ファイルは既定で除外（実 push の既定選択と一致）
-      const previewArg = mockLogDiffSummary.mock.calls.at(-1)?.[0] as Array<{ path: string }>;
+      const previewArg = mockLogDiffSummary.mock.calls.at(-1)?.[0] ?? [];
       expect(previewArg.map((f) => f.path)).toEqual(["keep.txt"]);
     });
 
@@ -613,7 +589,6 @@ describe("pushCommand", () => {
           { path: "keep.txt", type: "added", localContent: "k" },
           { path: "gone.txt", type: "deleted", templateContent: "g" },
         ],
-        summary: { added: 1, modified: 0, deleted: 1, unchanged: 0 },
       });
 
       await (pushCommand.run as any)({
@@ -622,7 +597,7 @@ describe("pushCommand", () => {
         cmd: pushCommand,
       });
 
-      const previewArg = mockLogDiffSummary.mock.calls.at(-1)?.[0] as Array<{ path: string }>;
+      const previewArg = mockLogDiffSummary.mock.calls.at(-1)?.[0] ?? [];
       expect(previewArg.map((f) => f.path).toSorted()).toEqual(["gone.txt", "keep.txt"]);
     });
 
@@ -639,7 +614,6 @@ describe("pushCommand", () => {
       });
       mockDetectDiff.mockResolvedValueOnce({
         files: [{ path: "edited.md", type: "added", localContent: "local edits" }],
-        summary: { added: 1, modified: 0, deleted: 0, unchanged: 0 },
       });
 
       await (pushCommand.run as any)({
@@ -648,7 +622,7 @@ describe("pushCommand", () => {
         cmd: pushCommand,
       });
 
-      const previewArg = mockLogDiffSummary.mock.calls.at(-1)?.[0] as Array<{ path: string }>;
+      const previewArg = mockLogDiffSummary.mock.calls.at(-1)?.[0] ?? [];
       expect(previewArg.map((f) => f.path)).toEqual(["edited.md"]);
     });
 
@@ -668,7 +642,6 @@ describe("pushCommand", () => {
           { path: "edited.md", type: "added", localContent: "local edits" },
           { path: "plain.txt", type: "added", localContent: "plain" },
         ],
-        summary: { added: 2, modified: 0, deleted: 0, unchanged: 0 },
       });
       mockSelectPushFiles.mockResolvedValueOnce([
         { path: "edited.md", type: "added", localContent: "local edits" },
@@ -1049,7 +1022,6 @@ describe("pushCommand", () => {
       };
       mockDetectDiff.mockResolvedValueOnce({
         files: [pushableFile],
-        summary: { added: 0, modified: 1, deleted: 0, unchanged: 0 },
       });
       mockSelectPushFiles.mockResolvedValueOnce([pushableFile]);
       mockConfirmAction.mockResolvedValueOnce(true);
@@ -1115,7 +1087,6 @@ describe("pushCommand", () => {
       };
       mockDetectDiff.mockResolvedValueOnce({
         files: [pushableFile],
-        summary: { added: 0, modified: 1, deleted: 0, unchanged: 0 },
       });
       mockSelectPushFiles.mockResolvedValueOnce([pushableFile]);
 
@@ -1172,7 +1143,6 @@ describe("pushCommand", () => {
             templateContent: "template content",
           },
         ],
-        summary: { added: 0, modified: 1, deleted: 0, unchanged: 0 },
       });
       // 衝突ファイルは既定で未選択 → ユーザーは何も選ばない
       mockSelectPushFiles.mockResolvedValueOnce([]);
@@ -1219,7 +1189,6 @@ describe("pushCommand", () => {
           { path: "safe.txt", type: "added", localContent: "safe" },
           { path: "bad.txt", type: "modified", localContent: "local", templateContent: "template" },
         ],
-        summary: { added: 1, modified: 1, deleted: 0, unchanged: 0 },
       });
       // ユーザーは衝突しない safe.txt のみ選択（bad.txt は既定で未選択）
       mockSelectPushFiles.mockResolvedValueOnce([
@@ -1285,7 +1254,6 @@ describe("pushCommand", () => {
             templateContent: "template content",
           },
         ],
-        summary: { added: 0, modified: 1, deleted: 0, unchanged: 0 },
       });
 
       // --files で衝突ファイルを明示指定 → 解決を促して確定的に中断する。
@@ -1336,7 +1304,6 @@ describe("pushCommand", () => {
       };
       mockDetectDiff.mockResolvedValueOnce({
         files: [conflictFile],
-        summary: { added: 0, modified: 1, deleted: 0, unchanged: 0 },
       });
       // 既定では未選択だが、ユーザーが対話で衝突ファイルを明示選択したケース
       mockSelectPushFiles.mockResolvedValueOnce([conflictFile]);
@@ -1405,7 +1372,6 @@ describe("pushCommand", () => {
       // detectDiff: コンテンツを提供
       mockDetectDiff.mockResolvedValueOnce({
         files: [pushableFile],
-        summary: { added: 0, modified: 1, deleted: 0, unchanged: 0 },
       });
 
       mockSelectPushFiles.mockResolvedValueOnce([pushableFile]);
@@ -1508,7 +1474,6 @@ describe("pushCommand", () => {
       };
       mockDetectDiff.mockResolvedValueOnce({
         files: [cleanDiff, conflictedDiff],
-        summary: { added: 0, modified: 2, deleted: 0, unchanged: 0 },
       });
 
       // 未解決の衝突は既定で未選択（selectPushFiles の既定集合と同じ）
@@ -1575,7 +1540,6 @@ describe("pushCommand", () => {
       };
       mockDetectDiff.mockResolvedValueOnce({
         files: [pushableFile],
-        summary: { added: 0, modified: 1, deleted: 0, unchanged: 0 },
       });
       mockSelectPushFiles.mockResolvedValueOnce([pushableFile]);
       mockConfirmAction.mockResolvedValueOnce(true);
@@ -1697,7 +1661,6 @@ describe("pushCommand", () => {
             templateContent: "template content",
           },
         ],
-        summary: { added: 0, modified: 1, deleted: 0, unchanged: 0 },
       });
       // 衝突ファイルは既定で未選択（フォールバック selector が除外する）
       mockSelectPushFiles.mockResolvedValueOnce([]);
@@ -1776,7 +1739,6 @@ describe("pushCommand", () => {
             templateContent: "new template content",
           },
         ],
-        summary: { added: 0, modified: 1, deleted: 0, unchanged: 0 },
       });
 
       await (pushCommand.run as any)({
@@ -1892,6 +1854,33 @@ describe("未追跡ファイルの追跡フロー", () => {
     // include に永続化される（push 成功後）
     expect(readTrackedInclude()).toContain("docs/new.md");
     expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining("Tracked 1 new file(s)"));
+  });
+
+  it("永続化先の ziku.jsonc がスキーマ違反なら、構文エラーではなく検証失敗として報告する", async () => {
+    // include を欠いた設定は JSONC としては通るので、構文エラーと混同されやすい。
+    vol.fromJSON({ "/test/.ziku/ziku.jsonc": `${JSON.stringify({ exclude: [] }, null, 2)}\n` });
+    mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);
+    mockSelectUntrackedToTrack.mockResolvedValueOnce(["docs/new.md"]);
+
+    setupPushableFiles([{ path: "docs/new.md", type: "added", localContent: "# New doc" }]);
+    mockSelectPushFiles.mockResolvedValueOnce([
+      { path: "docs/new.md", type: "added", localContent: "# New doc" },
+    ]);
+    mockGetGitHubToken.mockReturnValue("ghp_token");
+    mockConfirmAction.mockResolvedValueOnce(true);
+    mockCreatePullRequest.mockResolvedValueOnce({
+      url: "https://github.com/owner/repo/pull/1",
+      branch: "update-template-123",
+      number: 1,
+    });
+
+    await expect(
+      (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: false, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      }),
+    ).rejects.toThrow("Failed to read .ziku/ziku.jsonc");
   });
 
   it("新規追跡パターンが同一 push でテンプレの ziku.jsonc にも届く（codex P2）", async () => {

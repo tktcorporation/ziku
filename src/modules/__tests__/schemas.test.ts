@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { LockState } from "../schemas";
+import type { FileDiff, LockState } from "../schemas";
 import {
   diffResultSchema,
   diffTypeSchema,
@@ -21,6 +21,7 @@ import {
   resolveMerge,
   baseCommitSha,
   baseHashesOf,
+  summarizeDiff,
 } from "../schemas";
 
 describe("nonNegativeIntSchema", () => {
@@ -388,7 +389,7 @@ describe("diffTypeSchema", () => {
 });
 
 describe("fileDiffSchema", () => {
-  it("有効なファイル差分を受け入れる", () => {
+  it("modified は両側の内容を持つ", () => {
     const diff = {
       path: "file.txt",
       type: "modified",
@@ -398,7 +399,17 @@ describe("fileDiffSchema", () => {
     expect(fileDiffSchema.parse(diff)).toEqual(diff);
   });
 
-  it("コンテンツなしの差分を受け入れる（deleted の場合）", () => {
+  it("unchanged は両側の内容を持つ", () => {
+    const diff = {
+      path: "file.txt",
+      type: "unchanged",
+      localContent: "same",
+      templateContent: "same",
+    };
+    expect(fileDiffSchema.parse(diff)).toEqual(diff);
+  });
+
+  it("deleted はテンプレート側の内容だけを持つ", () => {
     const diff = {
       path: "file.txt",
       type: "deleted",
@@ -407,7 +418,7 @@ describe("fileDiffSchema", () => {
     expect(fileDiffSchema.parse(diff)).toEqual(diff);
   });
 
-  it("コンテンツなしの差分を受け入れる（added の場合）", () => {
+  it("added はローカル側の内容だけを持つ", () => {
     const diff = {
       path: "file.txt",
       type: "added",
@@ -415,33 +426,108 @@ describe("fileDiffSchema", () => {
     };
     expect(fileDiffSchema.parse(diff)).toEqual(diff);
   });
+
+  it("種別に対応する内容を欠いた差分は弾かれる", () => {
+    // 内容の欠損は下流の `?? ""` で空文字列に化け、「中身が空のファイル」と
+    // 区別できなくなる。検証段階で弾いて、その値が下流へ届かないようにする。
+    expect(() => fileDiffSchema.parse({ path: "file.txt", type: "added" })).toThrow();
+    expect(() => fileDiffSchema.parse({ path: "file.txt", type: "deleted" })).toThrow();
+    expect(() =>
+      fileDiffSchema.parse({ path: "file.txt", type: "modified", localContent: "local" }),
+    ).toThrow();
+    expect(() =>
+      fileDiffSchema.parse({ path: "file.txt", type: "unchanged", templateContent: "t" }),
+    ).toThrow();
+  });
+
+  it("型: 種別が持たない側の内容は読めない", () => {
+    const added: FileDiff = { path: "file.txt", type: "added", localContent: "local" };
+    const deleted: FileDiff = { path: "file.txt", type: "deleted", templateContent: "template" };
+
+    // 存在しない内容へのアクセスがコンパイルエラーになることが型の役目。読めるように
+    // なったら下の抑制コメントが不要になり、typecheck が失敗して気付ける。
+    // @ts-expect-error added はテンプレート側の内容を持たない
+    expect(added.templateContent).toBeUndefined();
+    // @ts-expect-error deleted はローカル側の内容を持たない
+    expect(deleted.localContent).toBeUndefined();
+  });
+
+  it("型: 種別が持たない側の内容は書けない", () => {
+    const invalid: FileDiff = {
+      path: "file.txt",
+      type: "added",
+      localContent: "local",
+      // @ts-expect-error added はテンプレート側の内容を持てない
+      templateContent: "template",
+    };
+    // 実行時の検証でも余分な内容は落ちる。
+    expect(fileDiffSchema.parse(invalid)).toEqual({
+      path: "file.txt",
+      type: "added",
+      localContent: "local",
+    });
+  });
+
+  it("型: 種別に対応する内容を欠いた差分は書けない", () => {
+    // @ts-expect-error modified は両側の内容が要る
+    const invalid: FileDiff = { path: "file.txt", type: "modified", localContent: "local" };
+    expect(() => fileDiffSchema.parse(invalid)).toThrow();
+  });
 });
 
 describe("diffResultSchema", () => {
   it("有効な差分結果を受け入れる", () => {
     const result = {
-      files: [{ path: "file.txt", type: "modified" }],
-      summary: {
-        added: 1,
-        modified: 2,
-        deleted: 0,
-        unchanged: 5,
-      },
+      files: [
+        { path: "file.txt", type: "modified", localContent: "l", templateContent: "t" },
+        { path: "new.txt", type: "added", localContent: "n" },
+      ],
     };
     expect(diffResultSchema.parse(result)).toEqual(result);
   });
 
   it("空のファイル配列を受け入れる", () => {
-    const result = {
-      files: [],
-      summary: {
-        added: 0,
-        modified: 0,
-        deleted: 0,
-        unchanged: 0,
-      },
-    };
+    const result = { files: [] };
     expect(diffResultSchema.parse(result)).toEqual(result);
+  });
+
+  it("集計値は差分結果に載らない", () => {
+    // 集計は files から導出する派生値。載せると絞り込んだ files と食い違う値を
+    // 持ち回れてしまうため、検証段階で落とす。
+    const parsed = diffResultSchema.parse({
+      files: [],
+      summary: { added: 1, modified: 0, deleted: 0, unchanged: 0 },
+    });
+    expect(parsed).not.toHaveProperty("summary");
+  });
+});
+
+describe("summarizeDiff", () => {
+  const files: FileDiff[] = [
+    { path: "a.txt", type: "added", localContent: "a" },
+    { path: "b.txt", type: "added", localContent: "b" },
+    { path: "c.txt", type: "modified", localContent: "c", templateContent: "C" },
+    { path: "d.txt", type: "deleted", templateContent: "d" },
+    { path: "e.txt", type: "unchanged", localContent: "e", templateContent: "e" },
+  ];
+
+  it("種別ごとの件数を数える", () => {
+    expect(summarizeDiff(files)).toEqual({ added: 2, modified: 1, deleted: 1, unchanged: 1 });
+  });
+
+  it("空の差分では全て 0 になる", () => {
+    expect(summarizeDiff([])).toEqual({ added: 0, modified: 0, deleted: 0, unchanged: 0 });
+  });
+
+  it("files を絞り込むと集計も追随する", () => {
+    // 集計をフィールドとして持っていた頃は、files を絞り込んでも集計が元のままで
+    // 食い違えた。導出関数なら絞り込んだ集合とずれようがない。
+    const withoutAdded = files.filter((f) => f.type !== "added");
+    const summary = summarizeDiff(withoutAdded);
+
+    expect(summary).toEqual({ added: 0, modified: 1, deleted: 1, unchanged: 1 });
+    const total = summary.added + summary.modified + summary.deleted + summary.unchanged;
+    expect(total).toBe(withoutAdded.length);
   });
 });
 

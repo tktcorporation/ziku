@@ -11,6 +11,8 @@ import * as p from "@clack/prompts";
 import { Effect } from "effect";
 import { match } from "ts-pattern";
 import pc from "picocolors";
+import type { FileDiff } from "../modules/schemas";
+import { summarizeDiff } from "../modules/schemas";
 
 declare const __VERSION__: string;
 const version = typeof __VERSION__ !== "undefined" ? __VERSION__ : "dev";
@@ -128,7 +130,7 @@ export function logFileResults(results: { action: string; path: string }[]): {
 }
 
 /** diff サマリーを表示（push/diff コマンド用） */
-export function logDiffSummary(files: { path: string; type: string }[]): void {
+export function logDiffSummary(files: readonly FileDiff[]): void {
   const changed = files.filter((f) => f.type !== "unchanged");
   if (changed.length === 0) {
     p.log.info("No changes detected");
@@ -140,18 +142,12 @@ export function logDiffSummary(files: { path: string; type: string }[]): void {
       .with("added", () => `${pc.green("+")} ${pc.green(f.path)}`)
       .with("modified", () => `${pc.yellow("~")} ${pc.yellow(f.path)}`)
       .with("deleted", () => `${pc.red("-")} ${pc.red(f.path)}`)
-      .otherwise(() => `  ${pc.dim(f.path)}`),
+      .exhaustive(),
   );
 
-  const summary = files.reduce(
-    (acc, f) => {
-      if (f.type === "added") acc.added++;
-      else if (f.type === "modified") acc.modified++;
-      else if (f.type === "deleted") acc.deleted++;
-      return acc;
-    },
-    { added: 0, modified: 0, deleted: 0 },
-  );
+  // 件数は差分そのものから数える。表示用に別集計を持つと、絞り込んだ一覧と
+  // 件数が食い違ったまま表示されうる。
+  const summary = summarizeDiff(files);
 
   const summaryParts = [
     summary.added > 0 ? pc.green(`+${summary.added} added`) : null,

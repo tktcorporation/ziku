@@ -398,7 +398,7 @@ function buildEffectiveDiff(original: FileDiff, pushedContent: string | undefine
   // 削除の場合はそのまま
   if (pushedContent === undefined) return original;
 
-  const templateContent = original.templateContent;
+  const templateContent = templateContentOf(original);
 
   // templateContent がない → テンプレートに新規追加
   if (templateContent === undefined) {
@@ -407,7 +407,12 @@ function buildEffectiveDiff(original: FileDiff, pushedContent: string | undefine
 
   // push される内容がテンプレートと同一 → 変更なし
   if (pushedContent === templateContent) {
-    return { path: original.path, type: "unchanged" };
+    return {
+      path: original.path,
+      type: "unchanged",
+      localContent: pushedContent,
+      templateContent,
+    };
   }
 
   // テンプレートと異なる → modified として unified diff で統計計算
@@ -417,6 +422,19 @@ function buildEffectiveDiff(original: FileDiff, pushedContent: string | undefine
     localContent: pushedContent,
     templateContent,
   };
+}
+
+/**
+ * テンプレート側の内容を、持っている種別からだけ取り出す。
+ *
+ * 「テンプレートにそのファイルがあるか」を判断したい呼び出し元のための問い合わせで、
+ * `added` の undefined は欠損ではなく「テンプレートに存在しない」という事実を表す。
+ */
+function templateContentOf(diff: FileDiff): string | undefined {
+  return match(diff)
+    .with({ type: "added" }, () => undefined)
+    .with({ type: P.union("deleted", "modified", "unchanged") }, (f) => f.templateContent)
+    .exhaustive();
 }
 
 function formatFileStat(file: FileDiff): string {
@@ -639,7 +657,8 @@ export const pushCommand = defineCommand({
         .filter((f) => f.type !== "deleted")
         .map((f) => ({
           path: f.path,
-          content: mergedContents.get(f.path) ?? asPushContent(f.localContent ?? ""),
+          // 自動マージ済みならその内容、それ以外はローカルの内容をそのまま送る。
+          content: mergedContents.get(f.path) ?? asPushContent(f.localContent),
         }));
 
       const deletions = pushableFiles
@@ -766,7 +785,11 @@ async function persistNewlyTracked(
   const patternsToPersist = newlyTrackedPaths.filter((p) => pushedPaths.has(p));
   if (patternsToPersist.length === 0) return;
 
-  const { rawContent } = await loadZikuConfig(targetDir);
+  // 分類済みの失敗（不在 / 構文エラー / スキーマ違反）を ZikuError へ落としてから投げる。
+  // 素の runPromise だと FiberFailure に包まれ、トップレベルが理由を判別できない。
+  const { rawContent } = await runCommandEffect(
+    loadZikuConfig(targetDir).pipe(Effect.mapError(toZikuError)),
+  );
   const updated = addIncludePattern(rawContent, patternsToPersist);
   if (updated === rawContent) return;
 
@@ -852,7 +875,8 @@ async function applyNewlyTrackedConfigToPush(params: {
 
   // union がテンプレと同一なら伝える追加パターンは無い（注入しない）。
   const configDiff = diffFiles.find((f) => f.path === ZIKU_CONFIG_FILE);
-  if (mergedConfig === configDiff?.templateContent) {
+  const templateConfig = configDiff === undefined ? undefined : templateContentOf(configDiff);
+  if (mergedConfig === templateConfig) {
     return { pushableFiles, configWriteBackSafe };
   }
 
@@ -864,16 +888,19 @@ async function applyNewlyTrackedConfigToPush(params: {
   }
 
   // detectDiff が unchanged 判定で漏らしたケース → union を内容とする差分を注入する。
+  // テンプレに ziku.jsonc が無ければ新規追加、あればその内容からの変更として表す。
+  const configFileDiff: FileDiff =
+    templateConfig === undefined
+      ? { path: ZIKU_CONFIG_FILE, type: "added", localContent: mergedConfig }
+      : {
+          path: ZIKU_CONFIG_FILE,
+          type: "modified",
+          localContent: mergedConfig,
+          templateContent: templateConfig,
+        };
+
   return {
-    pushableFiles: [
-      ...pushableFiles,
-      {
-        path: ZIKU_CONFIG_FILE,
-        type: configDiff?.templateContent === undefined ? "added" : "modified",
-        localContent: mergedConfig,
-        templateContent: configDiff?.templateContent,
-      },
-    ],
+    pushableFiles: [...pushableFiles, configFileDiff],
     configWriteBackSafe,
   };
 }

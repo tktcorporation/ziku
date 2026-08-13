@@ -157,7 +157,12 @@ describe("file-select-with-diff", () => {
 
   describe("buildColoredDiffLines", () => {
     it("should return no-changes message for unchanged files", () => {
-      const file: FileDiff = { path: "a.ts", type: "unchanged" };
+      const file: FileDiff = {
+        path: "a.ts",
+        type: "unchanged",
+        localContent: "same\n",
+        templateContent: "same\n",
+      };
       const lines = buildColoredDiffLines(file);
       expect(lines).toHaveLength(1);
       expect(stripCsi(lines[0])).toContain("no changes");
@@ -268,7 +273,9 @@ describe("file-select-with-diff", () => {
     });
 
     it("should handle unchanged files with space icon", () => {
-      const files: FileDiff[] = [{ path: "u.ts", type: "unchanged" }];
+      const files: FileDiff[] = [
+        { path: "u.ts", type: "unchanged", localContent: "u\n", templateContent: "u\n" },
+      ];
       const items = buildFileItems(files);
       const plain = stripCsi(items[0].label);
       expect(plain).toContain("u.ts");
@@ -325,7 +332,9 @@ describe("file-select-with-diff", () => {
     });
 
     it("should render unchanged file with its own type label", () => {
-      const files: FileDiff[] = [{ path: "u.ts", type: "unchanged" }];
+      const files: FileDiff[] = [
+        { path: "u.ts", type: "unchanged", localContent: "u\n", templateContent: "u\n" },
+      ];
       const items = buildFileItems(files);
       const state: RenderState = {
         items,

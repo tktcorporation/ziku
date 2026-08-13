@@ -197,7 +197,6 @@ vi.mock("../../utils/diff", () => ({
   detectDiff: vi.fn(() =>
     Promise.resolve({
       files: [],
-      summary: { added: 0, modified: 0, deleted: 0, unchanged: 0 },
       templateDir: "/tmp/template",
       targetDir: "/project",
     }),
@@ -876,7 +875,6 @@ describe("E2E: multi-scenario tests", () => {
             localContent: "# Testing Guide",
           },
         ],
-        summary: { added: 1, modified: 0, deleted: 0, unchanged: 2 },
       } as any);
       mockSelectPushFiles.mockResolvedValueOnce([
         {
