@@ -53,11 +53,22 @@ export interface FileClassification {
   autoUpdate: string[];
   /** ローカルのみ変更 → スキップ（ローカル保持） */
   localOnly: string[];
-  /** 両方変更 → 3-way マージが必要 */
+  /**
+   * 両側の変更が衝突 → ユーザーの判断が必要。
+   *
+   * 内容の衝突（両側が同じ箇所を異なる内容に変更）に加え、片側の削除ともう片側の
+   * 変更が衝突する delete/modify も両方向とも含む。後者ではテンプレート側または
+   * ローカル側にファイルが存在しない。
+   */
   conflicts: string[];
   /** テンプレートに新規追加 → そのまま追加 */
   newFiles: string[];
-  /** テンプレートで削除 → ユーザーに確認 */
+  /**
+   * テンプレートで削除され、ローカルは base から変更していない → ユーザーに確認して削除。
+   *
+   * ローカルが base から変更されている場合は削除するとその編集が失われるため、
+   * ここではなく conflicts に入る。
+   */
   deletedFiles: string[];
   /** ローカルで削除（base と template にあるがローカルにない）→ push で削除可能 */
   deletedLocally: string[];

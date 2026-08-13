@@ -107,6 +107,29 @@ describe("merge", () => {
       expect(result.deletedLocally).not.toContain("removed.txt");
     });
 
+    it("テンプレートで削除されローカルが編集済み → delete/modify conflict", () => {
+      const result = classifyFiles({
+        baseHashes: { "rules.md": "abc" },
+        localHashes: { "rules.md": "abc-edited" },
+        templateHashes: {},
+      });
+
+      // ローカルの編集を確認なしで消さないため、削除候補ではなく conflict にする
+      expect(result.conflicts).toContain("rules.md");
+      expect(result.deletedFiles).not.toContain("rules.md");
+    });
+
+    it("テンプレートで削除されローカルが base のまま → deletedFiles", () => {
+      const result = classifyFiles({
+        baseHashes: { "rules.md": "abc" },
+        localHashes: { "rules.md": "abc" },
+        templateHashes: {},
+      });
+
+      expect(result.deletedFiles).toContain("rules.md");
+      expect(result.conflicts).not.toContain("rules.md");
+    });
+
     it("base とテンプレート両方で削除されたファイルは deletedFiles に分類する（deletedLocally ではない）", () => {
       const result = classifyFiles({
         baseHashes: { "removed.txt": "abc" },
@@ -206,14 +229,12 @@ describe("merge", () => {
 
       const result = merge(base, local, template, "config.json");
 
-      // 行レベルの 3-way マージで異なる箇所への追加が正しくマージされるか、
-      // コンフリクトマーカーで明示される
-      if (!result.hasConflicts) {
-        expect(result.content).toContain('"c": 3');
-        expect(result.content).toContain('"d": 4');
-      } else {
-        expect(result.content).toContain("<<<<<<< LOCAL");
-      }
+      // 両側が同じ末尾行（"b": 2）を書き換えて別のキーを足しているため、
+      // 行レベルでは同じ領域の変更として conflict になる
+      expect(result.hasConflicts).toBe(true);
+      expect(result.content).toContain("<<<<<<< LOCAL");
+      expect(result.content).toContain('"c": 3');
+      expect(result.content).toContain('"d": 4');
     });
 
     it("filePath なしの場合はテキストマージを使用する", () => {
@@ -349,21 +370,101 @@ describe("merge", () => {
   });
 
   describe("threeWayMerge - テキストマージ後のバリデーション", () => {
+    // 行レベルではクリーンにマージできるが、結果が JSON として壊れる組み合わせ。
+    // ローカルが閉じ括弧を失っており、テンプレートは離れた行だけを変更している。
+    const brokenJson = {
+      base: '{\n  "a": 1,\n  "b": 2,\n  "c": 3,\n  "d": 4,\n  "e": 5\n}\n',
+      local: '{\n  "a": 1,\n  "b": 2,\n  "c": 3,\n  "d": 4,\n  "e": 5\n',
+      template: '{\n  "a": 10,\n  "b": 2,\n  "c": 3,\n  "d": 4,\n  "e": 5\n}\n',
+    };
+
+    it("テキストマージ自体は行レベルでクリーンに通る（バリデーションの前提）", () => {
+      const result = merge(brokenJson.base, brokenJson.local, brokenJson.template);
+
+      expect(result.hasConflicts).toBe(false);
+      expect(result.content).not.toContain("<<<<<<<");
+    });
+
     it("テキストマージが壊れた構造ファイルを生成した場合、コンフリクトマーカーにフォールバック", () => {
-      // 構造ファイルとして壊れた内容のテキストマージ
-      const base = "not valid toml but\nline1\nline2\n";
-      const local = "not valid toml but\nline1-modified\nline2\n";
-      const template = "not valid toml but\nline1\nline2-modified\n";
+      const result = merge(brokenJson.base, brokenJson.local, brokenJson.template, "config.json");
 
-      const result = merge(base, local, template, "config.toml");
+      expect(result.hasConflicts).toBe(true);
+      expect(result.content).toContain("<<<<<<< LOCAL");
+      expect(result.content).toContain("||||||| BASE");
+      expect(result.content).toContain(">>>>>>> TEMPLATE");
+      // 両側の内容がそのまま残っている（どちらかが欠けたら解決できない）
+      expect(result.content).toContain('"a": 1,');
+      expect(result.content).toContain('"a": 10,');
+    });
 
-      // テキストマージの結果（成功またはマーカー）
-      expect(result).toBeDefined();
+    it("ファイル全体フォールバックが末尾改行を保ち、マーカー直前に空行を入れない", () => {
+      const result = merge(brokenJson.base, brokenJson.local, brokenJson.template, "config.json");
+
+      expect(result.content.endsWith(">>>>>>> TEMPLATE\n")).toBe(true);
+      expect(result.content).not.toContain("\n\n|||||||");
+      expect(result.content).not.toContain("\n\n=======");
+      expect(result.content).not.toContain("\n\n>>>>>>>");
+    });
+
+    it("構造が壊れていない JSON はクリーンマージのまま確定する", () => {
+      const base = '{\n  "a": 1,\n  "b": 2,\n  "c": 3,\n  "d": 4,\n  "e": 5\n}\n';
+      const local = '{\n  "a": 1,\n  "b": 2,\n  "c": 3,\n  "d": 4,\n  "e": 50\n}\n';
+      const template = '{\n  "a": 10,\n  "b": 2,\n  "c": 3,\n  "d": 4,\n  "e": 5\n}\n';
+
+      const result = merge(base, local, template, "config.json");
+
+      expect(result.hasConflicts).toBe(false);
+      expect(JSON.parse(result.content)).toEqual({ a: 10, b: 2, c: 3, d: 4, e: 50 });
+    });
+  });
+
+  describe("threeWayMerge - コンフリクトマーカーの生成", () => {
+    it("base セクションを出力する（git の diff3 conflict style 相当）", () => {
+      const base = "line1\noriginal\nline3\n";
+      const local = "line1\nlocal-change\nline3\n";
+      const template = "line1\ntemplate-change\nline3\n";
+
+      const result = merge(base, local, template);
+
+      expect(result.hasConflicts).toBe(true);
+      const markerOrder = result.content
+        .split("\n")
+        .filter((line) => /^[<|=>]{7}/.test(line))
+        .map((line) => line.slice(0, 7));
+      expect(markerOrder).toEqual(["<<<<<<<", "|||||||", "=======", ">>>>>>>"]);
+      // base セクションに共通祖先の行が入る
+      expect(result.content).toContain("||||||| BASE\noriginal\n=======");
+    });
+
+    it("既にマーカーを含む内容をマージするとマーカーが伸長される", () => {
+      const withMarkers = [
+        "intro",
+        "<<<<<<< LOCAL",
+        "unresolved local",
+        "=======",
+        "unresolved template",
+        ">>>>>>> TEMPLATE",
+        "outro",
+        "",
+      ].join("\n");
+      const base = withMarkers;
+      const local = withMarkers.replace("intro", "intro-local");
+      const template = withMarkers.replace("intro", "intro-template");
+
+      const result = merge(base, local, template);
+
+      expect(result.hasConflicts).toBe(true);
+      // 生成されたマーカーは 3 種とも 8 文字。既存の 7 文字マーカーは内容として残る
+      expect(result.content).toContain("<<<<<<<< LOCAL");
+      expect(result.content).toContain("|||||||| BASE");
+      expect(result.content).toContain("\n========\n");
+      expect(result.content).toContain(">>>>>>>> TEMPLATE");
+      expect(result.content).toContain("<<<<<<< LOCAL");
     });
   });
 
   describe("hasConflictMarkers", () => {
-    it("コンフリクトマーカーを含む内容を検出する", () => {
+    it("コンフリクトマーカーを含む内容を検出し、ブロックの開始行を返す", () => {
       const content = `line1
 <<<<<<< LOCAL
 local content
@@ -375,7 +476,64 @@ line2`;
       const result = hasConflictMarkers(content);
 
       expect(result.found).toBe(true);
-      expect(result.lines).toEqual([2, 4, 6]);
+      expect(result.lines).toEqual([2]);
+    });
+
+    it("base セクション付き（diff3 形式）のブロックを検出する", () => {
+      const content = [
+        "<<<<<<< LOCAL",
+        "local content",
+        "||||||| BASE",
+        "base content",
+        "=======",
+        "template content",
+        ">>>>>>> TEMPLATE",
+        "",
+      ].join("\n");
+
+      const result = hasConflictMarkers(content);
+
+      expect(result.found).toBe(true);
+      expect(result.lines).toEqual([1]);
+    });
+
+    it("伸長されたマーカーのブロックを検出する", () => {
+      const content = [
+        "<<<<<<<< LOCAL",
+        "local content",
+        "|||||||| BASE",
+        "base content",
+        "========",
+        "template content",
+        ">>>>>>>> TEMPLATE",
+        "",
+      ].join("\n");
+
+      const result = hasConflictMarkers(content);
+
+      expect(result.found).toBe(true);
+      expect(result.lines).toEqual([1]);
+    });
+
+    it("複数ブロックをすべて検出する", () => {
+      const content = [
+        "<<<<<<< LOCAL",
+        "a",
+        "=======",
+        "b",
+        ">>>>>>> TEMPLATE",
+        "middle",
+        "<<<<<<< LOCAL",
+        "c",
+        "=======",
+        "d",
+        ">>>>>>> TEMPLATE",
+        "",
+      ].join("\n");
+
+      const result = hasConflictMarkers(content);
+
+      expect(result.lines).toEqual([1, 7]);
     });
 
     it("コンフリクトマーカーがない場合", () => {
@@ -387,13 +545,48 @@ line2`;
       expect(result.lines).toEqual([]);
     });
 
-    it("部分的なマーカー（<<<<<<< のみ）を検出する", () => {
+    it("Markdown の setext 見出しと区切り線を未解決と誤検出しない", () => {
+      const content = [
+        "Document Title",
+        "==============",
+        "",
+        "本文",
+        "",
+        "Section",
+        "=======",
+        "",
+        "本文",
+        "",
+      ].join("\n");
+
+      const result = hasConflictMarkers(content);
+
+      expect(result.found).toBe(false);
+      expect(result.lines).toEqual([]);
+    });
+
+    it("対応する `=======` / `>>>>>>>` が無い `<<<<<<<` は未解決とみなさない", () => {
+      // 誤検出すると `pull --continue` が永久に通らず、lock を手編集する以外に
+      // 復旧手段が無くなる。対応の取れたブロックだけを未解決として扱う。
       const content = "line1\n<<<<<<< LOCAL\nsome content\n";
 
       const result = hasConflictMarkers(content);
 
-      expect(result.found).toBe(true);
-      expect(result.lines).toEqual([2]);
+      expect(result.found).toBe(false);
+      expect(result.lines).toEqual([]);
+    });
+
+    it("マージ結果に残るブロックだけを数え、内容中の短いマーカーは本文として扱う", () => {
+      const withMarkers = ["intro", "<<<<<<< LOCAL", "a", "=======", "b", ">>>>>>> TEMPLATE", ""];
+      const base = withMarkers.join("\n");
+      const local = base.replace("intro", "intro-local");
+      const template = base.replace("intro", "intro-template");
+
+      const merged = merge(base, local, template);
+      const result = hasConflictMarkers(merged.content);
+
+      // 生成された 8 文字ブロック（1 行目）と、未解決のまま残る 7 文字ブロックの両方
+      expect(result.lines).toEqual([1, 8]);
     });
   });
 
@@ -407,22 +600,17 @@ line2`;
   // どちらかが消失している場合はバグ。
 
   describe("契約検証: hasConflicts: false ならテンプレート変更が反映されている", () => {
-    it("JSON: 両方が異なるキーを追加 → テンプレートのキーが結果に含まれる", () => {
+    it("JSON: 両方が同じ末尾行へ別のキーを追加 → 両側の変更がマーカー内に残る", () => {
       const base = JSON.stringify({ a: 1 }, null, 2);
       const local = JSON.stringify({ a: 1, localKey: "local" }, null, 2);
       const template = JSON.stringify({ a: 1, templateKey: "template" }, null, 2);
 
       const result = merge(base, local, template, "settings.json");
 
-      if (!result.hasConflicts) {
-        // Auto-merged なら両方の変更が含まれるべき
-        expect(result.content).toContain("localKey");
-        expect(result.content).toContain("templateKey");
-      }
-      // hasConflicts: true ならマーカーが必須
-      if (result.hasConflicts) {
-        expect(result.content).toContain("<<<<<<< LOCAL");
-      }
+      expect(result.hasConflicts).toBe(true);
+      expect(result.content).toContain("<<<<<<< LOCAL");
+      expect(result.content).toContain("localKey");
+      expect(result.content).toContain("templateKey");
     });
 
     it("JSON: 同じキーを異なる値に変更 → 必ずコンフリクトになる", () => {
@@ -480,15 +668,12 @@ line2`;
 
       const result = merge(base, local, template, "config.json");
 
-      // テキストマージでは行レベルで処理されるため、
-      // コンフリクトマーカーで両側の変更が可視化される
-      if (!result.hasConflicts) {
-        expect(result.content).toContain('"updated"');
-        expect(result.content).toContain("localOnly");
-      }
-      if (result.hasConflicts) {
-        expect(result.content).toContain("<<<<<<< LOCAL");
-      }
+      // 変更が隣接する行に集中しているため 1 つのブロックにまとまり、
+      // 両側の変更がマーカー内に可視化される
+      expect(result.hasConflicts).toBe(true);
+      expect(result.content).toContain("<<<<<<< LOCAL");
+      expect(result.content).toContain('"updated"');
+      expect(result.content).toContain("localOnly");
     });
 
     it("Markdown: 同じ行を異なる内容に変更 → コンフリクトマーカーが挿入される", () => {

@@ -4,14 +4,11 @@ import type { MergeResult, ThreeWayMergeParams } from "./types";
 /**
  * 3-way マージを実行する。
  *
- * 背景: 以前は JSON/TOML/YAML を構造マージ（キーレベル）で処理し、
- * フォールバックとしてテキストマージを使う2段構えだった。
- * しかし構造マージとテキストマージの分岐は設計を複雑にし、
- * conflictDetails がテキストマージで常に空になる等の不整合を生んでいた。
- * node-diff3 の行レベル 3-way マージは git merge-file と同等の
- * コンフリクト検出を行うため、全ファイル形式で統一的に処理できる。
+ * ファイル形式によらず行レベルの 3-way マージ（git merge-file 相当）で処理する。
+ * 形式ごとの構造マージへ分岐させると、コンフリクトの表現が形式ごとに食い違い、
+ * 呼び出し側が結果を一様に扱えなくなる。
  *
- * result の内容は local をベースにし、template 側の変更を適用したもの。
+ * 結果の内容は local をベースに template 側の変更を適用したもの。
  * コンフリクト時はコンフリクトマーカーが挿入される。
  */
 export function threeWayMerge({

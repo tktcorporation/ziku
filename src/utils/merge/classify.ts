@@ -1,4 +1,4 @@
-import { match, P } from "ts-pattern";
+import { match } from "ts-pattern";
 import type { ClassifyOptions, FileClassification } from "./types";
 
 /** 分類カテゴリ名。FileClassification のキーと対応する。 */
@@ -24,21 +24,31 @@ function classifyOneFile(
     hasTemplate: template !== undefined,
   };
 
-  return match(presence)
-    .with({ hasBase: false, hasLocal: false, hasTemplate: true }, () => "newFiles" as const)
-    .with({ hasBase: true, hasTemplate: false }, () => "deletedFiles" as const)
-    .with({ hasBase: true, hasLocal: false, hasTemplate: true }, () =>
-      template === base ? ("deletedLocally" as const) : ("conflicts" as const),
-    )
-    .with({ hasBase: false, hasLocal: true, hasTemplate: false }, () => "localOnly" as const)
-    .with({ hasBase: false, hasLocal: true, hasTemplate: true }, () =>
-      local === template ? ("unchanged" as const) : ("conflicts" as const),
-    )
-    .with({ hasBase: true, hasLocal: true, hasTemplate: true }, () =>
-      classifyThreeWay(base, local, template),
-    )
-    .with(P.any, () => "unchanged" as const)
-    .exhaustive();
+  return (
+    match(presence)
+      .with({ hasBase: false, hasLocal: false, hasTemplate: true }, () => "newFiles" as const)
+      // テンプレート側の削除とローカル側の編集は、どちらを採るかをユーザーしか決められない
+      // delete/modify の衝突。削除候補に混ぜると --force がローカルの編集ごと消す。
+      // 逆向き（ローカル削除 × テンプレート変更）を conflicts にしているのと同じ扱いにする。
+      .with({ hasBase: true, hasLocal: true, hasTemplate: false }, () =>
+        local === base ? ("deletedFiles" as const) : ("conflicts" as const),
+      )
+      .with({ hasBase: true, hasLocal: false, hasTemplate: false }, () => "deletedFiles" as const)
+      .with({ hasBase: true, hasLocal: false, hasTemplate: true }, () =>
+        template === base ? ("deletedLocally" as const) : ("conflicts" as const),
+      )
+      .with({ hasBase: false, hasLocal: true, hasTemplate: false }, () => "localOnly" as const)
+      .with({ hasBase: false, hasLocal: true, hasTemplate: true }, () =>
+        local === template ? ("unchanged" as const) : ("conflicts" as const),
+      )
+      .with({ hasBase: true, hasLocal: true, hasTemplate: true }, () =>
+        classifyThreeWay(base, local, template),
+      )
+      // どのハッシュマップにも無いパスは classifyFiles の走査対象に入らないため到達しない。
+      // 網羅性検査を成立させるためだけの分岐で、変更なし扱いにしても副作用はない。
+      .with({ hasBase: false, hasLocal: false, hasTemplate: false }, () => "unchanged" as const)
+      .exhaustive()
+  );
 }
 
 /**
