@@ -3,7 +3,8 @@ import { defineCommand } from "citty";
 import { Effect, Option } from "effect";
 import { match } from "ts-pattern";
 import { withFinally } from "../effect-helpers";
-import { ZikuError } from "../errors";
+import type { ZikuFailure } from "../errors";
+import { describeConflictLines, zikuFailure } from "../errors";
 import type {
   AbsPath,
   ConflictPaths,
@@ -25,7 +26,7 @@ import { selectDeletedFiles, selectDeletedFilesWithLocalEdits } from "../ui/prom
 import { intro, log, outro, pc } from "../ui/renderer";
 import { LOCK_FILE, loadLock, saveLock } from "../utils/lock";
 import { ZIKU_CONFIG_FILE, withConfigTracked, zikuConfigExists } from "../utils/ziku-config";
-import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
+import { loadCommandContext, runCommandEffect, toZikuFailure } from "../services/command-context";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 import { hashContent } from "../utils/hash";
@@ -129,20 +130,14 @@ export const pullCommand = defineCommand({
 
     // --continue モードは lock.json のみ必要（テンプレート不要）
     if (args.continue) {
-      if (!zikuConfigExists(targetDir)) {
-        throw new ZikuError("Not initialized", "Run `ziku init` first");
-      }
-      const lock = await runCommandEffect(loadLock(targetDir).pipe(Effect.mapError(toZikuError)));
-      if (lock.sync !== "merging") {
-        throw new ZikuError("No pending merge found", "Run `ziku pull` first to start a merge");
-      }
+      const lock = await runCommandEffect(loadPausedMerge(targetDir));
       await runContinue(targetDir, lock, args.dryRun as boolean);
       return;
     }
 
     // loadCommandContext + runCommandEffect で DRY 化
     const ctx = await runCommandEffect(
-      loadCommandContext(targetDir).pipe(Effect.mapError(toZikuError)),
+      loadCommandContext(targetDir).pipe(Effect.mapError(toZikuFailure)),
     );
 
     const { config, lock, source, templateDir, cleanup, resolveBaseRef } = ctx;
@@ -153,7 +148,7 @@ export const pullCommand = defineCommand({
     // ResumableLockState に絞られ、再実行経路が型として存在しなくなる。
     if (lock.sync === "merging") {
       await cleanup();
-      throw pausedMergeError(lock);
+      throw pausedMergeFailure(lock);
     }
 
     log.info(`Template: ${pc.cyan(templateDir)}${source.kind === "local" ? " (local)" : ""}`);
@@ -549,15 +544,9 @@ function applyMergeOutcome(params: {
     .exhaustive();
 }
 
-/**
- * 未解決ブロックの位置をユーザー向けに整形する。
- *
- * 行番号を添えるのは、マーカーが 1 ファイルに複数ブロック残ることがあり、
- * ファイル名だけでは編集すべき箇所が分からないため。
- */
+/** 未解決ブロックの位置を、失敗の hint と同じ文言でログへ出す。 */
 function formatRegions(regions: readonly ConflictRegion[]): string {
-  const label = regions.length === 1 ? "line" : "lines";
-  return pc.dim(`(${label} ${regions.map((r) => r.startLine).join(", ")})`);
+  return pc.dim(describeConflictLines(regions.map((r) => r.startLine)));
 }
 
 /**
@@ -680,12 +669,30 @@ async function deleteSelectedFiles(
  * 通常の pull は解決待ちのファイルを持たない状態を前提に組み立てられているため、
  * 解決の続きは `--continue` へ誘導する。
  */
-function pausedMergeError(lock: MergingLockState): ZikuError {
-  return new ZikuError(
-    "Merge already in progress from a previous `ziku pull`",
-    "Resolve the conflict markers in these files, then run `ziku pull --continue`:\n" +
-      lock.merge.conflicts.map((f) => `  \u2022 ${f}`).join("\n"),
-  );
+function pausedMergeFailure(lock: MergingLockState): ZikuFailure {
+  return zikuFailure({ kind: "MergePaused", conflicts: lock.merge.conflicts });
+}
+
+/**
+ * `--continue` の前提を確認し、解決待ちの lock を返す。
+ *
+ * 前提が崩れる 2 通り（未初期化 / 解決待ちが無い）はユーザーが取る行動が違うので、
+ * 別々の失敗理由で返す。戻り値が `MergingLockState` に絞られるため、再開処理は
+ * 解決待ちでない lock を受け取れない。
+ */
+function loadPausedMerge(targetDir: AbsPath): Effect.Effect<MergingLockState, ZikuFailure> {
+  return Effect.gen(function* () {
+    if (!zikuConfigExists(targetDir)) {
+      return yield* Effect.fail(zikuFailure({ kind: "NotInitialized", path: ZIKU_CONFIG_FILE }));
+    }
+
+    const lock = yield* loadLock(targetDir).pipe(Effect.mapError(toZikuFailure));
+    if (lock.sync !== "merging") {
+      return yield* Effect.fail(zikuFailure({ kind: "NoMergePaused" }));
+    }
+
+    return lock;
+  });
 }
 
 /**
@@ -713,13 +720,13 @@ async function runContinue(
   }
 
   if (stillConflicted.length > 0) {
-    for (const { file, regions } of stillConflicted) {
-      log.warn(`Still has conflict markers: ${pc.cyan(file)} ${formatRegions(regions)}`);
-    }
-    throw new ZikuError(
-      "Unresolved conflicts remain",
-      "Resolve all conflict markers then run `ziku pull --continue` again",
-    );
+    throw zikuFailure({
+      kind: "ConflictsUnresolved",
+      files: stillConflicted.map(({ file, regions }) => ({
+        path: file,
+        lines: regions.map((r) => r.startLine),
+      })),
+    });
   }
 
   // dryRun: --continue は同期ベースの確定（lock 更新）が本体の副作用なので、書き込みだけ

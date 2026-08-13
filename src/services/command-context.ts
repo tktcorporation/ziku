@@ -187,8 +187,8 @@ export function toZikuFailure(err: ContextLoadError): ZikuFailure {
 }
 
 /**
- * 分類した失敗を `ZikuError` へ落とす。`throw` で失敗を伝えるコマンド
- * (pull / push / status) が使う。文言は `toZikuFailure` と同じ SSOT から来る。
+ * 分類した失敗を `ZikuError` へ落とす。理由で分岐せず文言だけを使う `push` のための
+ * アダプタ。文言は `toZikuFailure` と同じ SSOT から来る。
  */
 export function toZikuError(err: ContextLoadError): ZikuError {
   const failure = toZikuFailure(err);

@@ -1,7 +1,7 @@
 import { vol } from "memfs";
 import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ZikuError, FileNotFoundError } from "../../errors";
+import { FileNotFoundError, ZikuFailure } from "../../errors";
 import type {
   AbsPath,
   CommitSha,
@@ -27,7 +27,7 @@ vi.mock("node:fs/promises", async () => {
 });
 
 // loadCommandContext をモック（DI の恩恵: 低レベルモック不要）
-// runCommandEffect / toZikuError は実際の実装を使い、loadCommandContext だけモックする
+// runCommandEffect / toZikuFailure は実際の実装を使い、loadCommandContext だけモックする
 vi.mock("../../services/command-context", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../services/command-context")>();
   return {
@@ -233,6 +233,21 @@ function lastSavedLock(): LockState {
   return saved;
 }
 
+/**
+ * pull が投げた `ZikuFailure` を取り出す。
+ *
+ * 失敗の検証は理由 (`reason.kind`) とユーザー向けの文言で行う。例外のクラスだけを見ると、
+ * 別の失敗にすり替わっても気付けない。
+ */
+async function captureFailure(run: () => Promise<unknown>): Promise<ZikuFailure> {
+  const thrown = await run().then(
+    () => undefined,
+    (e: unknown) => e,
+  );
+  expect(thrown).toBeInstanceOf(ZikuFailure);
+  return thrown as ZikuFailure;
+}
+
 /** コンフリクト解決待ちのロックを作る。 */
 function mergingLock(conflicts: ConflictPaths, next: SyncPoint): LockState {
   return markMerging(baseLock, next, conflicts);
@@ -327,13 +342,16 @@ describe("pullCommand", () => {
         Effect.fail(new FileNotFoundError({ path: ".ziku/ziku.jsonc" })),
       );
 
-      await expect(
+      const failure = await captureFailure(() =>
         (pullCommand.run as any)({
           args: { dir: "/test", force: false, yes: false },
           rawArgs: [],
           cmd: pullCommand,
         }),
-      ).rejects.toThrow(ZikuError);
+      );
+
+      expect(failure.reason).toEqual({ kind: "NotInitialized", path: ".ziku/ziku.jsonc" });
+      expect(failure.hint).toContain("ziku init");
     });
 
     it("変更がない場合は 'Already up to date' を表示", async () => {
@@ -1136,13 +1154,19 @@ describe("pullCommand", () => {
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
-      await expect(
+      const failure = await captureFailure(() =>
         (pullCommand.run as any)({
           args: { dir: "/test", force: false, yes: false, continue: false },
           rawArgs: [],
           cmd: pullCommand,
         }),
-      ).rejects.toThrow("Merge already in progress");
+      );
+
+      expect(failure.reason).toEqual({ kind: "MergePaused", conflicts: [".mcp.json"] });
+      expect(failure.message).toContain("Merge already in progress");
+      // 解決すべきファイルと、続きに使うコマンドの両方を hint が答える
+      expect(failure.hint).toContain(".mcp.json");
+      expect(failure.hint).toContain("ziku pull --continue");
 
       // マーカーは再マージされず、ファイルもロックも書き換わらない
       expect(mockMergeOneFile).not.toHaveBeenCalled();
@@ -1154,13 +1178,33 @@ describe("pullCommand", () => {
     it("--continue: 解決待ちのコンフリクトがない場合はエラー", async () => {
       mockLoadLock.mockReturnValueOnce(Effect.succeed(baseLock));
 
-      await expect(
+      const failure = await captureFailure(() =>
         (pullCommand.run as any)({
           args: { dir: "/test", force: false, yes: false, continue: true },
           rawArgs: [],
           cmd: pullCommand,
         }),
-      ).rejects.toThrow(ZikuError);
+      );
+
+      expect(failure.reason).toEqual({ kind: "NoMergePaused" });
+      expect(failure.message).toContain("No pending merge found");
+      // 解決待ちが無いので、案内は --continue ではなく通常の pull へ向く
+      expect(failure.hint).toContain("Run `ziku pull` first");
+    });
+
+    it("--continue: 未初期化なら init を案内する", async () => {
+      mockZikuConfigExists.mockReturnValue(false);
+
+      const failure = await captureFailure(() =>
+        (pullCommand.run as any)({
+          args: { dir: "/test", force: false, yes: false, continue: true },
+          rawArgs: [],
+          cmd: pullCommand,
+        }),
+      );
+
+      expect(failure.reason).toEqual({ kind: "NotInitialized", path: ".ziku/ziku.jsonc" });
+      expect(failure.hint).toContain("ziku init");
     });
 
     it("--continue: コンフリクトマーカーが残っている場合はエラー", async () => {
@@ -1177,13 +1221,22 @@ describe("pullCommand", () => {
         ),
       );
 
-      await expect(
+      const failure = await captureFailure(() =>
         (pullCommand.run as any)({
           args: { dir: "/test", force: false, yes: false, continue: true },
           rawArgs: [],
           cmd: pullCommand,
         }),
-      ).rejects.toThrow(ZikuError);
+      );
+
+      expect(failure.reason).toEqual({
+        kind: "ConflictsUnresolved",
+        files: [{ path: ".mcp.json", lines: [1] }],
+      });
+      expect(failure.message).toContain("Unresolved conflict markers remain");
+      // コマンドは合っているので、hint は編集すべき箇所を行番号まで示す
+      expect(failure.hint).toContain(".mcp.json (line 1)");
+      expect(failure.hint).toContain("ziku pull --continue");
     });
 
     it("--continue: 全解決済みならベースを確定して解決待ちの記録を消す", async () => {

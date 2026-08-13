@@ -18,8 +18,8 @@ import { match } from "ts-pattern";
 /**
  * ユーザー向けエラー。`hint` でリカバリ方法を提示する。
  *
- * `throw` で失敗を伝えるコマンド (pull / push / status) が使う。トップレベル
- * ハンドラ (`index.ts`) が `ZikuFailure` と同じ経路で表示する。
+ * `push` が使う。トップレベルハンドラ (`index.ts`) が `ZikuFailure` と同じ経路で表示する。
+ * 理由で分岐できないため、新規の失敗は `ZikuFailure` で表す。
  */
 export class ZikuError extends Error {
   constructor(
@@ -77,6 +77,29 @@ export type FailureReason =
     }
   /** 必須の CLI 引数が無い。 */
   | { readonly kind: "MissingArgument"; readonly argument: string; readonly usage: string }
+  /**
+   * 解決待ちのマージが残っているため、新しいマージを始められない。
+   *
+   * 取る行動は「`pull` ではなく `pull --continue` を使う」。解決自体は既に済んでいる
+   * こともあるので、コマンドの言い直しが本体になる。
+   */
+  | { readonly kind: "MergePaused"; readonly conflicts: readonly string[] }
+  /**
+   * 解決待ちのマージが無いのに再開しようとした。
+   *
+   * 取る行動は「まず `pull` を実行する」。`MergePaused` とは逆向きの言い直しになる。
+   */
+  | { readonly kind: "NoMergePaused" }
+  /**
+   * 再開を試みたが、コンフリクトマーカーが残っている。
+   *
+   * 取る行動はファイルの編集。コマンドは合っているので言い直しでは解決せず、
+   * どこを直せばよいかを行番号まで添えて示す。
+   */
+  | {
+      readonly kind: "ConflictsUnresolved";
+      readonly files: readonly { readonly path: string; readonly lines: readonly number[] }[];
+    }
   /** ローカルへの書き込みに失敗した。権限や書き込み先の状態を疑う。 */
   | {
       readonly kind: "FileWriteFailed";
@@ -161,6 +184,20 @@ export function describeFailure(reason: FailureReason): FailureDisplay {
       message: `No ${r.argument} specified.`,
       hint: r.usage,
     }))
+    .with({ kind: "MergePaused" }, (r) => ({
+      message: "Merge already in progress from a previous `ziku pull`",
+      hint: `Resolve the conflict markers in these files, then run \`ziku pull --continue\`:\n${bulletList(r.conflicts)}`,
+    }))
+    .with({ kind: "NoMergePaused" }, () => ({
+      message: "No pending merge found",
+      hint: "Run `ziku pull` first to start a merge",
+    }))
+    .with({ kind: "ConflictsUnresolved" }, (r) => ({
+      message: "Unresolved conflict markers remain",
+      hint: `Remove the conflict markers from these files, then run \`ziku pull --continue\` again:\n${bulletList(
+        r.files.map((f) => `${f.path} ${describeConflictLines(f.lines)}`),
+      )}`,
+    }))
     .with({ kind: "FileWriteFailed" }, (r) => ({
       message: `Failed to write ${r.path}: ${r.detail}`,
       hint: `Check write permissions for ${r.directory}`,
@@ -170,6 +207,23 @@ export function describeFailure(reason: FailureReason): FailureDisplay {
       hint: "Run without --dryRun to apply it, or point at an existing template with --from",
     }))
     .exhaustive();
+}
+
+/** 対象ファイルを 1 行 1 件で並べる。hint の中で複数件を数えられるようにする。 */
+function bulletList(items: readonly string[]): string {
+  return items.map((item) => `  • ${item}`).join("\n");
+}
+
+/**
+ * 未解決ブロックの位置をユーザー向けに整形する。
+ *
+ * 行番号を添えるのは、マーカーが 1 ファイルに複数ブロック残ることがあり、
+ * ファイル名だけでは編集すべき箇所が分からないため。
+ *
+ * 失敗の hint と、マージ中の警告ログの両方がこの文言を使う。
+ */
+export function describeConflictLines(lines: readonly number[]): string {
+  return `(${lines.length === 1 ? "line" : "lines"} ${lines.join(", ")})`;
 }
 
 /** レート制限の hint 前半。トークンを足すべきか、待つしかないかを分ける。 */

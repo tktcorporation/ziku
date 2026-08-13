@@ -1,7 +1,7 @@
 import { vol } from "memfs";
 import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ZikuError, FileNotFoundError } from "../../errors";
+import { FileNotFoundError, ZikuFailure } from "../../errors";
 import type { FileClassification } from "../../utils/merge/types";
 import type { SyncPlan } from "../../utils/merge/sync-plan";
 import type {
@@ -147,6 +147,21 @@ const pendingLock: ResumableLockState = {
   sync: "pending",
 };
 
+/**
+ * status が投げた `ZikuFailure` を取り出す。
+ *
+ * 失敗の検証は理由 (`reason.kind`) とユーザー向けの文言で行う。例外のクラスだけを見ると、
+ * 別の失敗にすり替わっても気付けない。
+ */
+async function captureFailure(run: () => Promise<unknown>): Promise<ZikuFailure> {
+  const thrown = await run().then(
+    () => undefined,
+    (e: unknown) => e,
+  );
+  expect(thrown).toBeInstanceOf(ZikuFailure);
+  return thrown as ZikuFailure;
+}
+
 /** コンフリクト解決待ちのロックを作る。 */
 function mergingLock(conflicts: ConflictPaths): LockState {
   return markMerging(pendingLock, { hashes: {} }, conflicts);
@@ -258,14 +273,15 @@ describe("statusCommand", () => {
         Effect.fail(new FileNotFoundError({ path: ".ziku/ziku.jsonc" })),
       );
 
-      await expect(
+      const failure = await captureFailure(() =>
         // biome-ignore lint/suspicious/noExplicitAny: citty run signature
         (statusCommand.run as any)({
           args: { dir: "/test" },
           rawArgs: [],
           cmd: statusCommand,
         }),
-      ).rejects.toThrow(ZikuError);
+      );
+      expect(failure.reason).toEqual({ kind: "NotInitialized", path: ".ziku/ziku.jsonc" });
 
       // fast-path を踏まないので outro での "pull --continue" 案内は出ない
       const outroCalls = mockOutro.mock.calls.flat().join("\n");
@@ -274,19 +290,22 @@ describe("statusCommand", () => {
       expect(mockLoadCommandContext).toHaveBeenCalled();
     });
 
-    it("loadCommandContext 失敗時は ZikuError をスロー", async () => {
+    it("loadCommandContext 失敗時は理由付きの失敗をスロー", async () => {
       mockLoadCommandContext.mockReturnValue(
         Effect.fail(new FileNotFoundError({ path: ".ziku/ziku.jsonc" })),
       );
 
-      await expect(
+      const failure = await captureFailure(() =>
         // biome-ignore lint/suspicious/noExplicitAny: citty run signature
         (statusCommand.run as any)({
           args: { dir: "/test" },
           rawArgs: [],
           cmd: statusCommand,
         }),
-      ).rejects.toThrow(ZikuError);
+      );
+
+      expect(failure.reason).toEqual({ kind: "NotInitialized", path: ".ziku/ziku.jsonc" });
+      expect(failure.hint).toContain("ziku init");
     });
 
     it("patterns が空の場合は警告 + outro 'Nothing to compare.'", async () => {

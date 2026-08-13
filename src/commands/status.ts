@@ -1,7 +1,7 @@
 import { defineCommand } from "citty";
 import { Effect, Option } from "effect";
 import { withFinally } from "../effect-helpers";
-import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
+import { loadCommandContext, runCommandEffect, toZikuFailure } from "../services/command-context";
 import type { LockState } from "../modules/schemas";
 import { baseHashesOf } from "../modules/schemas";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
@@ -93,7 +93,7 @@ export const statusCommand = defineCommand({
         loadLock(targetDir).pipe(
           Effect.map(Option.some),
           Effect.catchTag("FileNotFoundError", () => Effect.succeed(Option.none<LockState>())),
-          Effect.mapError(toZikuError),
+          Effect.mapError(toZikuFailure),
         ),
       );
       if (Option.isSome(lockOption) && lockOption.value.sync === "merging") {
@@ -113,7 +113,7 @@ export const statusCommand = defineCommand({
     }
 
     const ctx = await runCommandEffect(
-      loadCommandContext(targetDir).pipe(Effect.mapError(toZikuError)),
+      loadCommandContext(targetDir).pipe(Effect.mapError(toZikuFailure)),
     );
 
     const { config, lock, source, templateDir, cleanup } = ctx;

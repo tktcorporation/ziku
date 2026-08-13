@@ -92,6 +92,24 @@ describe("describeFailure", () => {
       hint: /Usage: ziku track/,
     },
     {
+      reason: { kind: "MergePaused", conflicts: [".mcp.json", "AGENTS.md"] },
+      message: "Merge already in progress from a previous `ziku pull`",
+      hint: /\u2022 \.mcp\.json[\s\S]*\u2022 AGENTS\.md[\s\S]*/,
+    },
+    {
+      reason: { kind: "NoMergePaused" },
+      message: "No pending merge found",
+      hint: /Run `ziku pull` first/,
+    },
+    {
+      reason: {
+        kind: "ConflictsUnresolved",
+        files: [{ path: ".mcp.json", lines: [3, 12] }],
+      },
+      message: "Unresolved conflict markers remain",
+      hint: /\.mcp\.json \(lines 3, 12\)/,
+    },
+    {
       reason: {
         kind: "FileWriteFailed",
         path: ".ziku/ziku.jsonc",
@@ -112,6 +130,28 @@ describe("describeFailure", () => {
     const display = describeFailure(reason);
     expect(display.message).toBe(message);
     expect(display.hint).toMatch(hint);
+  });
+
+  it("解決待ちのマージは、どちらの向きでも `ziku pull --continue` へ誘導する", () => {
+    // MergePaused は「pull ではなく --continue を使う」、ConflictsUnresolved は
+    // 「編集してから同じコマンドを再実行する」。案内するコマンドは同じでも行動が違う。
+    expect(describeFailure({ kind: "MergePaused", conflicts: ["a.txt"] }).hint).toContain(
+      "ziku pull --continue",
+    );
+    expect(
+      describeFailure({
+        kind: "ConflictsUnresolved",
+        files: [{ path: "a.txt", lines: [1] }],
+      }).hint,
+    ).toContain("`ziku pull --continue` again");
+  });
+
+  it("未解決ブロックが 1 つだけなら line と単数で数える", () => {
+    const single = describeFailure({
+      kind: "ConflictsUnresolved",
+      files: [{ path: "a.txt", lines: [7] }],
+    });
+    expect(single.hint).toContain("a.txt (line 7)");
   });
 
   it("レート制限は未認証ならトークン設定を、リセット時刻があれば残り時間を案内する", () => {
