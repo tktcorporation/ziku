@@ -5,18 +5,17 @@
  * Effect の Service として DRY 化する。各コマンドは loadCommandContext を yield* するだけで
  * 設定・lock・テンプレートディレクトリが手に入る。
  *
- * isLocalSource/isGitHubSource の分岐もここで吸収し、
- * resolveBaseRef で透過的にベースリビジョンを解決する。
+ * ソース種別の分岐もここで吸収し、resolveBaseRef で透過的にベースリビジョンを解決する。
  */
 import { Cause, Context, Effect, Exit, Layer, Option, Scope } from "effect";
+import { match } from "ts-pattern";
 import type { ZikuConfig, LockState, TemplateSource } from "../modules/schemas";
-import { isGitHubSource } from "../modules/schemas";
 import { FileNotFoundError, ParseError, ZikuError } from "../errors";
-import type { TemplateError } from "../errors";
+import type { TemplateError, ValidationError } from "../errors";
 import { loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
 import { loadLock } from "../utils/lock";
 import { resolveTemplateDirScoped } from "../utils/template-resolve";
-import { resolveLatestCommitSha } from "../utils/github";
+import { resolveSourceCommitSha } from "../utils/github";
 
 // ─── Service 定義 ───
 
@@ -40,9 +39,8 @@ export interface CommandContextShape {
   /**
    * テンプレートの最新コミット SHA を解決する。
    *
-   * GitHub ソースの場合は API で最新 SHA を取得。
-   * ローカルソースの場合は undefined を返す。
-   * isGitHubSource/isLocalSource の分岐を吸収し、呼び出し元は
+   * GitHub ソースの場合は API で SHA を取得。
+   * ローカルソースの場合は None を返す。ソース種別の分岐を吸収し、呼び出し元は
    * ソース種別を意識せずに使える。
    */
   readonly resolveBaseRef: Effect.Effect<Option.Option<string>>;
@@ -91,7 +89,10 @@ export async function runCommandEffect<A>(effect: Effect.Effect<A, ZikuError>): 
  */
 export function loadCommandContext(
   targetDir: string,
-): Effect.Effect<CommandContextShape, FileNotFoundError | ParseError | TemplateError> {
+): Effect.Effect<
+  CommandContextShape,
+  FileNotFoundError | ParseError | ValidationError | TemplateError
+> {
   return Effect.gen(function* () {
     if (!zikuConfigExists(targetDir)) {
       return yield* new FileNotFoundError({ path: ".ziku/ziku.jsonc" });
@@ -101,10 +102,7 @@ export function loadCommandContext(
       catch: (e) => new ParseError({ path: ".ziku/ziku.jsonc", cause: e }),
     });
 
-    const lock = yield* Effect.tryPromise({
-      try: () => loadLock(targetDir),
-      catch: () => new FileNotFoundError({ path: ".ziku/lock.json" }),
-    });
+    const lock = yield* loadLock(targetDir);
 
     const source = lock.source;
 
@@ -130,17 +128,20 @@ export function loadCommandContext(
     const cleanup = (): Promise<void> => Effect.runPromise(Scope.close(scope, Exit.void));
 
     // resolveBaseRef: ソース種別の分岐を吸収
-    // resolveLatestCommitSha は Promise<string | undefined> を返すため、
+    // resolveSourceCommitSha は Promise<string | undefined> を返すため、
     // Option.fromNullable で undefined → None に正規化してから返す
     //
-    // source.ref を渡す理由: テンプレートを取得したブランチと baseRef が食い違うと、
+    // source.ref を渡す理由: テンプレートを取得した ref とベースの SHA が食い違うと、
     // 3-way マージのベースが別ブランチのツリーになる。
-    const resolveBaseRef = isGitHubSource(source)
-      ? Effect.tryPromise(() => resolveLatestCommitSha(source.owner, source.repo, source.ref)).pipe(
+    const resolveBaseRef = match(source)
+      .with({ kind: "github" }, (gh) =>
+        Effect.tryPromise(() => resolveSourceCommitSha(gh.owner, gh.repo, gh.ref)).pipe(
           Effect.map(Option.fromNullable),
           Effect.orElseSucceed(() => Option.none<string>()),
-        )
-      : Effect.succeed(Option.none<string>());
+        ),
+      )
+      .with({ kind: "local" }, () => Effect.succeed(Option.none<string>()))
+      .exhaustive();
 
     return { config, lock, source, templateDir, cleanup, resolveBaseRef };
   });
@@ -151,7 +152,7 @@ export function loadCommandContext(
  */
 export function makeCommandContextLayer(
   targetDir: string,
-): Layer.Layer<CommandContext, FileNotFoundError | ParseError | TemplateError> {
+): Layer.Layer<CommandContext, FileNotFoundError | ParseError | ValidationError | TemplateError> {
   return Layer.effect(CommandContext, loadCommandContext(targetDir));
 }
 
@@ -159,13 +160,30 @@ export function makeCommandContextLayer(
  * loadCommandContext のエラーを ZikuError に変換するヘルパー。
  *
  * 各コマンドで繰り返される mapError パターンを DRY 化。
+ *
+ * スキーマ違反（ValidationError）はファイル不在と別文言にする。読めない設定ファイルを
+ * 「見つからない」と報告すると、ユーザーは存在するファイルを探し続けることになる。
  */
-export function toZikuError(err: FileNotFoundError | ParseError | TemplateError): ZikuError {
-  if (err._tag === "FileNotFoundError") {
-    return new ZikuError(`${err.path} not found.`, "Run 'ziku init' first.");
-  }
-  if (err._tag === "ParseError") {
-    return new ZikuError("Failed to parse configuration", String(err.cause));
-  }
-  return new ZikuError("Failed to load template", err.message);
+export function toZikuError(
+  err: FileNotFoundError | ParseError | ValidationError | TemplateError,
+): ZikuError {
+  return match(err)
+    .with(
+      { _tag: "FileNotFoundError" },
+      (e) => new ZikuError(`${e.path} not found.`, "Run 'ziku init' first."),
+    )
+    .with(
+      { _tag: "ParseError" },
+      (e) => new ZikuError(`Failed to parse ${e.path}`, String(e.cause)),
+    )
+    .with(
+      { _tag: "ValidationError" },
+      (e) =>
+        new ZikuError(
+          `Failed to read ${e.path}`,
+          [...e.issues, "Run `ziku init` to recreate it."].join("\n"),
+        ),
+    )
+    .with({ _tag: "TemplateError" }, (e) => new ZikuError("Failed to load template", e.message))
+    .exhaustive();
 }

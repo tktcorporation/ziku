@@ -68,9 +68,8 @@ export interface StatusBuckets {
  * - pushOnly         : push だけで十分
  * - pullThenPush     : 先に pull、その後 push（順序が重要なので分岐させている）
  * - resolveConflict  : conflict があるので pull で 3-way merge を始める
- * - continueMerge    : pendingMerge 中。`ziku pull --continue` で再開
- *                     conflictCount === 0 のケースは「stale lock のクリア」を促す
- *                     縮退状態（pull --continue 実行直前にプロセスが死んだ等）。
+ * - continueMerge    : コンフリクト解決待ち。`ziku pull --continue` で再開。
+ *                     解決待ちのファイルは必ず 1 件以上ある（lock の型が空を許さない）。
  */
 export type Recommendation =
   | { readonly kind: "inSync" }
@@ -185,11 +184,8 @@ export function categorizeForStatus(classification: FileClassification): StatusB
  * バケツと lock の状態から「次にすべきアクション」を1つ決める。
  *
  * 優先度（上から評価）:
- *   1. pendingMerge があれば continueMerge（最優先；他の差分より先に解決すべき）
- *      - conflicts.length === 0 のレアケース（--continue 直前にプロセスが死んだ等で
- *        lock が stale）でも continueMerge を返し、UI が「stale lock のクリア」を案内する。
- *        inSync にフォールスルーすると、その後 push が pendingMerge ガードでブロック
- *        される際に理由が分からなくなるため。
+ *   1. コンフリクト解決待ち（sync: "merging"）なら continueMerge
+ *      （最優先；他の差分より先に解決すべきで、その間 push はブロックされる）
  *   2. conflict があれば resolveConflict（pull --continue ではなく新規 pull で merge を開始）
  *   3. pull も push もある → pullThenPush（pull 先行で取りこぼし防止）
  *   4. pull だけ → pullOnly
@@ -202,17 +198,17 @@ export function categorizeForStatus(classification: FileClassification): StatusB
  * 必ず先に `pull` で `ziku.jsonc` を更新する必要がある。これを忘れて pushOnly や inSync を
  * 推奨すると「次の操作が no-op」という UX 事故になる (codex review #71)。
  *
- * 参考: schemas.ts の pendingMerge コメント — pendingMerge 中は push がブロックされる仕様。
+ * 参考: schemas.ts の lockSchema — `merging` の間は push がブロックされる仕様。
  */
 export function decideRecommendation(
   buckets: StatusBuckets,
-  lock: Pick<LockState, "pendingMerge">,
+  lock: LockState,
   patternsUpdated = false,
 ): Recommendation {
-  if (lock.pendingMerge !== undefined) {
+  if (lock.sync === "merging") {
     return {
       kind: "continueMerge",
-      conflictCount: lock.pendingMerge.conflicts.length,
+      conflictCount: lock.merge.conflicts.length,
     };
   }
 

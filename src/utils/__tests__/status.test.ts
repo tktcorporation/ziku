@@ -191,10 +191,16 @@ describe("status", () => {
   });
 
   describe("decideRecommendation", () => {
-    const noLock: Pick<LockState, "pendingMerge"> = {};
+    const syncedLock: LockState = {
+      version: "1.0.0",
+      installedAt: "2024-01-01T00:00:00Z",
+      source: { kind: "github", owner: "o", repo: "r" },
+      sync: "synced",
+      base: { hashes: {} },
+    };
 
     it("全バケツ空 → inSync", () => {
-      const rec = decideRecommendation(emptyBuckets(), noLock);
+      const rec = decideRecommendation(emptyBuckets(), syncedLock);
       expect(rec).toEqual({ kind: "inSync" });
     });
 
@@ -203,7 +209,7 @@ describe("status", () => {
         ...emptyBuckets(),
         pull: [{ path: "a", direction: "pull", category: "autoUpdate", isDestructive: false }],
       };
-      expect(decideRecommendation(buckets, noLock)).toEqual({ kind: "pullOnly", pullCount: 1 });
+      expect(decideRecommendation(buckets, syncedLock)).toEqual({ kind: "pullOnly", pullCount: 1 });
     });
 
     it("push のみ → pushOnly", () => {
@@ -211,7 +217,7 @@ describe("status", () => {
         ...emptyBuckets(),
         push: [{ path: "a", direction: "push", category: "localOnly", isDestructive: false }],
       };
-      expect(decideRecommendation(buckets, noLock)).toEqual({ kind: "pushOnly", pushCount: 1 });
+      expect(decideRecommendation(buckets, syncedLock)).toEqual({ kind: "pushOnly", pushCount: 1 });
     });
 
     it("pull + push → pullThenPush", () => {
@@ -220,7 +226,7 @@ describe("status", () => {
         pull: [{ path: "a", direction: "pull", category: "autoUpdate", isDestructive: false }],
         push: [{ path: "b", direction: "push", category: "localOnly", isDestructive: false }],
       };
-      expect(decideRecommendation(buckets, noLock)).toEqual({
+      expect(decideRecommendation(buckets, syncedLock)).toEqual({
         kind: "pullThenPush",
         pullCount: 1,
         pushCount: 1,
@@ -236,7 +242,7 @@ describe("status", () => {
           { path: "c", direction: "conflict", category: "conflicts", isDestructive: false },
         ],
       };
-      expect(decideRecommendation(buckets, noLock)).toEqual({
+      expect(decideRecommendation(buckets, syncedLock)).toEqual({
         kind: "resolveConflict",
         conflictCount: 1,
         pullCount: 1,
@@ -244,12 +250,12 @@ describe("status", () => {
       });
     });
 
-    it("pendingMerge が存在し conflicts に内容があれば continueMerge（最優先）", () => {
-      const lock: Pick<LockState, "pendingMerge"> = {
-        pendingMerge: {
-          conflicts: ["a.txt", "b.txt"],
-          templateHashes: {},
-        },
+    it("解決待ちのコンフリクトがあれば continueMerge（最優先）", () => {
+      const lock: LockState = {
+        ...syncedLock,
+        sync: "merging",
+        base: { hashes: {} },
+        merge: { conflicts: ["a.txt", "b.txt"], nextBase: { hashes: {} } },
       };
       // 通常なら pullThenPush になる buckets でも continueMerge が優先される
       const buckets: StatusBuckets = {
@@ -268,7 +274,7 @@ describe("status", () => {
       // inSync を返すと、ユーザーが push しても push は raw config.include しか見ないので
       // 何も起きず「次操作が no-op」という UX 事故になる。pull を必ず推奨する。
       const buckets = emptyBuckets();
-      expect(decideRecommendation(buckets, noLock, true)).toEqual({
+      expect(decideRecommendation(buckets, syncedLock, true)).toEqual({
         kind: "pullOnly",
         pullCount: 0,
       });
@@ -279,7 +285,7 @@ describe("status", () => {
         ...emptyBuckets(),
         push: [{ path: "x", direction: "push", category: "localOnly", isDestructive: false }],
       };
-      expect(decideRecommendation(buckets, noLock, true)).toEqual({
+      expect(decideRecommendation(buckets, syncedLock, true)).toEqual({
         kind: "pullThenPush",
         pullCount: 0,
         pushCount: 1,
@@ -289,23 +295,23 @@ describe("status", () => {
     it("patternsUpdated=false + 全バケツ空 → inSync (regression: デフォルト挙動を維持)", () => {
       // patternsUpdated 引数追加で既存呼び出しが壊れないことを保証
       const buckets = emptyBuckets();
-      expect(decideRecommendation(buckets, noLock)).toEqual({ kind: "inSync" });
+      expect(decideRecommendation(buckets, syncedLock)).toEqual({ kind: "inSync" });
     });
 
-    it("pendingMerge が空 conflicts でも continueMerge を返す（stale lock として扱う）", () => {
-      // --continue 直前にプロセスが死んだ等で lock が stale な状態。
-      // inSync にフォールスルーすると、その後 push が pendingMerge ガードで
-      // ブロックされる際に理由が分からなくなるため、明示的に continueMerge を返す。
-      const lock: Pick<LockState, "pendingMerge"> = {
-        pendingMerge: {
-          conflicts: [],
-          templateHashes: {},
-        },
+    it("ベース未確定 (sync: pending) の lock でも通常どおり推奨を出す", () => {
+      const pendingLock: LockState = {
+        version: "1.0.0",
+        installedAt: "2024-01-01T00:00:00Z",
+        source: { kind: "local", path: "/tpl" },
+        sync: "pending",
       };
-      const buckets = emptyBuckets();
-      expect(decideRecommendation(buckets, lock)).toEqual({
-        kind: "continueMerge",
-        conflictCount: 0,
+      const buckets: StatusBuckets = {
+        ...emptyBuckets(),
+        pull: [{ path: "a", direction: "pull", category: "newFiles", isDestructive: false }],
+      };
+      expect(decideRecommendation(buckets, pendingLock)).toEqual({
+        kind: "pullOnly",
+        pullCount: 1,
       });
     });
   });

@@ -14,6 +14,14 @@ import { vol } from "memfs";
 import { Effect } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZikuError } from "../../errors";
+import type { TemplateSource } from "../../modules/schemas";
+import {
+  baseCommitSha,
+  baseHashesOf,
+  createPendingLock,
+  lockSchema,
+  markSynced,
+} from "../../modules/schemas";
 
 // ── filesystem mock ─────────────────────────────────────────────
 
@@ -42,6 +50,10 @@ vi.mock("../../utils/template", () => {
     buildTemplateSource: vi.fn(
       (source: { owner: string; repo: string }) => `gh:${source.owner}/${source.repo}`,
     ),
+    buildCommitPinnedSource: vi.fn(
+      (source: { owner: string; repo: string }, sha: string) =>
+        `gh:${source.owner}/${source.repo}#${sha}`,
+    ),
     downloadTemplateToTemp,
     // command-context は resolveTemplateDirScoped 経由でこれを呼ぶ。
     // 既存テストが mockDownloadTemplateToTemp に { templateDir, cleanup } を返すよう
@@ -67,6 +79,7 @@ vi.mock("../../utils/github", async () => {
   const actual = await vi.importActual<typeof import("../../utils/github")>("../../utils/github");
   return {
     resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123")),
+    resolveSourceCommitSha: vi.fn(() => Promise.resolve("abc123")),
     checkRepoExists: vi.fn(() => Promise.resolve({ _tag: "Exists" as const })),
     checkRepoSetup: vi.fn(() => Promise.resolve(true)),
     getGitHubToken: vi.fn(() => "ghp_test"),
@@ -253,7 +266,7 @@ const mockClassifyFiles = vi.mocked(classifyFiles);
 
 // ── helpers ─────��───────────────────────────────────────────────
 
-const DEFAULT_SOURCE = { owner: "test-org", repo: ".github" };
+const DEFAULT_SOURCE: TemplateSource = { kind: "github", owner: "test-org", repo: ".github" };
 
 function createZikuJsonc(include: string[], exclude?: string[]): string {
   const content: Record<string, unknown> = { include };
@@ -261,25 +274,22 @@ function createZikuJsonc(include: string[], exclude?: string[]): string {
   return JSON.stringify(content, null, 2);
 }
 
-function _createLockJson(source = DEFAULT_SOURCE): string {
-  return JSON.stringify(
-    {
+function makeLock(source: TemplateSource, hashes: Record<string, string>, commitSha?: string) {
+  return markSynced(
+    createPendingLock({
       version: "0.1.0",
       installedAt: "2024-01-01T00:00:00.000Z",
       source,
-      baseHashes: {},
-    },
-    null,
-    2,
+    }),
+    { hashes, commitSha },
   );
 }
 
-const baseLock = {
-  version: "0.1.0",
-  installedAt: "2024-01-01T00:00:00.000Z",
-  source: DEFAULT_SOURCE,
-  baseHashes: {},
-};
+function _createLockJson(source = DEFAULT_SOURCE): string {
+  return JSON.stringify(makeLock(source, {}), null, 2);
+}
+
+const baseLock = makeLock(DEFAULT_SOURCE, {});
 
 // ═══════════════════════════════════════════════════════════════
 // E2E Scenarios
@@ -785,20 +795,16 @@ describe("E2E: multi-scenario tests", () => {
   //   2. テンプレートからファイルを削除
   //   3. pull で --force 削除が同期される
   //   4. pull で selectDeletedFiles による選択的削除
-  //   5. baseHashes の更新を確認
+  //   5. 同期ベースの更新を確認
   // ─────────────────────────────────────────────────────────────
 
   describe("ファイル削除の push → pull 同期（モック版）", () => {
-    const localSource = { path: "/template" };
-    const localLock = {
-      version: "0.1.0",
-      installedAt: "2024-01-01T00:00:00.000Z",
-      source: localSource,
-      baseHashes: {
-        ".mcp.json": "hash-mcp",
-        ".claude/rules/style.md": "hash-style",
-      },
+    const localSource: TemplateSource = { kind: "local", path: "/template" };
+    const localBaseHashes = {
+      ".mcp.json": "hash-mcp",
+      ".claude/rules/style.md": "hash-style",
     };
+    const localLock = makeLock(localSource, localBaseHashes);
 
     /**
      * テンプレートとプロジェクトの初期状態を構築するヘルパー。
@@ -908,14 +914,18 @@ describe("E2E: multi-scenario tests", () => {
       });
 
       // push で更新された lock を反映
-      const updatedLock = JSON.parse(
-        vol.readFileSync("/project/.ziku/lock.json", "utf8") as string,
+      const updatedLock = markSynced(
+        lockSchema.parse(
+          JSON.parse(vol.readFileSync("/project/.ziku/lock.json", "utf8") as string),
+        ),
+        {
+          hashes: {
+            ".mcp.json": "hash-mcp",
+            ".claude/rules/style.md": "hash-style",
+            ".claude/rules/testing.md": "hash-testing",
+          },
+        },
       );
-      updatedLock.baseHashes = {
-        ".mcp.json": "hash-mcp",
-        ".claude/rules/style.md": "hash-style",
-        ".claude/rules/testing.md": "hash-testing",
-      };
       vol.writeFileSync("/project/.ziku/lock.json", JSON.stringify(updatedLock, null, 2));
 
       await (pullCommand.run as any)({
@@ -932,11 +942,13 @@ describe("E2E: multi-scenario tests", () => {
       expect(vol.existsSync("/project/.mcp.json")).toBe(true);
       expect(vol.existsSync("/project/.claude/rules/style.md")).toBe(true);
 
-      // baseHashes から testing.md が消えている
-      const finalLock = JSON.parse(vol.readFileSync("/project/.ziku/lock.json", "utf8") as string);
-      expect(finalLock.baseHashes).not.toHaveProperty(".claude/rules/testing.md");
-      expect(finalLock.baseHashes).toHaveProperty(".mcp.json");
-      expect(finalLock.baseHashes).toHaveProperty(".claude/rules/style.md");
+      // 同期ベースから testing.md が消えている
+      const finalLock = lockSchema.parse(
+        JSON.parse(vol.readFileSync("/project/.ziku/lock.json", "utf8") as string),
+      );
+      expect(baseHashesOf(finalLock)).not.toHaveProperty(".claude/rules/testing.md");
+      expect(baseHashesOf(finalLock)).toHaveProperty(".mcp.json");
+      expect(baseHashesOf(finalLock)).toHaveProperty(".claude/rules/style.md");
     });
 
     it("pull で selectDeletedFiles を通じてユーザーが選択的に削除できる", async () => {
@@ -946,14 +958,13 @@ describe("E2E: multi-scenario tests", () => {
       vol.writeFileSync("/project/.claude/rules/deprecated-a.md", "old content A");
       vol.writeFileSync("/project/.claude/rules/deprecated-b.md", "old content B");
 
-      const lockWithExtra = {
-        ...localLock,
-        baseHashes: {
-          ...localLock.baseHashes,
+      const lockWithExtra = markSynced(localLock, {
+        hashes: {
+          ...localBaseHashes,
           ".claude/rules/deprecated-a.md": "hash-dep-a",
           ".claude/rules/deprecated-b.md": "hash-dep-b",
         },
-      };
+      });
       vol.writeFileSync("/project/.ziku/lock.json", JSON.stringify(lockWithExtra, null, 2));
 
       // テンプレート側（deprecated ファイルなし）、ローカル側（deprecated ファイルあり）
@@ -1000,18 +1011,16 @@ describe("E2E: multi-scenario tests", () => {
       expect(vol.existsSync("/project/.claude/rules/deprecated-b.md")).toBe(true);
     });
 
-    it("GitHub テンプレートでの pull 時にファイル削除と baseHashes 更新が行われる", async () => {
-      const ghLock = {
-        version: "0.1.0",
-        installedAt: "2024-01-01T00:00:00.000Z",
-        source: DEFAULT_SOURCE,
-        baseRef: "abc123",
-        baseHashes: {
+    it("GitHub テンプレートでの pull 時にファイル削除と同期ベース更新が行われる", async () => {
+      const ghLock = makeLock(
+        DEFAULT_SOURCE,
+        {
           ".mcp.json": "hash-mcp",
           ".claude/rules/style.md": "hash-style",
           "config/old.json": "hash-old",
         },
-      };
+        "abc123",
+      );
 
       vol.fromJSON({
         "/project/.ziku/ziku.jsonc": createZikuJsonc([
@@ -1059,11 +1068,13 @@ describe("E2E: multi-scenario tests", () => {
       // ファイルが削除された
       expect(vol.existsSync("/project/config/old.json")).toBe(false);
 
-      // lock.json の baseHashes が更新された
-      const finalLock = JSON.parse(vol.readFileSync("/project/.ziku/lock.json", "utf8") as string);
-      expect(finalLock.baseHashes).not.toHaveProperty("config/old.json");
-      expect(finalLock.baseHashes).toHaveProperty(".mcp.json");
-      expect(finalLock.baseRef).toBe("abc123");
+      // lock.json の同期ベースが更新された
+      const finalLock = lockSchema.parse(
+        JSON.parse(vol.readFileSync("/project/.ziku/lock.json", "utf8") as string),
+      );
+      expect(baseHashesOf(finalLock)).not.toHaveProperty("config/old.json");
+      expect(baseHashesOf(finalLock)).toHaveProperty(".mcp.json");
+      expect(baseCommitSha(finalLock)).toBe("abc123");
     });
   });
 });

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { LockState } from "../schemas";
 import {
   diffResultSchema,
   diffTypeSchema,
@@ -11,6 +12,15 @@ import {
   overwriteStrategySchema,
   prResultSchema,
   zikuConfigSchema,
+  templateRefSchema,
+  templateRefToString,
+  templateSourceSchema,
+  createPendingLock,
+  markMerging,
+  markSynced,
+  resolveMerge,
+  baseCommitSha,
+  baseHashesOf,
 } from "../schemas";
 
 describe("nonNegativeIntSchema", () => {
@@ -122,93 +132,135 @@ describe("zikuConfigSchema", () => {
   });
 });
 
+describe("templateRefSchema", () => {
+  it("ブランチ / タグ / コミットの各 ref を受け入れる", () => {
+    expect(templateRefSchema.parse({ kind: "branch", name: "main" })).toEqual({
+      kind: "branch",
+      name: "main",
+    });
+    expect(templateRefSchema.parse({ kind: "tag", name: "v1.0.0" })).toEqual({
+      kind: "tag",
+      name: "v1.0.0",
+    });
+    expect(templateRefSchema.parse({ kind: "commit", sha: "abc123" })).toEqual({
+      kind: "commit",
+      sha: "abc123",
+    });
+  });
+
+  it("判別タグの無い ref は拒否する", () => {
+    expect(() => templateRefSchema.parse({ name: "main" })).toThrow();
+  });
+});
+
+describe("templateRefToString", () => {
+  it("種別によらず giget の #<ref> に載る文字列へ落とす", () => {
+    expect(templateRefToString({ kind: "branch", name: "main" })).toBe("main");
+    expect(templateRefToString({ kind: "tag", name: "v1.0.0" })).toBe("v1.0.0");
+    expect(templateRefToString({ kind: "commit", sha: "abc123" })).toBe("abc123");
+  });
+});
+
+describe("templateSourceSchema", () => {
+  it("GitHub ソースを受け入れる", () => {
+    const source = { kind: "github", owner: "tktcorporation", repo: ".github" };
+    expect(templateSourceSchema.parse(source)).toEqual(source);
+  });
+
+  it("ローカルソースを受け入れる", () => {
+    const source = { kind: "local", path: "/path/to/template" };
+    expect(templateSourceSchema.parse(source)).toEqual(source);
+  });
+
+  it("判別タグの無い source は拒否する", () => {
+    expect(() => templateSourceSchema.parse({ owner: "o", repo: "r" })).toThrow();
+  });
+});
+
 describe("lockSchema", () => {
-  it("有効な lock を受け入れる（source 付き）", () => {
+  const identity = {
+    version: "0.1.0",
+    installedAt: "2024-01-01T00:00:00+09:00",
+  };
+  const githubSource = { kind: "github", owner: "tktcorporation", repo: ".github" };
+  const localSource = { kind: "local", path: "/path/to/template" };
+
+  it("ベース未確定 (sync: pending) を受け入れる", () => {
+    const lock = { ...identity, source: githubSource, sync: "pending" };
+    expect(lockSchema.parse(lock)).toEqual(lock);
+  });
+
+  it("ref 付きの GitHub ソースを受け入れる", () => {
     const lock = {
-      version: "0.1.0",
-      installedAt: "2024-01-01T00:00:00+09:00",
-      source: {
-        owner: "tktcorporation",
-        repo: ".github",
-      },
+      ...identity,
+      source: { ...githubSource, ref: { kind: "branch", name: "main" } },
+      sync: "pending",
     };
     expect(lockSchema.parse(lock)).toEqual(lock);
   });
 
-  it("ref を含む source を受け入れる", () => {
+  it("ローカルソースを受け入れる", () => {
+    const lock = { ...identity, source: localSource, sync: "pending" };
+    expect(lockSchema.parse(lock)).toEqual(lock);
+  });
+
+  it("GitHub ソースのベースはコミット SHA を持てる", () => {
     const lock = {
-      version: "0.1.0",
-      installedAt: "2024-01-01T00:00:00+09:00",
-      source: {
-        owner: "tktcorporation",
-        repo: ".github",
-        ref: "main",
-      },
+      ...identity,
+      source: githubSource,
+      sync: "synced",
+      base: { hashes: { ".mcp.json": "abc123" }, ref: "def456" },
     };
     expect(lockSchema.parse(lock)).toEqual(lock);
   });
 
-  it("ローカルパス source を受け入れる", () => {
-    const lock = {
-      version: "0.1.0",
-      installedAt: "2024-01-01T00:00:00+09:00",
-      source: {
-        path: "/path/to/template",
-      },
-    };
-    expect(lockSchema.parse(lock)).toEqual(lock);
+  it("ローカルソースのベースにコミット SHA がある lock は拒否する", () => {
+    expect(() =>
+      lockSchema.parse({
+        ...identity,
+        source: localSource,
+        sync: "synced",
+        base: { hashes: {}, ref: "def456" },
+      }),
+    ).toThrow();
   });
 
-  it("baseRef を受け入れる", () => {
+  it("コンフリクト解決待ち (sync: merging) を受け入れる", () => {
     const lock = {
-      version: "0.1.0",
-      installedAt: "2024-01-01T00:00:00+09:00",
-      source: {
-        owner: "tktcorporation",
-        repo: ".github",
-      },
-      baseRef: "abc123",
-    };
-    expect(lockSchema.parse(lock)).toEqual(lock);
-  });
-
-  it("baseHashes を受け入れる", () => {
-    const lock = {
-      version: "0.1.0",
-      installedAt: "2024-01-01T00:00:00+09:00",
-      source: {
-        owner: "tktcorporation",
-        repo: ".github",
-      },
-      baseHashes: { ".mcp.json": "abc123" },
-    };
-    expect(lockSchema.parse(lock)).toEqual(lock);
-  });
-
-  it("pendingMerge を受け入れる", () => {
-    const lock = {
-      version: "0.1.0",
-      installedAt: "2024-01-01T00:00:00+09:00",
-      source: {
-        owner: "tktcorporation",
-        repo: ".github",
-      },
-      pendingMerge: {
+      ...identity,
+      source: githubSource,
+      sync: "merging",
+      base: { hashes: {} },
+      merge: {
         conflicts: [".mcp.json"],
-        templateHashes: { ".mcp.json": "abc123" },
-        latestRef: "def456",
+        nextBase: { hashes: { ".mcp.json": "abc123" }, ref: "def456" },
       },
     };
     expect(lockSchema.parse(lock)).toEqual(lock);
+  });
+
+  it("解決待ちのコンフリクトが空配列の lock は拒否する", () => {
+    expect(() =>
+      lockSchema.parse({
+        ...identity,
+        source: githubSource,
+        sync: "merging",
+        base: { hashes: {} },
+        merge: { conflicts: [], nextBase: { hashes: {} } },
+      }),
+    ).toThrow();
+  });
+
+  it("ベース確定済みなのに base が無い lock は拒否する", () => {
+    expect(() => lockSchema.parse({ ...identity, source: githubSource, sync: "synced" })).toThrow();
   });
 
   it("source が欠けている場合は拒否する", () => {
-    expect(() =>
-      lockSchema.parse({
-        version: "0.1.0",
-        installedAt: "2024-01-01T00:00:00+09:00",
-      }),
-    ).toThrow();
+    expect(() => lockSchema.parse({ ...identity, sync: "pending" })).toThrow();
+  });
+
+  it("sync が欠けている場合は拒否する", () => {
+    expect(() => lockSchema.parse({ ...identity, source: githubSource })).toThrow();
   });
 
   it("不正な datetime 形式を拒否する", () => {
@@ -216,7 +268,8 @@ describe("lockSchema", () => {
       lockSchema.parse({
         version: "0.1.0",
         installedAt: "invalid-date",
-        source: { owner: "test", repo: "test" },
+        source: githubSource,
+        sync: "pending",
       }),
     ).toThrow();
   });
@@ -225,9 +278,99 @@ describe("lockSchema", () => {
     const lock = {
       version: "0.1.0",
       installedAt: "2024-06-15T10:30:00Z",
-      source: { owner: "test", repo: "test" },
+      source: githubSource,
+      sync: "pending",
     };
     expect(lockSchema.parse(lock)).toEqual(lock);
+  });
+});
+
+describe("lock の状態遷移", () => {
+  const githubLock = createPendingLock({
+    version: "0.1.0",
+    installedAt: "2024-01-01T00:00:00+09:00",
+    source: { kind: "github", owner: "o", repo: "r" },
+  });
+  const localLock = createPendingLock({
+    version: "0.1.0",
+    installedAt: "2024-01-01T00:00:00+09:00",
+    source: { kind: "local", path: "/tpl" },
+  });
+
+  it("markSynced: GitHub ソースにはコミット SHA が載る", () => {
+    const synced = markSynced(githubLock, { hashes: { "a.txt": "h" }, commitSha: "sha1" });
+    expect(synced).toEqual({
+      ...githubLock,
+      sync: "synced",
+      base: { hashes: { "a.txt": "h" }, ref: "sha1" },
+    });
+    expect(baseCommitSha(synced)).toBe("sha1");
+  });
+
+  it("markSynced: ローカルソースではコミット SHA が捨てられる", () => {
+    // ローカルソースの lock に commitSha を渡しても、lock の型がそれを保持できない。
+    // `base: { hashes, ref }` を持つローカル lock はコンパイルできないため、
+    // ここで確認しているのは「渡しても落ちる」という遷移関数側の振る舞い。
+    const synced = markSynced(localLock, { hashes: { "a.txt": "h" }, commitSha: "sha1" });
+    expect(synced).toEqual({ ...localLock, sync: "synced", base: { hashes: { "a.txt": "h" } } });
+    expect(baseCommitSha(synced)).toBeUndefined();
+  });
+
+  it("baseHashesOf: ベース未確定なら空写像", () => {
+    expect(baseHashesOf(githubLock)).toEqual({});
+  });
+
+  it("markMerging: ベース未確定から入ると空のベースを記録する", () => {
+    const merging = markMerging(githubLock, { hashes: { "a.txt": "h" } }, ["a.txt"]);
+    expect(merging).toEqual({
+      ...githubLock,
+      sync: "merging",
+      base: { hashes: {} },
+      merge: { conflicts: ["a.txt"], nextBase: { hashes: { "a.txt": "h" } } },
+    });
+  });
+
+  it("markMerging: ベース確定済みから入ると直前のベースを残す", () => {
+    const synced = markSynced(githubLock, { hashes: { "a.txt": "old" }, commitSha: "sha0" });
+    const merging = markMerging(synced, { hashes: { "a.txt": "new" }, commitSha: "sha1" }, [
+      "a.txt",
+    ]);
+    expect(merging).toMatchObject({
+      sync: "merging",
+      base: { hashes: { "a.txt": "old" }, ref: "sha0" },
+      merge: { nextBase: { hashes: { "a.txt": "new" }, ref: "sha1" } },
+    });
+  });
+
+  it("型: ローカルソースの lock はコミット SHA を持てない", () => {
+    // ローカルソースにはベースツリーを取り直す手段が無いため、SHA を記録しても
+    // 参照側が黙って無視するだけになる。この組み合わせが「コンパイルできない」ことが
+    // 型の役目なので、@ts-expect-error が外れたら（= 書けるようになったら）
+    // typecheck が失敗して気付ける。
+    // @ts-expect-error ローカルソースの同期ベースは ref を持てない
+    const invalid: LockState = {
+      version: "0.1.0",
+      installedAt: "2024-01-01T00:00:00+09:00",
+      source: { kind: "local", path: "/tpl" },
+      sync: "synced",
+      base: { hashes: {}, ref: "sha1" },
+    };
+    // 実行時の検証でも同じ組み合わせは弾かれる。
+    expect(() => lockSchema.parse(invalid)).toThrow();
+  });
+
+  it("resolveMerge: nextBase をベースに確定して merge を消す", () => {
+    const merging = markMerging(githubLock, { hashes: { "a.txt": "h" }, commitSha: "sha1" }, [
+      "a.txt",
+    ]);
+    if (merging.sync !== "merging") throw new Error("expected merging lock");
+    const resolved = resolveMerge(merging);
+    expect(resolved).toEqual({
+      ...githubLock,
+      sync: "synced",
+      base: { hashes: { "a.txt": "h" }, ref: "sha1" },
+    });
+    expect(resolved).not.toHaveProperty("merge");
   });
 });
 

@@ -3,6 +3,8 @@ import { Effect, Option } from "effect";
 import { resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
+import type { LockState } from "../modules/schemas";
+import { baseHashesOf } from "../modules/schemas";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 import { intro, log, outro, pc, withSpinner } from "../ui/renderer";
@@ -29,7 +31,7 @@ export const statusLifecycle: CommandLifecycle = {
       file: LOCK_FILE,
       location: "local",
       op: "read",
-      note: "baseHashes と pendingMerge を取得",
+      note: "同期ベースとコンフリクト解決待ちの状態を取得",
     },
     {
       file: SYNCED_FILES,
@@ -102,10 +104,10 @@ export const statusCommand = defineCommand({
 
     const targetDir = resolve(args.dir);
 
-    // Fast-path: pendingMerge を検出できればテンプレートを fetch せずに案内する。
+    // Fast-path: コンフリクト解決待ちを検出できればテンプレートを fetch せずに案内する。
     //
-    // 背景: pendingMerge 中の回復コマンド (`ziku pull --continue`) は
-    // `pendingMerge.templateHashes` をそのまま使うため、新たなテンプレ取得は不要。
+    // 背景: 解決待ち中の回復コマンド (`ziku pull --continue`) は
+    // `merge.nextBase` をそのまま使うため、新たなテンプレ取得は不要。
     // ところが status が常に `loadCommandContext` 経由で template を fetch していると、
     // ネットワーク不通やテンプレリポジトリ移動時に status 自体が失敗し、
     // ユーザーが「`pull --continue` を実行すれば回復できる」と知る術が無くなる
@@ -118,25 +120,28 @@ export const statusCommand = defineCommand({
     //   出すことになる。zikuConfigExists を先に確認し、不成立なら通常の
     //   `loadCommandContext` 経路に進ませて適切なエラーを出す。
     //
-    // lock.json はローカルのみで読めるので、Effect.option で失敗を None に正規化する。
-    // None / config 不在のいずれも fast-path をスキップする。
+    // lock.json が無いだけなら fast-path をスキップして通常経路のエラーに任せる。
+    // 一方で「読めたが lock として解釈できない」は通常経路でも同じ結論になるので、
+    // ここでそのまま報告する（テンプレート取得を挟むと原因が遠ざかる）。
     if (zikuConfigExists(targetDir)) {
-      const lockOption = await Effect.runPromise(
-        Effect.tryPromise(() => loadLock(targetDir)).pipe(Effect.option),
+      const lockOption = await runCommandEffect(
+        loadLock(targetDir).pipe(
+          Effect.map(Option.some),
+          Effect.catchTag("FileNotFoundError", () => Effect.succeed(Option.none<LockState>())),
+          Effect.mapError(toZikuError),
+        ),
       );
-      if (Option.isSome(lockOption) && lockOption.value.pendingMerge !== undefined) {
-        const conflicts = lockOption.value.pendingMerge.conflicts;
+      if (Option.isSome(lockOption) && lockOption.value.sync === "merging") {
+        const conflicts = lockOption.value.merge.conflicts;
         const recommendation: Recommendation = {
           kind: "continueMerge",
           conflictCount: conflicts.length,
         };
-        if (conflicts.length > 0) {
-          log.message(
-            `${pc.yellow("⚠")} Merge paused. Conflicts to resolve:\n${conflicts
-              .map((p) => `  ${pc.dim("•")} ${p}`)
-              .join("\n")}`,
-          );
-        }
+        log.message(
+          `${pc.yellow("⚠")} Merge paused. Conflicts to resolve:\n${conflicts
+            .map((p) => `  ${pc.dim("•")} ${p}`)
+            .join("\n")}`,
+        );
         outro(recommendationLine(recommendation));
         return;
       }
@@ -148,7 +153,7 @@ export const statusCommand = defineCommand({
 
     const { config, lock, source, templateDir, cleanup } = ctx;
 
-    log.info(`Template: ${pc.cyan(templateDir)}${"path" in source ? " (local)" : ""}`);
+    log.info(`Template: ${pc.cyan(templateDir)}${source.kind === "local" ? " (local)" : ""}`);
 
     await withFinally(async () => {
       const include = config.include;
@@ -180,7 +185,7 @@ export const statusCommand = defineCommand({
         analyzeSync({
           targetDir,
           templateDir,
-          baseHashes: lock.baseHashes,
+          baseHashes: baseHashesOf(lock),
           // ziku.jsonc 自体も追跡ファイルとして差分検出に含める（push/pull と一貫させ、
           // config ドリフトを status に反映する）。
           include: withConfigTracked(mergedInclude),

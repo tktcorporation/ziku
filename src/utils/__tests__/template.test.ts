@@ -1,7 +1,7 @@
 import { vol } from "memfs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CopyResult } from "../template";
-import { buildTemplateSource } from "../template";
+import { buildCommitPinnedSource, buildTemplateSource } from "../template";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -34,19 +34,64 @@ const mockConfirm = vi.mocked(clack.confirm);
 
 describe("buildTemplateSource", () => {
   it("owner/repo から giget 形式の文字列を構築", () => {
-    expect(buildTemplateSource({ owner: "my-org", repo: "my-templates" })).toBe(
+    expect(buildTemplateSource({ kind: "github", owner: "my-org", repo: "my-templates" })).toBe(
       "gh:my-org/my-templates",
     );
   });
 
-  it("ref が指定されている場合は #ref を付与", () => {
-    expect(buildTemplateSource({ owner: "my-org", repo: "repo", ref: "develop" })).toBe(
-      "gh:my-org/repo#develop",
-    );
+  it("ブランチ ref は #<ブランチ名> になる", () => {
+    expect(
+      buildTemplateSource({
+        kind: "github",
+        owner: "my-org",
+        repo: "repo",
+        ref: { kind: "branch", name: "develop" },
+      }),
+    ).toBe("gh:my-org/repo#develop");
+  });
+
+  it("タグ ref は #<タグ名> になる", () => {
+    expect(
+      buildTemplateSource({
+        kind: "github",
+        owner: "my-org",
+        repo: "repo",
+        ref: { kind: "tag", name: "v1.2.3" },
+      }),
+    ).toBe("gh:my-org/repo#v1.2.3");
+  });
+
+  it("コミット ref は #<SHA> になる", () => {
+    expect(
+      buildTemplateSource({
+        kind: "github",
+        owner: "my-org",
+        repo: "repo",
+        ref: { kind: "commit", sha: "abc123def" },
+      }),
+    ).toBe("gh:my-org/repo#abc123def");
   });
 
   it("ref が undefined の場合は付与しない", () => {
-    expect(buildTemplateSource({ owner: "x", repo: "y", ref: undefined })).toBe("gh:x/y");
+    expect(buildTemplateSource({ kind: "github", owner: "x", repo: "y", ref: undefined })).toBe(
+      "gh:x/y",
+    );
+  });
+});
+
+describe("buildCommitPinnedSource", () => {
+  it("source の ref を無視してコミット SHA へ固定する", () => {
+    expect(
+      buildCommitPinnedSource(
+        {
+          kind: "github",
+          owner: "my-org",
+          repo: "repo",
+          ref: { kind: "branch", name: "develop" },
+        },
+        "deadbeef",
+      ),
+    ).toBe("gh:my-org/repo#deadbeef");
   });
 });
 

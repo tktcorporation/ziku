@@ -1,7 +1,8 @@
 import { Octokit } from "@octokit/rest";
 import { Effect, Option } from "effect";
+import { match } from "ts-pattern";
 import { ZikuError } from "../errors";
-import type { PrResult } from "../modules/schemas";
+import type { BranchRef, PrResult, TemplateRef } from "../modules/schemas";
 
 export interface PushOptions {
   owner: string;
@@ -452,31 +453,20 @@ export async function resolveDefaultBranch(
 }
 
 /**
- * テンプレートリポジトリの最新コミット SHA を取得する。
+ * 任意の git ref（ブランチ名 / タグ名 / コミット SHA）が指すコミット SHA を取得する。
  *
- * 背景: init/pull 時に baseRef として保存し、後で 3-way マージのベース取得に使用する。
  * GitHub API の `Accept: application/vnd.github.sha` を使い、SHA 文字列のみを取得する。
- * 認証不要（公開リポジトリの場合）。
- *
- * `ref` は **ブランチ名を期待する**。「そのブランチの最新コミット」を解決するのが
- * 目的なので、タグやコミット SHA を渡すと固定のコミットがそのまま返り、
- * 「最新」を取得したつもりの呼び出し側が意図しない結果を受け取る。
- * 省略した場合はリポジトリの既定ブランチを使う。
- *
- * 既定ブランチを解決できない場合は SHA を取得せず undefined を返す。
+ * 認証不要（公開リポジトリの場合）。取得できない場合は undefined を返す。
  */
-export async function resolveLatestCommitSha(
+async function fetchCommitSha(
   owner: string,
   repo: string,
-  ref?: string,
+  ref: string,
 ): Promise<string | undefined> {
-  const branch = ref ?? (await resolveDefaultBranch(owner, repo));
-  if (branch === undefined) return undefined;
-
   return Option.getOrUndefined(
     await Effect.runPromise(
       Effect.tryPromise(async () => {
-        const url = `https://api.github.com/repos/${owner}/${repo}/commits/${branch}`;
+        const url = `https://api.github.com/repos/${owner}/${repo}/commits/${ref}`;
         const res = await fetch(url, {
           headers: { Accept: "application/vnd.github.sha" },
         });
@@ -485,6 +475,48 @@ export async function resolveLatestCommitSha(
       }).pipe(Effect.option),
     ),
   );
+}
+
+/**
+ * ブランチの最新コミット SHA を取得する。
+ *
+ * 引数がブランチに限られるのは「最新」という語がブランチでしか意味を持たないため。
+ * タグやコミットを渡せてしまうと、固定のコミットがそのまま返り、最新を取得した
+ * つもりの呼び出し側が意図しない結果を受け取る。
+ * 省略した場合はリポジトリの既定ブランチを使い、それを解決できなければ undefined を返す。
+ */
+export async function resolveLatestCommitSha(
+  owner: string,
+  repo: string,
+  branch?: BranchRef,
+): Promise<string | undefined> {
+  const name = branch?.name ?? (await resolveDefaultBranch(owner, repo));
+  if (name === undefined) return undefined;
+
+  return fetchCommitSha(owner, repo, name);
+}
+
+/**
+ * テンプレートソースの ref が現在指しているコミット SHA を解決する。
+ *
+ * 3-way マージのベースツリーを取り直すために lock へ記録する値。ref の種別ごとに
+ * 「今どのコミットか」の意味が違うため、ここで種別を吸収する。
+ *
+ * - ブランチ / 未指定: そのブランチ（未指定なら既定ブランチ）の最新コミット
+ * - タグ: タグが指すコミット
+ * - コミット: その SHA 自身（API 呼び出し不要）
+ */
+export function resolveSourceCommitSha(
+  owner: string,
+  repo: string,
+  ref?: TemplateRef,
+): Promise<string | undefined> {
+  return match(ref)
+    .with(undefined, () => resolveLatestCommitSha(owner, repo))
+    .with({ kind: "branch" }, (branch) => resolveLatestCommitSha(owner, repo, branch))
+    .with({ kind: "tag" }, (tag) => fetchCommitSha(owner, repo, tag.name))
+    .with({ kind: "commit" }, (commit) => Promise.resolve<string | undefined>(commit.sha))
+    .exhaustive();
 }
 
 /**

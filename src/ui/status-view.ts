@@ -64,10 +64,6 @@ function renderSection(
 /**
  * Recommendation を1行ヒントに変換する。`git status` の
  * "(use \"git push\" to publish your local commits)" の感覚。
- *
- * `continueMerge` は conflictCount で2分岐:
- *   - count > 0: 通常の merge resume
- *   - count === 0: 縮退（stale lock）。`pull --continue` でクリアを案内
  */
 export function recommendationLine(rec: Recommendation): string {
   return match(rec)
@@ -95,10 +91,10 @@ export function recommendationLine(rec: Recommendation): string {
       ({ conflictCount }) =>
         `${pc.yellow("⚠")} Run ${pc.cyan("`ziku pull`")} to start a 3-way merge for ${conflictCount} conflict(s).`,
     )
-    .with({ kind: "continueMerge" }, ({ conflictCount }) =>
-      conflictCount === 0
-        ? `${pc.yellow("⏸")} Stale merge state in lock — run ${pc.cyan("`ziku pull --continue`")} to clear it (push will be blocked otherwise).`
-        : `${pc.yellow("⏸")} Merge paused — resolve ${conflictCount} conflict(s) and run ${pc.cyan("`ziku pull --continue`")}.`,
+    .with(
+      { kind: "continueMerge" },
+      ({ conflictCount }) =>
+        `${pc.yellow("⏸")} Merge paused — resolve ${conflictCount} conflict(s) and run ${pc.cyan("`ziku pull --continue`")}.`,
     )
     .exhaustive();
 }
@@ -136,12 +132,12 @@ export function renderStatusLong(model: StatusViewModel): string {
 
   // isClean は decideRecommendation の結論をそのまま尊重する SSOT 設計。
   //
-  // recommendation.kind === "inSync" はすでに「全バケツ空 + pendingMerge 無し +
+  // recommendation.kind === "inSync" はすでに「全バケツ空 + 解決待ち無し +
   // patternsUpdated 無し」を意味する (decideRecommendation 側で集約済み)。
   // ここで bucket や untracked を再評価すると、新しい pull-pending 信号
-  // (例: patternsUpdated, pendingMerge) を decideRecommendation に追加するたびに
+  // (例: patternsUpdated, コンフリクト解決待ち) を decideRecommendation に追加するたびに
   // この条件式も同期更新する必要が出てしまい、矛盾の温床になる
-  // (codex review #71 — pendingMerge 中の "in sync" 矛盾、pattern-only pull の
+  // (codex review #71 — 解決待ち中の "in sync" 矛盾、pattern-only pull の
   //  "in sync" 矛盾、いずれも本質はビューが SSOT を信用していなかったこと)。
   //
   // untracked は「Tracked files are in sync」というメッセージとは独立。
@@ -149,7 +145,7 @@ export function renderStatusLong(model: StatusViewModel): string {
   const isClean = recommendation.kind === "inSync";
 
   // conflict section のアクションヒントは recommendation 種別で出し分ける。
-  // pendingMerge 中の場合は新規 merge ではなく `pull --continue` を案内する
+  // 解決待ち中の場合は新規 merge ではなく `pull --continue` を案内する
   // (codex review #71 P2 で指摘された矛盾を防ぐ)。
   const conflictHint =
     recommendation.kind === "continueMerge"

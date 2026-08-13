@@ -127,7 +127,7 @@ function generateFileLifecycleTable(): string {
     {
       file: LOCK_FILE,
       location: "ユーザープロジェクト",
-      description: "同期状態 + ソース情報（source, baseRef, baseHashes, pendingMerge）",
+      description: "同期状態 + ソース情報（source, sync, base, merge）",
       lifecycle: [
         {
           phase: "生成",

@@ -104,12 +104,12 @@ describe("status-view", () => {
       expect(line).toContain("2");
     });
 
-    it("continueMerge with conflictCount=0 は stale lock のクリアを案内する", () => {
-      const line = strip(recommendationLine({ kind: "continueMerge", conflictCount: 0 }));
-      expect(line).toContain("Stale merge state");
+    it("continueMerge は解決すべき件数と `pull --continue` を案内する", () => {
+      // 件数が 0 の縮退状態は lock の型が排除するので、分岐は 1 本だけになる。
+      const line = strip(recommendationLine({ kind: "continueMerge", conflictCount: 3 }));
+      expect(line).toContain("Merge paused");
+      expect(line).toContain("3 conflict(s)");
       expect(line).toContain("ziku pull --continue");
-      // 0 件と表示しないことを保証（混乱回避）
-      expect(line).not.toMatch(/\b0 conflict/);
     });
   });
 
@@ -159,8 +159,8 @@ describe("status-view", () => {
       expect(out).toContain(".claude/rules/draft.md");
     });
 
-    it("pendingMerge 中（continueMerge）はバケツが空でも in sync バナーを出さない", () => {
-      // バグ再現: bucket/untracked が全部空でも pendingMerge があれば
+    it("解決待ち中（continueMerge）はバケツが空でも in sync バナーを出さない", () => {
+      // バグ再現: bucket/untracked が全部空でも解決待ちがあれば
       // outro で `pull --continue` を案内するため、"Tracked files are in sync"
       // と矛盾するメッセージを同時に出してはいけない (codex review #71 より)
       const out = strip(
@@ -174,7 +174,7 @@ describe("status-view", () => {
       expect(out).not.toContain("Tracked files are in sync");
     });
 
-    it("conflict セクションのヒントは pendingMerge 中だと 'pull --continue' に切り替わる (codex P2)", () => {
+    it("conflict セクションのヒントは解決待ち中だと 'pull --continue' に切り替わる (codex P2)", () => {
       const conflictEntry = entry("c.txt", "conflict", "conflicts");
       const out = strip(
         renderStatusLong(
@@ -188,7 +188,7 @@ describe("status-view", () => {
       expect(out).not.toContain("start a 3-way merge");
     });
 
-    it("conflict セクションのヒントは pendingMerge 無しなら従来の '3-way merge を始める' のまま", () => {
+    it("conflict セクションのヒントは解決待ちが無ければ従来の '3-way merge を始める' のまま", () => {
       const conflictEntry = entry("c.txt", "conflict", "conflicts");
       const out = strip(
         renderStatusLong(

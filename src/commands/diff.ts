@@ -68,7 +68,7 @@ export const diffCommand = defineCommand({
 
     const { config, source, templateDir, cleanup } = ctx;
 
-    log.info(`Template: ${pc.cyan(templateDir)}${"path" in source ? " (local)" : ""}`);
+    log.info(`Template: ${pc.cyan(templateDir)}${source.kind === "local" ? " (local)" : ""}`);
 
     await withFinally(async () => {
       const patterns = {

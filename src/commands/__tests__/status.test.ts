@@ -3,6 +3,13 @@ import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZikuError, FileNotFoundError } from "../../errors";
 import type { FileClassification } from "../../utils/merge/types";
+import type {
+  ConflictPaths,
+  LockState,
+  ResumableLockState,
+  TemplateSource,
+} from "../../modules/schemas";
+import { markMerging } from "../../modules/schemas";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -44,7 +51,7 @@ vi.mock("../../utils/template-patterns", () => ({
 // デフォルトは ENOENT 相当: status が loadLock に失敗 → fast-path をスルーして
 // 通常の loadCommandContext 経路に進む (= 既存テストの挙動と互換)。
 vi.mock("../../utils/lock", () => ({
-  loadLock: vi.fn().mockRejectedValue(new Error("ENOENT")),
+  loadLock: vi.fn(),
   LOCK_FILE: ".ziku/lock.json",
 }));
 
@@ -119,23 +126,32 @@ function emptyClassification(): FileClassification {
 }
 
 /** テスト用 CommandContext */
+const testSource: TemplateSource = { kind: "github", owner: "tktcorporation", repo: ".github" };
+
+const pendingLock: ResumableLockState = {
+  version: "0.1.0",
+  installedAt: "2024-01-01T00:00:00.000Z",
+  source: testSource,
+  sync: "pending",
+};
+
+/** コンフリクト解決待ちのロックを作る。 */
+function mergingLock(conflicts: ConflictPaths): LockState {
+  return markMerging(pendingLock, { hashes: {} }, conflicts);
+}
+
 function mockContext(
   overrides: Partial<{
     include: string[];
-    pendingMerge: { conflicts: string[]; templateHashes: Record<string, string> };
+    lock: LockState;
   }> = {},
 ) {
   const cleanup = vi.fn();
   return {
     effect: Effect.succeed({
       config: { include: overrides.include ?? [".claude/**"] },
-      lock: {
-        version: "0.1.0",
-        installedAt: "2024-01-01T00:00:00.000Z",
-        source: { owner: "tktcorporation", repo: ".github" },
-        ...(overrides.pendingMerge ? { pendingMerge: overrides.pendingMerge } : {}),
-      },
-      source: { owner: "tktcorporation" as const, repo: ".github" },
+      lock: overrides.lock ?? pendingLock,
+      source: testSource,
       templateDir: "/tmp/template",
       cleanup,
       resolveBaseRef: Effect.succeed(Option.none<string>()),
@@ -157,7 +173,7 @@ describe("statusCommand", () => {
       patternsUpdated: false,
     });
     // デフォルト: lock 未作成相当 (fast-path をスキップし、通常の loadCommandContext 経路に進む)
-    mockLoadLock.mockRejectedValue(new Error("ENOENT"));
+    mockLoadLock.mockReturnValue(Effect.fail(new FileNotFoundError({ path: ".ziku/lock.json" })));
     // デフォルト: config 未作成相当 (fast-path をスキップ)
     mockZikuConfigExists.mockReturnValue(false);
   });
@@ -183,20 +199,14 @@ describe("statusCommand", () => {
   });
 
   describe("run", () => {
-    it("pendingMerge があれば fast-path で template fetch せずに案内する (codex P2 #6)", async () => {
-      // codex review #71 の最後の P2: pendingMerge 中はネットワーク不通でも
+    it("解決待ちがあれば fast-path で template fetch せずに案内する (codex P2 #6)", async () => {
+      // codex review #71 の最後の P2: 解決待ち中はネットワーク不通でも
       // status が "pull --continue" を案内できるべき。lock を local だけで読んで
       // 早期 return することで、loadCommandContext (= template download) を回避する。
       mockZikuConfigExists.mockReturnValue(true);
-      mockLoadLock.mockResolvedValueOnce({
-        version: "0.1.0",
-        installedAt: "2024-01-01T00:00:00.000Z",
-        source: { owner: "tktcorporation", repo: ".github" },
-        pendingMerge: {
-          conflicts: [".claude/settings.json", ".mcp.json"],
-          templateHashes: {},
-        },
-      });
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(mergingLock([".claude/settings.json", ".mcp.json"])),
+      );
       // loadCommandContext は失敗するように設定 (template 取得不可をシミュレート)
       const { TemplateError } = await import("../../errors");
       mockLoadCommandContext.mockReturnValue(
@@ -229,15 +239,7 @@ describe("statusCommand", () => {
       // "Not initialized" を出して失敗する。動かない命令を出さないために、
       // fast-path 内でも config 存在を前提条件として確認する。
       mockZikuConfigExists.mockReturnValue(false);
-      mockLoadLock.mockResolvedValueOnce({
-        version: "0.1.0",
-        installedAt: "2024-01-01T00:00:00.000Z",
-        source: { owner: "tktcorporation", repo: ".github" },
-        pendingMerge: {
-          conflicts: ["foo.txt"],
-          templateHashes: {},
-        },
-      });
+      mockLoadLock.mockReturnValueOnce(Effect.succeed(mergingLock(["foo.txt"])));
       mockLoadCommandContext.mockReturnValue(
         Effect.fail(new FileNotFoundError({ path: ".ziku/ziku.jsonc" })),
       );
@@ -350,15 +352,10 @@ describe("statusCommand", () => {
       expect(outroArg).toContain("ziku push");
     });
 
-    it("pendingMerge が立っている場合は outro に 'pull --continue'", async () => {
-      const { effect } = mockContext({
-        pendingMerge: {
-          conflicts: ["c.txt"],
-          // templateHashes の中身は decideRecommendation の分岐に影響しないため空で十分。
-          // pendingMerge フラグの存在自体が continueMerge を発火させる。
-          templateHashes: {},
-        },
-      });
+    it("コンフリクト解決待ちの場合は outro に 'pull --continue'", async () => {
+      // nextBase の中身は decideRecommendation の分岐に影響しないため空で十分。
+      // 解決待ちであること自体が continueMerge を発火させる。
+      const { effect } = mockContext({ lock: mergingLock(["c.txt"]) });
       mockLoadCommandContext.mockReturnValue(effect);
       mockAnalyzeSync.mockResolvedValueOnce({
         classification: emptyClassification(),
@@ -400,7 +397,7 @@ describe("statusCommand", () => {
       expect(outroArg).toContain("ziku push");
     });
 
-    it("conflict あり (pendingMerge なし) のとき outro に merge 開始の案内", async () => {
+    it("conflict あり (解決待ちなし) のとき outro に merge 開始の案内", async () => {
       const { effect } = mockContext();
       mockLoadCommandContext.mockReturnValue(effect);
       mockAnalyzeSync.mockResolvedValueOnce({

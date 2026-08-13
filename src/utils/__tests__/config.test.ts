@@ -1,5 +1,10 @@
+import { Cause, Effect, Exit, Option } from "effect";
 import { vol } from "memfs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ValidationError } from "../../errors";
+import type { LockState } from "../../modules/schemas";
+import { baseCommitSha, baseHashesOf, markSynced } from "../../modules/schemas";
+import { toZikuError } from "../../services/command-context";
 
 // fs モジュールをモック
 vi.mock("node:fs/promises", async () => {
@@ -243,48 +248,55 @@ describe("loadLock", () => {
     vol.reset();
   });
 
-  it("正常な .ziku/lock.json を読み込める", async () => {
+  const runLoad = (dir: string): Promise<LockState> => Effect.runPromise(loadLock(dir));
+  const loadFailure = async (dir: string): Promise<unknown> => {
+    const exit = await Effect.runPromiseExit(loadLock(dir));
+    return Exit.isFailure(exit) ? Cause.failureOption(exit.cause) : undefined;
+  };
+
+  it("ベース未確定 (sync: pending) のロックを読み込める", async () => {
     const lock = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
-      source: { owner: "tktcorporation", repo: ".github" },
+      source: { kind: "github", owner: "tktcorporation", repo: ".github" },
+      sync: "pending",
     };
 
     vol.fromJSON({
       "/project/.ziku/lock.json": JSON.stringify(lock),
     });
 
-    const result = await loadLock("/project");
-    expect(result).toEqual(lock);
+    expect(await runLoad("/project")).toEqual(lock);
   });
 
-  it("baseRef と baseHashes を含むロックを読み込める", async () => {
+  it("ベース確定済み (sync: synced) のロックを読み込める", async () => {
     const lock = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
-      source: { owner: "tktcorporation", repo: ".github" },
-      baseRef: "abc123def",
-      baseHashes: { "file.txt": "sha256hash" },
+      source: { kind: "github", owner: "tktcorporation", repo: ".github" },
+      sync: "synced",
+      base: { hashes: { "file.txt": "sha256hash" }, ref: "abc123def" },
     };
 
     vol.fromJSON({
       "/project/.ziku/lock.json": JSON.stringify(lock),
     });
 
-    const result = await loadLock("/project");
-    expect(result.baseRef).toBe("abc123def");
-    expect(result.baseHashes).toEqual({ "file.txt": "sha256hash" });
+    const result = await runLoad("/project");
+    expect(baseCommitSha(result)).toBe("abc123def");
+    expect(baseHashesOf(result)).toEqual({ "file.txt": "sha256hash" });
   });
 
-  it("pendingMerge を含むロックを読み込める", async () => {
+  it("コンフリクト解決待ち (sync: merging) のロックを読み込める", async () => {
     const lock = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
-      source: { owner: "tktcorporation", repo: ".github" },
-      pendingMerge: {
+      source: { kind: "github", owner: "tktcorporation", repo: ".github" },
+      sync: "merging",
+      base: { hashes: {}, ref: "abc123" },
+      merge: {
         conflicts: ["file1.txt"],
-        templateHashes: { "file1.txt": "hash1" },
-        latestRef: "def456",
+        nextBase: { hashes: { "file1.txt": "hash1" }, ref: "def456" },
       },
     };
 
@@ -292,40 +304,109 @@ describe("loadLock", () => {
       "/project/.ziku/lock.json": JSON.stringify(lock),
     });
 
-    const result = await loadLock("/project");
-    expect(result.pendingMerge?.conflicts).toEqual(["file1.txt"]);
-    expect(result.pendingMerge?.latestRef).toBe("def456");
+    const result = await runLoad("/project");
+    expect(result.sync).toBe("merging");
+    if (result.sync !== "merging") throw new Error("expected merging lock");
+    expect(result.merge.conflicts).toEqual(["file1.txt"]);
+    expect(result.merge.nextBase.hashes).toEqual({ "file1.txt": "hash1" });
   });
 
-  it("ファイルが存在しない場合はエラー", async () => {
+  it("ローカルソースのロックにコミット SHA があれば ValidationError", async () => {
+    vol.fromJSON({
+      "/project/.ziku/lock.json": JSON.stringify({
+        version: "1.0.0",
+        installedAt: "2024-01-01T00:00:00+09:00",
+        source: { kind: "local", path: "/tpl" },
+        sync: "synced",
+        base: { hashes: {}, ref: "abc123" },
+      }),
+    });
+
+    expect(await loadFailure("/project")).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "ValidationError" })),
+    );
+  });
+
+  it("解決待ちのコンフリクトが空配列のロックは受け付けない", async () => {
+    vol.fromJSON({
+      "/project/.ziku/lock.json": JSON.stringify({
+        version: "1.0.0",
+        installedAt: "2024-01-01T00:00:00+09:00",
+        source: { kind: "local", path: "/tpl" },
+        sync: "merging",
+        base: { hashes: {} },
+        merge: { conflicts: [], nextBase: { hashes: {} } },
+      }),
+    });
+
+    expect(await loadFailure("/project")).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "ValidationError" })),
+    );
+  });
+
+  it("ファイルが存在しない場合は FileNotFoundError", async () => {
     vol.fromJSON({});
-    await expect(loadLock("/project")).rejects.toThrow();
+    expect(await loadFailure("/project")).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "FileNotFoundError" })),
+    );
   });
 
-  it("不正な JSON の場合はエラー", async () => {
+  it("不正な JSON の場合は ParseError", async () => {
     vol.fromJSON({
       "/project/.ziku/lock.json": "{ invalid json }",
     });
-    await expect(loadLock("/project")).rejects.toThrow();
+    expect(await loadFailure("/project")).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "ParseError" })),
+    );
   });
 
-  it("スキーマに合わない場合はエラー (version が欠けている)", async () => {
+  it("スキーマに合わない場合は ValidationError (version が欠けている)", async () => {
     vol.fromJSON({
       "/project/.ziku/lock.json": JSON.stringify({
         installedAt: "2024-01-01T00:00:00+09:00",
+        source: { kind: "local", path: "/tpl" },
+        sync: "pending",
       }),
     });
-    await expect(loadLock("/project")).rejects.toThrow();
+    expect(await loadFailure("/project")).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "ValidationError" })),
+    );
   });
 
-  it("installedAt が不正な datetime 形式の場合はエラー", async () => {
+  it("installedAt が不正な datetime 形式の場合は ValidationError", async () => {
     vol.fromJSON({
       "/project/.ziku/lock.json": JSON.stringify({
         version: "1.0.0",
         installedAt: "invalid-date",
+        source: { kind: "local", path: "/tpl" },
+        sync: "pending",
       }),
     });
-    await expect(loadLock("/project")).rejects.toThrow();
+    expect(await loadFailure("/project")).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "ValidationError" })),
+    );
+  });
+
+  it("同期状態をトップレベルに持つロックは、不在ではなく検証失敗として作り直しを促す", async () => {
+    vol.fromJSON({
+      "/project/.ziku/lock.json": JSON.stringify({
+        version: "1.0.0",
+        installedAt: "2024-01-01T00:00:00+09:00",
+        source: { owner: "tktcorporation", repo: ".github" },
+        baseRef: "abc123",
+        baseHashes: { "file.txt": "hash" },
+      }),
+    });
+
+    const failure = await loadFailure("/project");
+    expect(failure).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "ValidationError", path: LOCK_FILE })),
+    );
+
+    const zikuError = toZikuError(Option.getOrThrow(failure as Option.Option<ValidationError>));
+    expect(zikuError.message).toContain(LOCK_FILE);
+    expect(zikuError.hint).toContain("cannot read");
+    expect(zikuError.hint).toContain("ziku init");
   });
 });
 
@@ -334,14 +415,15 @@ describe("saveLock", () => {
     vol.reset();
   });
 
+  const lock: LockState = {
+    version: "1.0.0",
+    installedAt: "2024-01-01T00:00:00+09:00",
+    source: { kind: "github", owner: "test", repo: ".ziku" },
+    sync: "pending",
+  };
+
   it("ロックを JSON ファイルとして保存できる", async () => {
     vol.fromJSON({ "/project/.ziku": null });
-
-    const lock = {
-      version: "1.0.0",
-      installedAt: "2024-01-01T00:00:00+09:00",
-      source: { owner: "test", repo: ".ziku" },
-    };
 
     await saveLock("/project", lock);
 
@@ -351,12 +433,6 @@ describe("saveLock", () => {
 
   it("保存される JSON は整形されている（2スペースインデント + 末尾改行）", async () => {
     vol.fromJSON({ "/project/.ziku": null });
-
-    const lock = {
-      version: "1.0.0",
-      installedAt: "2024-01-01T00:00:00+09:00",
-      source: { owner: "test", repo: ".ziku" },
-    };
 
     await saveLock("/project", lock);
 
@@ -374,12 +450,7 @@ describe("saveLock", () => {
       }),
     });
 
-    const newLock = {
-      version: "2.0.0",
-      installedAt: "2024-06-01T00:00:00+09:00",
-      source: { owner: "test", repo: ".ziku" },
-      baseRef: "newref",
-    };
+    const newLock = markSynced(lock, { hashes: { "a.txt": "h" }, commitSha: "newref" });
 
     await saveLock("/project", newLock);
 
@@ -389,12 +460,6 @@ describe("saveLock", () => {
 
   it(".ziku ディレクトリが存在しなくても保存できる", async () => {
     vol.fromJSON({ "/project": null });
-
-    const lock = {
-      version: "1.0.0",
-      installedAt: "2024-01-01T00:00:00+09:00",
-      source: { owner: "test", repo: ".ziku" },
-    };
 
     await saveLock("/project", lock);
 

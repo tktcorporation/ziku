@@ -724,7 +724,7 @@ describe("resolveLatestCommitSha", () => {
   it("ref が指定されている場合はその ref の SHA を解決する", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue(shaResponse("sha-develop"));
 
-    const sha = await resolveLatestCommitSha("owner", "repo", "develop");
+    const sha = await resolveLatestCommitSha("owner", "repo", { kind: "branch", name: "develop" });
 
     expect(sha).toBe("sha-develop");
     expect(globalThis.fetch).toHaveBeenCalledWith(
@@ -761,12 +761,16 @@ describe("resolveLatestCommitSha", () => {
   it("コミット取得が失敗した場合は undefined を返す", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 404 });
 
-    expect(await resolveLatestCommitSha("owner", "repo", "develop")).toBeUndefined();
+    expect(
+      await resolveLatestCommitSha("owner", "repo", { kind: "branch", name: "develop" }),
+    ).toBeUndefined();
   });
 
   it("ネットワークエラーの場合は undefined を返す", async () => {
     globalThis.fetch = vi.fn().mockRejectedValue(new Error("Network error"));
 
-    expect(await resolveLatestCommitSha("owner", "repo", "develop")).toBeUndefined();
+    expect(
+      await resolveLatestCommitSha("owner", "repo", { kind: "branch", name: "develop" }),
+    ).toBeUndefined();
   });
 });

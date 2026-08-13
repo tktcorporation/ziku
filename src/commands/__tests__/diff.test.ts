@@ -2,6 +2,8 @@ import { vol } from "memfs";
 import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZikuError, FileNotFoundError } from "../../errors";
+import type { TemplateSource } from "../../modules/schemas";
+import { createPendingLock } from "../../modules/schemas";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -83,20 +85,26 @@ const mockRenderFileDiff = vi.mocked(renderFileDiff);
 function mockContext(
   overrides?: Partial<{
     include: string[];
-    source: { owner: string; repo: string };
+    source: TemplateSource;
     templateDir: string;
   }>,
 ) {
   const cleanup = vi.fn();
+  const source: TemplateSource = overrides?.source ?? {
+    kind: "github",
+    owner: "tktcorporation",
+    repo: ".github",
+  };
+  const lock = createPendingLock({
+    version: "0.1.0",
+    installedAt: "2024-01-01T00:00:00.000Z",
+    source,
+  });
   return {
     effect: Effect.succeed({
       config: { include: overrides?.include ?? [".root/**", ".github/**"] },
-      lock: {
-        version: "0.1.0",
-        installedAt: "2024-01-01T00:00:00.000Z",
-        source: overrides?.source ?? { owner: "tktcorporation", repo: ".github" },
-      },
-      source: overrides?.source ?? { owner: "tktcorporation", repo: ".github" },
+      lock,
+      source,
       templateDir: overrides?.templateDir ?? "/tmp/template",
       cleanup,
       resolveBaseRef: Effect.succeed(Option.none<string>()),
@@ -218,7 +226,7 @@ describe("diffCommand", () => {
 
     it("lock.source からテンプレートソースを構築", async () => {
       const { effect } = mockContext({
-        source: { owner: "custom-org", repo: "custom-templates" },
+        source: { kind: "github", owner: "custom-org", repo: "custom-templates" },
         templateDir: "/tmp/custom-template",
       });
       mockLoadCommandContext.mockReturnValue(effect);

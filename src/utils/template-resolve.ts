@@ -10,8 +10,8 @@
 import { Effect } from "effect";
 import type { Scope } from "effect";
 import { resolve } from "pathe";
+import { match } from "ts-pattern";
 import type { TemplateSource } from "../modules/schemas";
-import { isLocalSource } from "../modules/schemas";
 import type { TemplateError } from "../errors";
 import { acquireTempTemplate, buildTemplateSource } from "./template";
 
@@ -33,8 +33,10 @@ export function resolveTemplateDirScoped(
   targetDir: string,
   label?: string,
 ): Effect.Effect<string, TemplateError, Scope.Scope> {
-  if (isLocalSource(source)) {
-    return Effect.succeed(resolve(source.path));
-  }
-  return acquireTempTemplate(targetDir, buildTemplateSource(source), label);
+  return match(source)
+    .with({ kind: "local" }, (local) => Effect.succeed(resolve(local.path)))
+    .with({ kind: "github" }, (gh) =>
+      acquireTempTemplate(targetDir, buildTemplateSource(gh), label),
+    )
+    .exhaustive();
 }

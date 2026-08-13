@@ -2,6 +2,14 @@ import { vol } from "memfs";
 import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZikuError, FileNotFoundError } from "../../errors";
+import type {
+  ConflictPaths,
+  LockState,
+  ResumableLockState,
+  SyncPoint,
+  TemplateSource,
+} from "../../modules/schemas";
+import { baseCommitSha, baseHashesOf, markMerging, markSynced } from "../../modules/schemas";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -154,12 +162,32 @@ const baseZikuConfig = {
   exclude: [],
 };
 
-const baseLock = {
+const baseSource: TemplateSource = { kind: "github", owner: "tktcorporation", repo: ".github" };
+
+const baseLock: ResumableLockState = {
   version: "0.1.0",
   installedAt: "2024-01-01T00:00:00.000Z",
-  source: { owner: "tktcorporation", repo: ".github" },
-  baseHashes: { ".mcp.json": "abc123" },
+  source: baseSource,
+  sync: "synced",
+  base: { hashes: { ".mcp.json": "abc123" } },
 };
+
+/** baseLock のベースだけ差し替えたロックを作る。 */
+function lockWithBase(hashes: Record<string, string>, commitSha?: string): LockState {
+  return markSynced(baseLock, { hashes, commitSha });
+}
+
+/** 直近に保存された lock。saveLock が呼ばれていなければ失敗する。 */
+function lastSavedLock(): LockState {
+  const saved = mockSaveLock.mock.calls.at(-1)?.[1];
+  if (saved === undefined) throw new Error("saveLock was not called");
+  return saved;
+}
+
+/** コンフリクト解決待ちのロックを作る。 */
+function mergingLock(conflicts: ConflictPaths, next: SyncPoint): LockState {
+  return markMerging(baseLock, next, conflicts);
+}
 
 /**
  * テスト用の CommandContext を生成するヘルパー。
@@ -167,13 +195,13 @@ const baseLock = {
  */
 function mockContext(overrides?: {
   config?: { include: string[]; exclude?: string[] };
-  lock?: typeof baseLock & Record<string, unknown>;
-  source?: { owner: string; repo: string };
+  lock?: LockState;
+  source?: TemplateSource;
   templateDir?: string;
   resolveBaseRef?: Effect.Effect<Option.Option<string>>;
 }) {
   const cleanup = vi.fn();
-  const source = overrides?.source ?? { owner: "tktcorporation", repo: ".github" };
+  const source = overrides?.source ?? baseSource;
   return {
     effect: Effect.succeed({
       config: overrides?.config ?? baseZikuConfig,
@@ -206,7 +234,7 @@ describe("pullCommand", () => {
 
     // --continue モード用のデフォルト
     mockZikuConfigExists.mockReturnValue(true);
-    mockLoadLock.mockResolvedValue(baseLock as any);
+    mockLoadLock.mockReturnValue(Effect.succeed(baseLock));
 
     mockDownloadTemplateToTemp.mockResolvedValue({
       templateDir: "/tmp/template",
@@ -311,7 +339,7 @@ describe("pullCommand", () => {
       expect(writeCall).toBeDefined();
       const written = JSON.parse(writeCall?.[1] as string);
       expect(written.include).toEqual([".root/**", ".github/**", ".new-pattern/**"]);
-      // lock も更新される (新しい baseHashes)
+      // lock も更新される (新しい同期ベース)
       expect(mockSaveLock).toHaveBeenCalled();
     });
 
@@ -384,8 +412,8 @@ describe("pullCommand", () => {
 
       // lock の base[ziku.jsonc] は書き込んだ union のハッシュと一致する（テンプレ縮小版ではない）
       const { hashContent } = await import("../../utils/hash");
-      const saveArg = mockSaveLock.mock.calls.at(-1)?.[1] as any;
-      expect(saveArg.baseHashes[".ziku/ziku.jsonc"]).toBe(hashContent(written));
+      const saveArg = lastSavedLock();
+      expect(baseHashesOf(saveArg)[".ziku/ziku.jsonc"]).toBe(hashContent(written));
     });
 
     it("テンプレが ziku.jsonc ファイル自体を削除しても、ローカルの制御ファイルは消さない（codex P2）", async () => {
@@ -427,8 +455,7 @@ describe("pullCommand", () => {
         "/tmp/template/.ziku/ziku.jsonc": localConfig,
       });
       const { effect } = mockContext({
-        // biome-ignore lint/suspicious/noExplicitAny: テスト用に baseHashes のキーを差し替える
-        lock: { ...baseLock, baseHashes: { ".ziku/ziku.jsonc": "stale-old-hash" } as any },
+        lock: lockWithBase({ ".ziku/ziku.jsonc": "stale-old-hash" }),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -452,8 +479,8 @@ describe("pullCommand", () => {
       // early-return せず lock を保存する（base を union に揃える）
       expect(mockLog.success).not.toHaveBeenCalledWith("Already up to date");
       expect(mockSaveLock).toHaveBeenCalled();
-      const saveArg = mockSaveLock.mock.calls.at(-1)?.[1] as any;
-      expect(saveArg.baseHashes[".ziku/ziku.jsonc"]).not.toBe("stale-old-hash");
+      const saveArg = lastSavedLock();
+      expect(baseHashesOf(saveArg)[".ziku/ziku.jsonc"]).not.toBe("stale-old-hash");
     });
 
     it("自動更新ファイルをコピー", async () => {
@@ -517,12 +544,9 @@ describe("pullCommand", () => {
         "/tmp/template/.mcp.json": "template content",
       });
 
-      // baseHashes にエントリがないケース
+      // ベースのハッシュにエントリがないケース
       const { effect } = mockContext({
-        lock: {
-          ...baseLock,
-          baseHashes: {} as any,
-        },
+        lock: lockWithBase({}),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -772,7 +796,7 @@ describe("pullCommand", () => {
       expect(vol.existsSync("/test/b.txt")).toBe(true);
     });
 
-    it("設定の baseHashes が更新される", async () => {
+    it("同期ベースのハッシュが更新される", async () => {
       vol.fromJSON({ "/test": null });
 
       const newTemplateHashes = { ".mcp.json": "newhash123" };
@@ -806,12 +830,13 @@ describe("pullCommand", () => {
       expect(mockSaveLock).toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
-          baseHashes: newTemplateHashes,
+          sync: "synced",
+          base: { hashes: newTemplateHashes },
         }),
       );
     });
 
-    it("resolveBaseRef が Some のとき baseRef が更新される", async () => {
+    it("resolveBaseRef が Some のときベースのコミット SHA が更新される", async () => {
       vol.fromJSON({
         "/test": null,
         "/tmp/template/.mcp.json": "updated",
@@ -841,18 +866,20 @@ describe("pullCommand", () => {
 
       expect(mockSaveLock).toHaveBeenCalledWith(
         expect.any(String),
-        expect.objectContaining({ baseRef: "newsha456" }),
+        expect.objectContaining({
+          base: expect.objectContaining({ ref: "newsha456" }),
+        }),
       );
     });
 
-    it("resolveBaseRef が None のとき既存の baseRef を上書きしない", async () => {
+    it("resolveBaseRef が None のとき既存のベース SHA を引き継ぐ", async () => {
       vol.fromJSON({
         "/test": null,
         "/tmp/template/.mcp.json": "updated",
       });
 
       const { effect } = mockContext({
-        lock: { ...baseLock, baseRef: "existing-sha" },
+        lock: lockWithBase({ ".mcp.json": "abc123" }, "existing-sha"),
         resolveBaseRef: Effect.succeed(Option.none<string>()),
       });
       mockLoadCommandContext.mockReturnValue(effect);
@@ -874,11 +901,9 @@ describe("pullCommand", () => {
         cmd: pullCommand,
       });
 
-      // baseRef: undefined でロックを上書きしないことを確認
       const lockArg = mockSaveLock.mock.calls[0][1];
-      expect(lockArg).not.toHaveProperty("baseRef", undefined);
-      // 既存の baseRef がスプレッドで保持される
-      expect(lockArg.baseRef).toBe("existing-sha");
+      expect(lockArg.sync).toBe("synced");
+      expect(baseCommitSha(lockArg)).toBe("existing-sha");
     });
 
     it("cleanup が必ず呼ばれる", async () => {
@@ -907,7 +932,7 @@ describe("pullCommand", () => {
       expect(mockCleanup).toHaveBeenCalled();
     });
 
-    it("コンフリクト時に pendingMerge を保存して中断", async () => {
+    it("コンフリクト時に解決待ちを保存して中断", async () => {
       vol.fromJSON({
         "/test/.mcp.json": "local content",
         "/tmp/template/.mcp.json": "template content",
@@ -939,26 +964,46 @@ describe("pullCommand", () => {
       expect(mockSaveLock).toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
-          pendingMerge: expect.objectContaining({
+          sync: "merging",
+          merge: expect.objectContaining({
             conflicts: [".mcp.json"],
           }),
         }),
       );
-      // baseHashes/baseRef は更新されない（pendingMerge に保留）
+      // ベースは前進しない（解決待ちに保留される）
       expect(mockSaveLock).not.toHaveBeenCalledWith(
         expect.any(String),
-        expect.objectContaining({
-          baseHashes: expect.any(Object),
-          pendingMerge: undefined,
-        }),
+        expect.objectContaining({ sync: "synced" }),
       );
     });
 
-    it("--continue: pendingMerge がない場合はエラー", async () => {
-      mockLoadLock.mockResolvedValueOnce({
-        ...baseLock,
-        pendingMerge: undefined,
+    it("解決待ちの lock で --continue なしの pull を実行すると、再マージせず --continue を案内して中断する", async () => {
+      vol.fromJSON({
+        "/test/.mcp.json": "<<<<<<< LOCAL\nlocal\n=======\ntemplate\n>>>>>>> TEMPLATE",
       });
+
+      const { effect, cleanup } = mockContext({
+        lock: mergingLock([".mcp.json"], { hashes: { ".mcp.json": "hash123" } }),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      await expect(
+        (pullCommand.run as any)({
+          args: { dir: "/test", force: false, continue: false },
+          rawArgs: [],
+          cmd: pullCommand,
+        }),
+      ).rejects.toThrow("Merge already in progress");
+
+      // マーカーは再マージされず、ファイルもロックも書き換わらない
+      expect(mockMergeOneFile).not.toHaveBeenCalled();
+      expect(mockSaveLock).not.toHaveBeenCalled();
+      expect(vol.readFileSync("/test/.mcp.json", "utf8")).toContain("<<<<<<< LOCAL");
+      expect(cleanup).toHaveBeenCalled();
+    });
+
+    it("--continue: 解決待ちのコンフリクトがない場合はエラー", async () => {
+      mockLoadLock.mockReturnValueOnce(Effect.succeed(baseLock));
 
       await expect(
         (pullCommand.run as any)({
@@ -974,14 +1019,14 @@ describe("pullCommand", () => {
         "/test/.mcp.json": "<<<<<<< LOCAL\nlocal\n=======\ntemplate\n>>>>>>> TEMPLATE",
       });
 
-      mockLoadLock.mockResolvedValueOnce({
-        ...baseLock,
-        pendingMerge: {
-          conflicts: [".mcp.json"],
-          templateHashes: { ".mcp.json": "hash123" },
-          latestRef: "latest123",
-        },
-      });
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(
+          mergingLock([".mcp.json"], {
+            hashes: { ".mcp.json": "hash123" },
+            commitSha: "latest123",
+          }),
+        ),
+      );
 
       await expect(
         (pullCommand.run as any)({
@@ -992,19 +1037,19 @@ describe("pullCommand", () => {
       ).rejects.toThrow(ZikuError);
     });
 
-    it("--continue: 全解決済みなら baseHashes/baseRef を更新して pendingMerge を削除", async () => {
+    it("--continue: 全解決済みならベースを確定して解決待ちの記録を消す", async () => {
       vol.fromJSON({
         "/test/.mcp.json": "resolved content (no conflict markers)",
       });
 
-      mockLoadLock.mockResolvedValueOnce({
-        ...baseLock,
-        pendingMerge: {
-          conflicts: [".mcp.json"],
-          templateHashes: { ".mcp.json": "newhash" },
-          latestRef: "newref123",
-        },
-      });
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(
+          mergingLock([".mcp.json"], {
+            hashes: { ".mcp.json": "newhash" },
+            commitSha: "newref123",
+          }),
+        ),
+      );
 
       await (pullCommand.run as any)({
         args: { dir: "/test", force: false, continue: true },
@@ -1012,30 +1057,32 @@ describe("pullCommand", () => {
         cmd: pullCommand,
       });
 
-      expect(mockSaveLock).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({
-          baseHashes: { ".mcp.json": "newhash" },
-          baseRef: "newref123",
-          pendingMerge: undefined,
-        }),
-      );
+      expect(mockSaveLock).toHaveBeenCalledWith(expect.any(String), {
+        version: baseLock.version,
+        installedAt: baseLock.installedAt,
+        source: baseSource,
+        sync: "synced",
+        base: { hashes: { ".mcp.json": "newhash" }, ref: "newref123" },
+      });
+      // 確定後の lock に解決待ちの記録は残らない
+      const savedLock = mockSaveLock.mock.calls.at(-1)?.[1];
+      expect(savedLock).not.toHaveProperty("merge");
       expect(mockLog.success).toHaveBeenCalledWith("All conflicts resolved");
     });
 
-    it("--continue --dryRun: 全解決済みでも saveLock を呼ばず pendingMerge を確定しない", async () => {
+    it("--continue --dryRun: 全解決済みでも saveLock を呼ばずベースを確定しない", async () => {
       vol.fromJSON({
         "/test/.mcp.json": "resolved content (no conflict markers)",
       });
 
-      mockLoadLock.mockResolvedValueOnce({
-        ...baseLock,
-        pendingMerge: {
-          conflicts: [".mcp.json"],
-          templateHashes: { ".mcp.json": "newhash" },
-          latestRef: "newref123",
-        },
-      });
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(
+          mergingLock([".mcp.json"], {
+            hashes: { ".mcp.json": "newhash" },
+            commitSha: "newref123",
+          }),
+        ),
+      );
 
       await (pullCommand.run as any)({
         args: { dir: "/test", force: false, continue: true, dryRun: true },
@@ -1047,18 +1094,14 @@ describe("pullCommand", () => {
       expect(mockLog.info).toHaveBeenCalledWith("Dry run mode");
     });
 
-    it("downloadBaseForMerge が baseRef 付きで呼ばれる", async () => {
+    it("downloadBaseForMerge がベースのコミット SHA 付きで呼ばれる", async () => {
       vol.fromJSON({
         "/test/settings.json": '{"local": true}',
         "/tmp/template/settings.json": '{"template": true}',
       });
 
       const { effect } = mockContext({
-        lock: {
-          ...baseLock,
-          baseRef: "abc123",
-          baseHashes: { "settings.json": "old-hash" } as any,
-        },
+        lock: lockWithBase({ "settings.json": "old-hash" }, "abc123"),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -1089,8 +1132,7 @@ describe("pullCommand", () => {
 
       // downloadBaseForMerge に正しい引数が渡される
       expect(mockDownloadBaseForMerge).toHaveBeenCalledWith({
-        source: { owner: "tktcorporation", repo: ".github" },
-        baseRef: "abc123",
+        lock: lockWithBase({ "settings.json": "old-hash" }, "abc123"),
         targetDir: "/test",
       });
       // mergeOneFile に baseTemplateDir が渡される
@@ -1151,10 +1193,10 @@ describe("pullCommand", () => {
       // 自動マージ成功のメッセージが出力される
       expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining("Auto-merged"));
       expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining(".mcp.json"));
-      // pendingMerge は保存されない（正常完了パス）
+      // 解決待ちは保存されない（正常完了パス）
       expect(mockSaveLock).not.toHaveBeenCalledWith(
         expect.any(String),
-        expect.objectContaining({ pendingMerge: expect.anything() }),
+        expect.objectContaining({ sync: "merging" }),
       );
     });
 
@@ -1197,18 +1239,19 @@ describe("pullCommand", () => {
       expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining("a.json"));
       // b.txt はコンフリクト
       expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining("b.txt"));
-      // 未解決コンフリクトがあるので pendingMerge が保存される
+      // 未解決コンフリクトがあるので解決待ちとして保存される
       expect(mockSaveLock).toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
-          pendingMerge: expect.objectContaining({
+          sync: "merging",
+          merge: expect.objectContaining({
             conflicts: ["b.txt"],
           }),
         }),
       );
     });
 
-    it("全コンフリクトが自動マージ成功した場合は pendingMerge なしで正常完了", async () => {
+    it("全コンフリクトが自動マージ成功した場合は解決待ちを残さず正常完了", async () => {
       vol.fromJSON({
         "/test/a.json": "local a",
         "/test/b.json": "local b",
@@ -1239,18 +1282,17 @@ describe("pullCommand", () => {
       // 両方自動マージ成功
       expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining("a.json"));
       expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining("b.json"));
-      // pendingMerge なしで正常完了
+      // 解決待ちを残さず正常完了
       expect(mockSaveLock).toHaveBeenCalledWith(
         expect.any(String),
         expect.objectContaining({
-          baseHashes: expect.any(Object),
+          sync: "synced",
+          base: expect.objectContaining({ hashes: expect.any(Object) }),
         }),
       );
       expect(mockSaveLock).not.toHaveBeenCalledWith(
         expect.any(String),
-        expect.objectContaining({
-          pendingMerge: expect.anything(),
-        }),
+        expect.objectContaining({ sync: "merging" }),
       );
     });
 
@@ -1329,13 +1371,7 @@ describe("pullCommand", () => {
       });
 
       const { effect } = mockContext({
-        lock: {
-          ...baseLock,
-          baseRef: "abc123def456",
-          baseHashes: {
-            ".claude/rules/worktree.md": "abc123",
-          } as any,
-        },
+        lock: lockWithBase({ ".claude/rules/worktree.md": "abc123" }, "abc123def456"),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 

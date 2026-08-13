@@ -2,6 +2,18 @@ import { vol } from "memfs";
 import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FileNotFoundError } from "../../errors";
+import type {
+  GitHubSource,
+  LockState,
+  ResumableLockState,
+  TemplateSource,
+} from "../../modules/schemas";
+import {
+  createPendingLock,
+  markMerging,
+  markSynced,
+  templateRefToString,
+} from "../../modules/schemas";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -79,10 +91,13 @@ vi.mock("../../utils/template", () => ({
   downloadTemplateToTemp: vi.fn(() =>
     Promise.resolve({ templateDir: "/tmp/base-template", cleanup: vi.fn() }),
   ),
-  buildTemplateSource: vi.fn((source: { owner: string; repo: string; ref?: string }) => {
+  buildTemplateSource: vi.fn((source: GitHubSource) => {
     const base = `gh:${source.owner}/${source.repo}`;
-    return source.ref ? `${base}#${source.ref}` : base;
+    return source.ref ? `${base}#${templateRefToString(source.ref)}` : base;
   }),
+  buildCommitPinnedSource: vi.fn(
+    (source: GitHubSource, sha: string) => `gh:${source.owner}/${source.repo}#${sha}`,
+  ),
 }));
 
 // ui/prompts をモック
@@ -164,14 +179,31 @@ const validZikuConfig = {
   exclude: [],
 };
 
-const validLock = {
+const githubSource: TemplateSource = { kind: "github", owner: "tktcorporation", repo: ".github" };
+const localTemplateSource: TemplateSource = { kind: "local", path: "/local/template" };
+
+const validLock: ResumableLockState = {
   version: "0.1.0",
   installedAt: "2024-01-01T00:00:00.000Z",
-  source: {
-    owner: "tktcorporation",
-    repo: ".github",
-  },
+  source: githubSource,
+  sync: "pending",
 };
+
+/** validLock のソースとベースを差し替えたロックを作る。 */
+function lockWith(opts: {
+  source?: TemplateSource;
+  hashes?: Record<string, string>;
+  commitSha?: string;
+}): LockState {
+  const base = createPendingLock({
+    version: validLock.version,
+    installedAt: validLock.installedAt,
+    source: opts.source ?? githubSource,
+  });
+  return opts.hashes === undefined && opts.commitSha === undefined
+    ? base
+    : markSynced(base, { hashes: opts.hashes ?? {}, commitSha: opts.commitSha });
+}
 
 const emptyDiff = {
   files: [],
@@ -184,12 +216,12 @@ const emptyDiff = {
  */
 function mockContext(overrides?: {
   config?: typeof validZikuConfig;
-  lock?: typeof validLock & Record<string, unknown>;
-  source?: { owner: string; repo: string } | { path: string };
+  lock?: LockState;
+  source?: TemplateSource;
   templateDir?: string;
 }) {
   const cleanup = vi.fn();
-  const source = overrides?.source ?? { owner: "tktcorporation", repo: ".github" };
+  const source = overrides?.source ?? githubSource;
   return {
     effect: Effect.succeed({
       config: overrides?.config ?? validZikuConfig,
@@ -318,7 +350,7 @@ describe("pushCommand", () => {
     });
 
     it("無効な .ziku/lock.json 形式の場合はエラー", async () => {
-      // ParseError は toZikuError で "Failed to parse configuration" に変換される
+      // ParseError は toZikuError で対象ファイル名付きのメッセージに変換される
       const { ParseError } = await import("../../errors");
       mockLoadCommandContext.mockReturnValue(
         Effect.fail(new ParseError({ path: ".ziku/lock.json", cause: "invalid format" })),
@@ -330,7 +362,7 @@ describe("pushCommand", () => {
           rawArgs: [],
           cmd: pushCommand,
         }),
-      ).rejects.toThrow("Failed to parse configuration");
+      ).rejects.toThrow("Failed to parse .ziku/lock.json");
     });
 
     it("patterns が空の場合は警告", async () => {
@@ -422,7 +454,7 @@ describe("pushCommand", () => {
 
     it("--dry-run は未解決の衝突を既定でプレビューから除外する（#81）", async () => {
       const { effect } = mockContext({
-        lock: { ...validLock, baseHashes: { "conflict.txt": "abc123" } },
+        lock: lockWith({ hashes: { "conflict.txt": "abc123" } }),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -459,7 +491,7 @@ describe("pushCommand", () => {
 
     it("--dry-run + --files で衝突ファイルを指定すると push が中断する旨を警告する（#81）", async () => {
       const { effect } = mockContext({
-        lock: { ...validLock, baseHashes: { "conflict.txt": "abc123" } },
+        lock: lockWith({ hashes: { "conflict.txt": "abc123" } }),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -905,15 +937,9 @@ describe("pushCommand", () => {
       expect(mockCreatePullRequest).toHaveBeenCalled();
     });
 
-    it("pendingMerge がある場合はエラー", async () => {
+    it("コンフリクト解決待ちの場合はエラー", async () => {
       const { effect } = mockContext({
-        lock: {
-          ...validLock,
-          pendingMerge: {
-            conflicts: [".mcp.json"],
-            templateHashes: {},
-          },
-        },
+        lock: markMerging(validLock, { hashes: {} }, [".mcp.json"]),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -928,11 +954,8 @@ describe("pushCommand", () => {
 
     it("ローカルソースの場合はファイルを直接テンプレートにコピー", async () => {
       const { effect } = mockContext({
-        source: { path: "/local/template" },
-        lock: {
-          ...validLock,
-          source: { path: "/local/template" } as any,
-        },
+        source: localTemplateSource,
+        lock: lockWith({ source: localTemplateSource }),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -951,10 +974,9 @@ describe("pushCommand", () => {
       // ローカルが .github/** を削除しただけ（localOnly）。push は生のローカルではなく
       // union を送るので、テンプレ側の .github/** は保持される（削除は自動伝播しない）。
       const { effect } = mockContext({
-        lock: {
-          ...validLock,
-          baseHashes: { ".ziku/ziku.jsonc": "oldhash" },
-        },
+        lock: lockWith({
+          hashes: { ".ziku/ziku.jsonc": "oldhash" },
+        }),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -1014,14 +1036,13 @@ describe("pushCommand", () => {
 
     it("ローカルテンプレへの push: ziku.jsonc の union 結果をローカルにも書き戻す（codex P2）", async () => {
       const { effect } = mockContext({
-        source: { path: "/local/template" },
+        source: localTemplateSource,
         // ローカルソースでは templateDir は localSource.path に解決される
         templateDir: "/local/template",
-        lock: {
-          ...validLock,
-          source: { path: "/local/template" } as any,
-          baseHashes: { ".ziku/ziku.jsonc": "oldhash" },
-        },
+        lock: lockWith({
+          source: localTemplateSource,
+          hashes: { ".ziku/ziku.jsonc": "oldhash" },
+        }),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -1074,12 +1095,11 @@ describe("pushCommand", () => {
 
     it("未解決の衝突は既定では push されず警告のみ（巻き添えで中断しない）", async () => {
       const { effect } = mockContext({
-        lock: {
-          ...validLock,
-          baseHashes: {
+        lock: lockWith({
+          hashes: {
             "file.txt": "abc123",
           },
-        },
+        }),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -1088,7 +1108,7 @@ describe("pushCommand", () => {
         "/tmp/template/file.txt": "template content",
       });
 
-      // classifyFiles がコンフリクトを返す（baseRef なし → 3-way マージ不可 → unresolved）
+      // classifyFiles がコンフリクトを返す（ベースの SHA なし → 3-way マージ不可 → unresolved）
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
@@ -1129,10 +1149,9 @@ describe("pushCommand", () => {
 
     it("コンフリクトしていないファイルは、未解決の衝突があっても push できる", async () => {
       const { effect } = mockContext({
-        lock: {
-          ...validLock,
-          baseHashes: { "bad.txt": "abc123" },
-        },
+        lock: lockWith({
+          hashes: { "bad.txt": "abc123" },
+        }),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -1141,7 +1160,7 @@ describe("pushCommand", () => {
         "/tmp/template/bad.txt": "template",
       });
 
-      // safe.txt は localOnly（push 可）、bad.txt は conflict（baseRef なし → unresolved）
+      // safe.txt は localOnly（push 可）、bad.txt は conflict（ベースの SHA なし → unresolved）
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: ["safe.txt"],
@@ -1191,12 +1210,11 @@ describe("pushCommand", () => {
 
     it("未解決の衝突を --files で明示指定すると中断し、ファイル名と ziku pull を案内する", async () => {
       const { effect } = mockContext({
-        lock: {
-          ...validLock,
-          baseHashes: {
+        lock: lockWith({
+          hashes: {
             "file.txt": "abc123",
           },
-        },
+        }),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -1246,10 +1264,9 @@ describe("pushCommand", () => {
 
     it("対話で未解決の衝突を選択すると中断する（--files 以外の経路）", async () => {
       const { effect } = mockContext({
-        lock: {
-          ...validLock,
-          baseHashes: { "file.txt": "abc123" },
-        },
+        lock: lockWith({
+          hashes: { "file.txt": "abc123" },
+        }),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -1296,15 +1313,14 @@ describe("pushCommand", () => {
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
-    it("baseRef + baseHashes がある場合に 3-way マージで自動解決", async () => {
+    it("ベースの SHA とハッシュがある場合に 3-way マージで自動解決", async () => {
       const { effect } = mockContext({
-        lock: {
-          ...validLock,
-          baseRef: "abc123def456",
-          baseHashes: {
+        lock: lockWith({
+          hashes: {
             "file.txt": "abc123",
           },
-        },
+          commitSha: "abc123def456",
+        }),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -1390,12 +1406,11 @@ describe("pushCommand", () => {
 
     it("ziku.jsonc の conflict は中断せず要素レベルマージで PR に統合される（base なし → 和集合）", async () => {
       const { effect } = mockContext({
-        lock: {
-          ...validLock,
-          baseHashes: {
+        lock: lockWith({
+          hashes: {
             ".ziku/ziku.jsonc": "oldhash",
           },
-        },
+        }),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -1459,13 +1474,12 @@ describe("pushCommand", () => {
 
     it("delete/modify conflict: 未解決でも ENOENT で落ちず、除外して継続する", async () => {
       const { effect } = mockContext({
-        lock: {
-          ...validLock,
-          baseRef: "abc123def456",
-          baseHashes: {
+        lock: lockWith({
+          hashes: {
             "deleted-file.txt": "abc123",
           },
-        },
+          commitSha: "abc123def456",
+        }),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -1517,12 +1531,11 @@ describe("pushCommand", () => {
 
     it("--yes でも未解決の衝突は push されない（暗黙の上書きをしない）", async () => {
       const { effect } = mockContext({
-        lock: {
-          ...validLock,
-          baseHashes: {
+        lock: lockWith({
+          hashes: {
             "file.txt": "abc123",
           },
-        },
+        }),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -1531,7 +1544,7 @@ describe("pushCommand", () => {
         "/tmp/template/file.txt": "template content",
       });
 
-      // baseRef なし → 3-way マージ不可 → unresolved
+      // ベースの SHA なし → 3-way マージ不可 → unresolved
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
@@ -1591,13 +1604,12 @@ describe("pushCommand", () => {
 
     it("autoUpdate ファイル（テンプレートのみ変更）は classification により push 対象外", async () => {
       const { effect } = mockContext({
-        lock: {
-          ...validLock,
-          baseHashes: {
+        lock: lockWith({
+          hashes: {
             "file.txt": "abc123",
             "template-only.txt": "def456",
           },
-        },
+        }),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -1650,12 +1662,11 @@ describe("pushCommand", () => {
 
     it("baseHashes が存在しコンフリクトがない場合は正常に続行", async () => {
       const { effect } = mockContext({
-        lock: {
-          ...validLock,
-          baseHashes: {
+        lock: lockWith({
+          hashes: {
             "file.txt": "abc123",
           },
-        },
+        }),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
@@ -1891,8 +1902,8 @@ describe("未追跡ファイルの追跡フロー", () => {
 
   it("ローカルソースへの push でも、追跡したファイルが include に永続化される", async () => {
     const { effect } = mockContext({
-      source: { path: "/local/template" },
-      lock: { ...validLock, source: { path: "/local/template" } as any },
+      source: localTemplateSource,
+      lock: lockWith({ source: localTemplateSource }),
     });
     mockLoadCommandContext.mockReturnValue(effect);
     seedZikuConfig();
@@ -2143,8 +2154,8 @@ describe("--files でファイル本体だけを指定した場合の ziku.jsonc
     // ローカルの ziku.jsonc へ書き戻すと、今回の push と無関係な docs/a.md が
     // ローカルの追跡対象から消えてしまう（union は削除しないという原則に反する）。
     const { effect } = mockContext({
-      source: { path: "/local/template" },
-      lock: { ...validLock, source: { path: "/local/template" } as any },
+      source: localTemplateSource,
+      lock: lockWith({ source: localTemplateSource }),
     });
     mockLoadCommandContext.mockReturnValue(effect);
 

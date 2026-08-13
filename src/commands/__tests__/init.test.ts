@@ -2,6 +2,7 @@ import { vol } from "memfs";
 import { Effect } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZikuError } from "../../errors";
+import { baseHashesOf, lockSchema } from "../../modules/schemas";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -41,6 +42,7 @@ vi.mock("../../utils/github", async () => {
   const actual = await vi.importActual<typeof import("../../utils/github")>("../../utils/github");
   return {
     resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
+    resolveSourceCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
     checkRepoExists: vi.fn(() => Promise.resolve({ _tag: "Exists" as const })),
     checkRepoSetup: vi.fn(() => Promise.resolve(true)),
     getGitHubToken: vi.fn(() => {}),
@@ -744,7 +746,7 @@ describe("initCommand", () => {
       );
     });
 
-    it(".ziku/lock.json に baseHashes が含まれる", async () => {
+    it(".ziku/lock.json に同期ベースのハッシュが含まれる", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -772,11 +774,13 @@ describe("initCommand", () => {
 
       // saveLock により .ziku/lock.json がファイルシステムに書き出される
       expect(vol.existsSync("/test/.ziku/lock.json")).toBe(true);
-      const lockContent = JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string);
-      expect(lockContent.baseHashes).toEqual(expectedHashes);
+      const lockContent = lockSchema.parse(
+        JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string),
+      );
+      expect(baseHashesOf(lockContent)).toEqual(expectedHashes);
     });
 
-    it("テンプレに ziku.jsonc があれば baseHashes に ziku.jsonc の base が記録される", async () => {
+    it("テンプレに ziku.jsonc があれば同期ベースに ziku.jsonc の base が記録される", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -793,15 +797,16 @@ describe("initCommand", () => {
       });
 
       expect(vol.existsSync("/test/.ziku/lock.json")).toBe(true);
-      const lockContent = JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string);
+      const lockContent = lockSchema.parse(
+        JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string),
+      );
       // base はローカル subset 由来のハッシュで記録される（テンプレ保護のため）
-      expect(lockContent.baseHashes).toBeDefined();
-      expect(lockContent.baseHashes[".ziku/ziku.jsonc"]).toEqual(expect.any(String));
+      expect(baseHashesOf(lockContent)[".ziku/ziku.jsonc"]).toEqual(expect.any(String));
       // テンプレ側ハッシュではなくローカル内容のハッシュ
-      expect(lockContent.baseHashes[".ziku/ziku.jsonc"]).not.toBe("template-config-hash");
+      expect(baseHashesOf(lockContent)[".ziku/ziku.jsonc"]).not.toBe("template-config-hash");
     });
 
-    it("テンプレに ziku.jsonc が無ければ baseHashes に ziku.jsonc を記録しない（誤削除防止 / codex P1）", async () => {
+    it("テンプレに ziku.jsonc が無ければ同期ベースに ziku.jsonc を記録しない（誤削除防止 / codex P1）", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -817,9 +822,11 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
-      const lockContent = JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string);
+      const lockContent = lockSchema.parse(
+        JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string),
+      );
       // base を記録しない（記録すると次回 pull で deletedFiles 判定→制御ファイル削除になる）
-      expect(lockContent.baseHashes?.[".ziku/ziku.jsonc"]).toBeUndefined();
+      expect(baseHashesOf(lockContent)[".ziku/ziku.jsonc"]).toBeUndefined();
     });
   });
 

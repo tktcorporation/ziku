@@ -8,11 +8,13 @@ import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 import type {
   FileOperationResult,
+  HashMap,
   LockState,
   OverwriteStrategy,
   TemplateSource,
 } from "../modules/schemas";
-import { P, match } from "ts-pattern";
+import { createPendingLock, markSynced } from "../modules/schemas";
+import { match } from "ts-pattern";
 import { ZikuError } from "../errors";
 import {
   inputTemplateSource,
@@ -33,7 +35,7 @@ import {
   getAuthenticatedUserLogin,
   getGitHubToken,
   rateLimitedError,
-  resolveLatestCommitSha,
+  resolveSourceCommitSha,
   scaffoldTemplateRepo,
   unauthorizedError,
 } from "../utils/github";
@@ -184,7 +186,7 @@ export const initCommand = defineCommand({
       // ローカルディレクトリをテンプレートとして使用（ダウンロード不要）
       templateDir = resolve(fromDir);
       cleanup = () => {};
-      source = { path: templateDir };
+      source = { kind: "local", path: templateDir };
       log.info(`Template: ${pc.cyan(templateDir)} (local)`);
     } else {
       // GitHub リポジトリからダウンロード
@@ -193,7 +195,7 @@ export const initCommand = defineCommand({
         args.yes as boolean,
         dryRun,
       );
-      source = { owner: resolved.sourceOwner, repo: resolved.sourceRepo };
+      source = { kind: "github", owner: resolved.sourceOwner, repo: resolved.sourceRepo };
 
       log.info(`Template: ${pc.cyan(`${resolved.sourceOwner}/${resolved.sourceRepo}`)}`);
 
@@ -233,11 +235,8 @@ export const initCommand = defineCommand({
         loadTemplateConfig(templateDir).pipe(
           Effect.catchTag("TemplateNotConfiguredError", (_err) => {
             const hint = match(source)
-              .with({ path: P.string }, (s) => `Add .ziku/ziku.jsonc to ${s.path}`)
-              .with(
-                { owner: P.string, repo: P.string },
-                (s) => `Add .ziku/ziku.jsonc to ${s.owner}/${s.repo}`,
-              )
+              .with({ kind: "local" }, (s) => `Add .ziku/ziku.jsonc to ${s.path}`)
+              .with({ kind: "github" }, (s) => `Add .ziku/ziku.jsonc to ${s.owner}/${s.repo}`)
               .exhaustive();
             return Effect.fail(new ZikuError(`Template has no .ziku/ziku.jsonc`, hint));
           }),
@@ -317,14 +316,12 @@ export const initCommand = defineCommand({
         });
       }
 
-      // baseRef: GitHub ソースの場合のみコミット SHA を取得。
-      // テンプレートを取得したブランチ（source.ref）と baseRef が食い違うと、
-      // 3-way マージのベースが別ブランチのツリーになるため ref をそのまま渡す。
-      const baseRef = await match(source)
-        .with({ owner: P.string, repo: P.string }, (s) =>
-          resolveLatestCommitSha(s.owner, s.repo, s.ref),
-        )
-        .with({ path: P.string }, () => Promise.resolve(undefined))
+      // ベースのコミット SHA: GitHub ソースの場合のみ取得。
+      // テンプレートを取得した ref とベースの SHA が食い違うと、3-way マージのベースが
+      // 別ブランチのツリーになるため ref をそのまま渡す。
+      const baseCommit = await match(source)
+        .with({ kind: "github" }, (s) => resolveSourceCommitSha(s.owner, s.repo, s.ref))
+        .with({ kind: "local" }, () => Promise.resolve(undefined))
         .exhaustive();
 
       // .ziku/ziku.jsonc を書き出し（パターン定義のみ、source なし）
@@ -336,7 +333,12 @@ export const initCommand = defineCommand({
       allResults.push(zikuJsoncResult);
 
       // .ziku/lock.json を書き出し（source + 同期状態）
-      const lockResult = await writeLockFile(targetDir, { source, baseHashes, baseRef, dryRun });
+      const lockResult = await writeLockFile(targetDir, {
+        source,
+        baseHashes,
+        baseCommit,
+        dryRun,
+      });
       allResults.push(lockResult);
 
       // ファイル操作結果を表示（サマリー含む）
@@ -440,7 +442,7 @@ function createEnvExample(
 }
 
 /**
- * init 時に `lock.baseHashes[".ziku/ziku.jsonc"]` へ記録するベースハッシュを決める。
+ * init 時に lock の同期ベースへ `.ziku/ziku.jsonc` のハッシュとして記録する値を決める。
  *
  * ## なぜ専用ロジックが必要か
  * `ziku.jsonc` を「他の追跡ファイルと同じ 3-way マージ対象」にしたことで、共通祖先
@@ -458,7 +460,7 @@ function createEnvExample(
  *
  * @param opts.localConfigContent  init で書き出すローカル ziku.jsonc の中身
  * @param opts.templateConfigHash  テンプレートの ziku.jsonc のハッシュ（無い場合 undefined）
- * @returns lock.baseHashes[".ziku/ziku.jsonc"] に入れるハッシュ値
+ * @returns 同期ベースの `.ziku/ziku.jsonc` に入れるハッシュ値
  */
 export function resolveConfigBaseHash(opts: {
   localConfigContent: string;
@@ -504,20 +506,22 @@ async function writeLockFile(
   targetDir: string,
   opts: {
     source: TemplateSource;
-    baseHashes?: Record<string, string>;
-    baseRef?: string;
+    baseHashes: HashMap;
+    baseCommit: string | undefined;
     dryRun?: boolean;
   },
 ): Promise<FileOperationResult> {
-  const lock: LockState = {
+  const pending = createPendingLock({
     version,
     installedAt: new Date().toISOString(),
     source: opts.source,
-    ...(opts.baseRef ? { baseRef: opts.baseRef } : {}),
-    ...(opts.baseHashes && Object.keys(opts.baseHashes).length > 0
-      ? { baseHashes: opts.baseHashes }
-      : {}),
-  };
+  });
+  // ハッシュが 1 件も取れなかった場合はベース未確定のまま残す。空のベースを「確定した
+  // ベース」として書くと、次回以降テンプレート全体が新規扱いになる事実が読み取れなくなる。
+  const lock: LockState =
+    Object.keys(opts.baseHashes).length > 0
+      ? markSynced(pending, { hashes: opts.baseHashes, commitSha: opts.baseCommit })
+      : pending;
 
   const isNew = !existsSync(join(targetDir, LOCK_FILE));
   if (!opts.dryRun) {

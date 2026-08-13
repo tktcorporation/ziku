@@ -4,7 +4,14 @@ import { Effect, Option } from "effect";
 import { join, resolve } from "pathe";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
-import type { LockState, TemplateSource } from "../modules/schemas";
+import type { ConflictPaths, MergingLockState, ResumableLockState } from "../modules/schemas";
+import {
+  baseCommitSha,
+  baseHashesOf,
+  markMerging,
+  markSynced,
+  resolveMerge,
+} from "../modules/schemas";
 import { selectDeletedFiles, selectDeletedFilesWithLocalEdits } from "../ui/prompts";
 import { intro, log, outro, pc } from "../ui/renderer";
 import { LOCK_FILE, loadLock, saveLock } from "../utils/lock";
@@ -33,7 +40,7 @@ export const pullLifecycle: CommandLifecycle = {
   description: "Pull latest template updates to local project",
   ops: [
     { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "patterns を取得" },
-    { file: LOCK_FILE, location: "local", op: "read", note: "source, baseHashes, baseRef を取得" },
+    { file: LOCK_FILE, location: "local", op: "read", note: "source と同期ベースを取得" },
     {
       file: SYNCED_FILES,
       location: "template",
@@ -56,7 +63,7 @@ export const pullLifecycle: CommandLifecycle = {
       file: LOCK_FILE,
       location: "local",
       op: "update",
-      note: "新しい baseHashes, baseRef で上書き",
+      note: "新しい同期ベースで上書き",
     },
   ],
   notes: [
@@ -104,13 +111,11 @@ export const pullCommand = defineCommand({
       if (!zikuConfigExists(targetDir)) {
         throw new ZikuError("Not initialized", "Run `ziku init` first");
       }
-      const lockOption = await Effect.runPromise(
-        Effect.tryPromise(() => loadLock(targetDir)).pipe(Effect.option),
-      );
-      if (Option.isNone(lockOption)) {
-        throw new ZikuError("No .ziku/lock.json found", "Run `ziku init` first");
+      const lock = await runCommandEffect(loadLock(targetDir).pipe(Effect.mapError(toZikuError)));
+      if (lock.sync !== "merging") {
+        throw new ZikuError("No pending merge found", "Run `ziku pull` first to start a merge");
       }
-      await runContinue(targetDir, lockOption.value, args.dryRun as boolean);
+      await runContinue(targetDir, lock, args.dryRun as boolean);
       return;
     }
 
@@ -121,7 +126,16 @@ export const pullCommand = defineCommand({
 
     const { config, lock, source, templateDir, cleanup, resolveBaseRef } = ctx;
 
-    log.info(`Template: ${pc.cyan(templateDir)}${"path" in source ? " (local)" : ""}`);
+    // コンフリクト解決待ちの lock は通常の pull フローへ渡さない。マーカーが残ったまま
+    // 再マージすると、マーカーが入れ子になったうえ、解決待ちの記録も上書きされて
+    // `push` が恒久的にブロックされる。ここで弾くことで、以降 lock は
+    // ResumableLockState に絞られ、再実行経路が型として存在しなくなる。
+    if (lock.sync === "merging") {
+      await cleanup();
+      throw pausedMergeError(lock);
+    }
+
+    log.info(`Template: ${pc.cyan(templateDir)}${source.kind === "local" ? " (local)" : ""}`);
 
     const include = config.include;
     const exclude = config.exclude ?? [];
@@ -155,7 +169,7 @@ export const pullCommand = defineCommand({
         hashFiles(templateDir, effectiveInclude, mergedExclude),
         hashFiles(targetDir, effectiveInclude, mergedExclude),
       ]);
-      const baseHashes = lock.baseHashes ?? {};
+      const baseHashes = baseHashesOf(lock);
 
       const classification = classifyFiles({ baseHashes, localHashes, templateHashes });
 
@@ -196,8 +210,7 @@ export const pullCommand = defineCommand({
       // （例: conflict だが union==local で書き込み不要）は lock を更新しないと、
       // 古い base が残って status/push が誤判定する（codex P2）。その場合は early-return しない。
       const configBaseChanged =
-        configSync.baseHash !== undefined &&
-        configSync.baseHash !== lock.baseHashes?.[ZIKU_CONFIG_FILE];
+        configSync.baseHash !== undefined && configSync.baseHash !== baseHashes[ZIKU_CONFIG_FILE];
 
       if (totalChanges === 0 && !configBaseChanged) {
         log.success("Already up to date");
@@ -219,7 +232,6 @@ export const pullCommand = defineCommand({
         await previewPull({
           targetDir,
           templateDir,
-          source,
           lock,
           conflicts,
           deletedFiles,
@@ -243,20 +255,26 @@ export const pullCommand = defineCommand({
       const unresolvedConflicts = await resolveConflicts(conflicts, {
         targetDir,
         templateDir,
-        source,
         lock,
       });
 
-      if (unresolvedConflicts.length > 0) {
+      const [firstConflict, ...restConflicts] = unresolvedConflicts;
+      if (firstConflict !== undefined) {
+        const pendingConflicts: ConflictPaths = [firstConflict, ...restConflicts];
         const latestRefOption = await Effect.runPromise(resolveBaseRef);
-        await saveLock(targetDir, {
-          ...lock,
-          pendingMerge: {
-            conflicts: unresolvedConflicts,
-            templateHashes: baseHashesForLock,
-            ...(Option.isSome(latestRefOption) ? { latestRef: latestRefOption.value } : {}),
-          },
-        });
+        await saveLock(
+          targetDir,
+          markMerging(
+            lock,
+            {
+              hashes: baseHashesForLock,
+              // SHA を解決できなかった場合は既存のベース SHA を引き継ぐ。ハッシュだけ
+              // 前進させて SHA を落とすと、次回のマージがベースツリーを取り直せなくなる。
+              commitSha: Option.getOrUndefined(latestRefOption) ?? baseCommitSha(lock),
+            },
+            pendingConflicts,
+          ),
+        );
         outro("Merge paused — resolve conflicts then run `ziku pull --continue`");
         return;
       }
@@ -276,11 +294,15 @@ export const pullCommand = defineCommand({
 
       const latestRefOption = await Effect.runPromise(resolveBaseRef);
 
-      await saveLock(targetDir, {
-        ...lock,
-        baseHashes: baseHashesForLock,
-        ...(Option.isSome(latestRefOption) ? { baseRef: latestRefOption.value } : {}),
-      });
+      // SHA を解決できなかった場合は、既存のベース SHA を引き継ぐ。ハッシュだけ前進させて
+      // SHA を落とすと、次回のマージがベースツリーを取り直せなくなる。
+      await saveLock(
+        targetDir,
+        markSynced(lock, {
+          hashes: baseHashesForLock,
+          commitSha: Option.getOrUndefined(latestRefOption) ?? baseCommitSha(lock),
+        }),
+      );
 
       outro("Pull complete");
     }, cleanup);
@@ -368,8 +390,7 @@ async function applyPullUpdates(opts: {
 async function previewPull(params: {
   targetDir: string;
   templateDir: string;
-  source: TemplateSource;
-  lock: LockState;
+  lock: ResumableLockState;
   conflicts: string[];
   deletedFiles: string[];
   deletedWithLocalEdits: string[];
@@ -385,7 +406,6 @@ async function previewPull(params: {
   const previewUnresolved = await resolveConflicts(params.conflicts, {
     targetDir: params.targetDir,
     templateDir: params.templateDir,
-    source: params.source,
     lock: params.lock,
     dryRun: true,
   });
@@ -425,15 +445,14 @@ async function applyFiles(files: string[], templateDir: string, targetDir: strin
  * 未解決のコンフリクトパスを返す。
  *
  * ファイル読み込み・マージ・ベースダウンロードは conflict-io の共通ユーティリティを使い、
- * pull 固有の処理（ローカルへの書き込み・pendingMerge 連携）だけをここで行う。
+ * pull 固有の処理（ローカルへの書き込み・解決待ち状態の記録）だけをここで行う。
  */
 async function resolveConflicts(
   conflicts: string[],
   ctx: {
     targetDir: string;
     templateDir: string;
-    source: TemplateSource;
-    lock: LockState;
+    lock: ResumableLockState;
     dryRun?: boolean;
   },
 ): Promise<string[]> {
@@ -444,8 +463,7 @@ async function resolveConflicts(
 
   const baseResult = await Effect.runPromise(
     downloadBaseForMerge({
-      source: ctx.source,
-      baseRef: ctx.lock.baseRef,
+      lock: ctx.lock,
       targetDir: ctx.targetDir,
     }),
   );
@@ -555,12 +573,31 @@ async function deleteSelectedFiles(files: string[], targetDir: string): Promise<
   }
 }
 
-async function runContinue(targetDir: string, lock: LockState, dryRun: boolean): Promise<void> {
-  if (!lock.pendingMerge) {
-    throw new ZikuError("No pending merge found", "Run `ziku pull` first to start a merge");
-  }
+/**
+ * コンフリクト解決待ちの lock を受け取ったときの中断エラー。
+ *
+ * 通常の pull は解決待ちのファイルを持たない状態を前提に組み立てられているため、
+ * 解決の続きは `--continue` へ誘導する。
+ */
+function pausedMergeError(lock: MergingLockState): ZikuError {
+  return new ZikuError(
+    "Merge already in progress from a previous `ziku pull`",
+    "Resolve the conflict markers in these files, then run `ziku pull --continue`:\n" +
+      lock.merge.conflicts.map((f) => `  \u2022 ${f}`).join("\n"),
+  );
+}
 
-  const { conflicts, templateHashes, latestRef } = lock.pendingMerge;
+/**
+ * コンフリクト解決後に同期ベースを確定する。
+ *
+ * 引数が `MergingLockState` なので、解決待ちでない lock に対しては呼べない。
+ */
+async function runContinue(
+  targetDir: string,
+  lock: MergingLockState,
+  dryRun: boolean,
+): Promise<void> {
+  const conflicts = lock.merge.conflicts;
 
   const stillConflicted: string[] = [];
   for (const file of conflicts) {
@@ -582,21 +619,17 @@ async function runContinue(targetDir: string, lock: LockState, dryRun: boolean):
     );
   }
 
-  // dryRun: --continue は pendingMerge の確定（lock 更新・baseHashes 前進）が本体の
-  // 副作用なので、書き込みだけ省略する。conflict マーカーの残存チェックは読み取りのみ
-  // なので dryRun でも実行してよい（他の dryRun 分岐と同じくプレビュー精度を保つため）。
+  // dryRun: --continue は同期ベースの確定（lock 更新）が本体の副作用なので、書き込みだけ
+  // 省略する。conflict マーカーの残存チェックは読み取りのみなので dryRun でも実行してよい
+  // （他の dryRun 分岐と同じくプレビュー精度を保つため）。
   if (dryRun) {
     log.info("Dry run mode");
     outro("Dry run complete — no changes were made. Conflicts are resolved and ready to finalize.");
     return;
   }
 
-  await saveLock(targetDir, {
-    ...lock,
-    baseHashes: templateHashes,
-    ...(latestRef ? { baseRef: latestRef } : {}),
-    pendingMerge: undefined,
-  });
+  // resolveMerge の戻り値には merge が無いため、確定後に解決待ちの記録が残らない。
+  await saveLock(targetDir, resolveMerge(lock));
 
   log.success("All conflicts resolved");
   outro("Pull complete");

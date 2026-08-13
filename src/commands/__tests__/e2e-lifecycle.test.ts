@@ -24,6 +24,7 @@
 import { vol } from "memfs";
 import { Effect } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { baseHashesOf, lockSchema } from "../../modules/schemas";
 
 // ── filesystem mock ─────────────────────────────────────────────
 
@@ -50,6 +51,7 @@ vi.mock("../../utils/github", async () => {
   const actual = await vi.importActual<typeof import("../../utils/github")>("../../utils/github");
   return {
     resolveLatestCommitSha: vi.fn(() => Promise.resolve("sha-001")),
+    resolveSourceCommitSha: vi.fn(() => Promise.resolve("sha-001")),
     checkRepoExists: vi.fn(() => Promise.resolve({ _tag: "Exists" as const })),
     checkRepoSetup: vi.fn(() => Promise.resolve(true)),
     getGitHubToken: vi.fn(() => "ghp_test"),
@@ -418,7 +420,7 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
     // Step 5: プロジェクトA でファイル追加 → push
     // ファイル操作:
     //   .ziku/ziku.jsonc [local/read]     — patterns 取得
-    //   .ziku/lock.json  [local/read]     — source, baseRef, baseHashes
+    //   .ziku/lock.json  [local/read]     — source, 同期ベース
     //   synced files     [local/read]     — ローカル変更検出
     //   synced files     [template/read]  — テンプレートと差分比較
     //   synced files     [template/update] — PR 作成
@@ -544,11 +546,11 @@ describe("E2E ライフサイクル: setup → init → track → push → pull 
     // Step 8: プロジェクトB で pull → A の変更が反映される
     // ファイル操作:
     //   .ziku/ziku.jsonc [local/read]   — patterns 取得
-    //   .ziku/lock.json  [local/read]   — source, baseHashes, baseRef
+    //   .ziku/lock.json  [local/read]   — source, 同期ベース
     //   synced files     [template/read] — ダウンロードして比較
     //   synced files     [local/update]  — 自動更新
     //   .ziku/ziku.jsonc [local/update]  — テンプレート新パターンマージ
-    //   .ziku/lock.json  [local/update]  — baseHashes, baseRef 更新
+    //   .ziku/lock.json  [local/update]  — 同期ベース更新
     // ═══════════════════════════════════════════════════════════
 
     mockClassifyFiles.mockReturnValueOnce({
@@ -911,11 +913,11 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
     expect(vol.existsSync("/projectB/.claude/rules/testing.md")).toBe(true);
     expect(vol.existsSync("/projectB/.mcp.json")).toBe(true);
 
-    // lock.json の baseHashes から .eslintrc.json が消えている
-    const lockAfterDelete = JSON.parse(
-      vol.readFileSync("/projectB/.ziku/lock.json", "utf8") as string,
+    // lock.json の同期ベースから .eslintrc.json が消えている
+    const lockAfterDelete = lockSchema.parse(
+      JSON.parse(vol.readFileSync("/projectB/.ziku/lock.json", "utf8") as string),
     );
-    expect(lockAfterDelete.baseHashes).not.toHaveProperty(".eslintrc.json");
+    expect(baseHashesOf(lockAfterDelete)).not.toHaveProperty(".eslintrc.json");
 
     // ═══════════════════════════════════════════════════════════
     // Step 12: プロジェクトA でも pull → 同じ削除が反映

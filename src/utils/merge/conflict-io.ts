@@ -11,9 +11,9 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { Effect } from "effect";
 import { dirname, join } from "pathe";
 import { match, P } from "ts-pattern";
-import type { TemplateSource } from "../../modules/schemas";
+import type { LockState } from "../../modules/schemas";
 import { FileNotFoundError } from "../../errors";
-import { downloadTemplateToTemp } from "../template";
+import { buildCommitPinnedSource, downloadTemplateToTemp } from "../template";
 import { log } from "../../ui/renderer";
 import type { MergeResult } from "./types";
 import { asBaseContent, asLocalContent, asTemplateContent } from "./types";
@@ -112,34 +112,38 @@ interface DownloadBaseResult {
 /**
  * 3-way マージ用のベーステンプレートをダウンロードする。
  *
- * GitHub ソースの場合: baseRef のコミットからテンプレートをダウンロード。
- * ローカルソース / baseRef なし: null を返す（2-way フォールバック）。
+ * ベースツリーを取り直せるのは「GitHub ソース」かつ「ベースのコミット SHA を記録済み」の
+ * ときだけ。それ以外（ローカルソース、ベース未確定、SHA 未記録）は null を返して
+ * 呼び出し側を 2-way フォールバックへ倒す。lock を引数に取るのは、この 2 つの条件が
+ * lock の型で結び付いているため。
+ *
  * ダウンロード失敗時もエラーにせず null を返す（2-way マーカーで対処可能なため）。
  */
 export const downloadBaseForMerge = (opts: {
-  source: TemplateSource;
-  baseRef: string | undefined;
+  lock: LockState;
   targetDir: string;
-}): Effect.Effect<DownloadBaseResult | null> => {
-  if (!opts.baseRef) return Effect.succeed(null);
-  const baseRef = opts.baseRef;
-
-  return match(opts.source)
-    .with({ owner: P.string, repo: P.string }, (ghSource) =>
-      Effect.tryPromise(() => {
-        log.info(`Downloading base version (${baseRef.slice(0, 7)}...) for merge...`);
-        return downloadTemplateToTemp(
-          opts.targetDir,
-          `gh:${ghSource.owner}/${ghSource.repo}#${baseRef}`,
-          "base",
-        );
-      }).pipe(
-        Effect.orElseSucceed(() => {
-          log.warn("Could not download base version. Falling back to 2-way conflict markers.");
-          return null;
-        }),
-      ),
+}): Effect.Effect<DownloadBaseResult | null> =>
+  match(opts.lock)
+    .with({ source: { kind: "local" } }, () => Effect.succeed(null))
+    .with({ source: { kind: "github" }, sync: "pending" }, () => Effect.succeed(null))
+    .with(
+      { source: { kind: "github" }, sync: P.union("synced", "merging"), base: { ref: P.string } },
+      ({ source, base }) =>
+        Effect.tryPromise(() => {
+          log.info(`Downloading base version (${base.ref.slice(0, 7)}...) for merge...`);
+          return downloadTemplateToTemp(
+            opts.targetDir,
+            buildCommitPinnedSource(source, base.ref),
+            "base",
+          );
+        }).pipe(
+          Effect.orElseSucceed(() => {
+            log.warn("Could not download base version. Falling back to 2-way conflict markers.");
+            return null;
+          }),
+        ),
     )
-    .with({ path: P.string }, () => Effect.succeed(null))
+    .with({ source: { kind: "github" }, sync: P.union("synced", "merging") }, () =>
+      Effect.succeed(null),
+    )
     .exhaustive();
-};

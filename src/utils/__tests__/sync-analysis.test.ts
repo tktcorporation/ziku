@@ -48,7 +48,7 @@ describe("sync-analysis", () => {
     expect(result.classification.conflicts).toContain("foo.txt");
   });
 
-  it("treats undefined baseHashes as empty (init 直後ケース): すべて newFiles", async () => {
+  it("treats empty baseHashes as no base (init 直後ケース): すべて newFiles", async () => {
     vol.fromJSON({
       "/template/a.txt": "x",
       "/template/b.txt": "y",
@@ -60,7 +60,7 @@ describe("sync-analysis", () => {
     const result = await analyzeSync({
       targetDir: "/project",
       templateDir: "/template",
-      baseHashes: undefined,
+      baseHashes: {},
       include: ["**"],
     });
 

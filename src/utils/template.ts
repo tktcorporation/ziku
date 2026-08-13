@@ -15,7 +15,8 @@ import { Effect } from "effect";
 import type { Scope } from "effect";
 import { match } from "ts-pattern";
 import { TemplateError } from "../errors";
-import type { FileOperationResult, OverwriteStrategy } from "../modules/schemas";
+import type { FileOperationResult, GitHubSource, OverwriteStrategy } from "../modules/schemas";
+import { templateRefToString } from "../modules/schemas";
 import { log } from "../ui/renderer";
 import { loadMergedGitignore, separateByGitignore } from "./gitignore";
 import type { FlatPatterns } from "./patterns";
@@ -69,14 +70,25 @@ function ensureGigetCacheDir(): void {
 export type CopyResult = FileOperationResult;
 
 /**
- * ZikuConfig の source フィールドから giget 用のテンプレートソース文字列を構築する。
+ * GitHub ソースから giget 用のテンプレートソース文字列を構築する。
  *
- * 背景: giget は "gh:owner/repo" または "gh:owner/repo#ref" 形式を期待する。
- * .ziku/ziku.jsonc の source: { owner, repo, ref? } をこの形式に変換する。
+ * giget は "gh:owner/repo" または "gh:owner/repo#ref" 形式を期待する。ref の種別
+ * （ブランチ / タグ / コミット）は giget にとって区別が無く、どれも "#" の後ろに載る。
+ * その変換は `templateRefToString` に集約している。
  */
-export function buildTemplateSource(source: { owner: string; repo: string; ref?: string }): string {
+export function buildTemplateSource(source: GitHubSource): string {
   const base = `gh:${source.owner}/${source.repo}`;
-  return source.ref ? `${base}#${source.ref}` : base;
+  return source.ref ? `${base}#${templateRefToString(source.ref)}` : base;
+}
+
+/**
+ * コミット SHA を固定した giget ソース文字列を構築する。
+ *
+ * 3-way マージのベースツリーは「その時点のコミット」を取り直す必要があるため、
+ * source が持つ ref ではなく渡された SHA で上書きする。
+ */
+export function buildCommitPinnedSource(source: GitHubSource, sha: string): string {
+  return buildTemplateSource({ ...source, ref: { kind: "commit", sha } });
 }
 
 /**

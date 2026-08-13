@@ -6,7 +6,8 @@ import { dirname, join, resolve } from "pathe";
 import { P, match } from "ts-pattern";
 import { withFinally } from "../effect-helpers";
 import { ZikuError } from "../errors";
-import type { FileDiff, TemplateSource } from "../modules/schemas";
+import type { FileDiff, GitHubSource, LocalSource, LockState } from "../modules/schemas";
+import { baseCommitSha, baseHashesOf, markSynced } from "../modules/schemas";
 import { LOCK_FILE, saveLock } from "../utils/lock";
 import {
   ZIKU_CONFIG_FILE,
@@ -16,7 +17,7 @@ import {
   withConfigTracked,
 } from "../utils/ziku-config";
 import { loadCommandContext, runCommandEffect, toZikuError } from "../services/command-context";
-import { downloadBaseForMerge, mergeOneFile } from "../utils/merge";
+import { classifyFiles, downloadBaseForMerge, mergeOneFile } from "../utils/merge";
 import {
   computeMergedZikuConfig,
   computeScopedZikuConfig,
@@ -55,7 +56,7 @@ export const pushLifecycle: CommandLifecycle = {
       op: "update",
       note: "選択した未追跡ファイルを include に追記（push 成功後）",
     },
-    { file: LOCK_FILE, location: "local", op: "read", note: "source, baseRef, baseHashes を取得" },
+    { file: LOCK_FILE, location: "local", op: "read", note: "source と同期ベースを取得" },
     { file: SYNCED_FILES, location: "local", op: "read", note: "ローカルの変更を検出" },
     {
       file: SYNCED_FILES,
@@ -75,7 +76,7 @@ export const pushLifecycle: CommandLifecycle = {
       op: "update",
       note: "ローカルで追加したパターンをテンプレの ziku.jsonc へ加法 union マージで伝播",
     },
-    { file: LOCK_FILE, location: "local", op: "update", note: "baseHashes を更新" },
+    { file: LOCK_FILE, location: "local", op: "update", note: "同期ベースを更新" },
   ],
   notes: [
     "`ziku.jsonc` 自体が追跡ファイルとして同期対象に含まれる。`ziku track` で追加したローカルパターンは、push 時にテンプレートの `ziku.jsonc` へ加法 union マージで伝播する（pull と双方向）。パターンの削除は自動伝播しない。",
@@ -96,6 +97,26 @@ interface PushTarget {
 }
 
 /**
+ * PR のベースブランチを決める。
+ *
+ * GitHub の PR はブランチにしか向けられない（ベースの解決に使う `repos.getBranch` は
+ * タグやコミット SHA で 404 になる）。ref を持たないソースは既定ブランチ名を使い、
+ * タグ・コミットへ固定されたソースは PR の宛先が定まらないので中断する。
+ */
+function resolvePrBaseBranch(source: GitHubSource): string {
+  return match(source.ref)
+    .with(undefined, () => "main")
+    .with({ kind: "branch" }, (branch) => branch.name)
+    .with({ kind: P.union("tag", "commit") }, (): never => {
+      throw new ZikuError(
+        "Cannot open a pull request against a template pinned to a tag or commit",
+        `Point .ziku/lock.json's source.ref at a branch (for example { "kind": "branch", "name": "main" }) and run push again.`,
+      );
+    })
+    .exhaustive();
+}
+
+/**
  * GitHub へ push: PR を作成する。
  *
  * トークン取得 → タイトル/本文 → サマリー表示 → 確認 → PR 作成
@@ -104,7 +125,7 @@ interface PushTarget {
  *   呼び出し側はこの結果で「追跡の永続化を行うか」を判断する（push 成功後のみ永続化する）。
  */
 function pushToGitHub(
-  ghSource: { owner: string; repo: string; ref?: string },
+  ghSource: GitHubSource,
   target: PushTarget,
   ctx: CommandContextShape,
   args: { message?: string; edit?: boolean; yes?: boolean },
@@ -137,10 +158,9 @@ function pushToGitHub(
       }
 
       // サマリー表示
-      const baseBranch = ghSource.ref || "main";
-      const baseHashStr = ctx.lock.baseRef
-        ? `  ${pc.dim(`since ${ctx.lock.baseRef.slice(0, 7)}`)}`
-        : "";
+      const baseBranch = resolvePrBaseBranch(ghSource);
+      const baseSha = baseCommitSha(ctx.lock);
+      const baseHashStr = baseSha ? `  ${pc.dim(`since ${baseSha.slice(0, 7)}`)}` : "";
       logPushSummary(
         `${ghSource.owner}/${ghSource.repo}`,
         `→ ${baseBranch}`,
@@ -175,7 +195,7 @@ function pushToGitHub(
       log.message(
         [
           `${pc.dim("To")} ${pc.bold(`${ghSource.owner}/${ghSource.repo}`)}`,
-          `  ${ctx.lock.baseRef ? `${pc.dim(ctx.lock.baseRef.slice(0, 7))}..` : ""}${pc.green(result.branch)}  ${pc.dim(`(${files.length + target.deletions.length} file${files.length + target.deletions.length === 1 ? "" : "s"} changed)`)}`,
+          `  ${baseSha ? `${pc.dim(baseSha.slice(0, 7))}..` : ""}${pc.green(result.branch)}  ${pc.dim(`(${files.length + target.deletions.length} file${files.length + target.deletions.length === 1 ? "" : "s"} changed)`)}`,
           "",
           `  ${pc.bold(`PR #${result.number}`)}  ${pc.cyan(result.url)}`,
         ].join("\n"),
@@ -201,7 +221,7 @@ function pushToGitHub(
  * @returns push したら true、確認でキャンセルされたら false。
  */
 function pushToLocal(
-  localSource: { path: string },
+  localSource: LocalSource,
   target: PushTarget,
   ctx: CommandContextShape,
   projectDir: string,
@@ -271,7 +291,7 @@ function pushToLocal(
       // 新規追跡ファイルと ziku.jsonc を含む effectivePatterns で計算するため、
       // 追跡したファイルも ziku.jsonc も baseHashes に入る（push 後はテンプレと一致する）。
       const baseHashes = await hashFiles(localSource.path, patterns.include, patterns.exclude);
-      await saveLock(projectDir, { ...ctx.lock, baseHashes });
+      await saveLock(projectDir, markSynced(ctx.lock, { hashes: baseHashes }));
 
       const totalCount = target.files.length + target.deletions.length;
       log.success(`Pushed ${totalCount} file(s) to ${pc.cyan(localSource.path)}`);
@@ -428,12 +448,12 @@ export const pushCommand = defineCommand({
     );
     const { config, lock, source, templateDir, cleanup } = ctx;
 
-    if (lock.pendingMerge) {
+    if (lock.sync === "merging") {
       await cleanup();
       throw new ZikuError(
         "Unresolved merge conflicts from `ziku pull`",
         "Resolve conflicts in these files, then run `ziku pull --continue`:\n" +
-          lock.pendingMerge.conflicts.map((f) => `  • ${f}`).join("\n"),
+          lock.merge.conflicts.map((f) => `  • ${f}`).join("\n"),
       );
     }
 
@@ -474,7 +494,6 @@ export const pushCommand = defineCommand({
         await classifyAndResolveConflicts({
           targetDir,
           templateDir,
-          source,
           lock,
           patterns: effectivePatterns,
           mergedContents,
@@ -607,14 +626,14 @@ export const pushCommand = defineCommand({
 
       const pushed = await runCommandEffect(
         match(source)
-          .with({ owner: P.string, repo: P.string }, (ghSource) =>
+          .with({ kind: "github" }, (ghSource) =>
             pushToGitHub(ghSource, target, ctx, {
               message: args.message as string | undefined,
               edit: args.edit as boolean,
               yes: args.yes as boolean,
             }),
           )
-          .with({ path: P.string }, (localSource) =>
+          .with({ kind: "local" }, (localSource) =>
             pushToLocal(
               localSource,
               target,
@@ -946,8 +965,7 @@ async function selectFilesToPush(
 async function classifyAndResolveConflicts(params: {
   targetDir: string;
   templateDir: string;
-  source: TemplateSource;
-  lock: { baseHashes?: Record<string, string>; baseRef?: string };
+  lock: LockState;
   patterns: { include: string[]; exclude: string[] };
   mergedContents: Map<string, string>;
 }): Promise<{
@@ -956,8 +974,6 @@ async function classifyAndResolveConflicts(params: {
   /** テンプレートが削除したがローカルに編集があるファイル。push はその削除を取り消す。 */
   deletedWithLocalEdits: Set<string>;
 }> {
-  const { classifyFiles } = await import("../utils/merge");
-
   const templateHashes = await hashFiles(
     params.templateDir,
     params.patterns.include,
@@ -970,7 +986,7 @@ async function classifyAndResolveConflicts(params: {
   );
 
   const classification = classifyFiles({
-    baseHashes: params.lock.baseHashes ?? {},
+    baseHashes: baseHashesOf(params.lock),
     localHashes,
     templateHashes,
   });
@@ -1014,7 +1030,6 @@ async function classifyAndResolveConflicts(params: {
     const unresolved = await resolveConflicts(conflictsToResolve, {
       targetDir: params.targetDir,
       templateDir: params.templateDir,
-      source: params.source,
       lock: params.lock,
       mergedContents: params.mergedContents,
     });
@@ -1046,13 +1061,13 @@ async function resolveConflicts(
   ctx: {
     targetDir: string;
     templateDir: string;
-    source: TemplateSource;
-    lock: { baseRef?: string };
+    lock: LockState;
     mergedContents: Map<string, string>;
   },
 ): Promise<string[]> {
-  const baseInfo = ctx.lock.baseRef
-    ? `since ${pc.bold(ctx.lock.baseRef.slice(0, 7))} (your last sync)`
+  const baseSha = baseCommitSha(ctx.lock);
+  const baseInfo = baseSha
+    ? `since ${pc.bold(baseSha.slice(0, 7))} (your last sync)`
     : "since your last pull/init";
   log.warn(
     `Template updated ${baseInfo} — ${conflicts.length} conflict(s) detected, attempting auto-merge...`,
@@ -1060,8 +1075,7 @@ async function resolveConflicts(
 
   const baseResult = await Effect.runPromise(
     downloadBaseForMerge({
-      source: ctx.source,
-      baseRef: ctx.lock.baseRef,
+      lock: ctx.lock,
       targetDir: ctx.targetDir,
     }),
   );

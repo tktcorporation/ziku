@@ -1,3 +1,4 @@
+import type { HashMap } from "../modules/schemas";
 import type { FileClassification } from "./merge/types";
 import { classifyFiles } from "./merge";
 import { hashFiles } from "./hash";
@@ -5,25 +6,24 @@ import { hashFiles } from "./hash";
 /**
  * 3-way ハッシュ比較に必要な3つのハッシュマップ。
  *
- * - base: 前回 sync 時のハッシュ（lock.baseHashes 由来）。3-way 比較の共通祖先。
+ * - base: 前回 sync 時のハッシュ（lock のベース由来）。3-way 比較の共通祖先。
  * - local: 現在のローカルファイルのハッシュ。
  * - template: 現在のテンプレートファイルのハッシュ。
  */
 export interface SyncHashes {
-  readonly baseHashes: Record<string, string>;
-  readonly localHashes: Record<string, string>;
-  readonly templateHashes: Record<string, string>;
+  readonly baseHashes: HashMap;
+  readonly localHashes: HashMap;
+  readonly templateHashes: HashMap;
 }
 
 export interface AnalyzeSyncOptions {
   readonly targetDir: string;
   readonly templateDir: string;
   /**
-   * 前回 sync 時のハッシュ。`lock.baseHashes` をそのまま渡せるよう undefined を許容する。
-   * undefined の場合は空オブジェクトとして扱い、すべてのテンプレートファイルが
-   * `newFiles` に分類される（init 直後 / 旧フォーマットの lock）。
+   * 前回 sync 時のハッシュ。`baseHashesOf(lock)` の戻り値をそのまま渡す。
+   * ベース未確定の lock では空になり、すべてのテンプレートファイルが `newFiles` に分類される。
    */
-  readonly baseHashes: Record<string, string> | undefined;
+  readonly baseHashes: HashMap;
   readonly include: string[];
   readonly exclude?: string[];
 }
@@ -47,18 +47,17 @@ export interface SyncAnalysis {
  */
 export async function analyzeSync(options: AnalyzeSyncOptions): Promise<SyncAnalysis> {
   const { targetDir, templateDir, baseHashes, include, exclude } = options;
-  const resolvedBaseHashes = baseHashes ?? {};
   const [templateHashes, localHashes] = await Promise.all([
     hashFiles(templateDir, include, exclude),
     hashFiles(targetDir, include, exclude),
   ]);
   const classification = classifyFiles({
-    baseHashes: resolvedBaseHashes,
+    baseHashes,
     localHashes,
     templateHashes,
   });
   return {
     classification,
-    hashes: { baseHashes: resolvedBaseHashes, localHashes, templateHashes },
+    hashes: { baseHashes, localHashes, templateHashes },
   };
 }
