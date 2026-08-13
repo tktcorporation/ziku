@@ -317,9 +317,13 @@ export const initCommand = defineCommand({
         });
       }
 
-      // baseRef: GitHub ソースの場合のみコミット SHA を取得
+      // baseRef: GitHub ソースの場合のみコミット SHA を取得。
+      // テンプレートを取得したブランチ（source.ref）と baseRef が食い違うと、
+      // 3-way マージのベースが別ブランチのツリーになるため ref をそのまま渡す。
       const baseRef = await match(source)
-        .with({ owner: P.string, repo: P.string }, (s) => resolveLatestCommitSha(s.owner, s.repo))
+        .with({ owner: P.string, repo: P.string }, (s) =>
+          resolveLatestCommitSha(s.owner, s.repo, s.ref),
+        )
         .with({ path: P.string }, () => Promise.resolve(undefined))
         .exhaustive();
 

@@ -50,7 +50,8 @@ vi.mock("@octokit/rest", () => ({
 }));
 
 // モック後にインポート
-const { createPullRequest, scaffoldTemplateRepo } = await import("../github");
+const { createPullRequest, scaffoldTemplateRepo, resolveDefaultBranch, resolveLatestCommitSha } =
+  await import("../github");
 
 describe("getGitHubToken", () => {
   const originalEnv = process.env;
@@ -662,5 +663,110 @@ describe("scaffoldTemplateRepo", () => {
     );
     // createInOrg は呼ばれない
     expect(mockReposCreateInOrg).not.toHaveBeenCalled();
+  });
+});
+
+describe("resolveDefaultBranch", () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env = { ...originalEnv };
+    // gh CLI 経由のトークン混入を避け、未認証の挙動で検証する
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+    process.env.PATH = "";
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it("リポジトリの既定ブランチ名を返す", async () => {
+    mockReposGet.mockResolvedValue({ data: { default_branch: "master" } });
+
+    const branch = await resolveDefaultBranch("owner", "repo");
+
+    expect(branch).toBe("master");
+    expect(mockReposGet).toHaveBeenCalledWith({ owner: "owner", repo: "repo" });
+  });
+
+  it("API が失敗した場合は undefined を返す", async () => {
+    mockReposGet.mockRejectedValue(new Error("Not Found"));
+
+    expect(await resolveDefaultBranch("owner", "repo")).toBeUndefined();
+  });
+});
+
+/** `Accept: application/vnd.github.sha` の応答（SHA 文字列のみ）を模す */
+const shaResponse = (sha: string) => ({
+  ok: true,
+  text: () => Promise.resolve(`${sha}\n`),
+});
+
+describe("resolveLatestCommitSha", () => {
+  const originalFetch = globalThis.fetch;
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env = { ...originalEnv };
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+    process.env.PATH = "";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    process.env = originalEnv;
+  });
+
+  it("ref が指定されている場合はその ref の SHA を解決する", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(shaResponse("sha-develop"));
+
+    const sha = await resolveLatestCommitSha("owner", "repo", "develop");
+
+    expect(sha).toBe("sha-develop");
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "https://api.github.com/repos/owner/repo/commits/develop",
+      expect.anything(),
+    );
+    // ref が判明しているので既定ブランチの問い合わせは不要
+    expect(mockReposGet).not.toHaveBeenCalled();
+  });
+
+  it("ref 未指定の場合はリポジトリの既定ブランチの SHA を解決する", async () => {
+    mockReposGet.mockResolvedValue({ data: { default_branch: "master" } });
+    globalThis.fetch = vi.fn().mockResolvedValue(shaResponse("sha-master"));
+
+    const sha = await resolveLatestCommitSha("owner", "repo");
+
+    expect(sha).toBe("sha-master");
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "https://api.github.com/repos/owner/repo/commits/master",
+      expect.anything(),
+    );
+  });
+
+  it("既定ブランチを取得できない場合は main へフォールバックせず undefined を返す", async () => {
+    mockReposGet.mockRejectedValue(new Error("Not Found"));
+    globalThis.fetch = vi.fn();
+
+    const sha = await resolveLatestCommitSha("owner", "repo");
+
+    expect(sha).toBeUndefined();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("コミット取得が失敗した場合は undefined を返す", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 404 });
+
+    expect(await resolveLatestCommitSha("owner", "repo", "develop")).toBeUndefined();
+  });
+
+  it("ネットワークエラーの場合は undefined を返す", async () => {
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("Network error"));
+
+    expect(await resolveLatestCommitSha("owner", "repo", "develop")).toBeUndefined();
   });
 });

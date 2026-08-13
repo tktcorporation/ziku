@@ -132,8 +132,11 @@ export function loadCommandContext(
     // resolveBaseRef: ソース種別の分岐を吸収
     // resolveLatestCommitSha は Promise<string | undefined> を返すため、
     // Option.fromNullable で undefined → None に正規化してから返す
+    //
+    // source.ref を渡す理由: テンプレートを取得したブランチと baseRef が食い違うと、
+    // 3-way マージのベースが別ブランチのツリーになる。
     const resolveBaseRef = isGitHubSource(source)
-      ? Effect.tryPromise(() => resolveLatestCommitSha(source.owner, source.repo)).pipe(
+      ? Effect.tryPromise(() => resolveLatestCommitSha(source.owner, source.repo, source.ref)).pipe(
           Effect.map(Option.fromNullable),
           Effect.orElseSucceed(() => Option.none<string>()),
         )

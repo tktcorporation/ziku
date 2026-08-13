@@ -425,21 +425,58 @@ export async function scaffoldTemplateRepo(
 }
 
 /**
+ * リポジトリの既定ブランチ名を取得する。
+ *
+ * 背景: 既定ブランチは `main` とは限らない（`master` / `trunk` 等）。ブランチが
+ * 指定されていないときに `main` を仮定すると、存在しないブランチを見に行くか、
+ * 別ブランチのコミットを掴む。どちらも 3-way マージのベースを取り違える原因になる。
+ *
+ * 取得できない場合（リポジトリ不在・認証失敗・ネットワーク断・レート制限）は
+ * undefined を返す。誤ったブランチ名で解決を続けるより、ベース未解決として
+ * 呼び出し側のフォールバックに倒すほうが安全なため。
+ */
+export async function resolveDefaultBranch(
+  owner: string,
+  repo: string,
+): Promise<string | undefined> {
+  const octokit = new Octokit({ auth: getGitHubToken() });
+
+  return Option.getOrUndefined(
+    await Effect.runPromise(
+      Effect.tryPromise(() => octokit.repos.get({ owner, repo })).pipe(
+        Effect.map(({ data }) => data.default_branch),
+        Effect.option,
+      ),
+    ),
+  );
+}
+
+/**
  * テンプレートリポジトリの最新コミット SHA を取得する。
  *
  * 背景: init/pull 時に baseRef として保存し、後で 3-way マージのベース取得に使用する。
  * GitHub API の `Accept: application/vnd.github.sha` を使い、SHA 文字列のみを取得する。
  * 認証不要（公開リポジトリの場合）。
+ *
+ * `ref` は **ブランチ名を期待する**。「そのブランチの最新コミット」を解決するのが
+ * 目的なので、タグやコミット SHA を渡すと固定のコミットがそのまま返り、
+ * 「最新」を取得したつもりの呼び出し側が意図しない結果を受け取る。
+ * 省略した場合はリポジトリの既定ブランチを使う。
+ *
+ * 既定ブランチを解決できない場合は SHA を取得せず undefined を返す。
  */
 export async function resolveLatestCommitSha(
   owner: string,
   repo: string,
-  ref = "main",
+  ref?: string,
 ): Promise<string | undefined> {
+  const branch = ref ?? (await resolveDefaultBranch(owner, repo));
+  if (branch === undefined) return undefined;
+
   return Option.getOrUndefined(
     await Effect.runPromise(
       Effect.tryPromise(async () => {
-        const url = `https://api.github.com/repos/${owner}/${repo}/commits/${ref}`;
+        const url = `https://api.github.com/repos/${owner}/${repo}/commits/${branch}`;
         const res = await fetch(url, {
           headers: { Accept: "application/vnd.github.sha" },
         });
