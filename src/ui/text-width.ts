@@ -62,9 +62,30 @@ const wideRanges: readonly (readonly [number, number])[] = [
  * 幅 0 のコードポイント。
  *
  * Mn / Me は結合文字で前の文字に重ねて描かれ、Cf は書式制御文字（ZWJ・異体字セレクタ）で
- * それ自体は描かれない。Cc は制御文字で、端末はカラムを進めない。
+ * それ自体は描かれない。Cc は制御文字（NUL・ベル・改行など）で、端末はカラムを進めない。
+ *
+ * TAB は Cc に含まれるがカラムを進める唯一の例外なので、この判定へ届く前に
+ * {@link TAB_WIDTH} で数える（{@link graphemeWidth}）。
  */
 const zeroWidthPattern = /^[\p{Mn}\p{Me}\p{Cf}\p{Cc}]$/u;
+
+/** TAB。制御文字でありながらカラムを進めるので、幅 0 の判定から切り離して扱う。 */
+const tab = "\t";
+
+/**
+ * TAB (U+0009) を何カラムとして数えるか。
+ *
+ * 端末の TAB は「次のタブストップまで」カーソルを進めるため、実際に消費するカラム数は行頭からの
+ * 位置によって 1〜8 に変わり、文字列だけを見ても確定しない。切り詰めの判断には 1 つの値が要るので、
+ * 既定のタブストップ間隔であり TAB が取りうる最大値でもある 8 を採る。
+ *
+ * 見積もりを過大側に倒すのは、2 方向の誤りで害が釣り合わないため。過小評価すると行は見積もりより
+ * 長くなり、切り詰めをすり抜けた行を端末が折り返す。選択画面は「1 項目 = 1 行」を前提に再描画の
+ * カーソル移動量を数えているので、折り返しが 1 行でも起きると描画位置を見失って画面が崩れる。
+ * 過大評価で起きるのは、まだ余地のある行を切り詰めて末尾を省略記号にすることだけで、
+ * 失うのは行末の数文字にとどまる。
+ */
+const TAB_WIDTH = 8;
 
 /**
  * 異体字セレクタ-16。直前の文字を絵文字表示に切り替える指示で、
@@ -97,6 +118,10 @@ export function graphemeWidth(cluster: string): number {
 
   let width = 0;
   for (const char of cluster) {
+    if (char === tab) {
+      width = Math.max(width, TAB_WIDTH);
+      continue;
+    }
     if (zeroWidthPattern.test(char)) continue;
     width = Math.max(width, isWide(char.codePointAt(0) ?? 0) ? 2 : 1);
   }

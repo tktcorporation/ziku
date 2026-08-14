@@ -44,16 +44,6 @@ export function asNonEmpty<T>(items: readonly T[]): NonEmptyArray<T> | undefined
 
 // ─── 引数の解釈 ───
 
-/**
- * 位置引数をターゲットディレクトリとして読む。
- *
- * `ziku init` と打たれた場合、citty は "init" を位置引数として渡す。サブコマンド名を
- * ディレクトリ名として解釈すると `./init` を作ってしまうので、カレントディレクトリに倒す。
- */
-export function resolveTargetDirArg(dirArg: string): string {
-  return dirArg === "init" ? "." : dirArg;
-}
-
 /** `--from` の読み取り結果。owner だけの指定は既定リポジトリの探索へ回る。 */
 export type FromArgPlan =
   | { readonly _tag: "Repo"; readonly owner: string; readonly repo: string }

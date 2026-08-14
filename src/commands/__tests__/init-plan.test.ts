@@ -32,7 +32,6 @@ import {
   requiresDevcontainerEnvExample,
   resolveConfigBaseContent,
   resolveConfigBaseHash,
-  resolveTargetDirArg,
   selectedFlatPatterns,
   splitOwnerRepo,
   withReadyFlags,
@@ -60,17 +59,6 @@ function candidate(owner: string, repo: string, ready?: boolean): TemplateCandid
 function probed<T>(item: T, existence: RepoExistence): ProbedItem<T> {
   return { item, existence };
 }
-
-describe("resolveTargetDirArg", () => {
-  it("サブコマンド名としての 'init' はカレントディレクトリとして扱う", () => {
-    expect(resolveTargetDirArg("init")).toBe(".");
-  });
-
-  it("それ以外の位置引数はディレクトリ名として扱う", () => {
-    expect(resolveTargetDirArg("./my-project")).toBe("./my-project");
-    expect(resolveTargetDirArg("initializer")).toBe("initializer");
-  });
-});
 
 describe("planFromArg", () => {
   it("owner/repo はそのリポジトリを指す", () => {

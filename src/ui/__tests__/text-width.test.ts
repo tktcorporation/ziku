@@ -54,6 +54,17 @@ describe("text-width", () => {
     it("全角の範囲表より後ろのコードポイントは 1 カラム", () => {
       expect(stringWidth("\u{10FFFD}")).toBe(1);
     });
+
+    it("TAB はカラムを進めるので 0 にはならない", () => {
+      expect(stringWidth("\t")).toBeGreaterThan(0);
+      expect(stringWidth("a\tb")).toBeGreaterThan(stringWidth("ab"));
+    });
+
+    it("TAB はタブストップ間隔の 8 カラムとして数える", () => {
+      expect(stringWidth("\t")).toBe(8);
+      expect(stringWidth("\t\t")).toBe(16);
+      expect(stringWidth("a\tb")).toBe(10);
+    });
   });
 
   describe("graphemeWidth", () => {
@@ -65,8 +76,14 @@ describe("text-width", () => {
       expect(graphemeWidth("\u200D")).toBe(0);
     });
 
-    it("制御文字は 0 カラム", () => {
+    it("TAB 以外の制御文字は 0 カラム", () => {
+      expect(graphemeWidth("\u0000")).toBe(0);
       expect(graphemeWidth("\u0007")).toBe(0);
+      expect(graphemeWidth("\n")).toBe(0);
+    });
+
+    it("TAB はタブストップ間隔の 8 カラム", () => {
+      expect(graphemeWidth("\t")).toBe(8);
     });
   });
 
@@ -101,6 +118,18 @@ describe("text-width", () => {
     it("書記素クラスタ境界で切るのでサロゲートペアが割れない", () => {
       const result = truncateToWidth(zwjFamily.repeat(3), 3);
       expect(result).toBe(zwjFamily);
+    });
+
+    it("タブインデントされた長い行を指定幅で切り詰める", () => {
+      const line = `\t\t${"x".repeat(100)}`;
+      const truncated = truncateToWidth(line, 40);
+      expect(truncated).not.toBe(line);
+      expect(stringWidth(truncated)).toBeLessThanOrEqual(40);
+    });
+
+    it("TAB 自体も切り詰めの予算を消費する", () => {
+      // TAB 1 つで 8 カラム使うので、10 カラムの枠には TAB + ASCII 2 文字しか入らない
+      expect(truncateToWidth("\tabcdef", 10)).toBe("\tab");
     });
 
     it("maxWidth が 0 以下なら空文字を返す", () => {

@@ -74,7 +74,6 @@ import {
   preferReadyCandidate,
   requiresDevcontainerEnvExample,
   resolveConfigBaseContent,
-  resolveTargetDirArg,
   selectedFlatPatterns,
   splitOwnerRepo,
   withReadyFlags,
@@ -210,7 +209,7 @@ export const initCommand = defineCommand({
       fromDir: args["from-dir"] as string | undefined,
       dryRun: args.dryRun,
     };
-    const targetDir = absPath(resolveTargetDirArg(args.dir));
+    const targetDir = absPath(args.dir);
 
     log.info(`Target: ${pc.cyan(targetDir)}`);
     if (initArgs.dryRun) {

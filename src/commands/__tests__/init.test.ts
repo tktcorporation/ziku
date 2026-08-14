@@ -1,6 +1,6 @@
 import { vol } from "memfs";
 import { Effect } from "effect";
-import { dirname } from "pathe";
+import { dirname, resolve } from "pathe";
 import { match } from "ts-pattern";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { baseHashesOf, lockSchema } from "../../modules/schemas";
@@ -255,6 +255,25 @@ describe("initCommand", () => {
       });
 
       expect(vol.existsSync("/new-dir")).toBe(true);
+    });
+
+    it("位置引数 'init' は ./init というディレクトリ指定として扱う", async () => {
+      // citty はサブコマンド名を rawArgs から取り除いてから initCommand へ渡すので、
+      // dir に "init" が入るのは `ziku init init` と打たれたときだけ。この場合ユーザーが
+      // 求めているのは ./init の作成で、カレントディレクトリへ倒してはいけない。
+      vol.fromJSON({});
+
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json"]));
+      mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "init", force: false, yes: false },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(vol.existsSync(resolve(process.cwd(), "init"))).toBe(true);
     });
 
     it("devcontainer ディレクトリ選択時に env.example を作成", async () => {
