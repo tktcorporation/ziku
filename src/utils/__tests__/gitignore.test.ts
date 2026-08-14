@@ -247,14 +247,29 @@ node_modules/
       expect(ig.ignores(repoRelPath(".claude/foo"))).toBe(true);
     });
 
-    it("行頭の空白は規則に含めない", async () => {
+    it("行頭の空白を規則の一部として残す", async () => {
+      // ` secret` は先頭に空白を持つ名前だけを指す。空白を落とすと、git が同期に出す
+      // `secret` まで対象から外れる。
       vol.fromJSON({
-        "/project/.claude/.gitignore": "   *.pem",
+        "/project/.claude/.gitignore": " secret",
       });
 
       const ig = await loadMergedGitignore([absPath("/project")], globPatterns([".claude/**"]));
 
-      expect(ig.ignores(repoRelPath(".claude/key.pem"))).toBe(true);
+      expect(ig.ignores(repoRelPath(".claude/nested/ secret"))).toBe(true);
+      expect(ig.ignores(repoRelPath(".claude/nested/secret"))).toBe(false);
+    });
+
+    it("行頭に空白がある `#` 始まりの行はコメントではなく規則", async () => {
+      // git はコメントかどうかを行の先頭 1 文字で決める。
+      vol.fromJSON({
+        "/project/.claude/.gitignore": " #notacomment",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([".claude/**"]));
+
+      expect(ig.ignores(repoRelPath(".claude/ #notacomment"))).toBe(true);
+      expect(ig.ignores(repoRelPath(".claude/notacomment"))).toBe(false);
     });
 
     it("否定パターンも元の適用範囲を保つ", async () => {

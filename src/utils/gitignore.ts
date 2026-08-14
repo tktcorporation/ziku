@@ -148,6 +148,7 @@ function prefixRules(content: string, dir: string): string {
     .split("\n")
     .map((line) => {
       const rule = ruleBody(line);
+      // コメントと否定は、git と同じく行の先頭 1 文字だけで決まる（{@link ruleBody}）。
       if (rule === "" || rule.startsWith("#")) return line;
       const negated = rule.startsWith("!");
       const pattern = negated ? rule.slice(1) : rule;
@@ -159,12 +160,19 @@ function prefixRules(content: string, dir: string): string {
 /**
  * 1 行から、git が規則として読む部分を取り出す。規則でない行（空行）は空文字列。
  *
- * 行末の空白は、バックスラッシュでエスケープされていれば規則の一部で、`secret\ ` は末尾に
- * 空白を持つ名前を指す。行全体を trim するとこの空白が落ち、git が無視するファイルを ziku は
- * 同期の対象として扱い、pull が上書きし push が送る。
+ * git が落とすのは行末の空白だけで、それもバックスラッシュでエスケープされていれば規則の
+ * 一部として残る。`secret\ ` は末尾に空白を持つ名前を指す。行末を無条件に trim するとこの
+ * 空白が落ち、git が無視するファイルを ziku は同期の対象として扱い、pull が上書きし push が送る。
+ *
+ * 行頭の空白は規則の一部なので落とさない。` secret` は先頭に空白を持つ名前だけを指し、
+ * `secret` には当たらない。落とすと、git が同期に出すファイルを ziku が対象から外す。
+ * コメントと否定の判定も行の先頭 1 文字だけで決まるので、` #foo` はコメントではなく
+ * 名前 ` #foo` の規則になる（{@link prefixRules}）。
+ *
+ * 空白だけの行は行末の除去で空文字列になり、規則でない行として扱われる。
  */
 function ruleBody(line: string): string {
-  return line.replace(/^\s+/, "").replace(/(?<!\\)\s+$/, "");
+  return line.replace(/(?<!\\)\s+$/, "");
 }
 
 /**
