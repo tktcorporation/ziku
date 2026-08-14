@@ -10,7 +10,9 @@
  * ログ表示は呼び出し側の責務。本関数は副作用ゼロで `newInclude` / `newExclude` を返し、
  * 呼び出し元がそれを見て `log.info` するなり、`status` のように暗黙に取り込むなりを選ぶ。
  */
-import { Effect, Option } from "effect";
+import { Effect, Either } from "effect";
+import { match } from "ts-pattern";
+import { zikuFailure } from "../errors";
 import type { AbsPath, GlobPattern } from "../modules/schemas";
 import { unionPatterns } from "./patterns";
 import { loadTemplateConfig } from "./template-config";
@@ -32,8 +34,18 @@ export interface MergedTemplatePatterns {
  * テンプレートの `ziku.jsonc` を読み込み、ローカルパターンとマージした結果を返す。
  *
  * マージは `unionPatterns` の和集合なので、ローカルのパターンは順序ごと保たれ、
- * テンプレ側の追加分だけが末尾に付く。テンプレ側に `ziku.jsonc` が無い場合は
- * 「追加分ゼロ」として扱い、ローカルのパターンだけが残る。
+ * テンプレ側の追加分だけが末尾に付く。
+ *
+ * テンプレート側の設定が読めなかったときの扱いは、パターンが空である理由で分ける。
+ *
+ * - `ziku.jsonc` が無い: まだ ziku を使っていないテンプレートという正当な状態。追加分ゼロ
+ *   として扱い、ローカルのパターンだけが残る。
+ * - 構文が壊れている: 空へ潰さず中断する。潰すと「テンプレートは何も同期対象と定めていない」
+ *   という読みが走査範囲になり、テンプレートが追跡しているファイルが分類にも差分にも現れない
+ *   まま、同期済みとして報告される。テキストは人が直せるので、直すまで待っても何も失われない。
+ *
+ * 失敗は `ZikuFailure` を throw して返す（`src/utils/config-merge.ts` と同じ経路）。呼び出し元は
+ * Effect ではない async 関数の連なりで、その先はコマンド層が defect ごと拾ってトップレベルへ運ぶ。
  *
  * 戻り値の `newInclude` / `newExclude` を呼び出し側が見て、ログ表示や永続化を決める。
  */
@@ -42,13 +54,23 @@ export async function mergeTemplatePatterns(
   include: readonly GlobPattern[],
   exclude: readonly GlobPattern[],
 ): Promise<MergedTemplatePatterns> {
-  const templateConfigOption = await Effect.runPromise(
-    loadTemplateConfig(templateDir).pipe(Effect.option),
-  );
+  const loaded = await Effect.runPromise(loadTemplateConfig(templateDir).pipe(Effect.either));
 
-  const templatePatterns = Option.match(templateConfigOption, {
-    onNone: () => ({ include: [] as GlobPattern[], exclude: [] as GlobPattern[] }),
-    onSome: (config) => ({ include: config.include, exclude: config.exclude ?? [] }),
+  const templatePatterns = Either.match(loaded, {
+    onRight: (config) => ({ include: config.include, exclude: config.exclude ?? [] }),
+    onLeft: (error) =>
+      match(error)
+        .with({ _tag: "TemplateNotConfiguredError" }, () => ({
+          include: [] as GlobPattern[],
+          exclude: [] as GlobPattern[],
+        }))
+        .with({ _tag: "ParseError" }, (e): never => {
+          throw zikuFailure(
+            { kind: "ConfigUnparsable", path: e.path, detail: String(e.cause) },
+            { cause: e.cause },
+          );
+        })
+        .exhaustive(),
   });
 
   const mergedInclude = unionPatterns(include, templatePatterns.include);

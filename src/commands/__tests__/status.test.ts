@@ -561,9 +561,7 @@ describe("statusCommand", () => {
       // 比較の範囲と未追跡探索の範囲が食い違うと、status が数えた push 候補を push が
       // 送れない。同じ範囲から両方を導いていることを、渡した値そのもので確かめる。
       expect(mockAnalyzeSync).toHaveBeenCalledWith(expect.objectContaining({ scope }));
-      expect(mockDetectUntrackedFiles).toHaveBeenCalledWith(
-        expect.objectContaining({ patterns: scope.declared }),
-      );
+      expect(mockDetectUntrackedFiles).toHaveBeenCalledWith(expect.objectContaining({ scope }));
       // ユーザー向けの新パターン通知
       const infoCalls = mockLog.info.mock.calls.flat().join(" ");
       expect(infoCalls).toContain("Template added 1 new pattern");

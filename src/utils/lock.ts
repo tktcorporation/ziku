@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { Effect } from "effect";
 import { dirname } from "pathe";
 import type { AbsPath, LockState, RepoRelPath } from "../modules/schemas";
-import { lockSchema } from "../modules/schemas";
+import { describeSchemaIssues, lockSchema } from "../modules/schemas";
 import { FileNotFoundError, ParseError, ValidationError } from "../errors";
 import { joinAbs, repoRelPath } from "./paths";
 
@@ -69,9 +69,7 @@ export function loadLock(
     if (!parsed.success) {
       return yield* new ValidationError({
         path: LOCK_FILE,
-        issues: parsed.error.issues.map((issue) =>
-          issue.path.length > 0 ? `${issue.path.join(".")}: ${issue.message}` : issue.message,
-        ),
+        issues: describeSchemaIssues(parsed.error),
       });
     }
 

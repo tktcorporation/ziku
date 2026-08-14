@@ -21,7 +21,8 @@
 import * as readline from "node:readline";
 import pc from "picocolors";
 import { match } from "ts-pattern";
-import type { FileDiff } from "../modules/schemas";
+import { isDefaultSelected } from "../commands/push-plan";
+import type { FileDiff, RepoRelPath } from "../modules/schemas";
 import { generateUnifiedDiff } from "../utils/diff";
 import {
   applyWordDiffAndColorize,
@@ -121,19 +122,36 @@ export interface FileItem {
  * 受け取り、同じ関数（{@link fileSelectionHint} / {@link isPreselectedByDefault}）で
  * 判断する。片方だけが注記や既定チェックを持つと、端末の種類で挙動が変わる。
  */
+/**
+ * 既定チェックの判定材料は判断層と共有する（`src/commands/push-plan.ts` の
+ * {@link DefaultSelectionMarks}）。UI 側の呼び名は `preselectDeletions` だが、意味は
+ * `--include-deletions` と同じなので、判定へ渡す前に名前だけを揃える
+ * （{@link isPreselectedByDefault}）。
+ *
+ * 3 つとも必須なのは、渡し忘れた集合が空集合として扱われ、既定から外すはずのファイルが
+ * 対話実行でだけチェック済みになるのを型で止めるため。印を付けるものが無い呼び出しは
+ * {@link NO_FILE_SELECTION_MARKS} を渡す。
+ */
 export interface FileSelectionMarks {
   /** 削除ファイルをデフォルトで選択するか */
-  readonly preselectDeletions?: boolean;
+  readonly preselectDeletions: boolean;
   /** 未解決の衝突ファイル。マーク表示し、デフォルト未選択にする。 */
-  readonly conflictedPaths?: ReadonlySet<string>;
+  readonly conflictedPaths: ReadonlySet<RepoRelPath>;
   /**
    * 送るとテンプレート側の削除を取り消すファイル。マーク表示し、デフォルト未選択にする。
    *
    * 見た目は新規追加と同じ `+` なので、注記が無いと「テンプレートが消したファイルを
    * 復活させる」操作だと画面から分からない。
    */
-  readonly restoresTemplateDeletion?: ReadonlySet<string>;
+  readonly restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
 }
+
+/** 特別扱いするファイルが 1 つも無い一覧のための印。 */
+export const NO_FILE_SELECTION_MARKS: FileSelectionMarks = {
+  preselectDeletions: false,
+  conflictedPaths: new Set(),
+  restoresTemplateDeletion: new Set(),
+};
 
 /**
  * 行に添える注記。
@@ -142,10 +160,10 @@ export interface FileSelectionMarks {
  * 行動への影響が大きい。
  */
 export function fileSelectionHint(file: FileDiff, marks: FileSelectionMarks): string {
-  if (marks.conflictedPaths?.has(file.path) === true) {
+  if (marks.conflictedPaths.has(file.path)) {
     return pc.red("conflict — resolve with ziku pull");
   }
-  if (marks.restoresTemplateDeletion?.has(file.path) === true) {
+  if (marks.restoresTemplateDeletion.has(file.path)) {
     return pc.yellow("restores file deleted in template");
   }
   return formatStatHint(file);
@@ -154,23 +172,22 @@ export function fileSelectionHint(file: FileDiff, marks: FileSelectionMarks): st
 /**
  * 既定でチェックを入れるか。
  *
- * 外すのは、選ぶと push が中断する未解決の衝突、`--include-deletions` でない削除、
- * テンプレート側の削除を取り消すファイル。理由は `defaultPushSelection`（非対話実行の
- * 既定集合）と同じで、対話実行だけが既定で送ってしまうことのないよう揃える。
+ * 判定そのものは判断層の {@link isDefaultSelected} に委ねる。非対話実行の既定集合と対話の
+ * 初期チェックが同じ関数を通るので、片方だけが既定で送るという食い違いを作れない。
  */
 export function isPreselectedByDefault(file: FileDiff, marks: FileSelectionMarks): boolean {
-  return (
-    marks.conflictedPaths?.has(file.path) !== true &&
-    marks.restoresTemplateDeletion?.has(file.path) !== true &&
-    (marks.preselectDeletions === true || file.type !== "deleted")
-  );
+  return isDefaultSelected(file, {
+    includeDeletions: marks.preselectDeletions,
+    conflictedPaths: marks.conflictedPaths,
+    restoresTemplateDeletion: marks.restoresTemplateDeletion,
+  });
 }
 
-export function buildFileItems(files: FileDiff[], marks?: FileSelectionMarks): FileItem[] {
+export function buildFileItems(files: FileDiff[], marks: FileSelectionMarks): FileItem[] {
   return files.map((file) => ({
     file,
     label: `${getTypeIcon(file.type)} ${file.path}`,
-    hint: fileSelectionHint(file, marks ?? {}),
+    hint: fileSelectionHint(file, marks),
     diffLines: buildColoredDiffLines(file),
   }));
 }
@@ -562,11 +579,10 @@ export type FileSelectWithDiffOptions = FileSelectionMarks;
 /* v8 ignore start -- readline raw mode のインタラクティブ I/O。ユニットテストでは再現不可。 */
 export function selectFilesWithDiffPreview(
   files: FileDiff[],
-  options?: FileSelectWithDiffOptions,
+  marks: FileSelectWithDiffOptions,
 ): Promise<FileDiff[]> {
   if (files.length === 0) return Promise.resolve([]);
 
-  const marks = options ?? {};
   const items = buildFileItems(files, marks);
 
   const initialSelected = new Set<string>(

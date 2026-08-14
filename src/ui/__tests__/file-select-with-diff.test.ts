@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { Key } from "node:readline";
 import type { FileDiff } from "../../modules/schemas";
 import {
+  type FileSelectionMarks,
   type RenderState,
+  NO_FILE_SELECTION_MARKS,
   applyAction,
   buildColoredDiffLines,
   buildFileItems,
@@ -16,9 +18,14 @@ import {
   truncateLine,
 } from "../file-select-with-diff";
 import { stringWidth } from "../text-width";
-import { repoRelPath } from "../../__tests__/brands";
+import { repoRelPath, repoRelPaths } from "../../__tests__/brands";
 
 // ─── ヘルパー ──────────────────────────────────────────────────
+
+/** 検証したい印だけを指定して {@link FileSelectionMarks} を組む。 */
+function marksWith(overrides: Partial<FileSelectionMarks>): FileSelectionMarks {
+  return { ...NO_FILE_SELECTION_MARKS, ...overrides };
+}
 
 /** バイナリの内容を差分の string チャネルへ載せた形（バイト保存の latin1）。 */
 function asBinaryContent(bytes: number[]): string {
@@ -39,7 +46,7 @@ function createTestState(
     },
     { path: repoRelPath("c.ts"), type: "deleted", templateContent: "del\n" },
   ];
-  const items = buildFileItems(files);
+  const items = buildFileItems(files, NO_FILE_SELECTION_MARKS);
   return {
     items,
     selected: new Set(["a.ts", "b.ts"]),
@@ -58,7 +65,7 @@ function createManyFilesState(fileCount: number, cursorIndex = 0): RenderState {
     templateContent: `old ${i}\n`,
   }));
   return {
-    items: buildFileItems(files),
+    items: buildFileItems(files, NO_FILE_SELECTION_MARKS),
     selected: new Set<string>(),
     cursorIndex,
     diffScrollOffset: 0,
@@ -242,7 +249,7 @@ describe("file-select-with-diff", () => {
         },
         { path: repoRelPath("deleted.ts"), type: "deleted", templateContent: "old\n" },
       ];
-      const items = buildFileItems(files);
+      const items = buildFileItems(files, NO_FILE_SELECTION_MARKS);
       expect(items).toHaveLength(3);
       expect(items[0].file.path).toBe("added.ts");
       expect(items[1].file.path).toBe("modified.ts");
@@ -254,7 +261,7 @@ describe("file-select-with-diff", () => {
 
     it("should include type icon in label", () => {
       const files: FileDiff[] = [{ path: repoRelPath("a.ts"), type: "added", localContent: "x\n" }];
-      const items = buildFileItems(files);
+      const items = buildFileItems(files, NO_FILE_SELECTION_MARKS);
       const plain = stripCsi(items[0].label);
       expect(plain).toContain("+");
       expect(plain).toContain("a.ts");
@@ -275,7 +282,10 @@ describe("file-select-with-diff", () => {
           templateContent: "old\n",
         },
       ];
-      const items = buildFileItems(files, { conflictedPaths: new Set(["bad.ts"]) });
+      const items = buildFileItems(
+        files,
+        marksWith({ conflictedPaths: new Set(repoRelPaths(["bad.ts"])) }),
+      );
       const okHint = stripCsi(items[0].hint);
       const badHint = stripCsi(items[1].hint);
       // 衝突ファイルだけ conflict 表示、それ以外は通常の統計 hint
@@ -288,9 +298,10 @@ describe("file-select-with-diff", () => {
         { path: repoRelPath("added.ts"), type: "added", localContent: "new\n" },
         { path: repoRelPath("restored.ts"), type: "added", localContent: "new\n" },
       ];
-      const items = buildFileItems(files, {
-        restoresTemplateDeletion: new Set(["restored.ts"]),
-      });
+      const items = buildFileItems(
+        files,
+        marksWith({ restoresTemplateDeletion: new Set(repoRelPaths(["restored.ts"])) }),
+      );
 
       // 種別アイコンはどちらも `+` なので、注記だけが両者を見分ける手掛かりになる
       expect(stripCsi(items[0].hint)).not.toContain("restores file deleted in template");
@@ -306,7 +317,7 @@ describe("file-select-with-diff", () => {
           templateContent: "old\n",
         },
       ];
-      const items = buildFileItems(files);
+      const items = buildFileItems(files, NO_FILE_SELECTION_MARKS);
       const plain = stripCsi(items[0].label);
       expect(plain).toContain("~");
     });
@@ -315,7 +326,7 @@ describe("file-select-with-diff", () => {
       const files: FileDiff[] = [
         { path: repoRelPath("d.ts"), type: "deleted", templateContent: "old\n" },
       ];
-      const items = buildFileItems(files);
+      const items = buildFileItems(files, NO_FILE_SELECTION_MARKS);
       const plain = stripCsi(items[0].label);
       expect(plain).toContain("-");
     });
@@ -329,7 +340,7 @@ describe("file-select-with-diff", () => {
           templateContent: "u\n",
         },
       ];
-      const items = buildFileItems(files);
+      const items = buildFileItems(files, NO_FILE_SELECTION_MARKS);
       const plain = stripCsi(items[0].label);
       expect(plain).toContain("u.ts");
       // 変更を示す記号は付けない
@@ -393,7 +404,7 @@ describe("file-select-with-diff", () => {
           templateContent: "u\n",
         },
       ];
-      const items = buildFileItems(files);
+      const items = buildFileItems(files, NO_FILE_SELECTION_MARKS);
       const state: RenderState = {
         items,
         selected: new Set<string>(),
@@ -417,7 +428,7 @@ describe("file-select-with-diff", () => {
       const files: FileDiff[] = [
         { path: repoRelPath("long.ts"), type: "added", localContent: longContent },
       ];
-      const items = buildFileItems(files);
+      const items = buildFileItems(files, NO_FILE_SELECTION_MARKS);
       const state: RenderState = {
         items,
         selected: new Set<string>(),
@@ -594,7 +605,7 @@ describe("file-select-with-diff", () => {
       const files: FileDiff[] = [
         { path: repoRelPath("long.ts"), type: "added", localContent: longContent },
       ];
-      const items = buildFileItems(files);
+      const items = buildFileItems(files, NO_FILE_SELECTION_MARKS);
       const state: RenderState = {
         items,
         selected: new Set<string>(),
@@ -779,7 +790,7 @@ describe("file-select-with-diff", () => {
         localContent: asBinaryContent([0x89, 0x50, 0x4e, 0x47, 0x00, 0x02]),
       };
 
-      const [item] = buildFileItems([binary]);
+      const [item] = buildFileItems([binary], NO_FILE_SELECTION_MARKS);
 
       // バイナリは増減行数を持たないので、0 行を根拠に hint ごと落とすと種別が伝わらない
       expect(stripCsi(item.hint)).toContain("(binary)");
@@ -793,7 +804,7 @@ describe("file-select-with-diff", () => {
         templateContent: "same\n",
       };
 
-      const [item] = buildFileItems([unchanged]);
+      const [item] = buildFileItems([unchanged], NO_FILE_SELECTION_MARKS);
 
       expect(item.hint).toBe("");
     });
@@ -813,23 +824,31 @@ describe("isPreselectedByDefault", () => {
   });
 
   it("既定でチェックが入るのは、衝突でも削除でも削除の取り消しでもないファイル", () => {
-    expect(isPreselectedByDefault(added("a.ts"), {})).toBe(true);
+    expect(isPreselectedByDefault(added("a.ts"), NO_FILE_SELECTION_MARKS)).toBe(true);
   });
 
   it("未解決の衝突は既定で外す（選ぶと push が中断する）", () => {
-    expect(isPreselectedByDefault(added("a.ts"), { conflictedPaths: new Set(["a.ts"]) })).toBe(
-      false,
-    );
+    expect(
+      isPreselectedByDefault(
+        added("a.ts"),
+        marksWith({ conflictedPaths: new Set(repoRelPaths(["a.ts"])) }),
+      ),
+    ).toBe(false);
   });
 
   it("テンプレートの削除を取り消すファイルは既定で外す", () => {
     expect(
-      isPreselectedByDefault(added("a.ts"), { restoresTemplateDeletion: new Set(["a.ts"]) }),
+      isPreselectedByDefault(
+        added("a.ts"),
+        marksWith({ restoresTemplateDeletion: new Set(repoRelPaths(["a.ts"])) }),
+      ),
     ).toBe(false);
   });
 
   it("削除は --include-deletions のときだけ既定に入る", () => {
-    expect(isPreselectedByDefault(deleted("gone.ts"), {})).toBe(false);
-    expect(isPreselectedByDefault(deleted("gone.ts"), { preselectDeletions: true })).toBe(true);
+    expect(isPreselectedByDefault(deleted("gone.ts"), NO_FILE_SELECTION_MARKS)).toBe(false);
+    expect(
+      isPreselectedByDefault(deleted("gone.ts"), marksWith({ preselectDeletions: true })),
+    ).toBe(true);
   });
 });

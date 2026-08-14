@@ -17,6 +17,7 @@ import { join } from "pathe";
 import { afterEach, describe, expect, it } from "vitest";
 import { absPath, globPatterns, repoRelPath, syncScope } from "../../__tests__/brands";
 import type { AbsPath } from "../../modules/schemas";
+import type { ScopedZikuConfig } from "../config-merge";
 import {
   analyzeConfigDrift,
   computeMergedZikuConfig,
@@ -30,6 +31,15 @@ import { detectDiff } from "../diff";
 import { resolveSyncScope } from "../sync-scope";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../untracked";
 import { ZIKU_CONFIG_FILE, generateZikuJsonc, withConfigTracked } from "../ziku-config";
+
+/**
+ * テンプレートに `ziku.jsonc` がある前提のケースで、組み立てた内容を取り出す。
+ * 足す先が無いケース（`NoTemplateConfig`）は別のテストが扱う。
+ */
+function scopedContent(result: ScopedZikuConfig): string {
+  if (result._tag !== "Scoped") throw new Error(`expected Scoped, got ${result._tag}`);
+  return result.content;
+}
 
 async function createTempDir(label: string): Promise<AbsPath> {
   const dir = absPath(
@@ -125,10 +135,12 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
     expect(pulled).toContain("// このプロジェクトは mcp だけ足している");
 
     // push: 今回の push に関係するパターンだけをテンプレートの内容へ足して送る
-    const pushed = await computeScopedZikuConfig({
-      templateDir,
-      additionalIncludes: globPatterns([".mcp.json"]),
-    });
+    const pushed = scopedContent(
+      await computeScopedZikuConfig({
+        templateDir,
+        additionalIncludes: globPatterns([".mcp.json"]),
+      }),
+    );
     await writeFiles(templateDir, { ".ziku/ziku.jsonc": pushed });
     expect(pushed).toContain("// 共通ルール");
 
@@ -289,7 +301,7 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
       include: globPatterns([".claude/**"]),
       exclude: [],
     });
-    const untracked = await detectUntrackedFiles({ targetDir: dir, patterns: scope.declared });
+    const untracked = await detectUntrackedFiles({ targetDir: dir, scope });
 
     // 走査用のパターンで探索すると `.ziku` が探索の基点になり lock.json が候補に出る。
     // 追跡すると、マシン固有の取得元とベースがテンプレートへ送られる。

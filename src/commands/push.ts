@@ -76,6 +76,7 @@ import { detectReadmeUpdate, renderTemplateReadme } from "../utils/readme";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked";
 import type {
   ChangedFileDiff,
+  ConfigPropagationPlan,
   PushCandidatePlan,
   PushDelivery,
   PushFile,
@@ -102,6 +103,7 @@ import {
   selectedUnresolvedConflicts,
   templateContentOf,
   withAutoUpdatedFile,
+  withheldFromDefaultSelection,
   zikuConfigWriteBack,
 } from "./push-plan";
 
@@ -776,6 +778,14 @@ async function pushProject(params: {
 
   const candidates = collectPushCandidates(diff.files, candidatePlan.pushablePaths);
 
+  // 既定選択が外す候補。選択を経ずに送信対象を増やす経路（`ziku.jsonc` の自動同梱）が
+  // 同じ歯止めを共有するために持ち回る。
+  const withheldFromDefault = withheldFromDefaultSelection(candidates, {
+    includeDeletions: args.includeDeletions,
+    conflictedPaths: unresolvedConflicts,
+    restoresTemplateDeletion: candidatePlan.restoresTemplateDeletion,
+  });
+
   // 未解決の衝突は既定では push しない。巻き添えで他ファイルを止めず、明示的に
   // 選択された場合だけ後段で中断する。ここでは存在を知らせて pull での解決を促す。
   if (unresolvedConflicts.size > 0) {
@@ -802,6 +812,7 @@ async function pushProject(params: {
       mergedContents,
       unresolvedConflicts,
       restoresTemplateDeletion: candidatePlan.restoresTemplateDeletion,
+      withheldFromDefault,
       args,
     });
     return;
@@ -828,6 +839,7 @@ async function pushProject(params: {
     templateDir: ctx.templateDir,
     newlyTrackedPaths,
     selected,
+    withheldFromDefault,
     diffFiles: diff.files,
     mergedContents,
   });
@@ -909,6 +921,8 @@ async function previewPush(params: {
   mergedContents: ReadonlyMap<RepoRelPath, PushContent>;
   unresolvedConflicts: ReadonlySet<RepoRelPath>;
   restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
+  /** 既定選択が意図的に外した候補のパス。自動同梱の予告も実 push と同じ歯止めを通す。 */
+  withheldFromDefault: ReadonlySet<RepoRelPath>;
   args: PushArgs;
 }): Promise<void> {
   const { candidates, unresolvedConflicts, restoresTemplateDeletion, args } = params;
@@ -944,6 +958,7 @@ async function previewPush(params: {
     targetDir: params.targetDir,
     templateDir: params.templateDir,
     previewFiles,
+    withheldFromDefault: params.withheldFromDefault,
   });
 
   // README の自動更新が走るのは GitHub への push だけ（`pushToGitHub`）。ローカルテンプレート
@@ -995,9 +1010,14 @@ async function warnIfConfigWouldBeAutoIncluded(params: {
   targetDir: AbsPath;
   templateDir: AbsPath;
   previewFiles: readonly ChangedFileDiff[];
+  /** 既定選択が意図的に外した候補のパス。 */
+  withheldFromDefault: ReadonlySet<RepoRelPath>;
 }): Promise<void> {
   const { targetDir, templateDir, previewFiles } = params;
   if (previewFiles.some((f) => isZikuConfigPath(f.path))) return;
+  // 実 push が自動同梱を止める条件（`planConfigPropagation`）と揃える。予告だけが出ると、
+  // dry-run で見た集合と実際に送られる集合が食い違う。
+  if (params.withheldFromDefault.has(ZIKU_CONFIG_FILE)) return;
 
   const relevantPatterns = await findLocalOnlyPatternsForPaths({
     targetDir,
@@ -1032,10 +1052,7 @@ async function resolveUntrackedTracking(
   effectiveScope: SyncScope;
   newlyTrackedPaths: RepoRelPath[];
 }> {
-  const untrackedByFolder = await detectUntrackedFiles({
-    targetDir,
-    patterns: scope.declared,
-  });
+  const untrackedByFolder = await detectUntrackedFiles({ targetDir, scope });
   const untrackedCount = getTotalUntrackedCount(untrackedByFolder);
 
   const plan = planUntrackedTracking({ untrackedCount, yes: args.yes, dryRun: args.dryRun });
@@ -1113,6 +1130,8 @@ async function propagateConfigPatterns(params: {
   templateDir: AbsPath;
   newlyTrackedPaths: readonly RepoRelPath[];
   selected: readonly ChangedFileDiff[];
+  /** 既定選択が意図的に外した候補のパス。自動同梱がその歯止めを越えないようにする。 */
+  withheldFromDefault: ReadonlySet<RepoRelPath>;
   diffFiles: readonly FileDiff[];
   mergedContents: Map<RepoRelPath, PushContent>;
 }): Promise<{ selected: readonly ChangedFileDiff[]; writeBack: ZikuConfigWriteBack }> {
@@ -1130,18 +1149,11 @@ async function propagateConfigPatterns(params: {
     selectedPaths,
     newlyTrackedPaths: params.newlyTrackedPaths,
     localOnlyPatterns,
+    withheldFromDefault: params.withheldFromDefault,
   });
   const writeBack = zikuConfigWriteBack(plan);
 
-  const mergedConfig = await match(plan)
-    .with({ _tag: "NoConfigChange" }, () => Promise.resolve(undefined))
-    .with({ _tag: "MergeLocalConfig" }, ({ extraIncludes }) =>
-      computeMergedZikuConfig({ targetDir, templateDir, extraIncludes }),
-    )
-    .with({ _tag: "MergeScopedConfig" }, ({ additionalIncludes }) =>
-      computeScopedZikuConfig({ templateDir, additionalIncludes }),
-    )
-    .exhaustive();
+  const mergedConfig = await renderPropagatedConfig(plan, { targetDir, templateDir });
 
   if (mergedConfig === undefined) return { selected, writeBack };
   mergedContents.set(ZIKU_CONFIG_FILE, asPushContent(mergedConfig));
@@ -1158,6 +1170,37 @@ async function propagateConfigPatterns(params: {
 
   announceConfigAutoInclude(localOnlyPatterns);
   return { selected: [...selected, injected], writeBack };
+}
+
+/**
+ * 伝播の計画に沿って、テンプレートへ送る `ziku.jsonc` の内容を組み立てる。
+ *
+ * `undefined` は「送る内容が無い」。テンプレートに `ziku.jsonc` が無い状態でスコープ限定の
+ * 内容を求められた場合もここに入る。足す先の文書が無ければ作れるのは今回の push に関係する
+ * パターンだけを持つ新しい文書で、それを送ることはテンプレート側の設定ファイル削除を
+ * 縮小版で取り消すのと同じになる。設定ファイルを送るかは候補の一覧から利用者が選ぶ
+ * （選ばれた場合はローカル全体の union を送る `MergeLocalConfig` を通る）。
+ */
+function renderPropagatedConfig(
+  plan: ConfigPropagationPlan,
+  dirs: { targetDir: AbsPath; templateDir: AbsPath },
+): Promise<string | undefined> {
+  return match(plan)
+    .with({ _tag: "NoConfigChange" }, () => Promise.resolve(undefined))
+    .with({ _tag: "MergeLocalConfig" }, ({ extraIncludes }) =>
+      computeMergedZikuConfig({ ...dirs, extraIncludes }),
+    )
+    .with({ _tag: "MergeScopedConfig" }, async ({ additionalIncludes }) => {
+      const scoped = await computeScopedZikuConfig({
+        templateDir: dirs.templateDir,
+        additionalIncludes,
+      });
+      return match(scoped)
+        .with({ _tag: "Scoped" }, ({ content }) => content)
+        .with({ _tag: "NoTemplateConfig" }, () => undefined)
+        .exhaustive();
+    })
+    .exhaustive();
 }
 
 /**

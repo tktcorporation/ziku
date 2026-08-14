@@ -98,10 +98,7 @@ export const diffCommand = defineCommand({
             detectDiff({ targetDir, templateDir, scope }),
           );
 
-          const untrackedByFolder = await detectUntrackedFiles({
-            targetDir,
-            patterns: scope.declared,
-          });
+          const untrackedByFolder = await detectUntrackedFiles({ targetDir, scope });
           const untrackedCount = getTotalUntrackedCount(untrackedByFolder);
 
           if (hasDiff(diff)) {

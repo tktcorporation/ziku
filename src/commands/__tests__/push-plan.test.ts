@@ -45,12 +45,16 @@ import {
   resolvePrBaseBranch,
   selectedUnresolvedConflicts,
   withAutoUpdatedFile,
+  withheldFromDefaultSelection,
   zikuConfigWriteBack,
 } from "../push-plan";
 import type { ChangedFileDiff, PushFile, PushPayload, PushSend } from "../push-plan";
 
 /** 送った内容をローカルへ書き戻していないケース。ベース前進の例外が要らない既定の入力。 */
 const NOTHING_WRITTEN_BACK: ReadonlySet<RepoRelPath> = new Set();
+
+/** 既定選択が何も外さなかったケース。伝播の計画にゲートが効いていない状態を表す。 */
+const NOTHING_WITHHELD: ReadonlySet<RepoRelPath> = new Set();
 
 /**
  * ローカルの内容をそのまま送るファイル。ベースをテンプレート側へ進めてよい。
@@ -383,6 +387,39 @@ describe("defaultPushSelection", () => {
     });
 
     expect(paths(selected)).toEqual(["a.txt"]);
+  });
+});
+
+describe("withheldFromDefaultSelection", () => {
+  it("既定選択が外した候補だけを集める", () => {
+    const candidates = [
+      added("a.txt"),
+      deleted("gone.txt"),
+      modified("conflict.txt"),
+      added("restored.txt"),
+    ];
+
+    const withheld = withheldFromDefaultSelection(candidates, {
+      includeDeletions: false,
+      conflictedPaths: pathSet(["conflict.txt"]),
+      restoresTemplateDeletion: pathSet(["restored.txt"]),
+    });
+
+    expect([...withheld].toSorted()).toEqual(["conflict.txt", "gone.txt", "restored.txt"]);
+  });
+
+  it("既定集合と補い合う（候補は必ずどちらか一方に入る）", () => {
+    const candidates = [added("a.txt"), deleted("gone.txt")];
+    const marks = {
+      includeDeletions: false,
+      conflictedPaths: pathSet(),
+      restoresTemplateDeletion: pathSet(),
+    };
+
+    const selected = paths(defaultPushSelection(candidates, marks));
+    const withheld = [...withheldFromDefaultSelection(candidates, marks)];
+
+    expect([...selected, ...withheld].toSorted()).toEqual(["a.txt", "gone.txt"]);
   });
 });
 
@@ -754,6 +791,7 @@ describe("planConfigPropagation", () => {
       selectedPaths: repoRelPaths(["a.txt"]),
       newlyTrackedPaths: [],
       localOnlyPatterns: [],
+      withheldFromDefault: NOTHING_WITHHELD,
     });
 
     expect(plan).toEqual({ _tag: "NoConfigChange" });
@@ -765,6 +803,7 @@ describe("planConfigPropagation", () => {
       selectedPaths: [CONFIG_PATH, repoRelPath("a.txt")],
       newlyTrackedPaths: repoRelPaths(["a.txt"]),
       localOnlyPatterns: [],
+      withheldFromDefault: NOTHING_WITHHELD,
     });
 
     expect(plan).toEqual({ _tag: "MergeLocalConfig", extraIncludes: globPatterns(["a.txt"]) });
@@ -776,6 +815,7 @@ describe("planConfigPropagation", () => {
       selectedPaths: repoRelPaths(["a.txt"]),
       newlyTrackedPaths: repoRelPaths(["a.txt"]),
       localOnlyPatterns: globPatterns([".claude/rules/*.md"]),
+      withheldFromDefault: NOTHING_WITHHELD,
     });
 
     expect(plan).toEqual({
@@ -789,6 +829,7 @@ describe("planConfigPropagation", () => {
       selectedPaths: repoRelPaths(["a.txt"]),
       newlyTrackedPaths: [],
       localOnlyPatterns: globPatterns(["a.txt"]),
+      withheldFromDefault: NOTHING_WITHHELD,
     });
 
     expect(zikuConfigWriteBack(plan)).toEqual({ _tag: "Withhold" });
@@ -799,6 +840,7 @@ describe("planConfigPropagation", () => {
       selectedPaths: repoRelPaths(["a.txt"]),
       newlyTrackedPaths: repoRelPaths(["a.txt", "dropped.txt"]),
       localOnlyPatterns: [],
+      withheldFromDefault: NOTHING_WITHHELD,
     });
 
     expect(plan).toEqual({
@@ -807,11 +849,39 @@ describe("planConfigPropagation", () => {
     });
   });
 
+  it("既定選択が ziku.jsonc を外していたら自動同梱しない", () => {
+    // 既定から外す理由（テンプレート側の削除の取り消し・未解決の衝突）は、選択を経ずに
+    // 送信対象へ足す経路でも変わらない。ここが素通しになると、既定で送らないと決めた
+    // 設定ファイルが自動同梱として PR に載る。
+    const plan = planConfigPropagation({
+      selectedPaths: repoRelPaths(["a.txt"]),
+      newlyTrackedPaths: repoRelPaths(["a.txt"]),
+      localOnlyPatterns: globPatterns([".claude/rules/*.md"]),
+      withheldFromDefault: new Set([CONFIG_PATH]),
+    });
+
+    expect(plan).toEqual({ _tag: "NoConfigChange" });
+  });
+
+  it("ゲートに掛かっていても、ユーザーが ziku.jsonc を選んでいれば送る", () => {
+    // 一覧から明示的に選んだ場合は、削除の取り消しだと分かったうえでの操作。ローカル全体の
+    // 和集合を送る経路に戻す。
+    const plan = planConfigPropagation({
+      selectedPaths: [CONFIG_PATH, repoRelPath("a.txt")],
+      newlyTrackedPaths: repoRelPaths(["a.txt"]),
+      localOnlyPatterns: [],
+      withheldFromDefault: new Set([CONFIG_PATH]),
+    });
+
+    expect(plan).toEqual({ _tag: "MergeLocalConfig", extraIncludes: globPatterns(["a.txt"]) });
+  });
+
   it("ziku.jsonc が選択済みで新規追跡が無ければ、既存の内容をそのまま送る", () => {
     const plan = planConfigPropagation({
       selectedPaths: [CONFIG_PATH],
       newlyTrackedPaths: [],
       localOnlyPatterns: [],
+      withheldFromDefault: NOTHING_WITHHELD,
     });
 
     expect(plan).toEqual({ _tag: "NoConfigChange" });

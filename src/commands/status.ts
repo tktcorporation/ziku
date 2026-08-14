@@ -168,10 +168,7 @@ export const statusCommand = defineCommand({
           const buckets = categorizeForStatus(
             withZikuConfigAt(plan.files, zikuConfigStatusCategory(plan.config, drift)),
           );
-          const untracked = await detectUntrackedFiles({
-            targetDir,
-            patterns: scope.declared,
-          });
+          const untracked = await detectUntrackedFiles({ targetDir, scope });
           const recommendation = decideRecommendation(buckets, lock);
 
           const model: StatusViewModel = { buckets, untracked, recommendation };

@@ -21,6 +21,8 @@ vi.mock("node:child_process", () => ({
 import { execFileSync } from "node:child_process";
 import * as p from "@clack/prompts";
 import type { FileDiff } from "../../modules/schemas";
+import type { FileSelectionMarks } from "../file-select-with-diff";
+import { NO_FILE_SELECTION_MARKS } from "../file-select-with-diff";
 import {
   confirmAction,
   confirmRetryConflictResolution,
@@ -36,6 +38,11 @@ import {
   selectPushFiles,
 } from "../prompts";
 import { globPatterns, repoRelPath, repoRelPaths } from "../../__tests__/brands";
+
+/** 検証したい印だけを指定して {@link FileSelectionMarks} を組む。 */
+function marksWith(overrides: Partial<FileSelectionMarks>): FileSelectionMarks {
+  return { ...NO_FILE_SELECTION_MARKS, ...overrides };
+}
 
 /** バイナリの内容を差分の string チャネルへ載せた形（バイト保存の latin1）。 */
 function asBinaryContent(bytes: number[]): string {
@@ -117,7 +124,7 @@ describe("prompts", () => {
         },
       ];
       vi.mocked(p.multiselect).mockResolvedValue(["a.ts"]);
-      const result = await selectPushFiles(files);
+      const result = await selectPushFiles(files, NO_FILE_SELECTION_MARKS);
       expect(result).toHaveLength(1);
       expect(result[0].path).toBe("a.ts");
     });
@@ -125,7 +132,7 @@ describe("prompts", () => {
     it("should return empty array when nothing selected", async () => {
       const files = [{ path: repoRelPath("a.ts"), type: "added" as const, localContent: "local" }];
       vi.mocked(p.multiselect).mockResolvedValue([]);
-      const result = await selectPushFiles(files);
+      const result = await selectPushFiles(files, NO_FILE_SELECTION_MARKS);
       expect(result).toHaveLength(0);
     });
 
@@ -145,7 +152,10 @@ describe("prompts", () => {
         },
       ];
       vi.mocked(p.multiselect).mockResolvedValue([]);
-      await selectPushFiles(files, { conflictedPaths: new Set(["bad.ts"]) });
+      await selectPushFiles(
+        files,
+        marksWith({ conflictedPaths: new Set(repoRelPaths(["bad.ts"])) }),
+      );
 
       const callArg = vi.mocked(p.multiselect).mock.calls[0][0] as {
         initialValues: string[];
@@ -167,9 +177,10 @@ describe("prompts", () => {
         { path: repoRelPath("restored.ts"), type: "added" as const, localContent: "local" },
       ];
       vi.mocked(p.multiselect).mockResolvedValue([]);
-      await selectPushFiles(files, {
-        restoresTemplateDeletion: new Set(["restored.ts"]),
-      });
+      await selectPushFiles(
+        files,
+        marksWith({ restoresTemplateDeletion: new Set(repoRelPaths(["restored.ts"])) }),
+      );
 
       const callArg = vi.mocked(p.multiselect).mock.calls[0][0] as {
         initialValues: string[];
@@ -191,7 +202,7 @@ describe("prompts", () => {
         },
       ];
       vi.mocked(p.multiselect).mockResolvedValue([]);
-      await selectPushFiles(files);
+      await selectPushFiles(files, NO_FILE_SELECTION_MARKS);
 
       const callArg = vi.mocked(p.multiselect).mock.calls[0][0] as {
         options: Array<{ value: string; hint?: string }>;

@@ -25,8 +25,9 @@ import { readFile } from "node:fs/promises";
 import { match } from "ts-pattern";
 import { zikuFailure } from "../errors";
 import type { AbsPath, GlobPattern, RepoRelPath } from "../modules/schemas";
+import { describeSchemaIssues, zikuConfigSchema } from "../modules/schemas";
 import { parseJsonc } from "./jsonc";
-import { globPatterns, joinAbs, selectPatternsMatchingPaths } from "./paths";
+import { joinAbs, selectPatternsMatchingPaths } from "./paths";
 import { unionPatterns } from "./patterns";
 import { ZIKU_CONFIG_FILE, generateZikuJsonc, withPatterns } from "./ziku-config";
 
@@ -70,6 +71,13 @@ interface ConfigDocument {
  * 指定ディレクトリの `.ziku/ziku.jsonc` を読む。
  * ファイルが無ければ undefined（base が無いケースの判定に使う）。
  *
+ * 内容は構文（{@link parseJsonc}）とスキーマ（`zikuConfigSchema`）の両方を通す。構文だけを
+ * 見て値をキャストで通すと、`"include": "a"` や `"include": [1]` のようにスキーマだけを
+ * 破った設定が、パターン列を組み立てる時点の型エラー（`map is not a function`）や、数値を
+ * glob として扱う同期として現れる。どちらも分類済みの失敗にならず、利用者はどのファイルの
+ * どこが悪いか分からないまま止まる。境界で parse すれば、直すべき箇所を持った
+ * `ConfigInvalid` として報告できる。
+ *
  * 構文が壊れていれば、ユーザーが手で直せる失敗として報告して中断する。パターン無しとして
  * 扱わないのは、ここで読んだ内容が union の入力であると同時に、{@link renderUnionInto} が
  * 書き戻す先の土台でもあるため。壊れた側を空集合とみなすと、その側のパターンを 1 つ残らず
@@ -92,39 +100,50 @@ async function readConfigAt(dir: AbsPath): Promise<ConfigDocument | undefined> {
   const raw = await readFile(path, "utf-8");
 
   // ディスク上の JSONC はスキーマを通っていない生の値。ここがパターンの brand 入口になる。
-  const parsed = match(parseJsonc(raw))
-    .with({ kind: "parsed" }, ({ value }) => value as { include?: string[]; exclude?: string[] })
+  const document = match(parseJsonc(raw))
+    .with({ kind: "parsed" }, ({ value }) => value)
     .with({ kind: "unparsable" }, ({ detail }): never => {
       throw zikuFailure({ kind: "ConfigUnparsable", path, detail });
     })
     .exhaustive();
 
+  const parsed = zikuConfigSchema.safeParse(document);
+  if (!parsed.success) {
+    throw zikuFailure({
+      kind: "ConfigInvalid",
+      path,
+      issues: describeSchemaIssues(parsed.error),
+    });
+  }
+
   return {
     raw,
-    patterns: {
-      include: globPatterns(parsed?.include ?? []),
-      exclude: globPatterns(parsed?.exclude ?? []),
-    },
+    patterns: { include: parsed.data.include, exclude: parsed.data.exclude ?? [] },
   };
 }
 
 /**
  * 書き換える対象の文書に `incoming` を和集合で足した `ziku.jsonc` の内容を返す。
  *
- * 元の文書があればその include / exclude だけを差し替え、注釈と他のキーを残す。無い場合
- * （まだ `ziku.jsonc` が存在しないテンプレート / プロジェクト）だけ新規に生成する。
+ * 元の文書の include / exclude だけを差し替え、注釈と他のキーを残す。
  *
  * union の並びの基準（{@link unionPatterns} の `base`）と書き戻し先の文書を、同じ 1 つの
  * 引数から導く。マージ済みのパターン列を受け取る形にすると「テンプレートの文書を、ローカルを
  * 先にした並びで書き換える」組み合わせが作れてしまい、既存要素が並べ替わって配列全体の
  * 差し替えになる（追記のはずの差分が全行の入れ替えとして PR に出る）。
+ *
+ * 文書が無い場合（まだ `ziku.jsonc` が存在しないテンプレート / プロジェクト）はこの関数を
+ * 通せない。その状況で作れるのは「土台に足した内容」ではなく「渡した分だけの新しい文書」で、
+ * 両者を 1 つの関数で扱うと、土台があることを前提にした呼び出しが黙って全体生成へ落ちる。
+ * 新規生成が正しい経路は {@link renderFullConfig} を明示的に選ぶ。
  */
-function renderUnionInto(document: ConfigDocument | undefined, incoming: ConfigPatterns): string {
-  const merged = mergeConfigPatterns({
-    document: document?.patterns ?? EMPTY_PATTERNS,
-    incoming,
-  });
-  return document === undefined ? generateZikuJsonc(merged) : withPatterns(document.raw, merged);
+function renderUnionInto(document: ConfigDocument, incoming: ConfigPatterns): string {
+  return withPatterns(document.raw, mergeConfigPatterns({ document: document.patterns, incoming }));
+}
+
+/** 土台になる文書が無いときに、渡したパターンだけで `ziku.jsonc` を新規生成する。 */
+function renderFullConfig(incoming: ConfigPatterns): string {
+  return generateZikuJsonc(mergeConfigPatterns({ document: EMPTY_PATTERNS, incoming }));
 }
 
 /** 2 つのパターン配列が集合として等しいか（順序・重複を無視）。 */
@@ -202,11 +221,14 @@ export async function computeMergedZikuConfig(opts: {
   ]);
 
   const templatePatterns = template?.patterns ?? EMPTY_PATTERNS;
-
-  return renderUnionInto(local, {
+  const incoming: ConfigPatterns = {
     include: [...(opts.extraIncludes ?? []), ...templatePatterns.include],
     exclude: templatePatterns.exclude,
-  });
+  };
+
+  // ローカルに `ziku.jsonc` が無いのは init 前の状態で、そこへ書く内容はローカルの全パターン
+  // （= 取り込む分だけ）になる。新規生成しても失われるものが無いので全体生成でよい。
+  return local === undefined ? renderFullConfig(incoming) : renderUnionInto(local, incoming);
 }
 
 /**
@@ -250,6 +272,20 @@ export async function findLocalOnlyPatternsForPaths(opts: {
 }
 
 /**
+ * テンプレート側の `ziku.jsonc` に追加パターンを足せたかどうか。
+ *
+ * 足す先の文書が無ければ結果は「テンプレートの内容 + 追加分」ではなく「追加分だけの新しい
+ * `ziku.jsonc`」になり、スコープ限定という前提が成り立たない。呼び出し側が両方のケースを
+ * 網羅して扱う形にすることで、テンプレートに設定ファイルが無い状況で縮小版を新規作成する
+ * 経路を型から選べなくする。
+ */
+export type ScopedZikuConfig =
+  /** テンプレートの文書に追加分を足した内容。 */
+  | { readonly _tag: "Scoped"; readonly content: string }
+  /** テンプレートに `ziku.jsonc` が無く、足す先の文書が存在しない。 */
+  | { readonly _tag: "NoTemplateConfig" };
+
+/**
  * テンプレート側の `ziku.jsonc` に、指定した追加パターンだけを和集合で加えた
  * `ziku.jsonc` 文字列を返す。ローカルの `ziku.jsonc` の他のパターンは一切参照しない。
  *
@@ -268,7 +304,11 @@ export async function findLocalOnlyPatternsForPaths(opts: {
 export async function computeScopedZikuConfig(opts: {
   templateDir: AbsPath;
   additionalIncludes: readonly GlobPattern[];
-}): Promise<string> {
+}): Promise<ScopedZikuConfig> {
   const template = await readConfigAt(opts.templateDir);
-  return renderUnionInto(template, { include: opts.additionalIncludes, exclude: [] });
+  if (template === undefined) return { _tag: "NoTemplateConfig" };
+  return {
+    _tag: "Scoped",
+    content: renderUnionInto(template, { include: opts.additionalIncludes, exclude: [] }),
+  };
 }

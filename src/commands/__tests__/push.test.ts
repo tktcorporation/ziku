@@ -926,6 +926,61 @@ describe("pushCommand", () => {
       expect(prArg?.files.map((f) => f.path)).toEqual(["plain.txt"]);
     });
 
+    it("--yes は ziku.jsonc の自動同梱でもテンプレートの削除を取り消さない", async () => {
+      // テンプレートが ziku.jsonc を削除し、ローカルには編集がある状態。設定ファイルは
+      // 既定選択から外れるが、テンプレートに ziku.jsonc が無いためローカルの include は
+      // すべて「ローカル限定パターン」に見える。自動同梱がここを素通りすると、既定から
+      // 外したはずの設定ファイルが、ローカル全体ではなく今回の push 分だけの縮小版として
+      // PR に載る。
+      vol.fromJSON({
+        "/test/.ziku/ziku.jsonc": `${JSON.stringify(
+          { include: [".github/**", "docs/a.md", "docs/b.md"] },
+          null,
+          2,
+        )}\n`,
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: repoRelPaths(["docs/b.md"]),
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedWithLocalEdits: repoRelPaths([".ziku/ziku.jsonc"]),
+        deletedLocally: [],
+        unchanged: [],
+      });
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [
+          { path: repoRelPath("docs/b.md"), type: "added", localContent: "# doc b" },
+          {
+            path: repoRelPath(".ziku/ziku.jsonc"),
+            type: "added",
+            localContent: JSON.stringify(
+              { include: [".github/**", "docs/a.md", "docs/b.md"] },
+              null,
+              2,
+            ),
+          },
+        ],
+      });
+      mockGetGitHubToken.mockReturnValue("ghp_token");
+      mockCreatePullRequest.mockResolvedValueOnce({
+        url: "https://github.com/owner/repo/pull/1",
+        branch: "update-template-123",
+        number: 1,
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: true, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      const prArg = mockCreatePullRequest.mock.calls[0]?.[1];
+      expect(prArg?.files.map((f) => f.path)).toEqual(["docs/b.md"]);
+    });
+
     it("deletedWithLocalEdits を対話で明示選択すると送られ、削除の取り消しだとサマリで示す", async () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
@@ -2941,7 +2996,7 @@ describe("未追跡ファイルの追跡フロー", () => {
     expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining("Tracked 1 new file(s)"));
   });
 
-  it("永続化先の ziku.jsonc がスキーマ違反なら、構文エラーではなく検証失敗として報告する", async () => {
+  it("ziku.jsonc がスキーマ違反なら、構文エラーではなく検証失敗として報告する", async () => {
     // include を欠いた設定は JSONC としては通るので、構文エラーと混同されやすい。
     vol.fromJSON({ "/test/.ziku/ziku.jsonc": `${JSON.stringify({ exclude: [] }, null, 2)}\n` });
     mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);
@@ -2967,7 +3022,8 @@ describe("未追跡ファイルの追跡フロー", () => {
         rawArgs: [],
         cmd: pushCommand,
       }),
-    ).rejects.toThrow("Failed to read .ziku/ziku.jsonc");
+      // どちらの側の設定が悪いか一目で分かるよう、パスは絶対パスで報告する。
+    ).rejects.toThrow("Failed to read /test/.ziku/ziku.jsonc");
   });
 
   it("新規追跡パターンが同一 push でテンプレの ziku.jsonc にも届く", async () => {
@@ -3304,6 +3360,9 @@ describe("--files でファイル本体だけを指定した場合の ziku.jsonc
       ".claude/skills/new-skill/SKILL.md",
       ".claude/rules/unrelated.md",
     ]);
+    vol.fromJSON({
+      "/tmp/template/.ziku/ziku.jsonc": `${JSON.stringify({ include: [".github/**"] }, null, 2)}\n`,
+    });
 
     setupPushableFiles([
       {
@@ -3415,6 +3474,8 @@ describe("--files でファイル本体だけを指定した場合の ziku.jsonc
     const { effect } = mockContext({
       source: localTemplateSource,
       lock: lockWith({ source: localTemplateSource }),
+      // ローカルテンプレートでは、パターンを読む先と書く先が同じディレクトリになる。
+      templateDir: absPath("/local/template"),
     });
     mockLoadCommandContext.mockReturnValue(effect);
 

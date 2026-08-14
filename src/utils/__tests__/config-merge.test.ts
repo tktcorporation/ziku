@@ -1,5 +1,6 @@
 import { vol } from "memfs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ScopedZikuConfig } from "../config-merge";
 
 vi.mock("node:fs", async () => (await import("memfs")).fs);
 vi.mock("node:fs/promises", async () => (await import("memfs")).fs.promises);
@@ -13,6 +14,15 @@ const {
   findLocalOnlyPatternsForPaths,
 } = await import("../config-merge");
 const { parse: parseJsonc } = await import("jsonc-parser");
+
+/**
+ * テンプレートに `ziku.jsonc` がある前提のケースで、組み立てた内容を取り出す。
+ * 足す先が無いケース（`NoTemplateConfig`）は別のテストが扱う。
+ */
+function scopedContent(result: ScopedZikuConfig): string {
+  if (result._tag !== "Scoped") throw new Error(`expected Scoped, got ${result._tag}`);
+  return result.content;
+}
 
 describe("mergeConfigPatterns（要素レベル加法マージ＝和集合）", () => {
   it("書き換える文書と取り込む側、双方の追加を保持する", () => {
@@ -178,10 +188,12 @@ describe("computeScopedZikuConfig（テンプレ側の内容 + 明示した追�
       ].join("\n"),
     });
 
-    const merged = await computeScopedZikuConfig({
-      templateDir: absPath("/template"),
-      additionalIncludes: globPatterns([".mcp.json"]),
-    });
+    const merged = scopedContent(
+      await computeScopedZikuConfig({
+        templateDir: absPath("/template"),
+        additionalIncludes: globPatterns([".mcp.json"]),
+      }),
+    );
 
     expect(merged).toContain("// 共通ルール");
     expect(parseJsonc(merged).include).toEqual([".claude/**", ".mcp.json"]);
@@ -198,10 +210,12 @@ describe("computeScopedZikuConfig（テンプレ側の内容 + 明示した追�
       ),
     });
 
-    const merged = await computeScopedZikuConfig({
-      templateDir: absPath("/template"),
-      additionalIncludes: globPatterns([".mcp.json", ".claude/**"]),
-    });
+    const merged = scopedContent(
+      await computeScopedZikuConfig({
+        templateDir: absPath("/template"),
+        additionalIncludes: globPatterns([".mcp.json", ".claude/**"]),
+      }),
+    );
 
     expect(parseJsonc(merged).include).toEqual([".claude/**", ".github/**", ".mcp.json"]);
   });
@@ -214,11 +228,72 @@ describe("computeScopedZikuConfig（テンプレ側の内容 + 明示した追�
     vol.fromJSON({ "/template/.ziku/ziku.jsonc": raw });
 
     expect(
+      scopedContent(
+        await computeScopedZikuConfig({
+          templateDir: absPath("/template"),
+          additionalIncludes: globPatterns([".github/**"]),
+        }),
+      ),
+    ).toBe(raw);
+  });
+
+  it("テンプレートに ziku.jsonc が無ければ内容を作らない", async () => {
+    // 作れるのは「テンプレートの内容 + 追加分」ではなく「追加分だけの新しい文書」で、
+    // それを送るとテンプレート側の削除を縮小版で取り消すことになる。
+    vol.fromJSON({ "/template/README.md": "" });
+
+    expect(
       await computeScopedZikuConfig({
         templateDir: absPath("/template"),
         additionalIncludes: globPatterns([".github/**"]),
       }),
-    ).toBe(raw);
+    ).toEqual({ _tag: "NoTemplateConfig" });
+  });
+});
+
+describe("readConfigAt のスキーマ検証", () => {
+  beforeEach(() => {
+    vol.reset();
+  });
+
+  const expectConfigInvalid = async (run: () => Promise<unknown>): Promise<void> => {
+    await expect(run()).rejects.toMatchObject({
+      _tag: "ZikuFailure",
+      reason: { kind: "ConfigInvalid", path: "/template/.ziku/ziku.jsonc" },
+    });
+  };
+
+  it("include が配列でなければ、素の実行時エラーではなく分類済みの失敗にする", async () => {
+    vol.fromJSON({ "/template/.ziku/ziku.jsonc": JSON.stringify({ include: "not-an-array" }) });
+
+    await expectConfigInvalid(() =>
+      computeScopedZikuConfig({
+        templateDir: absPath("/template"),
+        additionalIncludes: globPatterns([".github/**"]),
+      }),
+    );
+  });
+
+  it("include の要素が文字列でなければ、glob として扱わず失敗にする", async () => {
+    vol.fromJSON({ "/template/.ziku/ziku.jsonc": JSON.stringify({ include: [1, 2] }) });
+
+    await expectConfigInvalid(() =>
+      computeScopedZikuConfig({
+        templateDir: absPath("/template"),
+        additionalIncludes: globPatterns([".github/**"]),
+      }),
+    );
+  });
+
+  it("違反箇所を利用者が直せる粒度で示す", async () => {
+    vol.fromJSON({ "/template/.ziku/ziku.jsonc": JSON.stringify({ include: [1] }) });
+
+    await expect(
+      computeScopedZikuConfig({
+        templateDir: absPath("/template"),
+        additionalIncludes: globPatterns([".github/**"]),
+      }),
+    ).rejects.toMatchObject({ hint: expect.stringContaining("include.0") });
   });
 });
 

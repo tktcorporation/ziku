@@ -4,7 +4,7 @@ import { Effect } from "effect";
 import { dirname } from "pathe";
 import { match } from "ts-pattern";
 import type { AbsPath, GlobPattern, RepoRelPath, ZikuConfig } from "../modules/schemas";
-import { zikuConfigSchema } from "../modules/schemas";
+import { describeSchemaIssues, zikuConfigSchema } from "../modules/schemas";
 import { FileNotFoundError, ParseError, ValidationError } from "../errors";
 import { applyEdits, modify, parseJsonc } from "./jsonc";
 import { globPattern, joinAbs, pathAsPattern, repoRelPath } from "./paths";
@@ -170,9 +170,7 @@ export function loadZikuConfig(
     if (!result.success) {
       return yield* new ValidationError({
         path: ZIKU_CONFIG_FILE,
-        issues: result.error.issues.map((issue) =>
-          issue.path.length > 0 ? `${issue.path.join(".")}: ${issue.message}` : issue.message,
-        ),
+        issues: describeSchemaIssues(result.error),
       });
     }
 

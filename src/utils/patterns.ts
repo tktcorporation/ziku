@@ -62,6 +62,42 @@ export function unionPatterns(
 }
 
 /**
+ * パターンが触れうるディレクトリの範囲。
+ *
+ * glob を評価せずに「どこを見ればよいか」だけを先頭セグメントから導く。走査範囲を組み立てる
+ * 側（どのディレクトリの `.gitignore` を読むか）と、未追跡ファイルを探す側（どのディレクトリを
+ * 走査するか）が同じ答えを使うための型。
+ */
+export interface PatternBaseDirs {
+  /** `<dir>/...` の形のパターンが指す先頭ディレクトリ。 */
+  readonly dirs: string[];
+  /** リポジトリ直下のファイルを指すパターンがあるか。 */
+  readonly hasRootPatterns: boolean;
+}
+
+/**
+ * include パターンから、触れうるディレクトリを抽出する。
+ *
+ * 先頭セグメントだけを見るので、`.claude/**` も `.claude/rules/*.md` も `.claude` に畳まれる。
+ * 走査の基点も、ネストした `.gitignore` を探す先も、この粒度で足りる。
+ */
+export function getBaseDirsFromPatterns(include: readonly GlobPattern[]): PatternBaseDirs {
+  const dirs = new Set<string>();
+  let hasRootPatterns = false;
+
+  for (const pattern of include) {
+    const firstSegment = pattern.split("/")[0];
+    if (pattern.includes("/") && firstSegment) {
+      dirs.add(firstSegment);
+    } else {
+      hasRootPatterns = true;
+    }
+  }
+
+  return { dirs: [...dirs], hasRootPatterns };
+}
+
+/**
  * パターンにマッチするファイル一覧を、基点からの相対パスとして取得する。
  *
  * パターンからパスへの変換点。`baseDir` の中身を実際に走査した結果だけが

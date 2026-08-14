@@ -1,6 +1,7 @@
 import type { Ignore } from "ignore";
 import type { AbsPath, GlobPattern, RepoRelPath } from "../modules/schemas";
 import { loadMergedGitignore } from "./gitignore";
+import { getBaseDirsFromPatterns } from "./patterns";
 import { mergeTemplatePatterns } from "./template-patterns";
 import { alwaysTrackedPathsIn, withConfigTracked } from "./ziku-config";
 
@@ -66,6 +67,14 @@ export interface SyncScope {
   readonly scan: ScanPatterns;
   /** 追跡対象として宣言されたパターン。 */
   readonly declared: DeclaredPatterns;
+  /**
+   * 走査から外すファイルの判定。
+   *
+   * ローカルとテンプレートのルート `.gitignore` に加えて、宣言されたパターンが触れる
+   * ディレクトリのネストした `.gitignore`（`.claude/.gitignore` など）も畳み込んである。
+   * 参照は {@link isExcludedFromScope} 経由に閉じる。ここから直接 `ignores()` を呼ぶと
+   * `alwaysTracked` の例外が抜け落ちる。
+   */
   readonly gitignore: Ignore;
   /**
    * gitignore や exclude に関わらず走査へ戻すパス。
@@ -96,7 +105,14 @@ async function composeScope(params: {
   include: readonly GlobPattern[];
   exclude: readonly GlobPattern[];
 }): Promise<SyncScope> {
-  const gitignore = await loadMergedGitignore([params.targetDir, params.templateDir]);
+  // ネストした `.gitignore` を探す先は、宣言されたパターンが触れるディレクトリに限る。
+  // 走査用パターン（`.ziku/ziku.jsonc` を足したもの）から導くと、ziku 自身の設定ディレクトリを
+  // 探索の基点として扱う経路が範囲の決定側にも生まれる。
+  const { dirs: nestedGitignoreDirs } = getBaseDirsFromPatterns(params.include);
+  const gitignore = await loadMergedGitignore(
+    [params.targetDir, params.templateDir],
+    nestedGitignoreDirs,
+  );
   const alwaysTracked = [
     ...new Set([
       ...alwaysTrackedPathsIn(params.targetDir),
@@ -128,6 +144,9 @@ async function composeScope(params: {
  *
  * gitignore は双方をマージして読む。テンプレート側だけが無視しているファイルも、
  * ローカル側だけが無視しているファイルも、同期の対象から外れる。
+ *
+ * テンプレートの `ziku.jsonc` が壊れている場合は `ZikuFailure` を throw する
+ * （{@link mergeTemplatePatterns}）。範囲が黙って縮むより、直せる失敗として報告する。
  */
 export async function resolveSyncScope(params: {
   targetDir: AbsPath;
@@ -189,8 +208,20 @@ export function extendScope(scope: SyncScope, include: readonly GlobPattern[]): 
   };
 }
 
+/**
+ * そのパスが走査範囲から外れるか。
+ *
+ * 「同期の対象か」を決める規則はこの 1 関数だけが持つ。ハッシュ計算・差分検出（{@link
+ * withinScope} 経由）と未追跡ファイルの探索が別々に gitignore を評価すると、片方だけが
+ * 落とすファイルが生まれる。そのファイルは未追跡として追跡を勧められるのに、追跡しても
+ * ハッシュにも差分にも現れず、`ziku.jsonc` に載ったまま永久に同期されないパターンになる。
+ */
+export function isExcludedFromScope(file: RepoRelPath, scope: SyncScope): boolean {
+  if (scope.alwaysTracked.includes(file)) return false;
+  return scope.gitignore.ignores(file);
+}
+
 /** 走査結果から、範囲外のパスを落とす。 */
 export function withinScope(files: readonly RepoRelPath[], scope: SyncScope): RepoRelPath[] {
-  const always = new Set<RepoRelPath>(scope.alwaysTracked);
-  return files.filter((file) => always.has(file) || !scope.gitignore.ignores(file));
+  return files.filter((file) => !isExcludedFromScope(file, scope));
 }

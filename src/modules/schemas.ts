@@ -3,6 +3,19 @@ import { z } from "zod";
 import type { ConflictedContent, MergedContent } from "../utils/merge";
 import type { SyncPath } from "../utils/ziku-config";
 
+/**
+ * スキーマ違反を、利用者がファイルのどこを直せばよいか分かる 1 行ずつの説明に直す。
+ *
+ * `ConfigInvalid` / `ValidationError` の `issues` は、そのまま利用者へ表示される。どの
+ * 入口（設定ファイル・lock）から来た違反でも同じ形で読めるよう、整形をここに集約する。
+ * ルート直下の違反はパスが空になるので、区切りの `: ` だけが浮かないようメッセージだけを出す。
+ */
+export function describeSchemaIssues(error: z.ZodError): string[] {
+  return error.issues.map((issue) =>
+    issue.path.length > 0 ? `${issue.path.join(".")}: ${issue.message}` : issue.message,
+  );
+}
+
 // ────────────────────────────────────────────────────────────────
 // Branded Types — 同じ string に載る別種の値を型で分ける
 //

@@ -16,9 +16,19 @@ import { dirname, join } from "pathe";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AbsPath, GlobPattern } from "../../modules/schemas";
 import { absPath, globPatterns, repoRelPaths } from "../../__tests__/brands";
+import type { ScopedZikuConfig } from "../config-merge";
 import { computeScopedZikuConfig, findLocalOnlyPatternsForPaths } from "../config-merge";
 import { joinAbs } from "../paths";
 import { ZIKU_CONFIG_FILE } from "../ziku-config";
+
+/**
+ * テンプレートに `ziku.jsonc` がある前提のケースで、組み立てた内容を取り出す。
+ * 足す先が無いケース（`NoTemplateConfig`）は別のテストが扱う。
+ */
+function scopedContent(result: ScopedZikuConfig): string {
+  if (result._tag !== "Scoped") throw new Error(`expected Scoped, got ${result._tag}`);
+  return result.content;
+}
 
 const tempDirs: AbsPath[] = [];
 
@@ -86,10 +96,9 @@ describe("glob で追跡したパターンの push 伝播", () => {
       templateDir,
       paths: repoRelPaths([".claude/rules/a.md"]),
     });
-    const merged = await computeScopedZikuConfig({
-      templateDir,
-      additionalIncludes: relevant,
-    });
+    const merged = scopedContent(
+      await computeScopedZikuConfig({ templateDir, additionalIncludes: relevant }),
+    );
 
     expect(JSON.parse(merged).include).toEqual([".github/**", ".claude/rules/*.md"]);
   });

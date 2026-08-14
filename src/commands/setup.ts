@@ -11,6 +11,7 @@ import {
   checkRepoExists,
   getGitHubToken,
   createPullRequest,
+  decideDefaultBranch,
   fetchDefaultBranch,
   fetchRepoSetupState,
   rateLimitedError,
@@ -282,7 +283,7 @@ async function handleRemoteSetup(
 
   // 宛先ブランチは確認プロンプトやトークン取得より先に決める。宛先が定まらないまま対話を
   // 進めると、必ず中断する作業をユーザーにさせることになる。
-  const baseBranch = await resolvePrBaseBranch(owner, repo);
+  const baseBranch = await setupPrBaseBranch(owner, repo);
 
   if (!opts.yes) {
     const confirmed = await confirmAction(
@@ -327,21 +328,26 @@ async function handleRemoteSetup(
 }
 
 /**
- * PR の宛先ブランチを決める。
+ * setup が開く PR の宛先ブランチを決める。
  *
  * 既定ブランチは `main` とは限らない（`master` / `trunk` 等）。名前を仮定すると、
  * 存在しないブランチを宛先にした PR 作成が GitHub API の 404 で落ち、ziku 側の不具合として
  * 表示される。引けなかったときは宛先が定まらないので、仮定せず失敗として報告する。
  *
- * 引けなかった理由は潰さずに受け取る（{@link fetchDefaultBranch}）。トークンを拒否された
- * 場合に取る行動はトークンを入れ直すことで、`DefaultBranchUnresolved` が案内する
- * `.ziku/lock.json` の `source.ref` は setup の対象リポジトリにまだ存在しない。
+ * 使ってよい名前かの判断は {@link decideDefaultBranch} に委ねる。setup にだけ別の分岐を
+ * 置くと、規則にケースが増えたときここだけが取り残される。
+ *
+ * 控えの名前は渡さない。setup の対象は「まだ ziku を使っていないテンプレート」で、
+ * ローカルに lock が無く、控えるべき既定ブランチ名をそもそも持たない。同じ理由で、
+ * `DefaultBranchUnresolved` が案内する `.ziku/lock.json` の `source.ref` も対象外になるが、
+ * 取る行動（GitHub への到達性を確かめる）は変わらないのでその分類を使う。
  */
-async function resolvePrBaseBranch(owner: string, repo: string): Promise<string> {
-  return match(await fetchDefaultBranch(owner, repo))
-    .with({ _tag: "Resolved" }, (r) => r.name)
-    .with({ _tag: "AuthRejected" }, (f): never => {
-      throw zikuFailure({ kind: "GitHubAuthRejected", detail: f.detail });
+async function setupPrBaseBranch(owner: string, repo: string): Promise<string> {
+  const resolution = await fetchDefaultBranch(owner, repo);
+  return match(decideDefaultBranch(resolution, undefined))
+    .with({ _tag: "Fetched" }, { _tag: "Recorded" }, (d) => d.name)
+    .with({ _tag: "AuthRejected" }, (d): never => {
+      throw zikuFailure({ kind: "GitHubAuthRejected", detail: d.detail });
     })
     .with({ _tag: "Unresolved" }, (): never => {
       throw zikuFailure({ kind: "DefaultBranchUnresolved", repo: `${owner}/${repo}` });

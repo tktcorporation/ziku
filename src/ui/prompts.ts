@@ -211,20 +211,17 @@ export async function inputTemplateSource(defaultValue?: string): Promise<string
  * TTY 環境では diff プレビュー付きのカスタムセレクタを使い、
  * 非 TTY 環境（テスト・CI）では @clack/prompts のフォールバックを使う。
  */
-export function selectPushFiles(
-  files: FileDiff[],
-  options?: FileSelectionMarks,
-): Promise<FileDiff[]> {
+export function selectPushFiles(files: FileDiff[], marks: FileSelectionMarks): Promise<FileDiff[]> {
   // TTY: diff プレビュー付きカスタムセレクタ
   // stdin と stdout の両方が TTY であることを確認する。
   // stdout がリダイレクトされている場合（例: ziku push > out.txt）、
   // ANSI 制御シーケンスが非対話ストリームに出力され操作不能になる。
   if (process.stdin.isTTY && process.stdout.isTTY) {
-    return selectFilesWithDiffPreview(files, options);
+    return selectFilesWithDiffPreview(files, marks);
   }
 
   // 非 TTY フォールバック: @clack/prompts multiselect
-  return selectPushFilesFallback(files, options);
+  return selectPushFilesFallback(files, marks);
 }
 
 /**
@@ -234,10 +231,8 @@ export function selectPushFiles(
  */
 export async function selectPushFilesFallback(
   files: FileDiff[],
-  options?: FileSelectionMarks,
+  marks: FileSelectionMarks,
 ): Promise<FileDiff[]> {
-  const marks = options ?? {};
-
   const selected = await p.multiselect({
     message: "Select files to include in PR",
     options: files.map((f) => ({

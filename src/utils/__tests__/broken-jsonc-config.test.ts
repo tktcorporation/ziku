@@ -9,6 +9,7 @@
 import { Cause, Effect, Exit, Option } from "effect";
 import { vol } from "memfs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ScopedZikuConfig } from "../config-merge";
 
 vi.mock("node:fs", async () => (await import("memfs")).fs);
 vi.mock("node:fs/promises", async () => (await import("memfs")).fs.promises);
@@ -22,8 +23,18 @@ const {
   findLocalOnlyPatternsForPaths,
 } = await import("../config-merge");
 const { loadTemplateConfig } = await import("../template-config");
+const { resolveSyncScope } = await import("../sync-scope");
 const { generateReadme } = await import("../readme");
 const { parseJsonc } = await import("../jsonc");
+
+/**
+ * テンプレートに `ziku.jsonc` がある前提のケースで、組み立てた内容を取り出す。
+ * 足す先が無いケース（`NoTemplateConfig`）は別のテストが扱う。
+ */
+function scopedContent(result: ScopedZikuConfig): string {
+  if (result._tag !== "Scoped") throw new Error(`expected Scoped, got ${result._tag}`);
+  return result.content;
+}
 
 /** 閉じ括弧を失ったテンプレートの `ziku.jsonc`。回復すると `{ include: [...] }` が取れる。 */
 const BROKEN_CONFIG = '{\n  // template config\n  "include": [".claude/**",\n}\n';
@@ -135,10 +146,12 @@ describe("readConfigAt 経由の入口（テンプレートが壊れていれば
       "/template/.ziku/ziku.jsonc": VALID_CONFIG,
     });
 
-    const merged = await computeScopedZikuConfig({
-      templateDir: absPath("/template"),
-      additionalIncludes: globPatterns([".github/**"]),
-    });
+    const merged = scopedContent(
+      await computeScopedZikuConfig({
+        templateDir: absPath("/template"),
+        additionalIncludes: globPatterns([".github/**"]),
+      }),
+    );
     expect(parseJsonc(merged)).toMatchObject({
       kind: "parsed",
       value: { include: [".claude/**", ".github/**"] },
@@ -172,6 +185,50 @@ describe("loadTemplateConfig（壊れていればパターン無しではなく�
     expect(await failureOf("/template")).toMatchObject(
       Option.some(expect.objectContaining({ _tag: "TemplateNotConfiguredError" })),
     );
+  });
+});
+
+describe("走査範囲の解決（壊れていれば範囲を空へ潰さず中断する）", () => {
+  beforeEach(() => {
+    vol.reset();
+  });
+
+  it("テンプレートが壊れていれば ConfigUnparsable として中断する", async () => {
+    vol.fromJSON({
+      "/local/.ziku/ziku.jsonc": VALID_CONFIG,
+      "/template/.ziku/ziku.jsonc": BROKEN_CONFIG,
+    });
+
+    // 空のパターンへ潰すと「テンプレートは何も同期対象と定めていない」が走査範囲になり、
+    // テンプレートが追跡しているファイルが差分に現れないまま同期済みと報告される。
+    await expect(
+      resolveSyncScope({
+        targetDir: absPath("/local"),
+        templateDir: absPath("/template"),
+        include: globPatterns([".claude/**"]),
+        exclude: [],
+      }),
+    ).rejects.toMatchObject({
+      _tag: "ZikuFailure",
+      reason: { kind: "ConfigUnparsable", path: "/template/.ziku/ziku.jsonc" },
+    });
+  });
+
+  it("テンプレートに ziku.jsonc が無ければローカルのパターンだけで範囲を組む", async () => {
+    vol.fromJSON({
+      "/local/.ziku/ziku.jsonc": VALID_CONFIG,
+      "/template/README.md": "",
+    });
+
+    const { scope, newInclude } = await resolveSyncScope({
+      targetDir: absPath("/local"),
+      templateDir: absPath("/template"),
+      include: globPatterns([".claude/**"]),
+      exclude: [],
+    });
+
+    expect(scope.declared.include).toEqual([".claude/**"]);
+    expect(newInclude).toEqual([]);
   });
 });
 

@@ -144,12 +144,7 @@ export type PushFileSelection =
   /** `--files` で明示指定された。候補に無いパスは `notFound` として返る。 */
   | { readonly _tag: "Files"; readonly filesArg: string }
   /** 対話を省く（`--yes` / dry-run プレビュー）ので既定集合を使う。 */
-  | {
-      readonly _tag: "Default";
-      readonly includeDeletions: boolean;
-      readonly conflictedPaths: ReadonlySet<RepoRelPath>;
-      readonly restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
-    }
+  | ({ readonly _tag: "Default" } & DefaultSelectionMarks)
   /** 対話で選ばれた結果をそのまま使う。 */
   | { readonly _tag: "Chosen"; readonly paths: readonly RepoRelPath[] };
 
@@ -185,8 +180,23 @@ export function filterByFilesArg(
 }
 
 /**
- * 対話選択を経由しないときの既定集合を算出する。dry-run のプレビューと `--yes` の実 push が
- * 同じ集合になるよう共有する。
+ * 既定選択の判定に要る材料。
+ *
+ * 3 つとも必須にしてあるのは、渡し忘れが「空集合として扱われ、既定から外すはずのファイルが
+ * 既定で選ばれる」という気づけない形で表に出るため。判定を使う側が増えても、材料を欠いた
+ * 呼び出しはコンパイルエラーになる。
+ */
+export interface DefaultSelectionMarks {
+  /** 削除を既定で選ぶか（`--include-deletions`）。 */
+  readonly includeDeletions: boolean;
+  /** 未解決の衝突を抱えるパス。 */
+  readonly conflictedPaths: ReadonlySet<RepoRelPath>;
+  /** 送るとテンプレート側の削除を取り消すパス。 */
+  readonly restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
+}
+
+/**
+ * 1 ファイルが既定で送信対象に入るか。
  *
  * 既定から外すもの:
  * - 未解決の衝突。選ぶと push が中断する。
@@ -199,21 +209,43 @@ export function filterByFilesArg(
  * 巻き戻す。フラグを増やさず既定から外すだけに留めるのは、削除の取り消しが必要になる場面が
  * 稀で、必要なときはユーザーが対話の一覧（`restores file deleted in template` の注記付き）を
  * 見て明示的に選べる状況だから。候補からは外さないので、意図があれば対話で送れる。
+ *
+ * この 1 本が既定選択の唯一の規則になる。非対話実行の集合（{@link defaultPushSelection}）、
+ * 対話の初期チェック（`src/ui/file-select-with-diff.ts` の `isPreselectedByDefault`）、
+ * 自動同梱を止めるゲート（{@link withheldFromDefaultSelection}）がすべてここを通るので、
+ * 実行モードによって既定の扱いが食い違うことがない。
+ */
+export function isDefaultSelected(diff: FileDiff, marks: DefaultSelectionMarks): boolean {
+  return (
+    !marks.conflictedPaths.has(diff.path) &&
+    !marks.restoresTemplateDeletion.has(diff.path) &&
+    (marks.includeDeletions || diff.type !== "deleted")
+  );
+}
+
+/**
+ * 対話選択を経由しないときの既定集合を算出する。dry-run のプレビューと `--yes` の実 push が
+ * 同じ集合になるよう共有する。
  */
 export function defaultPushSelection(
   candidates: readonly ChangedFileDiff[],
-  opts: {
-    includeDeletions: boolean;
-    conflictedPaths: ReadonlySet<RepoRelPath>;
-    restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
-  },
+  marks: DefaultSelectionMarks,
 ): ChangedFileDiff[] {
-  return candidates.filter(
-    (f) =>
-      !opts.conflictedPaths.has(f.path) &&
-      !opts.restoresTemplateDeletion.has(f.path) &&
-      (opts.includeDeletions || f.type !== "deleted"),
-  );
+  return candidates.filter((f) => isDefaultSelected(f, marks));
+}
+
+/**
+ * 既定選択が意図的に外した候補のパス。
+ *
+ * 選択を経由せずに送信対象へファイルを足す経路（`ziku.jsonc` の自動同梱）が、既定選択の
+ * 歯止めを迂回していないか確かめるために使う。「候補にあるのに既定では選ばれなかった」を
+ * {@link isDefaultSelected} から導くので、外す条件を書き写した 2 つ目の判定が生まれない。
+ */
+export function withheldFromDefaultSelection(
+  candidates: readonly ChangedFileDiff[],
+  marks: DefaultSelectionMarks,
+): ReadonlySet<RepoRelPath> {
+  return new Set(candidates.filter((f) => !isDefaultSelected(f, marks)).map((f) => f.path));
 }
 
 /**
@@ -587,11 +619,15 @@ export type ConfigPropagationPlan =
  *   パターンとして載る（選択で外したファイルのパターンを先に送らない）。
  * @param localOnlyPatterns 送信対象に関係する、ローカルの `ziku.jsonc` にしか無いパターン。
  *   `selectedPaths` が `ziku.jsonc` を含む場合は参照しないので、呼び出し側は調査を省いてよい。
+ * @param withheldFromDefault 既定選択が意図的に外した候補のパス
+ *   （{@link withheldFromDefaultSelection}）。自動同梱はユーザーの選択を経ずに送信対象を
+ *   増やすので、既定選択が止めたものをここで素通しすると歯止めが片方の経路だけ効かなくなる。
  */
 export function planConfigPropagation(params: {
   readonly selectedPaths: readonly RepoRelPath[];
   readonly newlyTrackedPaths: readonly RepoRelPath[];
   readonly localOnlyPatterns: readonly GlobPattern[];
+  readonly withheldFromDefault: ReadonlySet<RepoRelPath>;
 }): ConfigPropagationPlan {
   const configAlreadySelected = params.selectedPaths.some((p) => isZikuConfigPath(p));
   const selectedPathSet = new Set<RepoRelPath>(params.selectedPaths);
@@ -604,6 +640,11 @@ export function planConfigPropagation(params: {
       ? { _tag: "NoConfigChange" }
       : { _tag: "MergeLocalConfig", extraIncludes: trackedAndPushed };
   }
+
+  // 既定選択が `ziku.jsonc` を外していたなら、その理由（未解決の衝突・テンプレート側の削除の
+  // 取り消し）は自動同梱でも変わらない。ユーザーが一覧から明示的に選んだ場合は上の
+  // `configAlreadySelected` を通るので、ここで止まるのは選ばれていない同梱だけ。
+  if (params.withheldFromDefault.has(ZIKU_CONFIG_FILE)) return { _tag: "NoConfigChange" };
 
   if (trackedAndPushed.length === 0 && params.localOnlyPatterns.length === 0) {
     return { _tag: "NoConfigChange" };

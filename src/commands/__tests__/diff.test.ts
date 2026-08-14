@@ -208,13 +208,16 @@ describe("diffCommand", () => {
         cmd: diffCommand,
       });
 
-      // 走査パターンで探索すると `.ziku` が探索の基点になり、同期対象ではない
-      // `.ziku/lock.json` が追跡候補として提示される。
+      // 未追跡探索も範囲全体を受け取る。探索の基点になるのはその中の宣言側で、走査パターンを
+      // 基点にすると `.ziku` が基点になり、同期対象ではない `.ziku/lock.json` が追跡候補として
+      // 提示される。
       expect(mockDetectUntrackedFiles).toHaveBeenCalledWith({
         targetDir: "/test",
-        patterns: expect.objectContaining({
-          purpose: "declared",
-          include: expect.not.arrayContaining([ZIKU_CONFIG_FILE]),
+        scope: expect.objectContaining({
+          declared: expect.objectContaining({
+            purpose: "declared",
+            include: expect.not.arrayContaining([ZIKU_CONFIG_FILE]),
+          }),
         }),
       });
       // 比較の側は制御ファイルを含む（落とすとパターンの追加が双方向に伝わらない）。
