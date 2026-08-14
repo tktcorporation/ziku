@@ -55,7 +55,8 @@ vi.mock("../../utils/github", () => ({
 
 // utils/readme をモック
 vi.mock("../../utils/readme", () => ({
-  detectAndUpdateReadme: vi.fn(() => null),
+  detectAndUpdateReadme: vi.fn(() => Promise.resolve(null)),
+  detectReadmeUpdate: vi.fn(() => Promise.resolve(null)),
 }));
 
 // utils/untracked をモック
@@ -198,6 +199,7 @@ const {
   logUntrackedFilesNotice,
 } = await import("../../ui/prompts");
 const { detectUntrackedFiles } = await import("../../utils/untracked");
+const { detectAndUpdateReadme, detectReadmeUpdate } = await import("../../utils/readme");
 const { log, logDiffSummary } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
 const { classifyFiles, mergeOneFile, downloadBaseForMerge } = await import("../../utils/merge");
@@ -219,6 +221,8 @@ const mockSelectPushFiles = vi.mocked(selectPushFiles);
 const mockSelectUntrackedToTrack = vi.mocked(selectUntrackedToTrack);
 const mockLogUntrackedFilesNotice = vi.mocked(logUntrackedFilesNotice);
 const mockDetectUntrackedFiles = vi.mocked(detectUntrackedFiles);
+const mockDetectAndUpdateReadme = vi.mocked(detectAndUpdateReadme);
+const mockDetectReadmeUpdate = vi.mocked(detectReadmeUpdate);
 const mockLog = vi.mocked(log);
 const mockLogDiffSummary = vi.mocked(logDiffSummary);
 const mockHashFiles = vi.mocked(hashFiles);
@@ -361,6 +365,10 @@ function resetPushMocks(): void {
   mockDownloadBaseForMerge.mockReturnValue(Effect.succeed(null));
   mockHashFiles.mockReset();
   mockHashFiles.mockResolvedValue({});
+  mockDetectAndUpdateReadme.mockReset();
+  mockDetectAndUpdateReadme.mockResolvedValue(null);
+  mockDetectReadmeUpdate.mockReset();
+  mockDetectReadmeUpdate.mockResolvedValue(null);
 }
 
 describe("pushCommand", () => {
@@ -526,6 +534,102 @@ describe("pushCommand", () => {
       expect(mockLog.info).toHaveBeenCalledWith("Dry run mode");
       // dry-run ではファイルリストを表示して終了
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
+    describe("テンプレート README の自動更新", () => {
+      const updatedReadme = {
+        updated: true,
+        content: "# Template\n\n<!-- FILES:START -->\n- `.github/**`\n<!-- FILES:END -->\n",
+        readmePath: "/tmp/template/README.md",
+      };
+
+      /** README 以外に 1 件だけ送るものがある状態を作る。 */
+      function setupSinglePushableFile(): void {
+        setupPushableFiles([
+          { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
+        ]);
+        mockGetGitHubToken.mockReturnValue("ghp_token");
+        mockCreatePullRequest.mockResolvedValueOnce({
+          url: "https://github.com/owner/repo/pull/1",
+          branch: "update-template-123",
+          number: 1,
+        });
+      }
+
+      it("マーカーがあると README の更新を同梱し、サマリと案内に出す", async () => {
+        setupSinglePushableFile();
+        mockDetectAndUpdateReadme.mockResolvedValueOnce(updatedReadme);
+
+        await (pushCommand.run as any)({
+          args: { dir: "/test", dryRun: false, yes: true, edit: false },
+          rawArgs: [],
+          cmd: pushCommand,
+        });
+
+        const prArg = mockCreatePullRequest.mock.calls[0]?.[1];
+        expect(prArg?.files.map((f) => f.path)).toContain("README.md");
+
+        // 選んでいないファイルが PR に出る理由を、送信前に名指しで伝える
+        expect(mockLog.info).toHaveBeenCalledWith(
+          "Also pushing README.md — its generated sections are rebuilt from .ziku/ziku.jsonc.",
+        );
+
+        const summary = mockLog.message.mock.calls
+          .map((call) => call[0])
+          .find((text) => text.includes("README.md"));
+        expect(summary).toContain("(auto-updated)");
+      });
+
+      it("マーカーが無ければ同梱も案内もしない", async () => {
+        setupSinglePushableFile();
+
+        await (pushCommand.run as any)({
+          args: { dir: "/test", dryRun: false, yes: true, edit: false },
+          rawArgs: [],
+          cmd: pushCommand,
+        });
+
+        const prArg = mockCreatePullRequest.mock.calls[0]?.[1];
+        expect(prArg?.files.map((f) => f.path)).toEqual(["file.txt"]);
+        expect(
+          mockLog.info.mock.calls.map((call) => call[0]).filter((text) => text.includes("README")),
+        ).toEqual([]);
+      });
+
+      it("--dry-run のプレビューでも README が同梱されることを予告する", async () => {
+        setupPushableFiles([
+          { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
+        ]);
+        mockDetectReadmeUpdate.mockResolvedValueOnce(updatedReadme);
+
+        await (pushCommand.run as any)({
+          args: { dir: "/test", dryRun: true, yes: false, edit: false },
+          rawArgs: [],
+          cmd: pushCommand,
+        });
+
+        expect(mockLog.warn).toHaveBeenCalledWith(
+          "README.md would also be pushed — its generated sections are rebuilt from .ziku/ziku.jsonc.",
+        );
+        // プレビューは何も書き換えない
+        expect(mockDetectAndUpdateReadme).not.toHaveBeenCalled();
+      });
+
+      it("--dry-run でマーカーが無ければ予告しない", async () => {
+        setupPushableFiles([
+          { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
+        ]);
+
+        await (pushCommand.run as any)({
+          args: { dir: "/test", dryRun: true, yes: false, edit: false },
+          rawArgs: [],
+          cmd: pushCommand,
+        });
+
+        expect(
+          mockLog.warn.mock.calls.map((call) => call[0]).filter((text) => text.includes("README")),
+        ).toEqual([]);
+      });
     });
 
     it("--dry-run + --files はプレビューを指定ファイルだけに絞る（#81）", async () => {

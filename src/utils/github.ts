@@ -450,30 +450,123 @@ export async function scaffoldTemplateRepo(
 }
 
 /**
+ * GitHub への問い合わせが値を返せなかった理由。
+ *
+ * 2 ケースに分けるのは、呼び出し側が取れる行動が違うため。
+ *
+ * - `AuthRejected`: 付与したトークンを GitHub が拒否した（401）。人がトークンを直すまで
+ *   何度問い合わせても結果は変わらないので、黙って続けると壊れた前提のまま進み続ける。
+ *   プライベートリポジトリでは「見えるはずのものが見えない」状態でもあるため、続行の判断を
+ *   ツールが代わりに下してよい失敗ではない。
+ * - `Unresolved`: ネットワーク断・5xx・レート制限・対象が見つからない。再実行や時間経過で
+ *   解消しうるので、呼び出し側は手持ちの値で続行するかを選べる。
+ */
+export type GitHubLookupFailure =
+  | {
+      readonly _tag: "AuthRejected";
+      /** GitHub が返したメッセージ（例: "Bad credentials"）。 */
+      readonly detail: string;
+    }
+  | {
+      readonly _tag: "Unresolved";
+      /** 値を返せなかった事情。HTTP ステータス文か例外のメッセージ。 */
+      readonly reason: string;
+    };
+
+/**
+ * コミット SHA の解決結果。
+ *
+ * 単なる `CommitSha | undefined` では「トークンが拒否された」と「一時的に引けなかった」が
+ * 同じ値に潰れる。3-way マージのベースは引けなかったとき古い SHA へ倒れるため、潰したまま
+ * だとトークン失効に誰も気づかないまま陳腐化したベースでマージが続く。
+ *
+ * ライフサイクル: {@link resolveSourceCommit} が返し、`services/command-context.ts` が
+ * ベースリビジョンへ変換する（認証拒否は失敗、それ以外は None）。
+ */
+export type CommitShaResolution =
+  | { readonly _tag: "Resolved"; readonly sha: CommitSha }
+  | GitHubLookupFailure;
+
+/** リポジトリの既定ブランチ名の解決結果。失敗の分け方は {@link GitHubLookupFailure} と同じ。 */
+type DefaultBranchResolution =
+  | { readonly _tag: "Resolved"; readonly name: string }
+  | GitHubLookupFailure;
+
+/**
+ * 値を返さなかった HTTP レスポンスを、呼び出し側の行動が変わる 2 つの理由へ分類する。
+ *
+ * 401 だけを認証拒否として扱う。401 は付与した Authorization が拒否されたことを意味し、
+ * 未認証アクセスでは返らない（公開リポジトリは 200、プライベートリポジトリは 404）。
+ * 403 のレート制限・5xx・404 は待つか再実行すれば解消しうるので分けない。
+ */
+function classifyLookupFailure(res: Response): GitHubLookupFailure {
+  if (res.status === 401) {
+    return { _tag: "AuthRejected", detail: res.statusText || "Bad credentials" };
+  }
+  return { _tag: "Unresolved", reason: res.statusText || `HTTP ${res.status}` };
+}
+
+/**
+ * Octokit が投げた例外を {@link classifyLookupFailure} と同じ基準で分類する。
+ *
+ * Octokit の RequestError は HTTP ステータスを `status` に載せる。ネットワーク断のように
+ * ステータスを持たない例外も飛んでくるため、形を確かめてから読む。
+ */
+function classifyOctokitFailure(cause: unknown): GitHubLookupFailure {
+  const detail = cause instanceof Error ? cause.message : String(cause);
+  return httpStatusOf(cause) === 401
+    ? { _tag: "AuthRejected", detail }
+    : { _tag: "Unresolved", reason: detail };
+}
+
+/** 例外オブジェクトに載っている HTTP ステータス。持たない例外では undefined。 */
+function httpStatusOf(cause: unknown): number | undefined {
+  if (typeof cause !== "object" || cause === null || !("status" in cause)) return undefined;
+  const { status } = cause;
+  return typeof status === "number" ? status : undefined;
+}
+
+/**
+ * リポジトリの既定ブランチ名を、失敗理由を保ったまま取得する。
+ *
+ * 既定ブランチは `main` とは限らない（`master` / `trunk` 等）。ブランチが指定されていない
+ * ときに `main` を仮定すると、存在しないブランチを見に行くか、別ブランチのコミットを掴む。
+ * どちらも 3-way マージのベースを取り違える原因になる。
+ */
+function fetchDefaultBranch(owner: string, repo: string): Promise<DefaultBranchResolution> {
+  const octokit = new Octokit({ auth: getGitHubToken() });
+
+  return Effect.runPromise(
+    Effect.tryPromise({
+      try: () => octokit.repos.get({ owner, repo }),
+      catch: classifyOctokitFailure,
+    }).pipe(
+      Effect.map(
+        ({ data }): DefaultBranchResolution => ({ _tag: "Resolved", name: data.default_branch }),
+      ),
+      // 成功も失敗も同じ union なので、エラーチャネルを戻り値へ畳む。
+      Effect.merge,
+    ),
+  );
+}
+
+/**
  * リポジトリの既定ブランチ名を取得する。
  *
- * 背景: 既定ブランチは `main` とは限らない（`master` / `trunk` 等）。ブランチが
- * 指定されていないときに `main` を仮定すると、存在しないブランチを見に行くか、
- * 別ブランチのコミットを掴む。どちらも 3-way マージのベースを取り違える原因になる。
- *
- * 取得できない場合（リポジトリ不在・認証失敗・ネットワーク断・レート制限）は
- * undefined を返す。誤ったブランチ名で解決を続けるより、ベース未解決として
- * 呼び出し側のフォールバックに倒すほうが安全なため。
+ * 取得できない場合（リポジトリ不在・認証失敗・ネットワーク断・レート制限）は undefined を
+ * 返す。誤ったブランチ名で解決を続けるより、未解決として呼び出し側のフォールバックへ倒す
+ * ほうが安全なため。失敗の理由で行動を変える呼び出しは {@link resolveSourceCommit} と同じく
+ * 分類済みの結果を扱うこと。
  */
 export async function resolveDefaultBranch(
   owner: string,
   repo: string,
 ): Promise<string | undefined> {
-  const octokit = new Octokit({ auth: getGitHubToken() });
-
-  return Option.getOrUndefined(
-    await Effect.runPromise(
-      Effect.tryPromise(() => octokit.repos.get({ owner, repo })).pipe(
-        Effect.map(({ data }) => data.default_branch),
-        Effect.option,
-      ),
-    ),
-  );
+  return match(await fetchDefaultBranch(owner, repo))
+    .with({ _tag: "Resolved" }, (r) => r.name)
+    .with({ _tag: "AuthRejected" }, () => undefined)
+    .with({ _tag: "Unresolved" }, () => undefined)
+    .exhaustive();
 }
 
 /**
@@ -482,30 +575,28 @@ export async function resolveDefaultBranch(
  * GitHub API の `Accept: application/vnd.github.sha` を使い、SHA 文字列のみを取得する。
  * トークンがあれば付与する: プライベートなテンプレートリポジトリは未認証だと 404 になり、
  * ベースコミットが lock に記録されないまま 3-way マージの共通祖先を失う。
- *
- * 取得できない場合は undefined を返す。ベース未解決として呼び出し側のフォールバックに
- * 倒すほうが、誤った SHA でマージのベースを取り違えるより安全なため。
  */
-async function fetchCommitSha(
-  owner: string,
-  repo: string,
-  ref: string,
-): Promise<CommitSha | undefined> {
+function fetchCommitSha(owner: string, repo: string, ref: string): Promise<CommitShaResolution> {
   const headers = {
     Accept: "application/vnd.github.sha",
     ...githubAuthHeaders(getGitHubToken()),
   };
 
-  return Option.getOrUndefined(
-    await Effect.runPromise(
-      Effect.tryPromise(async () => {
+  return Effect.runPromise(
+    Effect.tryPromise({
+      try: async (): Promise<CommitShaResolution> => {
         const url = `https://api.github.com/repos/${owner}/${repo}/commits/${ref}`;
         const res = await fetch(url, { headers });
-        if (!res.ok) return undefined;
+        if (!res.ok) return classifyLookupFailure(res);
         // API レスポンスがコミット SHA の入口。ここから先は brand 付きで流れる。
-        return commitShaSchema.parse((await res.text()).trim());
-      }).pipe(Effect.option),
-    ),
+        // 想定外の本文（HTML のエラーページ等）はスキーマが弾き、下の catch が拾う。
+        return { _tag: "Resolved", sha: commitShaSchema.parse((await res.text()).trim()) };
+      },
+      catch: (cause): GitHubLookupFailure => ({
+        _tag: "Unresolved",
+        reason: cause instanceof Error ? cause.message : String(cause),
+      }),
+    }).pipe(Effect.merge),
   );
 }
 
@@ -515,21 +606,32 @@ async function fetchCommitSha(
  * 引数がブランチに限られるのは「最新」という語がブランチでしか意味を持たないため。
  * タグやコミットを渡せてしまうと、固定のコミットがそのまま返り、最新を取得した
  * つもりの呼び出し側が意図しない結果を受け取る。
- * 省略した場合はリポジトリの既定ブランチを使い、それを解決できなければ undefined を返す。
+ * 省略した場合はリポジトリの既定ブランチを使う。既定ブランチの問い合わせで認証が拒否
+ * されたときも認証拒否として返す。ref を省いた設定が最も多いので、ここで潰すと
+ * トークン失効がほとんどの経路で見えなくなる。
  */
 export async function resolveLatestCommitSha(
   owner: string,
   repo: string,
   branch?: BranchRef,
-): Promise<CommitSha | undefined> {
-  const name = branch?.name ?? (await resolveDefaultBranch(owner, repo));
-  if (name === undefined) return undefined;
+): Promise<CommitShaResolution> {
+  if (branch !== undefined) return fetchCommitSha(owner, repo, branch.name);
 
-  return fetchCommitSha(owner, repo, name);
+  return match(await fetchDefaultBranch(owner, repo))
+    .with({ _tag: "Resolved" }, (r) => fetchCommitSha(owner, repo, r.name))
+    .with({ _tag: "AuthRejected" }, (f): CommitShaResolution => f)
+    .with(
+      { _tag: "Unresolved" },
+      (f): CommitShaResolution => ({
+        _tag: "Unresolved",
+        reason: `could not resolve the default branch: ${f.reason}`,
+      }),
+    )
+    .exhaustive();
 }
 
 /**
- * テンプレートソースの ref が現在指しているコミット SHA を解決する。
+ * テンプレートソースの ref が現在指しているコミットを解決する。
  *
  * 3-way マージのベースツリーを取り直すために lock へ記録する値。ref の種別ごとに
  * 「今どのコミットか」の意味が違うため、ここで種別を吸収する。
@@ -537,17 +639,40 @@ export async function resolveLatestCommitSha(
  * - ブランチ / 未指定: そのブランチ（未指定なら既定ブランチ）の最新コミット
  * - タグ: タグが指すコミット
  * - コミット: その SHA 自身（API 呼び出し不要）
+ *
+ * 失敗は戻り値で表す（{@link CommitShaResolution}）。reject するのは実装の不具合だけ。
  */
-export function resolveSourceCommitSha(
+export function resolveSourceCommit(
   owner: string,
   repo: string,
   ref?: TemplateRef,
-): Promise<CommitSha | undefined> {
+): Promise<CommitShaResolution> {
   return match(ref)
     .with(undefined, () => resolveLatestCommitSha(owner, repo))
     .with({ kind: "branch" }, (branch) => resolveLatestCommitSha(owner, repo, branch))
     .with({ kind: "tag" }, (tag) => fetchCommitSha(owner, repo, tag.name))
-    .with({ kind: "commit" }, (commit) => Promise.resolve<CommitSha | undefined>(commit.sha))
+    .with({ kind: "commit" }, (commit) =>
+      Promise.resolve<CommitShaResolution>({ _tag: "Resolved", sha: commit.sha }),
+    )
+    .exhaustive();
+}
+
+/**
+ * テンプレートソースの ref が指すコミット SHA を、解決できなければ undefined として返す。
+ *
+ * 「SHA が取れたら記録し、取れなければ記録しない」だけで足りる呼び出し向け。既に記録済みの
+ * ベースを持たない経路（`init`）では、失敗の理由が分かっても取れる行動が変わらない。
+ * 既存のベースへ倒れる経路は理由で行動が変わるので {@link resolveSourceCommit} を使うこと。
+ */
+export async function resolveSourceCommitSha(
+  owner: string,
+  repo: string,
+  ref?: TemplateRef,
+): Promise<CommitSha | undefined> {
+  return match(await resolveSourceCommit(owner, repo, ref))
+    .with({ _tag: "Resolved" }, (r) => r.sha)
+    .with({ _tag: "AuthRejected" }, () => undefined)
+    .with({ _tag: "Unresolved" }, () => undefined)
     .exhaustive();
 }
 

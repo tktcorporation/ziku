@@ -55,6 +55,16 @@ function deletablePath(path: string): DeletablePath {
 
 const CONFIG_PATH = repoRelPath(".ziku/ziku.jsonc");
 
+/**
+ * パスの集合をテストの入力として組み立てる。
+ *
+ * 送信対象を絞る API は `ReadonlySet<RepoRelPath>` を取る。リテラルの `Set<string>` は
+ * 代入できないので、変換をここへまとめる。
+ */
+function pathSet(members: readonly string[] = []): ReadonlySet<RepoRelPath> {
+  return new Set(repoRelPaths(members));
+}
+
 const emptyClassification: FileClassification = {
   autoUpdate: [],
   localOnly: [],
@@ -261,8 +271,8 @@ describe("filterByFilesArg", () => {
 
 describe("defaultPushSelection", () => {
   const candidates = [added("a.txt"), deleted("gone.txt"), modified("conflict.txt")];
-  const conflictedPaths = new Set<string>(["conflict.txt"]);
-  const noRestores = new Set<string>();
+  const conflictedPaths = pathSet(["conflict.txt"]);
+  const noRestores = pathSet();
 
   it("未解決の衝突と削除を既定で外す", () => {
     const selected = defaultPushSelection(candidates, {
@@ -289,8 +299,8 @@ describe("defaultPushSelection", () => {
 
     const selected = defaultPushSelection(withRestore, {
       includeDeletions: false,
-      conflictedPaths: new Set<string>(),
-      restoresTemplateDeletion: new Set<string>(["restored.txt"]),
+      conflictedPaths: pathSet(),
+      restoresTemplateDeletion: pathSet(["restored.txt"]),
     });
 
     expect(paths(selected)).toEqual(["a.txt"]);
@@ -301,8 +311,8 @@ describe("defaultPushSelection", () => {
 
     const selected = defaultPushSelection(withRestore, {
       includeDeletions: true,
-      conflictedPaths: new Set<string>(),
-      restoresTemplateDeletion: new Set<string>(["restored.txt"]),
+      conflictedPaths: pathSet(),
+      restoresTemplateDeletion: pathSet(["restored.txt"]),
     });
 
     expect(paths(selected)).toEqual(["a.txt"]);
@@ -326,8 +336,8 @@ describe("applyPushSelection", () => {
     const { selected } = applyPushSelection(candidates, {
       _tag: "Default",
       includeDeletions: false,
-      conflictedPaths: new Set<string>(),
-      restoresTemplateDeletion: new Set<string>(),
+      conflictedPaths: pathSet(),
+      restoresTemplateDeletion: pathSet(),
     });
 
     expect(paths(selected)).toEqual(["a.txt", "b.txt"]);
@@ -335,12 +345,12 @@ describe("applyPushSelection", () => {
 
   it("削除の取り消しは対話で明示選択すれば送れる", () => {
     const restoring = [added("a.txt"), added("restored.txt")];
-    const restoresTemplateDeletion = new Set<string>(["restored.txt"]);
+    const restoresTemplateDeletion = pathSet(["restored.txt"]);
 
     const viaDefault = applyPushSelection(restoring, {
       _tag: "Default",
       includeDeletions: false,
-      conflictedPaths: new Set<string>(),
+      conflictedPaths: pathSet(),
       restoresTemplateDeletion,
     });
     const viaChosen = applyPushSelection(restoring, {
@@ -367,14 +377,38 @@ describe("selectedUnresolvedConflicts", () => {
   it("選択に混ざった未解決の衝突を返す", () => {
     const blocking = selectedUnresolvedConflicts(
       [added("a.txt"), modified("conflict.txt")],
-      new Set(["conflict.txt", "other.txt"]),
+      pathSet(["conflict.txt", "other.txt"]),
     );
 
     expect(paths(blocking)).toEqual(["conflict.txt"]);
   });
 
   it("衝突が選ばれていなければ空を返す", () => {
-    expect(selectedUnresolvedConflicts([added("a.txt")], new Set(["conflict.txt"]))).toEqual([]);
+    expect(selectedUnresolvedConflicts([added("a.txt")], pathSet(["conflict.txt"]))).toEqual([]);
+  });
+});
+
+describe("PushContent", () => {
+  it("型: マーカー入りと確定した内容は送信対象へ変換できない", () => {
+    const outcome = classifyMergeOutcome(
+      "<<<<<<< LOCAL\nmine\n=======\ntheirs\n>>>>>>> TEMPLATE\n",
+    );
+    if (outcome._tag !== "Conflicted") throw new Error("fixture must conflict");
+
+    // マーカー入りの内容がテンプレートへ配られると、そのテンプレートを使う全プロジェクトへ
+    // 壊れたファイルが届く。これを「コンパイルできない」ことで防ぐのが PushContent の役目
+    // なので、@ts-expect-error が外れたら（= 変換できるようになったら）typecheck が失敗する。
+    // @ts-expect-error マージ由来の内容は asPushContent を通れない
+    const converted: PushContent = asPushContent(outcome.content);
+
+    expect(converted).toBe(outcome.content);
+  });
+
+  it("クリーンと判定された内容は専用の経路で送信対象になる", () => {
+    const outcome = classifyMergeOutcome("merged content");
+    if (outcome._tag !== "Clean") throw new Error("fixture must merge cleanly");
+
+    expect(mergedAsPushContent(outcome.content)).toBe("merged content");
   });
 });
 
@@ -676,14 +710,14 @@ describe("patternsToPersist", () => {
   it("実際に送ったファイルのパターンだけを永続化する", () => {
     const persisted = patternsToPersist(
       repoRelPaths(["a.txt", "dropped.txt"]),
-      new Set(["a.txt", "other.txt"]),
+      pathSet(["a.txt", "other.txt"]),
     );
 
     expect(persisted).toEqual(globPatterns(["a.txt"]));
   });
 
   it("送ったファイルが無ければ何も永続化しない", () => {
-    expect(patternsToPersist(repoRelPaths(["a.txt"]), new Set())).toEqual([]);
+    expect(patternsToPersist(repoRelPaths(["a.txt"]), pathSet())).toEqual([]);
   });
 });
 
@@ -715,7 +749,7 @@ describe("resolvePrBaseBranch", () => {
 });
 
 describe("buildPushSummaryRows", () => {
-  const noRestores = new Set<string>();
+  const noRestores = pathSet();
 
   it("送る内容とテンプレートの内容から種別を決め直す", () => {
     const rows = buildPushSummaryRows({
@@ -772,7 +806,7 @@ describe("buildPushSummaryRows", () => {
       pushableFiles: [added("restored.txt", "local")],
       files: [{ path: repoRelPath("restored.txt"), content: asPushContent("local") }],
       deletions: [],
-      restoresTemplateDeletion: new Set(["restored.txt"]),
+      restoresTemplateDeletion: pathSet(["restored.txt"]),
     });
 
     expect(rows[0]).toMatchObject({ _tag: "Change", restoresTemplateDeletion: true });

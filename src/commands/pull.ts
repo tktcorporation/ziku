@@ -1,13 +1,12 @@
 import { readFile, rm } from "node:fs/promises";
 import { defineCommand } from "citty";
 import { Effect, Option } from "effect";
-import { P, match } from "ts-pattern";
+import { match } from "ts-pattern";
 import { withCleanup } from "../effect-helpers";
 import type { ZikuFailure } from "../errors";
 import { describeConflictLines, zikuFailure } from "../errors";
 import type {
   AbsPath,
-  ContentHash,
   GlobPattern,
   HashMap,
   MergingLockState,
@@ -15,15 +14,10 @@ import type {
   PendingConflicts,
   RepoRelPath,
   ResumableLockState,
+  SyncPoint,
   UnmergedConflict,
 } from "../modules/schemas";
-import {
-  baseCommitSha,
-  baseHashesOf,
-  markMerging,
-  markSynced,
-  resolveMerge,
-} from "../modules/schemas";
+import { baseCommitSha, baseHashesOf, markMerging, markSynced } from "../modules/schemas";
 import type { UnmergedResolution } from "../ui/prompts";
 import {
   selectDeletedFiles,
@@ -55,6 +49,17 @@ import { zikuConfigPullAction } from "../utils/merge/sync-plan";
 import { analyzeSync } from "../utils/sync-analysis";
 import { mergeTemplatePatterns } from "../utils/template-patterns";
 import { computeMergedZikuConfig } from "../utils/config-merge";
+import type { PullApprovalFlags, ZikuConfigMergeResult } from "./pull-plan";
+import {
+  configContentToWrite,
+  finalizeMergedBase,
+  hasReadableText,
+  isNonInteractive,
+  isUnmergedConflict,
+  nextSyncBase,
+  planPullChanges,
+  resolveDeletionPolicy,
+} from "./pull-plan";
 
 /**
  * pull コマンドのファイル操作メタデータ。
@@ -210,61 +215,29 @@ export const pullCommand = defineCommand({
             exclude: mergedExclude,
           });
 
-          // ziku.jsonc の扱いは分類カテゴリではなく sync-plan の判断に従う。汎用の applyFiles
-          // （テンプレ丸ごとコピー）や diff3 マージに乗せると、テンプレ側で削除されたパターンが
-          // ローカルへ伝播し「削除は自動伝播しない」方針に反する。plan.files には ziku.jsonc が
-          // 入らないため、以降の適用・削除処理へ紛れ込むことはない。
+          // ziku.jsonc の扱いは分類カテゴリではなく sync-plan の判断に従う。テンプレートの
+          // 内容をそのまま置くコピー（{@link copyTemplateFiles}）や diff3 マージに乗せると、
+          // テンプレ側で削除されたパターンがローカルへ伝播し「削除は自動伝播しない」方針に
+          // 反する。plan.files には ziku.jsonc が入らないため、以降の適用・削除処理へ
+          // 紛れ込むことはない。
           const configSync = await resolveConfigMerge(
             targetDir,
             templateDir,
             zikuConfigPullAction(plan.config),
           );
-          const { autoUpdate, conflicts, deletedFiles, deletedWithLocalEdits } = plan.files;
+          const configWrite = configContentToWrite(configSync);
+          const { autoUpdate, conflicts, deletedWithLocalEdits } = plan.files;
 
-          const { deletable: deletableFiles, hasStaleBaseEntries } = splitTemplateDeletions(
-            deletedFiles,
-            hashes.localHashes,
-          );
+          const changes = planPullChanges({ files: plan.files, hashes, configSync });
 
-          // テンプレートが削除したファイルは、どちらのカテゴリでも「削除するか残すか」が
-          // 実行時に決まる。ベースの確定にはその結果が要るので、候補を 1 本にまとめて
-          // 通常フローと中断の両方から同じ集合を渡す。ここは実在しないファイルも含めた
-          // まま渡す。ベースのエントリを落とす判断は {@link baseAfterDeletions} が持つ。
-          const deletionCandidates: readonly RepoRelPath[] = [
-            ...deletedFiles,
-            ...deletedWithLocalEdits,
-          ];
-
-          // union マージを行ったときは lock の base[ziku.jsonc] をローカル最終内容（union）に
-          // 揃える。templateHashes 側に寄せると、テンプレが削除したパターンを後続 push が
-          // localOnly として再追加してしまう。
-          const baseHashesForLock: HashMap =
-            configSync.baseHash !== undefined
-              ? { ...hashes.templateHashes, [ZIKU_CONFIG_FILE]: configSync.baseHash }
-              : hashes.templateHashes;
-
-          const totalChanges =
-            autoUpdate.length +
-            plan.files.newFiles.length +
-            conflicts.length +
-            deletableFiles.length +
-            deletedWithLocalEdits.length +
-            (configSync.write !== undefined ? 1 : 0);
-
-          const rewriteLock = lockNeedsRewrite({
-            configBaseHash: configSync.baseHash,
-            recordedConfigBaseHash: hashes.baseHashes[ZIKU_CONFIG_FILE],
-            hasStaleBaseEntries,
-          });
-
-          if (totalChanges === 0 && !rewriteLock) {
+          if (changes.totalChanges === 0 && !changes.rewriteLock) {
             log.success("Already up to date");
             outro("No changes needed");
             return;
           }
 
-          if (totalChanges > 0) {
-            logPullSummary({ ...plan.files, deletedFiles: deletableFiles });
+          if (changes.totalChanges > 0) {
+            logPullSummary({ ...plan.files, deletedFiles: changes.deletableFiles });
           }
 
           if (args.dryRun) {
@@ -273,53 +246,57 @@ export const pullCommand = defineCommand({
               templateDir,
               lock,
               conflicts,
-              deletedFiles: deletableFiles,
+              deletedFiles: changes.deletableFiles,
               deletedWithLocalEdits,
-              configWrite: configSync.write,
+              configWrite,
               flags: approvalFlags,
             });
             return;
           }
 
+          // ベースの解決は、ファイルへ書き込む前に済ませる。トークンが拒否されていれば
+          // ここで失敗するので、ワークツリーも lock も手つかずのまま止まり、トークンを
+          // 直して実行し直せばよい状態になる。書き込みの後ろに置くと、更新済みのファイルと
+          // 解決待ちの記録を残したまま lock だけ書けずに終わる。
+          const latestRefOption = await runCommandEffect(resolveBaseRef);
+
+          // 中断経路（markMerging）と確定経路（markSynced）が書くベースは、削除を適用した
+          // かどうか以外すべて同じ。両方をこの 1 つの計算へ通すことで、片方だけ直して
+          // ベースがずれる事故（{@link baseAfterDeletions} が最も避けたい失敗）を作れなくする。
+          const syncBaseAfter = (appliedDeletions: ReadonlySet<RepoRelPath>): SyncPoint =>
+            nextSyncBase({
+              advancedBase: changes.advancedBase,
+              previousBase: hashes.baseHashes,
+              localHashes: hashes.localHashes,
+              deletions: { candidates: changes.deletionCandidates, applied: appliedDeletions },
+              resolvedRef: Option.getOrUndefined(latestRefOption),
+              recordedRef: baseCommitSha(lock),
+            });
+
           // 自動更新・新規追加・ziku.jsonc union 同期をまとめて適用
-          await applyPullUpdates({
-            autoUpdate,
-            newFiles: plan.files.newFiles,
-            configWrite: configSync.write,
-            targetDir,
-            templateDir,
-          });
+          await runCommandEffect(
+            applyPullUpdates({
+              autoUpdate,
+              newFiles: plan.files.newFiles,
+              configWrite,
+              targetDir,
+              templateDir,
+            }),
+          );
 
           // コンフリクト解決
-          const unresolvedConflicts = await resolveConflicts(conflicts, {
-            targetDir,
-            templateDir,
-            lock,
-          });
+          const unresolvedConflicts = await runCommandEffect(
+            resolveConflicts(conflicts, { targetDir, templateDir, lock }),
+          );
 
           const [firstConflict, ...restConflicts] = unresolvedConflicts;
           if (firstConflict !== undefined) {
             const pendingConflicts: PendingConflicts = [firstConflict, ...restConflicts];
-            const latestRefOption = await Effect.runPromise(resolveBaseRef);
+            // 解決待ちで抜けるこの経路は、削除の問い合わせより手前にある。削除は 1 件も
+            // 適用していないので、候補すべてのベースが据え置かれる。
             await saveLock(
               targetDir,
-              markMerging(
-                lock,
-                {
-                  // 解決待ちで抜けるこの経路は、削除の問い合わせより手前にある。削除は
-                  // 1 件も適用していないので、候補すべてのベースを据え置く。
-                  hashes: baseAfterDeletions({
-                    advancedBase: baseHashesForLock,
-                    previousBase: hashes.baseHashes,
-                    localHashes: hashes.localHashes,
-                    deletions: { candidates: deletionCandidates, applied: new Set() },
-                  }),
-                  // SHA を解決できなかった場合は既存のベース SHA を引き継ぐ。ハッシュだけ
-                  // 前進させて SHA を落とすと、次回のマージがベースツリーを取り直せなくなる。
-                  commitSha: Option.getOrUndefined(latestRefOption) ?? baseCommitSha(lock),
-                },
-                pendingConflicts,
-              ),
+              markMerging(lock, syncBaseAfter(new Set()), pendingConflicts),
             );
             outro("Merge paused — resolve conflicts then run `ziku pull --continue`");
             return;
@@ -327,38 +304,23 @@ export const pullCommand = defineCommand({
 
           // 削除されたファイルを処理（plan.files に ziku.jsonc は入らない）
           const appliedDeletions = new Set<RepoRelPath>();
-          if (deletableFiles.length > 0) {
-            for (const path of await handleDeletedFiles(deletableFiles, targetDir, approvalFlags)) {
-              appliedDeletions.add(path);
-            }
-          }
-
-          if (deletedWithLocalEdits.length > 0) {
-            for (const path of await handleDeletedWithLocalEdits(
-              deletedWithLocalEdits,
-              targetDir,
-              approvalFlags,
+          if (changes.deletableFiles.length > 0) {
+            for (const path of await runCommandEffect(
+              handleDeletedFiles(changes.deletableFiles, targetDir, approvalFlags),
             )) {
               appliedDeletions.add(path);
             }
           }
 
-          const latestRefOption = await Effect.runPromise(resolveBaseRef);
+          if (deletedWithLocalEdits.length > 0) {
+            for (const path of await runCommandEffect(
+              handleDeletedWithLocalEdits(deletedWithLocalEdits, targetDir, approvalFlags),
+            )) {
+              appliedDeletions.add(path);
+            }
+          }
 
-          // SHA を解決できなかった場合は、既存のベース SHA を引き継ぐ。ハッシュだけ前進させて
-          // SHA を落とすと、次回のマージがベースツリーを取り直せなくなる。
-          await saveLock(
-            targetDir,
-            markSynced(lock, {
-              hashes: baseAfterDeletions({
-                advancedBase: baseHashesForLock,
-                previousBase: hashes.baseHashes,
-                localHashes: hashes.localHashes,
-                deletions: { candidates: deletionCandidates, applied: appliedDeletions },
-              }),
-              commitSha: Option.getOrUndefined(latestRefOption) ?? baseCommitSha(lock),
-            }),
-          );
+          await saveLock(targetDir, markSynced(lock, syncBaseAfter(appliedDeletions)));
 
           outro("Pull complete");
         }),
@@ -385,26 +347,23 @@ function logNewIncludeNotice(newInclude: readonly GlobPattern[]): void {
 /**
  * pull における `ziku.jsonc` の加法 union 同期を計算する。
  *
- * - `baseHash`: lock に記録すべき base ハッシュ（= ローカル最終内容 = union）。union マージを
- *   行う場合のみ定義される。base をローカル最終内容に揃えることで、テンプレ削除パターンを
- *   後続 push が再追加するのを防ぐ。
- * - `write`: 実際に書き込む内容。union が現在のローカルと一致する場合（テンプレ削除のみ等）は
- *   undefined（no-op）。これにより再検出ノイズを防ぐ。
+ * ローカルとテンプレートの内容を読むところまでがここの仕事で、結末をどう lock と書き込みへ
+ * 反映するかは {@link ZikuConfigMergeResult} を受け取る `pull-plan.ts` 側が決める。
  */
 function resolveConfigMerge(
   targetDir: AbsPath,
   templateDir: AbsPath,
   action: ZikuConfigPullAction,
-): Promise<{ baseHash?: ContentHash; write?: string }> {
+): Promise<ZikuConfigMergeResult> {
   return match(action)
-    .with({ _tag: "Skip" }, () => Promise.resolve({}))
-    .with({ _tag: "UnionMerge" }, async () => {
+    .with({ _tag: "Skip" }, (): Promise<ZikuConfigMergeResult> => Promise.resolve({ _tag: "Skip" }))
+    .with({ _tag: "UnionMerge" }, async (): Promise<ZikuConfigMergeResult> => {
       const merged = await computeMergedZikuConfig({ targetDir, templateDir });
       const currentLocal = await readFile(joinAbs(targetDir, ZIKU_CONFIG_FILE), "utf-8");
-      return {
-        baseHash: hashContent(merged),
-        write: merged !== currentLocal ? merged : undefined,
-      };
+      const baseHash = hashContent(merged);
+      return merged === currentLocal
+        ? { _tag: "BaseOnly", baseHash }
+        : { _tag: "Write", baseHash, content: merged };
     })
     .exhaustive();
 }
@@ -413,30 +372,51 @@ function resolveConfigMerge(
  * pull の適用フェーズ（autoUpdate コピー・newFiles 追加・ziku.jsonc の union 書き込み）を
  * まとめて実行する。run() 本体の分岐数（複雑度）を抑えるために切り出す。
  */
-async function applyPullUpdates(opts: {
+function applyPullUpdates(opts: {
   autoUpdate: readonly RepoRelPath[];
   newFiles: readonly RepoRelPath[];
   configWrite: string | undefined;
   targetDir: AbsPath;
   templateDir: AbsPath;
-}): Promise<void> {
-  await applyFiles(opts.autoUpdate, opts.templateDir, opts.targetDir);
-  if (opts.autoUpdate.length > 0) {
-    log.success(`Updated ${opts.autoUpdate.length} file(s)`);
-  }
+}): Effect.Effect<void> {
+  return Effect.gen(function* () {
+    yield* applyTemplateFiles(opts.autoUpdate, opts.templateDir, opts.targetDir);
+    if (opts.autoUpdate.length > 0) {
+      log.success(`Updated ${opts.autoUpdate.length} file(s)`);
+    }
 
-  await applyFiles(opts.newFiles, opts.templateDir, opts.targetDir);
-  if (opts.newFiles.length > 0) {
-    log.success(`Added ${opts.newFiles.length} new file(s)`);
-  }
+    yield* applyTemplateFiles(opts.newFiles, opts.templateDir, opts.targetDir);
+    if (opts.newFiles.length > 0) {
+      log.success(`Added ${opts.newFiles.length} new file(s)`);
+    }
 
-  // ziku.jsonc を加法 union で同期（テンプレの追加は取り込み、削除は伝播しない）。
-  if (opts.configWrite !== undefined) {
-    await Effect.runPromise(
-      writeFileEnsureDir(joinAbs(opts.targetDir, ZIKU_CONFIG_FILE), opts.configWrite),
-    );
-    log.success(`Merged ${pc.cyan(ZIKU_CONFIG_FILE)}`);
-  }
+    // ziku.jsonc を加法 union で同期（テンプレの追加は取り込み、削除は伝播しない）。
+    if (opts.configWrite !== undefined) {
+      yield* writeFileEnsureDir(joinAbs(opts.targetDir, ZIKU_CONFIG_FILE), opts.configWrite);
+      log.success(`Merged ${pc.cyan(ZIKU_CONFIG_FILE)}`);
+    }
+  });
+}
+
+/**
+ * テンプレートの更新（autoUpdate / newFiles）をローカルへ置く。
+ *
+ * 読むのは走査した直後のテンプレートなので、ここでファイルが消えているのは実行中にテンプレート
+ * のツリーが変わった場合だけ。ユーザーが選び直せる失敗ではないため defect として運び、元の
+ * 例外をそのまま見せる。書き込んだ内容のハッシュは使わない（次のベースはテンプレートを走査した
+ * ハッシュから決まる）。
+ */
+function applyTemplateFiles(
+  files: readonly RepoRelPath[],
+  templateDir: AbsPath,
+  targetDir: AbsPath,
+): Effect.Effect<void> {
+  return copyTemplateFiles({
+    files,
+    templateDir,
+    targetDir,
+    onUnreadable: (_file, cause) => cause,
+  }).pipe(Effect.orDie, Effect.asVoid);
 }
 
 /**
@@ -462,12 +442,14 @@ async function previewPull(params: {
     log.message(`  ${pc.cyan("~")} ${pc.cyan(ZIKU_CONFIG_FILE)} ${pc.dim("(would be merged)")}`);
   }
 
-  const previewUnresolved = await resolveConflicts(params.conflicts, {
-    targetDir: params.targetDir,
-    templateDir: params.templateDir,
-    lock: params.lock,
-    dryRun: true,
-  });
+  const previewUnresolved = await runCommandEffect(
+    resolveConflicts(params.conflicts, {
+      targetDir: params.targetDir,
+      templateDir: params.templateDir,
+      lock: params.lock,
+      dryRun: true,
+    }),
+  );
 
   // 実 pull は解決待ちで中断すると削除の処理まで到達しない。中断するプレビューで削除の
   // 見込みを伝えると、この実行では起きないことを予告することになる。削除候補は解決後の
@@ -518,21 +500,42 @@ function describeDeletedFilesPreview(count: number, flags: PullApprovalFlags): s
 }
 
 /**
- * テンプレートからファイルをコピーする共通処理。
- * autoUpdate と newFiles で同じロジックを使う（DRY）。
+ * テンプレートの内容でローカルを置き換え、書き込んだ内容のハッシュを返す。
  *
- * 内容をバイト列のまま運ぶ。テンプレートの画像やフォントを utf-8 の文字列として
- * 読み書きすると、不正バイトが U+FFFD へ置き換わってファイルが壊れる。
+ * 取り込み（autoUpdate / newFiles）と `--continue` の「テンプレートを取る」は、どちらも
+ * 「テンプレートのバイト列をそのままローカルへ置く」操作なのでこの 1 本に集約する。
+ *
+ * 内容をバイト列のまま運ぶ。テンプレートの画像やフォントを utf-8 の文字列として読み書き
+ * すると、不正バイトが U+FFFD へ置き換わってファイルが壊れる。ハッシュも同じバイト列から
+ * 計算するので、ディスクを読み直したときの値と一致する。
+ *
+ * @param onUnreadable テンプレート側を読めなかったときの失敗。何が起きているかが経路ごとに
+ *   違う（取り込み中なら実行中にテンプレートが変わった予期しない事象、`--continue` なら
+ *   ユーザーがローカルを残す側で選び直せる失敗）ので、失敗の作り方だけを呼び出し側が渡す。
+ * @param onCopied 1 ファイル書き終えるたびに呼ぶ通知。どのファイルを置き換えたかを都度
+ *   見せる経路だけが渡す。
+ * @returns 置き換えたファイルと、書き込んだ内容のハッシュ。
  */
-async function applyFiles(
-  files: readonly RepoRelPath[],
-  templateDir: AbsPath,
-  targetDir: AbsPath,
-): Promise<void> {
-  for (const file of files) {
-    const bytes = await readFile(joinAbs(templateDir, file));
-    await Effect.runPromise(writeFileEnsureDir(joinAbs(targetDir, file), bytes));
-  }
+function copyTemplateFiles<E>(params: {
+  readonly files: readonly RepoRelPath[];
+  readonly templateDir: AbsPath;
+  readonly targetDir: AbsPath;
+  readonly onUnreadable: (file: RepoRelPath, cause: unknown) => E;
+  readonly onCopied?: (file: RepoRelPath) => void;
+}): Effect.Effect<HashMap, E> {
+  return Effect.gen(function* () {
+    const written: HashMap = {};
+    for (const file of params.files) {
+      const bytes = yield* Effect.tryPromise({
+        try: () => readFile(joinAbs(params.templateDir, file)),
+        catch: (cause) => params.onUnreadable(file, cause),
+      });
+      yield* writeFileEnsureDir(joinAbs(params.targetDir, file), bytes);
+      written[file] = hashBytes(bytes);
+      params.onCopied?.(file);
+    }
+    return written;
+  });
 }
 
 /**
@@ -541,7 +544,7 @@ async function applyFiles(
  * ループとベース取得は `mergeConflictFiles` が持つ。ここが担うのは pull 固有の後処理、
  * つまり「マージできた内容をローカルへ書き戻し、結末をユーザーへ伝える」ことだけ。
  */
-async function resolveConflicts(
+function resolveConflicts(
   conflicts: readonly RepoRelPath[],
   ctx: {
     targetDir: AbsPath;
@@ -549,25 +552,25 @@ async function resolveConflicts(
     lock: ResumableLockState;
     dryRun?: boolean;
   },
-): Promise<readonly PendingConflict[]> {
+): Effect.Effect<readonly PendingConflict[]> {
   const dryRun = ctx.dryRun ?? false;
 
-  const unresolvedConflicts = await Effect.runPromise(
-    mergeConflictFiles({
+  return Effect.gen(function* () {
+    const unresolvedConflicts = yield* mergeConflictFiles({
       conflicts,
       targetDir: ctx.targetDir,
       templateDir: ctx.templateDir,
       lock: ctx.lock,
       onFileResult: ({ file, outcome }) =>
         applyMergeOutcome({ file, outcome, targetDir: ctx.targetDir, dryRun }),
-    }),
-  );
+    });
 
-  if (unresolvedConflicts.length > 0 && !dryRun) {
-    log.warn("Some files have conflicts. Resolve them, then run `ziku pull --continue`");
-  }
+    if (unresolvedConflicts.length > 0 && !dryRun) {
+      log.warn("Some files have conflicts. Resolve them, then run `ziku pull --continue`");
+    }
 
-  return unresolvedConflicts;
+    return unresolvedConflicts;
+  });
 }
 
 /**
@@ -624,185 +627,37 @@ function formatRegions(regions: readonly ConflictRegion[]): string {
 }
 
 /**
- * `--force`（破壊的操作の承認）と `--yes`（対話の省略）の組み合わせ。
- * 削除候補の扱いはこの 2 つだけで決まる。
- */
-interface PullApprovalFlags {
-  readonly force: boolean;
-  readonly yes: boolean;
-}
-
-/** 削除候補に対して取る行動。 */
-type DeletionPolicy = "deleteAll" | "keepAll" | "askUser";
-
-/**
- * テンプレートで削除され、ローカルも base のままのファイルの扱いを決める。
- *
- * 失われるのはテンプレートから再取得できる内容だけなので、`--force` はこの削除の承認に
- * なる。承認済みの対象について改めて選択を求めても意味が無いので全件削除する。
- * `--yes` はプロンプトを省くだけで削除を承認しないため、全件残す。
- */
-function resolveDeletionPolicy(flags: PullApprovalFlags): DeletionPolicy {
-  return match(flags)
-    .with({ force: true }, () => "deleteAll" as const)
-    .with({ force: false, yes: true }, () => "keepAll" as const)
-    .with({ force: false, yes: false }, () => "askUser" as const)
-    .exhaustive();
-}
-
-/**
- * プロンプトを出さずに進める実行か。
- *
- * `--yes` は対話の省略、`--force` は破壊的操作の承認で、どちらも対話端末を前提にしない
- * 実行を意図する指定。選択を求める処理はこの判定で分岐し、入力待ちで止まらないようにする。
- * 選択できないときに何をするかは処理ごとに違う（削除候補は残し、マージの選択は中断する）。
- */
-function isNonInteractive(flags: PullApprovalFlags): boolean {
-  return flags.force || flags.yes;
-}
-
-/**
- * ユーザーへ見せる変更が 1 件も無くても、lock だけは書き直す必要があるか。
- *
- * 該当するのは 2 つ。ziku.jsonc の base を union の内容へ揃える必要がある場合（例: conflict
- * だが union==local で書き込みが要らない）と、ベースにだけ残ったエントリを落とす場合。
- * どちらも古い base を残すと `status` / `push` が誤判定し、同じ状態のまま毎回走ることになる。
- *
- * @param configBaseHash union マージが決めた ziku.jsonc の base。揃える必要が無ければ undefined。
- * @param recordedConfigBaseHash lock に記録されている ziku.jsonc の base。
- */
-function lockNeedsRewrite(params: {
-  readonly configBaseHash: ContentHash | undefined;
-  readonly recordedConfigBaseHash: ContentHash | undefined;
-  readonly hasStaleBaseEntries: boolean;
-}): boolean {
-  const configBaseChanged =
-    params.configBaseHash !== undefined && params.configBaseHash !== params.recordedConfigBaseHash;
-  return configBaseChanged || params.hasStaleBaseEntries;
-}
-
-/** テンプレートが削除したファイルを、削除を問える側と問う意味が無い側に分けた結果。 */
-interface TemplateDeletions {
-  /** ローカルに実在し、削除するか残すかを問える候補。 */
-  readonly deletable: readonly RepoRelPath[];
-  /** ベースにだけエントリが残っているファイルがあるか。 */
-  readonly hasStaleBaseEntries: boolean;
-}
-
-/**
- * テンプレートが削除したファイルを、ローカルでの実在で分ける。
- *
- * `deletedFiles` には「テンプレートにもワークツリーにも無く、ベースにだけ残っている」
- * ファイルも入る（`utils/merge/classify.ts`）。消すものが無いので、候補として見せても
- * 選択も削除ログも実体を伴わない。
- *
- * ベースにだけ残ったエントリは、見せる変更が無くても lock を書き直して落とす必要がある
- * （{@link baseAfterDeletions}）。落とさないと毎回同じ状態で走り、`status` も同期済みに
- * ならないため、その有無を呼び出し側へ返す。
- */
-function splitTemplateDeletions(
-  deletedFiles: readonly RepoRelPath[],
-  localHashes: HashMap,
-): TemplateDeletions {
-  const deletable = deletedFiles.filter((path) => localHashes[path] !== undefined);
-  return { deletable, hasStaleBaseEntries: deletable.length < deletedFiles.length };
-}
-
-/**
- * テンプレート側の削除候補と、そのうち実際にローカルから消したもの。
- *
- * 候補と適用結果を 1 つの値で運ぶことで、{@link baseAfterDeletions} が「残ったのはどれか」を
- * 自分で導ける。呼び出し側が差を計算して渡す形にすると、経路ごとに引き算が散る。
- */
-interface DeletionOutcome {
-  /** テンプレートから消えたファイル。`deletedFiles` と `deletedWithLocalEdits` の合計。 */
-  readonly candidates: readonly RepoRelPath[];
-  /** そのうちローカルからも消したファイル。 */
-  readonly applied: ReadonlySet<RepoRelPath>;
-}
-
-/**
- * lock に書き込む同期ベースを、適用された削除だけ反映した形で組み立てる。
- *
- * pull は分類に使ったテンプレート側のハッシュをそのまま次のベースにする。テンプレートから
- * 消えたファイルはそこにエントリを持たないので、ローカルに残したファイルまでベースを進めると
- * 「base に無い・template に無い・local にある」＝ `localOnly` に化ける。`localOnly` は
- * push の既定送信集合であり、`restoresTemplateDeletion`（テンプレートの削除を取り消す操作
- * だと識別するための集合）にも入らない。結果として、次の `ziku push --yes` がテンプレートの
- * 削除を黙って巻き戻す。
- *
- * そこで据え置くのは、次の 2 つをどちらも満たすファイルだけ。
- *
- * 1. 今回の実行で削除を適用しなかった
- * 2. ローカルのワークツリーにファイルが実在する（`localHashes` にエントリがある）
- *
- * 条件 2 が要るのは、据え置きが `localOnly` への化けを防ぐためのものだから。ローカルに無い
- * ファイルは push の送信集合に入りようがなく、据え置く理由が無い。削除候補には
- * 「テンプレートにもワークツリーにも無く、ベースにだけ残っている」ファイルも入る
- * （`utils/merge/classify.ts`）。これは削除の適用対象にならないので、据え置くとベースの
- * エントリだけが永久に残り、毎回削除候補として報告され `status` も同期済みにならない。
- * エントリを落とせば以降は分類の対象から外れ、繰り返しても状態が収束する。
- *
- * 据え置いたファイルは次回の pull でも「テンプレートが削除した」状態として同じカテゴリに
- * 分類され、ユーザーは削除するか残すかを再び問われる。テンプレートとの差異が解消していない
- * 以上、問われ続けるのが正しい。黙ってテンプレートへ送り返すより、毎回目に入るほうが失う
- * ものが小さい。
- *
- * lock を書く経路は 3 つある（通常フローの確定・解決待ちでの中断・`pull --continue` の確定）。
- * 前 2 つはこの関数を通し、`--continue` は中断時に書いた `merge.nextBase` をそのまま昇格
- * させるので、ベースの決め方はこの 1 箇所に閉じる。
- */
-function baseAfterDeletions(params: {
-  /** テンプレート側へ前進させたベース（`ziku.jsonc` の補正込み）。 */
-  readonly advancedBase: HashMap;
-  /** 今回の比較で共通祖先として使ったベース。 */
-  readonly previousBase: HashMap;
-  /** 今回の走査で得たローカルのハッシュ。エントリの有無がワークツリーでの実在と一致する。 */
-  readonly localHashes: HashMap;
-  readonly deletions: DeletionOutcome;
-}): HashMap {
-  const retained = params.deletions.candidates.filter(
-    (path) => !params.deletions.applied.has(path) && params.localHashes[path] !== undefined,
-  );
-  if (retained.length === 0) return params.advancedBase;
-
-  const base: HashMap = { ...params.advancedBase };
-  for (const path of retained) {
-    const previous = params.previousBase[path];
-    // 削除候補はベースにエントリを持つ（`utils/merge/classify.ts` の `hasBase: true` 側から
-    // しか出てこない）。型はそれを保証しないので、無ければ前進させた側をそのまま残す。
-    if (previous === undefined) continue;
-    base[path] = previous;
-  }
-  return base;
-}
-
-/**
  * テンプレートで削除され、ローカルも base のままのファイルを処理する。
  *
  * @returns 実際にローカルから削除したファイル。残したものはベースを据え置く
  *   （{@link baseAfterDeletions}）。
  */
-async function handleDeletedFiles(
+function handleDeletedFiles(
   deletedFiles: readonly RepoRelPath[],
   targetDir: AbsPath,
   flags: PullApprovalFlags,
-): Promise<ReadonlySet<RepoRelPath>> {
-  const filesToDelete = await match(resolveDeletionPolicy(flags))
-    .with("deleteAll", (): readonly RepoRelPath[] => {
-      log.info(`Deleting ${deletedFiles.length} file(s) removed from template...`);
-      return deletedFiles;
-    })
-    .with("keepAll", (): readonly RepoRelPath[] => {
-      log.warn(
-        `Kept ${deletedFiles.length} file(s) removed from the template — --yes skips prompts but does not approve deletion. Re-run with --force to delete them.`,
-      );
-      return [];
-    })
-    .with("askUser", () => selectDeletedFiles(deletedFiles))
-    .exhaustive();
+): Effect.Effect<ReadonlySet<RepoRelPath>> {
+  return Effect.gen(function* () {
+    const filesToDelete = yield* match(resolveDeletionPolicy(flags))
+      .with("deleteAll", (): Effect.Effect<readonly RepoRelPath[]> => {
+        log.info(`Deleting ${deletedFiles.length} file(s) removed from template...`);
+        return Effect.succeed(deletedFiles);
+      })
+      .with("keepAll", (): Effect.Effect<readonly RepoRelPath[]> => {
+        log.warn(
+          `Kept ${deletedFiles.length} file(s) removed from the template — --yes skips prompts but does not approve deletion. Re-run with --force to delete them.`,
+        );
+        return Effect.succeed([]);
+      })
+      .with(
+        "askUser",
+        (): Effect.Effect<readonly RepoRelPath[]> =>
+          Effect.promise(() => selectDeletedFiles(deletedFiles)),
+      )
+      .exhaustive();
 
-  return deleteSelectedFiles(filesToDelete, targetDir);
+    return yield* deleteSelectedFiles(filesToDelete, targetDir);
+  });
 }
 
 /**
@@ -818,31 +673,33 @@ async function handleDeletedFiles(
  *
  * @returns 実際にローカルから削除したファイル。
  */
-async function handleDeletedWithLocalEdits(
+function handleDeletedWithLocalEdits(
   files: readonly RepoRelPath[],
   targetDir: AbsPath,
   flags: PullApprovalFlags,
-): Promise<ReadonlySet<RepoRelPath>> {
-  if (isNonInteractive(flags)) {
+): Effect.Effect<ReadonlySet<RepoRelPath>> {
+  return Effect.gen(function* () {
+    if (isNonInteractive(flags)) {
+      log.warn(
+        `Kept ${files.length} file(s) removed from the template because they have local edits. Run 'ziku pull' without --force / --yes to choose which to delete.`,
+      );
+      return new Set<RepoRelPath>();
+    }
+
     log.warn(
-      `Kept ${files.length} file(s) removed from the template because they have local edits. Run 'ziku pull' without --force / --yes to choose which to delete.`,
+      `${files.length} file(s) removed from the template have local edits — select explicitly to delete:`,
     );
-    return new Set();
-  }
+    const filesToDelete = yield* Effect.promise(() => selectDeletedFilesWithLocalEdits(files));
 
-  log.warn(
-    `${files.length} file(s) removed from the template have local edits — select explicitly to delete:`,
-  );
-  const filesToDelete = await selectDeletedFilesWithLocalEdits(files);
+    const deleted = yield* deleteSelectedFiles(filesToDelete, targetDir);
 
-  const deleted = await deleteSelectedFiles(filesToDelete, targetDir);
+    const kept = files.filter((f) => !deleted.has(f));
+    if (kept.length > 0) {
+      log.info(`Kept ${kept.length} locally edited file(s).`);
+    }
 
-  const kept = files.filter((f) => !deleted.has(f));
-  if (kept.length > 0) {
-    log.info(`Kept ${kept.length} locally edited file(s).`);
-  }
-
-  return deleted;
+    return deleted;
+  });
 }
 
 /**
@@ -851,14 +708,14 @@ async function handleDeletedWithLocalEdits(
  * @returns 実際に消えたファイル。消せなかったファイルはローカルに残っているため、
  *   呼び出し側はベースを進めてはいけない。
  */
-async function deleteSelectedFiles(
+function deleteSelectedFiles(
   files: readonly RepoRelPath[],
   targetDir: AbsPath,
-): Promise<ReadonlySet<RepoRelPath>> {
-  const deleted = new Set<RepoRelPath>();
-  for (const file of files) {
-    const removed = await Effect.runPromise(
-      Effect.tryPromise(async () => {
+): Effect.Effect<ReadonlySet<RepoRelPath>> {
+  return Effect.gen(function* () {
+    const deleted = new Set<RepoRelPath>();
+    for (const file of files) {
+      const removed = yield* Effect.tryPromise(async () => {
         await rm(joinAbs(targetDir, file), { force: true });
         log.success(`Deleted: ${file}`);
         return true;
@@ -867,11 +724,11 @@ async function deleteSelectedFiles(
           log.warn(`Could not delete: ${file}`);
           return false;
         }),
-      ),
-    );
-    if (removed) deleted.add(file);
-  }
-  return deleted;
+      );
+      if (removed) deleted.add(file);
+    }
+    return deleted;
+  });
 }
 
 /**
@@ -933,9 +790,8 @@ async function runContinue(
 ): Promise<void> {
   const unmerged = lock.merge.conflicts.filter(isUnmergedConflict);
 
-  const stillConflicted = await findRemainingMarkers(
-    targetDir,
-    lock.merge.conflicts.filter(hasReadableText),
+  const stillConflicted = await runCommandEffect(
+    findRemainingMarkers(targetDir, lock.merge.conflicts.filter(hasReadableText)),
   );
   if (stillConflicted.length > 0) {
     throw zikuFailure({
@@ -987,31 +843,6 @@ async function runContinue(
 }
 
 /**
- * 解決を終えたベースを確定した lock を組み立てる。
- *
- * テンプレートの内容で置き換えたファイルは、`nextBase` に記録されたハッシュではなく実際に
- * 書き込んだ内容のハッシュをベースにする。書き込む内容の取得元が中断時点のツリーである保証は
- * 無いため（{@link acquireResolutionTemplate}）、`nextBase` をそのまま載せると「ローカルに
- * ある内容」と「ベースが指す内容」が食い違い、直後から同じファイルが `localOnly` として現れて
- * 次の push がテンプレートの内容をローカルの変更として送り返す。
- *
- * 置き換えたファイルが無ければ到達点は `nextBase` そのものなので、`resolveMerge` で確定する。
- *
- * @param takenFromTemplate テンプレートの内容で置き換えたファイルと、書き込んだ内容のハッシュ。
- */
-function finalizeMergedBase(
-  lock: MergingLockState,
-  takenFromTemplate: HashMap,
-): ResumableLockState {
-  if (Object.keys(takenFromTemplate).length === 0) return resolveMerge(lock);
-
-  return markSynced(lock, {
-    hashes: { ...lock.merge.nextBase.hashes, ...takenFromTemplate },
-    commitSha: lock.merge.nextBase.ref,
-  });
-}
-
-/**
  * dry-run で、自動マージできなかったファイルを `--continue` がどう扱うかを伝える。
  *
  * 非対話を意図する実行では選択を求められないまま中断するため、プレビューの時点でそれを
@@ -1023,22 +854,6 @@ function describeUnmergedPreview(count: number, flags: PullApprovalFlags): strin
     : `${count} file(s) could not be auto-merged — continue would ask whether to keep your local version or take the template's:`;
 }
 
-/** 自動マージを試みなかった経路か。マーカーの有無では解決を判定できない側。 */
-function isUnmergedConflict(conflict: PendingConflict): conflict is UnmergedConflict {
-  return match(conflict)
-    .with({ reason: "markers" }, () => false)
-    .with({ reason: P.union("noBase", "binary") }, () => true)
-    .exhaustive();
-}
-
-/** テキストとして読めるか。バイナリの中からマーカーを探しても意味を持たない。 */
-function hasReadableText(conflict: PendingConflict): boolean {
-  return match(conflict)
-    .with({ reason: P.union("markers", "noBase") }, () => true)
-    .with({ reason: "binary" }, () => false)
-    .exhaustive();
-}
-
 /**
  * ローカルに残っているコンフリクトマーカーを探す。
  *
@@ -1048,20 +863,20 @@ function hasReadableText(conflict: PendingConflict): boolean {
  * ziku がマーカーを書いていない `noBase` も走査する。ユーザーが自分でマーカーを書いた
  * まま再開することがあり、そのままテンプレートへ送らせないため。
  */
-async function findRemainingMarkers(
+function findRemainingMarkers(
   targetDir: AbsPath,
   conflicts: readonly PendingConflict[],
-): Promise<Array<{ file: RepoRelPath; regions: readonly ConflictRegion[] }>> {
-  const stillConflicted: Array<{ file: RepoRelPath; regions: readonly ConflictRegion[] }> = [];
-  for (const { path } of conflicts) {
-    const contentOption = await Effect.runPromise(
-      readFileSafe(joinAbs(targetDir, path)).pipe(Effect.option),
-    );
-    if (Option.isNone(contentOption)) continue;
-    const regions = findConflictRegions(contentOption.value);
-    if (regions.length > 0) stillConflicted.push({ file: path, regions });
-  }
-  return stillConflicted;
+): Effect.Effect<Array<{ file: RepoRelPath; regions: readonly ConflictRegion[] }>> {
+  return Effect.gen(function* () {
+    const stillConflicted: Array<{ file: RepoRelPath; regions: readonly ConflictRegion[] }> = [];
+    for (const { path } of conflicts) {
+      const contentOption = yield* readFileSafe(joinAbs(targetDir, path)).pipe(Effect.option);
+      if (Option.isNone(contentOption)) continue;
+      const regions = findConflictRegions(contentOption.value);
+      if (regions.length > 0) stillConflicted.push({ file: path, regions });
+    }
+    return stillConflicted;
+  });
 }
 
 /**
@@ -1158,14 +973,11 @@ function acquireResolutionTemplate(
 }
 
 /**
- * テンプレートの内容でローカルを置き換え、書き込んだ内容のハッシュを返す。
- *
- * 内容をバイト列のまま運ぶ。バイナリを utf-8 の文字列として読み書きすると、不正バイトが
- * U+FFFD へ置き換わってファイルが壊れる（このカテゴリにはバイナリが含まれる）。ハッシュも
- * 同じバイト列から計算するので、ディスクを読み直したときの値と一致する。
+ * 「テンプレートを取る」と選ばれたファイルを、テンプレートの内容で置き換える。
  *
  * 取り寄せたテンプレートにファイルが無い場合は失敗として返す。書き込む内容が無いまま
- * 進めると、ローカルを残したのにベースだけがテンプレート側へ前進する。
+ * 進めると、ローカルを残したのにベースだけがテンプレート側へ前進する。ユーザーはローカルを
+ * 残す側で選び直せるので、失敗として渡して判断材料にする。
  *
  * @returns 置き換えたファイルと、書き込んだ内容のハッシュ。呼び出し側がベースとして確定する。
  */
@@ -1174,29 +986,28 @@ function copyFromTemplate(
   templateDir: AbsPath,
   targetDir: AbsPath,
 ): Effect.Effect<HashMap, ZikuFailure> {
-  return Effect.gen(function* () {
-    const written: HashMap = {};
-    for (const file of files) {
-      const bytes = yield* Effect.tryPromise({
-        try: () => readFile(joinAbs(templateDir, file)),
-        catch: (cause) => zikuFailure({ kind: "TemplateFileMissing", path: file }, { cause }),
-      });
-      yield* writeFileEnsureDir(joinAbs(targetDir, file), bytes);
-      written[file] = hashBytes(bytes);
-      log.success(`Took the template version: ${pc.cyan(file)}`);
-    }
-    return written;
+  return copyTemplateFiles({
+    files,
+    templateDir,
+    targetDir,
+    onUnreadable: (file, cause) =>
+      zikuFailure({ kind: "TemplateFileMissing", path: file }, { cause }),
+    onCopied: (file) => log.success(`Took the template version: ${pc.cyan(file)}`),
   });
 }
 
+/**
+ * 取り込む変更の一覧と内訳を表示する。
+ *
+ * 受け取るのは行として出す分類だけ。ローカルにしか無いファイルと差分の無いファイルは pull が
+ * 何もしない対象なので、渡されても出す行が無い。
+ */
 function logPullSummary(classification: {
   autoUpdate: readonly RepoRelPath[];
   newFiles: readonly RepoRelPath[];
   conflicts: readonly RepoRelPath[];
   deletedFiles: readonly RepoRelPath[];
   deletedWithLocalEdits: readonly RepoRelPath[];
-  localOnly: readonly RepoRelPath[];
-  unchanged: readonly RepoRelPath[];
 }): void {
   const lines: string[] = [];
 

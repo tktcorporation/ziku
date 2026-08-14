@@ -1,7 +1,7 @@
 import { vol } from "memfs";
 import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { FileNotFoundError, ZikuFailure } from "../../errors";
+import { FileNotFoundError, ZikuFailure, zikuFailure } from "../../errors";
 import type {
   AbsPath,
   CommitSha,
@@ -293,7 +293,7 @@ function mockContext(overrides?: {
   lock?: LockState;
   source?: TemplateSource;
   templateDir?: AbsPath;
-  resolveBaseRef?: Effect.Effect<Option.Option<CommitSha>>;
+  resolveBaseRef?: Effect.Effect<Option.Option<CommitSha>, ZikuFailure>;
 }) {
   const cleanup = vi.fn();
   const source = overrides?.source ?? baseSource;
@@ -1095,6 +1095,45 @@ describe("pullCommand", () => {
           base: expect.objectContaining({ ref: "newsha456" }),
         }),
       );
+    });
+
+    it("resolveBaseRef が認証拒否で失敗したとき、古いベースへ倒さず中断する", async () => {
+      vol.fromJSON({
+        "/test": null,
+        "/tmp/template/.mcp.json": "updated",
+      });
+
+      const { effect } = mockContext({
+        lock: lockWithBase({ ".mcp.json": "abc123" }, "existing-sha"),
+        resolveBaseRef: Effect.fail(
+          zikuFailure({ kind: "GitHubAuthRejected", detail: "Bad credentials" }),
+        ),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: repoRelPaths([".mcp.json"]),
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedWithLocalEdits: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      const failure = await captureFailure(() =>
+        (pullCommand.run as any)({
+          args: { dir: "/test", force: false, yes: false },
+          rawArgs: [],
+          cmd: pullCommand,
+        }),
+      );
+
+      expect(failure.reason.kind).toBe("GitHubAuthRejected");
+      // lock を書かないだけでなく、ファイルへも触れないまま止まる
+      expect(mockSaveLock).not.toHaveBeenCalled();
+      expect(mockWriteFileEnsureDir).not.toHaveBeenCalled();
     });
 
     it("resolveBaseRef が None のとき既存のベース SHA を引き継ぐ", async () => {
@@ -2171,6 +2210,78 @@ describe("pullCommand", () => {
         "conflict.md": "hash-template",
         "old-file.txt": "hash-old",
       });
+    });
+
+    /**
+     * コンフリクト 1 件とテンプレート側の削除 1 件を抱えた状態で pull を 1 回走らせる。
+     *
+     * マージ結果だけを差し替えることで、中断（マーカーが残る）と確定（クリーン）の
+     * どちらの経路も同じ入力から作れる。
+     */
+    async function runPullWithMergeResult(mergedContent: string): Promise<LockState> {
+      vi.clearAllMocks();
+      vol.reset();
+      vol.fromJSON({
+        "/test/conflict.md": "local",
+        "/test/old-file.txt": "old content",
+        "/tmp/template/conflict.md": "template",
+      });
+      mockSaveLock.mockResolvedValue();
+
+      const { effect } = mockContext({
+        lock: lockWithBase({ "conflict.md": "hash-base", "old-file.txt": "hash-old" }),
+        resolveBaseRef: Effect.succeed(Option.some(commitSha("latest123"))),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      mockScannedHashes({
+        template: { "conflict.md": "hash-template" },
+        local: { "conflict.md": "hash-local", "old-file.txt": "hash-old" },
+      });
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: repoRelPaths(["conflict.md"]),
+        newFiles: [],
+        deletedFiles: repoRelPaths(["old-file.txt"]),
+        deletedWithLocalEdits: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+      mockBaseAvailable();
+      mockMergeResult("conflict.md", mergedContent);
+
+      // --yes は削除を承認しないので、どちらの経路でも old-file.txt は残る。
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      return lastSavedLock();
+    }
+
+    it("中断経路と確定経路は同じベースを書く", async () => {
+      // 到達点の計算が経路ごとに複製されていると、片方だけ直したときにベースがずれる。
+      // 中断して --continue で昇格させた場合と、その場で確定した場合とで、次のベースが
+      // 食い違ってはならない。
+      const paused = await runPullWithMergeResult(
+        "<<<<<<< LOCAL\nlocal\n=======\ntemplate\n>>>>>>> TEMPLATE\n",
+      );
+      const synced = await runPullWithMergeResult("merged");
+
+      expect(paused.sync).toBe("merging");
+      expect(synced.sync).toBe("synced");
+
+      const pausedBase = paused.sync === "merging" ? paused.merge.nextBase : undefined;
+      expect(pausedBase?.hashes).toEqual(baseHashesOf(synced));
+      expect(pausedBase?.ref).toEqual(baseCommitSha(synced));
+      // 据え置いた削除も、前進させたコンフリクトも、どちらも両経路に現れる。
+      expect(baseHashesOf(synced)).toEqual({
+        "conflict.md": "hash-template",
+        "old-file.txt": "hash-old",
+      });
+      expect(baseCommitSha(synced)).toBe("latest123");
     });
 
     it("--continue で確定したベースにも未処理の削除が残る", async () => {

@@ -11,7 +11,7 @@ import * as p from "@clack/prompts";
 import { Effect } from "effect";
 import { match } from "ts-pattern";
 import pc from "picocolors";
-import type { FileDiff } from "../modules/schemas";
+import type { FileDiff, FileOperationResult } from "../modules/schemas";
 import { summarizeDiff } from "../modules/schemas";
 
 declare const __VERSION__: string;
@@ -87,8 +87,14 @@ function runWithoutSpinner<T>(message: string, task: () => Promise<T>): Promise<
   );
 }
 
-/** ファイル操作結果を表示（init コマンド用） */
-export function logFileResults(results: { action: string; path: string }[]): {
+/**
+ * ファイル操作結果を表示（init コマンド用）。
+ *
+ * 引数を `FileAction` の union で受けるのは、表示区分への振り分けを網羅的に書くため。
+ * `action: string` で受けると既定値へ落とす分岐しか書けず、種別を足したときに
+ * どの区分へ数えるか決めないまま「スキップ」に紛れ込む。
+ */
+export function logFileResults(results: readonly FileOperationResult[]): {
   added: number;
   updated: number;
   skipped: number;
@@ -102,7 +108,8 @@ export function logFileResults(results: { action: string; path: string }[]): {
     const label = match(r.action)
       .with("copied", "created", () => "added" as const)
       .with("overwritten", () => "updated" as const)
-      .otherwise(() => "skipped" as const);
+      .with("skipped", "skipped_ignored", () => "skipped" as const)
+      .exhaustive();
 
     if (label === "added") {
       lines.push(`${pc.green("+")} ${r.path}`);

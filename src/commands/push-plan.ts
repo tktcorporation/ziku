@@ -14,7 +14,7 @@ import { z } from "zod/v4";
 import type { FileDiff, GitHubSource, GlobPattern, HashMap, RepoRelPath } from "../modules/schemas";
 import { repoRelPathSchema } from "../modules/schemas";
 import type { ConfigDrift } from "../utils/config-merge";
-import type { MergedContent } from "../utils/merge";
+import type { ConflictedContent, MergedContent } from "../utils/merge";
 import type { SyncPlan } from "../utils/merge/sync-plan";
 import { zikuConfigPushOutcome } from "../utils/merge/sync-plan";
 import type { SyncHashes } from "../utils/sync-analysis";
@@ -39,8 +39,22 @@ import { ZIKU_CONFIG_FILE, classifySyncPath, isZikuConfigPath } from "../utils/z
 const PushContentSchema = z.string().brand("PushContent");
 export type PushContent = z.infer<typeof PushContentSchema>;
 
-/** ローカルに実在する内容（ユーザーが書いたファイル・ziku が組み立てた設定）を送る。 */
-export function asPushContent(content: string): PushContent {
+/**
+ * マージ結果のブランドを弾く。素の `string` と、マージと無関係なブランド付き文字列は通す。
+ *
+ * `MergedContent` / `ConflictedContent` はどちらも `string` の部分型なので、引数を
+ * `string` にすると 3-way マージの結果がそのまま {@link asPushContent} を通ってしまう。
+ * この条件型を交差させることで、マージ由来の内容を渡した呼び出しだけが型エラーになる。
+ */
+type NotMergeOutput<T> = T extends MergedContent | ConflictedContent ? never : T;
+
+/**
+ * ローカルに実在する内容（ユーザーが書いたファイル・ziku が組み立てた設定）を送る。
+ *
+ * 3-way マージの結果は受け取らない。クリーンと判定できた内容は
+ * {@link mergedAsPushContent} が、マーカー入りの内容はどこも受け付けない。
+ */
+export function asPushContent<T extends string>(content: T & NotMergeOutput<T>): PushContent {
   return PushContentSchema.parse(content);
 }
 
@@ -198,8 +212,8 @@ export type PushFileSelection =
   | {
       readonly _tag: "Default";
       readonly includeDeletions: boolean;
-      readonly conflictedPaths: ReadonlySet<string>;
-      readonly restoresTemplateDeletion: ReadonlySet<string>;
+      readonly conflictedPaths: ReadonlySet<RepoRelPath>;
+      readonly restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
     }
   /** 対話で選ばれた結果をそのまま使う。 */
   | { readonly _tag: "Chosen"; readonly paths: readonly RepoRelPath[] };
@@ -228,9 +242,9 @@ export function filterByFilesArg(
     .map((p) => p.trim())
     .filter(Boolean)
     .map((p) => repoRelPath(p));
-  const availablePaths = new Set<string>(candidates.map((f) => f.path));
+  const availablePaths = new Set<RepoRelPath>(candidates.map((f) => f.path));
   const notFound = requestedPaths.filter((p) => !availablePaths.has(p));
-  const requestedSet = new Set<string>(requestedPaths);
+  const requestedSet = new Set<RepoRelPath>(requestedPaths);
   const filtered = candidates.filter((f) => requestedSet.has(f.path));
   return { filtered, notFound };
 }
@@ -255,8 +269,8 @@ export function defaultPushSelection(
   candidates: readonly ChangedFileDiff[],
   opts: {
     includeDeletions: boolean;
-    conflictedPaths: ReadonlySet<string>;
-    restoresTemplateDeletion: ReadonlySet<string>;
+    conflictedPaths: ReadonlySet<RepoRelPath>;
+    restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
   },
 ): ChangedFileDiff[] {
   return candidates.filter(
@@ -290,7 +304,7 @@ export function applyPushSelection(
       }),
     )
     .with({ _tag: "Chosen" }, ({ paths }): PushFileSelectionResult => {
-      const chosen = new Set<string>(paths);
+      const chosen = new Set<RepoRelPath>(paths);
       return { selected: candidates.filter((f) => chosen.has(f.path)), notFound: [] };
     })
     .exhaustive();
@@ -304,7 +318,7 @@ export function applyPushSelection(
  */
 export function selectedUnresolvedConflicts(
   selected: readonly ChangedFileDiff[],
-  unresolvedConflicts: ReadonlySet<string>,
+  unresolvedConflicts: ReadonlySet<RepoRelPath>,
 ): ChangedFileDiff[] {
   return selected.filter((f) => unresolvedConflicts.has(f.path));
 }
@@ -470,7 +484,7 @@ export function planConfigPropagation(params: {
   readonly localOnlyPatterns: readonly GlobPattern[];
 }): ConfigPropagationPlan {
   const configAlreadySelected = params.selectedPaths.some((p) => isZikuConfigPath(p));
-  const selectedPathSet = new Set<string>(params.selectedPaths);
+  const selectedPathSet = new Set<RepoRelPath>(params.selectedPaths);
   const trackedAndPushed = params.newlyTrackedPaths
     .filter((p) => selectedPathSet.has(p))
     .map((path) => pathAsPattern(path));
@@ -589,7 +603,7 @@ export function withNewlyTrackedPatterns(
  */
 export function patternsToPersist(
   newlyTrackedPaths: readonly RepoRelPath[],
-  pushedPaths: ReadonlySet<string>,
+  pushedPaths: ReadonlySet<RepoRelPath>,
 ): GlobPattern[] {
   return newlyTrackedPaths.filter((p) => pushedPaths.has(p)).map((path) => pathAsPattern(path));
 }
@@ -660,7 +674,7 @@ export function buildPushSummaryRows(params: {
   readonly pushableFiles: readonly ChangedFileDiff[];
   readonly files: readonly { readonly path: RepoRelPath; readonly content: string }[];
   readonly deletions: readonly { readonly path: RepoRelPath }[];
-  readonly restoresTemplateDeletion: ReadonlySet<string>;
+  readonly restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
 }): PushSummaryRow[] {
   const pushedContentMap = new Map(params.files.map((f) => [f.path, f.content]));
   const rows: PushSummaryRow[] = [];

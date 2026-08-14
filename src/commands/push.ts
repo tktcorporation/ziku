@@ -54,11 +54,12 @@ import {
   selectUntrackedToTrack,
 } from "../ui/prompts";
 import { calculateDiffStats, formatStats } from "../ui/diff-view";
+import { padToWidth } from "../ui/text-width";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
 import { detectDiff } from "../utils/diff";
 import { createPullRequest, getGitHubToken, resolveDefaultBranch } from "../utils/github";
 import { hashFiles } from "../utils/hash";
-import { detectAndUpdateReadme } from "../utils/readme";
+import { detectAndUpdateReadme, detectReadmeUpdate } from "../utils/readme";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked";
 import type {
   ChangedFileDiff,
@@ -90,6 +91,9 @@ import {
   withNewlyTrackedPatterns,
 } from "./push-plan";
 
+/** テンプレートのリポジトリルートにある README。マーカー間が同期対象一覧の反映先になる。 */
+const TEMPLATE_README = repoRelPath("README.md");
+
 export const pushLifecycle: CommandLifecycle = {
   name: "push",
   description: "Push local changes to template (GitHub: PR / local: direct copy)",
@@ -120,6 +124,12 @@ export const pushLifecycle: CommandLifecycle = {
       location: "template",
       op: "update",
       note: "ローカルで追加したパターンをテンプレの ziku.jsonc へ加法 union マージで伝播",
+    },
+    {
+      file: TEMPLATE_README,
+      location: "template",
+      op: "update",
+      note: "マーカーがあれば同期対象一覧を反映した内容を PR に同梱（GitHub への push のみ）",
     },
     { file: LOCK_FILE, location: "local", op: "update", note: "同期ベースを更新" },
   ],
@@ -220,14 +230,7 @@ function pushToGitHub(
         }))
         .otherwise(() => ({ title: suggestedTitle, body: suggestedBody }));
 
-      const readmeResult = await detectAndUpdateReadme(ctx.templateDir, ctx.templateDir);
-      const files = [...target.files];
-      if (readmeResult?.updated) {
-        files.push({
-          path: repoRelPath("README.md"),
-          content: asPushContent(readmeResult.content),
-        });
-      }
+      const files = [...target.files, ...(await readmeAutoUpdate(ctx.templateDir))];
 
       // サマリー表示
       const baseSha = baseCommitSha(ctx.lock);
@@ -396,6 +399,9 @@ function logPushSummary(
   target: PushTarget,
   files: readonly { path: RepoRelPath; content: PushContent }[],
 ): void {
+  /** サマリでパスの後ろの情報を揃える桁位置。 */
+  const PATH_COLUMN_WIDTH = 50;
+
   const rows = buildPushSummaryRows({
     pushableFiles: target.pushableFiles,
     files,
@@ -416,11 +422,12 @@ function logPushSummary(
         const note = restoresTemplateDeletion
           ? ` ${pc.yellow("(restores file deleted in template)")}`
           : "";
-        return `  ${icon} ${diff.path.padEnd(50)} ${formatStats(calculateDiffStats(diff))}${note}`;
+        return `  ${icon} ${padToWidth(diff.path, PATH_COLUMN_WIDTH)} ${formatStats(calculateDiffStats(diff))}${note}`;
       })
       .with(
         { _tag: "AutoUpdated" },
-        ({ path }) => `  ${pc.green("+")} ${path.padEnd(50)} ${pc.dim("(auto-updated)")}`,
+        ({ path }) =>
+          `  ${pc.green("+")} ${padToWidth(path, PATH_COLUMN_WIDTH)} ${pc.dim("(auto-updated)")}`,
       )
       .exhaustive(),
   );
@@ -708,7 +715,7 @@ async function pushProject(params: {
   // ziku.jsonc の書き換えは push が実際に成功したときだけ行う。push 失敗（throw）や
   // 確認キャンセル（pushed=false）では設定を変えない。
   if (pushed && newlyTrackedPaths.length > 0) {
-    const pushedPaths = new Set<string>([
+    const pushedPaths = new Set<RepoRelPath>([
       ...payload.files.map((f) => f.path),
       ...payload.deletions.map((d) => d.path),
     ]);
@@ -722,8 +729,9 @@ async function pushProject(params: {
  * 実 push と同じ規則で「実際に送られる集合」を表示する。
  *
  * プレビューだけ別の規則で組み立てると、表示された集合と実際に送られる集合が食い違う。
- * 対話選択と `ziku.jsonc` の自動同梱はプレビューでは行わず、実 push で何が起きるかを
- * 注意書きで補う（プレビューの集合は「今の指定で送られるもの」に保つ）。
+ * 対話選択と、ziku が付け足すファイル（`ziku.jsonc` の自動同梱・README の自動更新）は
+ * プレビューでは行わず、実 push で何が起きるかを注意書きで補う（プレビューの集合は
+ * 「今の指定で送られるもの」に保つ）。
  */
 async function previewPush(params: {
   targetDir: AbsPath;
@@ -761,6 +769,8 @@ async function previewPush(params: {
     templateDir: params.templateDir,
     previewFiles,
   });
+
+  await warnIfReadmeWouldBeAutoUpdated(params.templateDir);
 
   // 未解決の衝突を --files で明示選択した場合、実 push は中断する。予告して挙動を一致させる。
   const selectedConflicts = selectedUnresolvedConflicts(previewFiles, unresolvedConflicts);
@@ -863,7 +873,7 @@ async function resolveUntrackedTracking(
 async function persistNewlyTracked(
   targetDir: AbsPath,
   newlyTrackedPaths: readonly RepoRelPath[],
-  pushedPaths: ReadonlySet<string>,
+  pushedPaths: ReadonlySet<RepoRelPath>,
 ): Promise<void> {
   const patterns = patternsToPersist(newlyTrackedPaths, pushedPaths);
   if (patterns.length === 0) return;
@@ -952,6 +962,57 @@ function announceConfigAutoInclude(localOnlyPatterns: readonly GlobPattern[]): v
     `Also pushing ${ZIKU_CONFIG_FILE} — it registers ${localOnlyPatterns.length} pattern(s) needed by the file(s) in this push (#90):`,
   );
   for (const p of localOnlyPatterns) log.message(`  ${pc.dim("+")} ${p}`);
+}
+
+// ─── テンプレート README の自動更新 ───
+
+/**
+ * テンプレートの README を同期対象一覧に合わせて更新し、送信対象へ足す分を返す。
+ *
+ * README を選択単位にしない理由: マーカー間の内容はユーザーが書いたテキストではなく、
+ * `ziku.jsonc` の include から機械的に導出される派生物で、SSOT は `ziku.jsonc` にある。
+ * 追跡ファイルと同じ選択単位にすると「同期対象一覧だけ古い README」を選べることになり、
+ * 選ばなかった側が正しいのか判断する材料がユーザーにも ziku にも無い。派生物は導出元に
+ * 従わせ、選択ではなく確認（`Create PR?`）で降りられるようにする。そのため送信対象へ
+ * 常に足したうえで、同梱する事実を送信前に伝える（{@link announceReadmeAutoUpdate}）。
+ *
+ * @returns 更新が生じたときだけ 1 件、それ以外は空。
+ */
+async function readmeAutoUpdate(
+  templateDir: AbsPath,
+): Promise<{ path: RepoRelPath; content: PushContent }[]> {
+  const result = await detectAndUpdateReadme(templateDir, templateDir);
+  if (!result?.updated) return [];
+
+  announceReadmeAutoUpdate();
+  return [{ path: TEMPLATE_README, content: asPushContent(result.content) }];
+}
+
+/**
+ * 明示指定されていない README を同梱する理由を伝える。
+ *
+ * サマリには `(auto-updated)` の 1 行として並ぶが、記号だけでは「なぜ自分が選んでいない
+ * ファイルが PR に出るのか」が読み取れない。導出元を名指しして、確認プロンプトの前に
+ * 判断材料を渡す（`ziku.jsonc` の自動同梱と同じ扱い）。
+ */
+function announceReadmeAutoUpdate(): void {
+  log.info(
+    `Also pushing ${TEMPLATE_README} — its generated sections are rebuilt from ${ZIKU_CONFIG_FILE}.`,
+  );
+}
+
+/**
+ * dry-run で、実 push なら同梱されるテンプレート README の更新を予告する。
+ *
+ * 検出だけを行い README へは書き込まない（dry-run は何も変えない）。
+ */
+async function warnIfReadmeWouldBeAutoUpdated(templateDir: AbsPath): Promise<void> {
+  const result = await detectReadmeUpdate(templateDir, templateDir);
+  if (!result?.updated) return;
+
+  log.warn(
+    `${TEMPLATE_README} would also be pushed — its generated sections are rebuilt from ${ZIKU_CONFIG_FILE}.`,
+  );
 }
 
 // ─── ファイル選択 ───

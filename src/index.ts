@@ -11,6 +11,7 @@ import { initCommand } from "./commands/init";
 import { pullCommand } from "./commands/pull";
 import { pushCommand } from "./commands/push";
 import { setupCommand } from "./commands/setup";
+import { SUBCOMMAND_NAMES, type SubCommandName } from "./commands/names";
 import { statusCommand } from "./commands/status";
 import { trackCommand } from "./commands/track";
 import { ZikuFailure, zikuFailure } from "./errors";
@@ -35,17 +36,6 @@ const main = defineCommand({
     track: trackCommand,
   } satisfies Record<SubCommandName, unknown>,
 });
-
-/**
- * ziku が持つサブコマンド名。
- *
- * 引数解釈（第 1 引数がサブコマンドか / その打ち間違いか）と対話メニューの両方が
- * この 1 本を見る。片方にだけコマンドを足すと、メニューから辿れないコマンドや
- * 打ち間違い判定の対象外になるコマンドが生まれる。
- */
-const SUBCOMMAND_NAMES = ["init", "setup", "push", "pull", "diff", "status", "track"] as const;
-
-type SubCommandName = (typeof SUBCOMMAND_NAMES)[number];
 
 function isSubCommandName(value: string): value is SubCommandName {
   return (SUBCOMMAND_NAMES as readonly string[]).includes(value);

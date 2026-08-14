@@ -37,6 +37,7 @@ const {
   isZikuConfigPath,
   withConfigTracked,
   withoutConfigTracked,
+  SPECIAL_SYNC_PATHS,
   ZIKU_CONFIG_FILE,
 } = await import("../ziku-config");
 
@@ -325,6 +326,31 @@ describe("classifySyncPath", () => {
   it("通常のファイルは syncedFile 種別", () => {
     expect(classifySyncPath(repoRelPath(".claude/rules/foo.md")).kind).toBe("syncedFile");
     expect(isZikuConfigPath(repoRelPath(".claude/rules/foo.md"))).toBe(false);
+  });
+
+  it("特別扱いの表に登録された種別をすべて返す", () => {
+    // 判定は表の逆引きだけで組み立てる。表に載っているのに分類が返さない種別があると、
+    // その種別を前提にした消費側の分岐が到達不能なまま通り、通常の同期ファイルとして
+    // コピー・削除・3-way マージに乗ってしまう。
+    for (const [kind, special] of Object.entries(SPECIAL_SYNC_PATHS)) {
+      expect(classifySyncPath(special.path)).toEqual({ kind, path: special.path });
+    }
+  });
+
+  it("型: 種別を足したら特別扱いの表への登録が必須になる", () => {
+    // 登録の強制が型の役目なので、@ts-expect-error が外れたら（= 空の表が書けるように
+    // なったら）typecheck が失敗して気付ける。
+    // @ts-expect-error 種別ごとのパスを欠いた表は SPECIAL_SYNC_PATHS の型を満たさない
+    const missing: typeof SPECIAL_SYNC_PATHS = {};
+    expect(Object.keys(missing)).toEqual([]);
+  });
+
+  it("型: 表の鍵と分類結果の種別は食い違えない", () => {
+    const mismatched: typeof SPECIAL_SYNC_PATHS = {
+      // @ts-expect-error zikuConfig の欄に別種別の分類結果は置けない
+      zikuConfig: { kind: "syncedFile", path: ZIKU_CONFIG_FILE },
+    };
+    expect(mismatched.zikuConfig.path).toBe(ZIKU_CONFIG_FILE);
   });
 });
 

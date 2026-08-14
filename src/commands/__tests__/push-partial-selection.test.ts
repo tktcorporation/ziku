@@ -64,6 +64,7 @@ vi.mock("../../utils/github", () => ({
 
 vi.mock("../../utils/readme", () => ({
   detectAndUpdateReadme: vi.fn(() => Promise.resolve(null)),
+  detectReadmeUpdate: vi.fn(() => Promise.resolve(null)),
 }));
 
 vi.mock("../../ui/prompts", () => ({

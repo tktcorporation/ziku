@@ -158,11 +158,12 @@ interface DownloadBaseResult {
  * 3-way マージ用のベーステンプレートをダウンロードする。
  *
  * ベースツリーを取り直せるのは「GitHub ソース」かつ「ベースのコミット SHA を記録済み」の
- * ときだけ。それ以外（ローカルソース、ベース未確定、SHA 未記録）は null を返して
- * 呼び出し側を 2-way フォールバックへ倒す。lock を引数に取るのは、この 2 つの条件が
- * lock の型で結び付いているため。
+ * ときだけ。それ以外（ローカルソース、ベース未確定、SHA 未記録）は null を返し、呼び出し側は
+ * 共通祖先無し（`MergeBaseSource` の `no-base`）として扱う。lock を引数に取るのは、この 2 つの
+ * 条件が lock の型で結び付いているため。
  *
- * ダウンロード失敗時もエラーにせず null を返す（2-way マーカーで対処可能なため）。
+ * ダウンロード失敗時もエラーにせず null を返す。ベースが無くても自動マージを飛ばせば済み、
+ * どちらの版を残すかはユーザーが選べる（`FileMergeOutcome` の `NoBase`）。
  */
 export const downloadBaseForMerge = (opts: {
   lock: LockState;
@@ -183,7 +184,12 @@ export const downloadBaseForMerge = (opts: {
           );
         }).pipe(
           Effect.orElseSucceed(() => {
-            log.warn("Could not download base version. Falling back to 2-way conflict markers.");
+            // 文言は実際に起きることに合わせる。ベースが無いとマージ自体を試みず、ローカルの
+            // ファイルには一切書かない（`mergeOneFile` の `no-base`）。マーカーを書いたと
+            // 読める文言だと、入っていないマーカーを探しに行かせることになる。
+            log.warn(
+              "Could not download the base version. Auto-merge is skipped — conflicting files are left untouched and reported as unresolved.",
+            );
             return null;
           }),
         ),

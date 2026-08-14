@@ -690,6 +690,43 @@ describe("setup: セットアップ UX", () => {
       );
     });
 
+    it("--yes は確認プロンプトを出さずに PR を作る", async () => {
+      // 対話端末を持たない実行（CI）で入力待ちのまま止まらないようにする。
+      await runSetup(["--remote", "--from", "my-org/my-templates", "--yes"]);
+
+      expect(mockConfirmAction).not.toHaveBeenCalled();
+      expect(mockCreatePullRequest).toHaveBeenCalledWith(
+        "ghp_test_token",
+        expect.objectContaining({ owner: "my-org", repo: "my-templates" }),
+      );
+    });
+
+    it("エイリアス -y でも確認プロンプトを出さない", async () => {
+      await runSetup(["--remote", "--from", "my-org/my-templates", "-y"]);
+
+      expect(mockConfirmAction).not.toHaveBeenCalled();
+      expect(mockCreatePullRequest).toHaveBeenCalled();
+    });
+
+    it("--yes が無ければ確認プロンプトを出し、断られたら PR を作らない", async () => {
+      mockConfirmAction.mockResolvedValue(false);
+
+      await runSetup(["--remote", "--from", "my-org/my-templates"]);
+
+      expect(mockConfirmAction).toHaveBeenCalled();
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
+    it("--yes でも既定ブランチを取得できなければ PR を作らない", async () => {
+      // --yes は対話の省略であって、宛先が定まらないまま作成へ進む指定ではない。
+      mockResolveDefaultBranch.mockResolvedValue(undefined);
+
+      await expect(
+        runSetup(["--remote", "--from", "my-org/my-templates", "--yes"]),
+      ).rejects.toThrow("Cannot determine the default branch of my-org/my-templates");
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
     it("PR はリポジトリの既定ブランチへ向ける", async () => {
       // 既定が master のテンプレートで main を宛先にすると、GitHub API が存在しない
       // ブランチとして 404 を返し、原因の分からない失敗になる。

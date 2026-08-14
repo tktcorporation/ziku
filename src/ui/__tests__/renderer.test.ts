@@ -28,6 +28,7 @@ import {
   outro,
   withSpinner,
 } from "../renderer";
+import type { FileOperationResult } from "../../modules/schemas";
 import { repoRelPath } from "../../__tests__/brands";
 
 /** テスト中に process.stdout.isTTY を切り替えるヘルパー（#84 の分岐検証用） */
@@ -169,20 +170,31 @@ describe("renderer", () => {
 
   describe("logFileResults", () => {
     it("should count added/updated/skipped", () => {
-      const results = [
+      const results: FileOperationResult[] = [
         { action: "copied", path: repoRelPath("a.ts") },
         { action: "created", path: repoRelPath("b.ts") },
         { action: "overwritten", path: repoRelPath("c.ts") },
         { action: "skipped", path: repoRelPath("d.ts") },
+        { action: "skipped_ignored", path: repoRelPath("e.ts") },
       ];
       const summary = logFileResults(results);
-      expect(summary).toEqual({ added: 2, updated: 1, skipped: 1 });
+      expect(summary).toEqual({ added: 2, updated: 1, skipped: 2 });
       expect(p.log.message).toHaveBeenCalledTimes(1);
     });
 
     it("should handle empty results", () => {
       const summary = logFileResults([]);
       expect(summary).toEqual({ added: 0, updated: 0, skipped: 0 });
+    });
+
+    it("型: FileAction 以外の操作結果は渡せない", () => {
+      // 表示区分への振り分けを網羅的に書けることが型の役目なので、@ts-expect-error が
+      // 外れたら（= 未知の action を渡せるようになったら）typecheck が失敗して気付ける。
+      const invalid: Parameters<typeof logFileResults>[0] = [
+        // @ts-expect-error FileAction に無い action は集計対象にならない
+        { action: "unknown", path: "a.ts" },
+      ];
+      expect(invalid).toHaveLength(1);
     });
   });
 

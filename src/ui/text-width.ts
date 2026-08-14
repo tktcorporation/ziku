@@ -156,3 +156,16 @@ export function truncateToWidth(text: string, maxWidth: number): string {
   }
   return result;
 }
+
+/**
+ * 表示カラム数が `width` になるまで右へ空白を詰める。
+ *
+ * 桁を揃えた一覧を組むために使う。`String.prototype.padEnd` は UTF-16 の
+ * コードユニット数で数えるため、全角文字を含むパスが混ざると桁がずれる。
+ * 既に `width` 以上のときは切り詰めずそのまま返す（一覧の情報を落とすより、
+ * その行だけ桁が伸びるほうが害が小さい）。
+ */
+export function padToWidth(text: string, width: number): string {
+  const padding = width - stringWidth(text);
+  return padding > 0 ? text + " ".repeat(padding) : text;
+}

@@ -32,34 +32,45 @@ import { setupLifecycle } from "../commands/setup";
 import { diffLifecycle } from "../commands/diff";
 import { statusLifecycle } from "../commands/status";
 import { trackLifecycle } from "../commands/track";
+import type { SubCommandName } from "../commands/names";
 
-export const lifecycle: readonly CommandLifecycle[] = [
-  setupLifecycle,
-  initUserLifecycle,
-  pullLifecycle,
-  pushLifecycle,
-  diffLifecycle,
-  statusLifecycle,
-  trackLifecycle,
-];
+/**
+ * サブコマンドごとのライフサイクル定義。
+ *
+ * `Record<SubCommandName, ...>` にしているのは、コマンドを足したときにここへの登録が
+ * コンパイルエラーになるようにするため。素の配列だと登録漏れが検知できず、生成される
+ * ドキュメントからそのコマンドが黙って消える。
+ *
+ * 宣言順がそのままドキュメントの節の並びになる（{@link lifecycle} が値の順を引き継ぐ）。
+ */
+export const LIFECYCLE_BY_COMMAND: Record<SubCommandName, CommandLifecycle> = {
+  setup: setupLifecycle,
+  init: initUserLifecycle,
+  pull: pullLifecycle,
+  push: pushLifecycle,
+  diff: diffLifecycle,
+  status: statusLifecycle,
+  track: trackLifecycle,
+};
+
+export const lifecycle: readonly CommandLifecycle[] = Object.values(LIFECYCLE_BY_COMMAND);
 
 // ──────────────────────────────────────────────
 // ドキュメント生成
 // ──────────────────────────────────────────────
 
-/** 操作の種類をラベルに変換 */
-function opLabel(op: Op): string {
-  switch (op) {
-    case "read":
-      return "読み取り";
-    case "create":
-      return "作成";
-    case "update":
-      return "更新";
-    default:
-      return op;
-  }
-}
+/**
+ * 操作の種類の表示ラベル。
+ *
+ * `Record<Op, string>` にしているのは、`Op` に値を足したときにラベルの登録が
+ * コンパイルエラーになるようにするため。既定値へ落とす分岐にすると、ラベルの無い操作が
+ * 生の識別子のままドキュメントへ出る。
+ */
+export const OP_LABELS: Record<Op, string> = {
+  read: "読み取り",
+  create: "作成",
+  update: "更新",
+};
 
 /**
  * コンポーネント（ファイル）一覧と、各コマンドとの関係を示す mermaid 図を生成。
@@ -182,7 +193,7 @@ function generateCommandTables(): string {
     for (const op of cmd.ops) {
       const loc = op.location === "template" ? "template" : "local";
       const fileDisplay = op.file === SYNCED_FILES ? "synced files" : `\`${op.file}\``;
-      sections.push(`| ${opLabel(op.op)} | ${fileDisplay} | ${loc} | ${op.note} |`);
+      sections.push(`| ${OP_LABELS[op.op]} | ${fileDisplay} | ${loc} | ${op.note} |`);
     }
     sections.push("");
   }
@@ -201,7 +212,9 @@ function generateCommandTables(): string {
  * 現れる。ドキュメント側に散文で持つと、実装だけが変わって説明が嘘になる。
  */
 function generateNotesSection(): string {
-  const commandsWithNotes = lifecycle.filter((cmd) => cmd.notes && cmd.notes.length > 0);
+  const commandsWithNotes = lifecycle.filter(
+    (cmd) => cmd.notes !== undefined && cmd.notes.length > 0,
+  );
   if (commandsWithNotes.length === 0) return "";
 
   const lines: string[] = ["## 補足\n"];

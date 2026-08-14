@@ -202,11 +202,17 @@ export async function updateReadmeFile(
 }
 
 /**
- * プロジェクトディレクトリ内の README を検出して更新
+ * プロジェクトディレクトリ内の README を検出し、更新後の内容を返す。ディスクへは書かない。
+ *
+ * 書き込みを伴わないので、更新の有無だけを知りたい呼び出し元（push の dry-run プレビュー）が
+ * そのまま使える。「何も変えない」ことを守るためにプレビュー側で判定を書き直すと、予告した
+ * 内容と実 push が同梱する内容が食い違う。
+ *
  * @param targetDir 更新対象の README.md があるディレクトリ
  * @param templateDir 同期パターンを定義する ziku.jsonc があるディレクトリ
+ * @returns README が無い / マーカーが無い場合は null。
  */
-export async function detectAndUpdateReadme(
+export async function detectReadmeUpdate(
   targetDir: string,
   templateDir: string,
 ): Promise<GenerateReadmeResult | null> {
@@ -226,8 +232,23 @@ export async function detectAndUpdateReadme(
     return null;
   }
 
-  return updateReadmeFile({
-    readmePath,
-    configPath,
-  });
+  return generateReadme({ readmePath, configPath });
+}
+
+/**
+ * プロジェクトディレクトリ内の README を検出して更新
+ * @param targetDir 更新対象の README.md があるディレクトリ
+ * @param templateDir 同期パターンを定義する ziku.jsonc があるディレクトリ
+ */
+export async function detectAndUpdateReadme(
+  targetDir: string,
+  templateDir: string,
+): Promise<GenerateReadmeResult | null> {
+  const result = await detectReadmeUpdate(targetDir, templateDir);
+
+  if (result?.updated) {
+    await writeFile(result.readmePath, result.content);
+  }
+
+  return result;
 }

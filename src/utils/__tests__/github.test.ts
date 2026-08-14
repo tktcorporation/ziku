@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { repoRelPath } from "../../__tests__/brands";
+import { commitSha, repoRelPath } from "../../__tests__/brands";
 import {
   checkRepoExists,
   checkRepoSetup,
@@ -56,6 +56,7 @@ const {
   scaffoldTemplateRepo,
   resolveDefaultBranch,
   resolveLatestCommitSha,
+  resolveSourceCommit,
   resolveSourceCommitSha,
 } = await import("../github");
 
@@ -774,9 +775,12 @@ describe("resolveLatestCommitSha", () => {
   it("ref が指定されている場合はその ref の SHA を解決する", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue(shaResponse("sha-develop"));
 
-    const sha = await resolveLatestCommitSha("owner", "repo", { kind: "branch", name: "develop" });
+    const resolution = await resolveLatestCommitSha("owner", "repo", {
+      kind: "branch",
+      name: "develop",
+    });
 
-    expect(sha).toBe("sha-develop");
+    expect(resolution).toEqual({ _tag: "Resolved", sha: "sha-develop" });
     expect(globalThis.fetch).toHaveBeenCalledWith(
       "https://api.github.com/repos/owner/repo/commits/develop",
       expect.anything(),
@@ -789,38 +793,124 @@ describe("resolveLatestCommitSha", () => {
     mockReposGet.mockResolvedValue({ data: { default_branch: "master" } });
     globalThis.fetch = vi.fn().mockResolvedValue(shaResponse("sha-master"));
 
-    const sha = await resolveLatestCommitSha("owner", "repo");
+    const resolution = await resolveLatestCommitSha("owner", "repo");
 
-    expect(sha).toBe("sha-master");
+    expect(resolution).toEqual({ _tag: "Resolved", sha: "sha-master" });
     expect(globalThis.fetch).toHaveBeenCalledWith(
       "https://api.github.com/repos/owner/repo/commits/master",
       expect.anything(),
     );
   });
 
-  it("既定ブランチを取得できない場合は main へフォールバックせず undefined を返す", async () => {
+  it("既定ブランチを取得できない場合は main へフォールバックせず未解決を返す", async () => {
     mockReposGet.mockRejectedValue(new Error("Not Found"));
     globalThis.fetch = vi.fn();
 
-    const sha = await resolveLatestCommitSha("owner", "repo");
+    const resolution = await resolveLatestCommitSha("owner", "repo");
 
-    expect(sha).toBeUndefined();
+    expect(resolution._tag).toBe("Unresolved");
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
-  it("コミット取得が失敗した場合は undefined を返す", async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 404 });
+  it("コミット取得が 404 の場合は未解決を返す", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: false, status: 404, statusText: "Not Found" });
 
     expect(
       await resolveLatestCommitSha("owner", "repo", { kind: "branch", name: "develop" }),
-    ).toBeUndefined();
+    ).toEqual({ _tag: "Unresolved", reason: "Not Found" });
   });
 
-  it("ネットワークエラーの場合は undefined を返す", async () => {
+  it("ネットワークエラーの場合は未解決を返す", async () => {
     globalThis.fetch = vi.fn().mockRejectedValue(new Error("Network error"));
 
     expect(
       await resolveLatestCommitSha("owner", "repo", { kind: "branch", name: "develop" }),
+    ).toEqual({ _tag: "Unresolved", reason: "Network error" });
+  });
+});
+
+describe("コミット SHA 取得の失敗の分類", () => {
+  const originalFetch = globalThis.fetch;
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env = { ...originalEnv };
+    process.env.GITHUB_TOKEN = "ghp_expired";
+    delete process.env.GH_TOKEN;
+    process.env.PATH = "";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    process.env = originalEnv;
+  });
+
+  it("トークンが拒否された場合（401）は認証拒否として返す", async () => {
+    // 401 を未解決に混ぜると、失効したトークンのまま古いベースで 3-way マージが続く。
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: false, status: 401, statusText: "Unauthorized" });
+
+    expect(await resolveSourceCommit("owner", "repo", { kind: "branch", name: "main" })).toEqual({
+      _tag: "AuthRejected",
+      detail: "Unauthorized",
+    });
+  });
+
+  it("タグの解決でも 401 は認証拒否として返す", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 401, statusText: "" });
+
+    expect(await resolveSourceCommit("owner", "repo", { kind: "tag", name: "v1.0.0" })).toEqual({
+      _tag: "AuthRejected",
+      detail: "Bad credentials",
+    });
+  });
+
+  it("ref 未指定でも既定ブランチの問い合わせが 401 なら認証拒否として返す", async () => {
+    // ref 未指定が最も多い設定なので、ここで潰すとトークン失効がほぼ見えなくなる。
+    mockReposGet.mockRejectedValue(Object.assign(new Error("Bad credentials"), { status: 401 }));
+    globalThis.fetch = vi.fn();
+
+    expect(await resolveSourceCommit("owner", "repo")).toEqual({
+      _tag: "AuthRejected",
+      detail: "Bad credentials",
+    });
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("レート制限（403）は再実行で解消しうるので未解決として返す", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: false, status: 403, statusText: "rate limit exceeded" });
+
+    expect(await resolveSourceCommit("owner", "repo", { kind: "branch", name: "main" })).toEqual({
+      _tag: "Unresolved",
+      reason: "rate limit exceeded",
+    });
+  });
+
+  it("コミット指定は API を呼ばずにその SHA を返す", async () => {
+    globalThis.fetch = vi.fn();
+
+    expect(
+      await resolveSourceCommit("owner", "repo", { kind: "commit", sha: commitSha("abc123") }),
+    ).toEqual({
+      _tag: "Resolved",
+      sha: "abc123",
+    });
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("resolveSourceCommitSha は理由を落として SHA だけを返す", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: false, status: 401, statusText: "Unauthorized" });
+
+    expect(
+      await resolveSourceCommitSha("owner", "repo", { kind: "branch", name: "main" }),
     ).toBeUndefined();
   });
 });
@@ -873,9 +963,12 @@ describe("コミット SHA 取得の認証", () => {
   it("トークンがない場合は Authorization ヘッダを付けず、公開リポジトリは解決できる", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue(shaResponse("sha-public"));
 
-    const sha = await resolveLatestCommitSha("owner", "repo", { kind: "branch", name: "main" });
+    const resolution = await resolveLatestCommitSha("owner", "repo", {
+      kind: "branch",
+      name: "main",
+    });
 
-    expect(sha).toBe("sha-public");
+    expect(resolution).toEqual({ _tag: "Resolved", sha: "sha-public" });
     expect(globalThis.fetch).toHaveBeenCalledWith(
       "https://api.github.com/repos/owner/repo/commits/main",
       { headers: { Accept: "application/vnd.github.sha" } },
@@ -897,11 +990,11 @@ describe("コミット SHA 取得の認証", () => {
 
     expect(
       await resolveLatestCommitSha("owner", "private-repo", { kind: "branch", name: "main" }),
-    ).toBeUndefined();
+    ).toEqual({ _tag: "Unresolved", reason: "HTTP 404" });
 
     process.env.GITHUB_TOKEN = "ghp_test";
     expect(
       await resolveLatestCommitSha("owner", "private-repo", { kind: "branch", name: "main" }),
-    ).toBe("sha-private");
+    ).toEqual({ _tag: "Resolved", sha: "sha-private" });
   });
 });

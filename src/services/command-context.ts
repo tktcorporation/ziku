@@ -21,7 +21,8 @@ import type {
 import { loadZikuConfig } from "../utils/ziku-config";
 import { loadLock } from "../utils/lock";
 import { resolveTemplateDirScoped } from "../utils/template-resolve";
-import { resolveSourceCommitSha } from "../utils/github";
+import type { CommitShaResolution } from "../utils/github";
+import { resolveSourceCommit } from "../utils/github";
 
 // ─── Service 定義 ───
 
@@ -45,11 +46,12 @@ export interface CommandContextShape {
   /**
    * テンプレートの最新コミット SHA を解決する。
    *
-   * GitHub ソースの場合は API で SHA を取得。
-   * ローカルソースの場合は None を返す。ソース種別の分岐を吸収し、呼び出し元は
-   * ソース種別を意識せずに使える。
+   * GitHub ソースの場合は API で SHA を取得。ローカルソースの場合は None を返す。
+   * ソース種別の分岐を吸収し、呼び出し元はソース種別を意識せずに使える。
+   *
+   * 失敗するのはトークンが拒否されたときだけ。振り分けの理由は {@link toBaseRef} を参照。
    */
-  readonly resolveBaseRef: Effect.Effect<Option.Option<CommitSha>>;
+  readonly resolveBaseRef: Effect.Effect<Option.Option<CommitSha>, ZikuFailure>;
 }
 
 /**
@@ -127,17 +129,17 @@ export function loadCommandContext(
     );
     const cleanup = (): Promise<void> => Effect.runPromise(Scope.close(scope, Exit.void));
 
-    // resolveBaseRef: ソース種別の分岐を吸収
-    // resolveSourceCommitSha は Promise<string | undefined> を返すため、
-    // Option.fromNullable で undefined → None に正規化してから返す
+    // resolveBaseRef: ソース種別の分岐を吸収する。
     //
     // source.ref を渡す理由: テンプレートを取得した ref とベースの SHA が食い違うと、
     // 3-way マージのベースが別ブランチのツリーになる。
+    //
+    // Effect.promise を使うのは、resolveSourceCommit が失敗を戻り値で表すため。
+    // reject するのは実装の不具合なので、defect として運ぶ。
     const resolveBaseRef = match(source)
       .with({ kind: "github" }, (gh) =>
-        Effect.tryPromise(() => resolveSourceCommitSha(gh.owner, gh.repo, gh.ref)).pipe(
-          Effect.map(Option.fromNullable),
-          Effect.orElseSucceed(() => Option.none<CommitSha>()),
+        Effect.promise(() => resolveSourceCommit(gh.owner, gh.repo, gh.ref)).pipe(
+          Effect.flatMap(toBaseRef),
         ),
       )
       .with({ kind: "local" }, () => Effect.succeed(Option.none<CommitSha>()))
@@ -145,6 +147,30 @@ export function loadCommandContext(
 
     return { config, lock, source, templateDir, cleanup, resolveBaseRef };
   });
+}
+
+/**
+ * コミット SHA の解決結果を、同期ベースとして使える形へ変換する。
+ *
+ * 失敗として返すのは認証拒否だけ。トークンが拒否されている間は何度取り直しても SHA は
+ * 取れないので、記録済みの古いベースへ黙って倒すと、共通祖先が実際のテンプレートから
+ * 離れたまま 3-way マージが動き続ける。ユーザーはトークンを直せば復帰できるので、
+ * その判断材料を失敗として渡す。
+ *
+ * それ以外（ネットワーク断・レート制限・ref が見つからない）は None を返し、呼び出し側が
+ * 記録済みのベースへ倒せるようにする。時間を置けば解消しうる失敗でコマンド全体を止めると、
+ * SHA を引けないだけで取り込み自体は成功している実行まで巻き添えになる。
+ */
+function toBaseRef(
+  resolution: CommitShaResolution,
+): Effect.Effect<Option.Option<CommitSha>, ZikuFailure> {
+  return match(resolution)
+    .with({ _tag: "Resolved" }, (r) => Effect.succeedSome(r.sha))
+    .with({ _tag: "AuthRejected" }, (r) =>
+      Effect.fail(zikuFailure({ kind: "GitHubAuthRejected", detail: r.detail })),
+    )
+    .with({ _tag: "Unresolved" }, () => Effect.succeed(Option.none<CommitSha>()))
+    .exhaustive();
 }
 
 /**

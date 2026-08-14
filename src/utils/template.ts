@@ -24,6 +24,7 @@ import type {
 } from "../modules/schemas";
 import { templateRefToString } from "../modules/schemas";
 import { log } from "../ui/renderer";
+import { getGitHubToken } from "./github";
 import { loadMergedGitignore, separateByGitignore } from "./gitignore";
 import { absPath, joinAbs } from "./paths";
 import type { FlatPatterns } from "./patterns";
@@ -71,6 +72,25 @@ function ensureGigetCacheDir(): void {
       ),
     ),
   );
+}
+
+/**
+ * giget にテンプレートを取り寄せさせるときのオプション。
+ *
+ * トークンがあれば `auth` に載せる。giget はこれを取得リクエストの Authorization ヘッダに
+ * するので、プライベートなテンプレートリポジトリでもアーカイブを取れる。存在確認とコミット
+ * SHA の取得（`utils/github.ts`）だけを認証しても、本体の取得が未認証のままだと
+ * 「リポジトリは在るし SHA も引けるのに、ダウンロードだけ 404」という辻褄の合わない失敗になる。
+ *
+ * トークンが無ければ `auth` を渡さない。公開リポジトリを未認証で取り寄せる経路をそのまま
+ * 残すため。
+ *
+ * `force: true` は展開先の一時ディレクトリを毎回作り直させる指定で、前回の中断で残った
+ * 中身が混ざらないようにする。
+ */
+function gigetOptions(dir: AbsPath): { dir: AbsPath; force: true; auth?: string } {
+  const token = getGitHubToken();
+  return token === undefined ? { dir, force: true } : { dir, force: true, auth: token };
 }
 
 // 後方互換性のためのエイリアス
@@ -147,7 +167,7 @@ export function acquireTempTemplate(
     yield* Effect.sync(ensureGigetCacheDir);
 
     const result = yield* Effect.tryPromise({
-      try: () => downloadTemplate(source ?? TEMPLATE_SOURCE, { dir: tempDir, force: true }),
+      try: () => downloadTemplate(source ?? TEMPLATE_SOURCE, gigetOptions(tempDir)),
       catch: (e) => new TemplateError({ message: "Failed to download template", cause: e }),
     });
 
@@ -173,7 +193,7 @@ export function downloadTemplateToTemp(
   // 後段で同名 .ziku-temp* が新規作成された場合に process exit で
   // 誤って削除されうるので、reject 経路でも unregister + rmSync する。
   // try/catch は ast-grep で禁止のため Promise.then(onFulfilled, onRejected) を使う。
-  return downloadTemplate(source ?? TEMPLATE_SOURCE, { dir: tempDir, force: true }).then(
+  return downloadTemplate(source ?? TEMPLATE_SOURCE, gigetOptions(tempDir)).then(
     ({ dir: templateDir }) => {
       const cleanup = () => {
         unregisterTempDir(tempDir);
@@ -293,10 +313,7 @@ export function fetchTemplates(options: DownloadOptions): Promise<FileOperationR
 
     let templateDir: AbsPath;
     if (shouldDownload) {
-      const result = await downloadTemplate(TEMPLATE_SOURCE, {
-        dir: tempDir,
-        force: true,
-      });
+      const result = await downloadTemplate(TEMPLATE_SOURCE, gigetOptions(tempDir));
       templateDir = absPath(result.dir);
     } else {
       templateDir = preDownloadedDir;

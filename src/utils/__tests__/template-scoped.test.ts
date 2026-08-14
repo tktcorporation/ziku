@@ -17,10 +17,18 @@ vi.mock("giget", () => ({
   }),
 }));
 
+// テンプレート取得に載せる認証は getGitHubToken の戻り値で決まる。実環境のトークンや
+// gh CLI の状態に左右されないよう、取得元ごとモックする。
+vi.mock("../github", () => ({
+  getGitHubToken: vi.fn(() => undefined),
+}));
+
 const { absPath } = await import("../../__tests__/brands");
 const { acquireTempTemplate } = await import("../template");
 const { _resetForTest, _getTrackedCountForTest } = await import("../temp-tracker");
 const giget = await import("giget");
+const { getGitHubToken } = await import("../github");
+const mockGetGitHubToken = vi.mocked(getGitHubToken);
 
 describe("acquireTempTemplate (Scope ベースのリソース管理)", () => {
   beforeEach(() => {
@@ -122,6 +130,59 @@ describe("acquireTempTemplate (Scope ベースのリソース管理)", () => {
       }),
     ).rejects.toThrow("network");
     expect(_getTrackedCountForTest()).toBe(0);
+  });
+
+  it("トークンがあればテンプレートの取得にも認証を渡す", async () => {
+    // SHA の取得だけを認証しても、本体の取得が未認証だとプライベートテンプレートは
+    // ダウンロードだけが 404 で落ちる。
+    mockGetGitHubToken.mockReturnValue("ghp_test");
+
+    await Effect.runPromise(Effect.scoped(acquireTempTemplate(absPath("/work"), "gh:foo/private")));
+
+    expect(giget.downloadTemplate).toHaveBeenCalledWith(
+      "gh:foo/private",
+      expect.objectContaining({ auth: "ghp_test" }),
+    );
+  });
+
+  it("トークンが無ければ認証を渡さず取得する", async () => {
+    mockGetGitHubToken.mockReturnValue(undefined);
+
+    await Effect.runPromise(Effect.scoped(acquireTempTemplate(absPath("/work"), "gh:foo/bar")));
+
+    expect(giget.downloadTemplate).toHaveBeenCalledWith("gh:foo/bar", {
+      dir: "/work/.ziku-temp",
+      force: true,
+    });
+  });
+
+  it("downloadTemplateToTemp も同じ認証で取得する", async () => {
+    const { downloadTemplateToTemp } = await import("../template");
+    mockGetGitHubToken.mockReturnValue("ghp_test");
+
+    const { cleanup } = await downloadTemplateToTemp(absPath("/work"), "gh:foo/private");
+    cleanup();
+
+    expect(giget.downloadTemplate).toHaveBeenCalledWith(
+      "gh:foo/private",
+      expect.objectContaining({ auth: "ghp_test" }),
+    );
+  });
+
+  it("fetchTemplates も同じ認証で取得する", async () => {
+    const { fetchTemplates } = await import("../template");
+    mockGetGitHubToken.mockReturnValue("ghp_test");
+
+    await fetchTemplates({
+      targetDir: absPath("/work"),
+      overwriteStrategy: "skip",
+      patterns: { include: [], exclude: [] },
+    });
+
+    expect(giget.downloadTemplate).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ auth: "ghp_test" }),
+    );
   });
 
   it("label を付けると別ディレクトリに展開される", async () => {

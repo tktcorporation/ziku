@@ -53,6 +53,9 @@ vi.mock("../../utils/github", async () => {
     resolveLatestCommitSha: vi.fn(() => Promise.resolve("sha-001")),
     resolveDefaultBranch: vi.fn(() => Promise.resolve("main")),
     resolveSourceCommitSha: vi.fn(() => Promise.resolve("sha-001")),
+    resolveSourceCommit: vi.fn(() =>
+      Promise.resolve({ _tag: "Resolved" as const, sha: "sha-001" }),
+    ),
     checkRepoExists: vi.fn(() => Promise.resolve({ _tag: "Exists" as const })),
     checkRepoSetup: vi.fn(() => Promise.resolve(true)),
     getGitHubToken: vi.fn(() => "ghp_test"),

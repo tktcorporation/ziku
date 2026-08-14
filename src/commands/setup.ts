@@ -87,6 +87,12 @@ export const setupCommand = defineCommand({
       description: "Preview what would be created, without writing files or opening a PR",
       default: false,
     },
+    yes: {
+      type: "boolean",
+      alias: "y",
+      description: "Skip prompts (with --remote, the PR is opened without asking to confirm)",
+      default: false,
+    },
   },
   async run({ args }) {
     intro("setup");
@@ -94,7 +100,7 @@ export const setupCommand = defineCommand({
     const dryRun = args.dryRun as boolean;
 
     if (args.remote) {
-      await handleRemoteSetup(args.from as string | undefined, dryRun);
+      await handleRemoteSetup(args.from as string | undefined, { dryRun, yes: args.yes });
       return;
     }
 
@@ -169,8 +175,15 @@ function previewIncludePatterns(heading: string): string {
 
 /**
  * リモートのテンプレートリポジトリに ziku.jsonc を追加する PR を作成する。
+ *
+ * @param opts.yes 確認プロンプトを省く。他コマンドと同じく対話の省略だけを意味し、破壊的
+ *   操作の承認は含まない。ここで行うのは PR の作成で、テンプレートに変更が入るかはレビュー側が
+ *   決めるため、承認を別に求めずそのまま作成まで進む。
  */
-async function handleRemoteSetup(from: string | undefined, dryRun: boolean): Promise<void> {
+async function handleRemoteSetup(
+  from: string | undefined,
+  opts: { dryRun: boolean; yes: boolean },
+): Promise<void> {
   const { owner, repo } = resolveRemoteTarget(from);
 
   log.info(`Template: ${pc.cyan(`${owner}/${repo}`)}`);
@@ -194,7 +207,7 @@ async function handleRemoteSetup(from: string | undefined, dryRun: boolean): Pro
     })
     .exhaustive();
 
-  if (dryRun) {
+  if (opts.dryRun) {
     log.info("Dry run mode");
     log.message(
       previewIncludePatterns(
@@ -209,13 +222,15 @@ async function handleRemoteSetup(from: string | undefined, dryRun: boolean): Pro
   // 進めると、必ず中断する作業をユーザーにさせることになる。
   const baseBranch = await resolvePrBaseBranch(owner, repo);
 
-  const confirmed = await confirmAction(
-    `Create a PR to add .ziku/ziku.jsonc to ${owner}/${repo} (→ ${baseBranch})?`,
-    { initialValue: true },
-  );
-  if (!confirmed) {
-    log.info("Cancelled.");
-    return;
+  if (!opts.yes) {
+    const confirmed = await confirmAction(
+      `Create a PR to add .ziku/ziku.jsonc to ${owner}/${repo} (→ ${baseBranch})?`,
+      { initialValue: true },
+    );
+    if (!confirmed) {
+      log.info("Cancelled.");
+      return;
+    }
   }
 
   const token = getGitHubToken();

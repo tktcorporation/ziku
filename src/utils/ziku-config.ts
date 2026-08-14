@@ -37,15 +37,27 @@ export type SyncPath =
   | { readonly kind: "syncedFile"; readonly path: RepoRelPath }
   | { readonly kind: "zikuConfig"; readonly path: RepoRelPath };
 
+/** 通常の同期ファイルと違う規則で扱う種別。 */
+export type SpecialSyncKind = Exclude<SyncPath["kind"], "syncedFile">;
+
 /**
- * 特別扱いする種別と、その相対パス。
+ * 特別扱いする種別と、その分類結果。
  *
- * `Record` で全種別を必須にしているのは、`SyncPath` に種別を足したときにこの表がコンパイル
- * エラーになり、パスの登録漏れに気付けるようにするため。
+ * 値は「そのパスを分類した結果」そのもので、{@link classifySyncPath} はこの表をパスで
+ * 逆引きして返すだけ。表と分類の分岐を別々に書くと、表へ登録しても分類が返さない種別が
+ * 生まれ、その種別を前提にした消費側の分岐が到達不能なまま通ってしまう（新種別が通常の
+ * 同期ファイルとして扱われる）。
+ *
+ * 鍵ごとに `Extract<SyncPath, { kind: K }>` を要求するので、`SyncPath` に種別を足すと
+ * この表への登録が必須になり、鍵と値の種別が食い違うこともコンパイルエラーになる。
  */
-const SPECIAL_SYNC_PATHS: Record<Exclude<SyncPath["kind"], "syncedFile">, RepoRelPath> = {
-  zikuConfig: ZIKU_CONFIG_FILE,
+export const SPECIAL_SYNC_PATHS: {
+  readonly [K in SpecialSyncKind]: Extract<SyncPath, { readonly kind: K }>;
+} = {
+  zikuConfig: { kind: "zikuConfig", path: ZIKU_CONFIG_FILE },
 };
+
+const SPECIAL_SYNC_PATH_LIST: readonly SyncPath[] = Object.values(SPECIAL_SYNC_PATHS);
 
 /**
  * 走査条件にかかわらず同期対象へ戻すパス。
@@ -53,7 +65,14 @@ const SPECIAL_SYNC_PATHS: Record<Exclude<SyncPath["kind"], "syncedFile">, RepoRe
  * 特別扱いのファイルは、ユーザーが除外していても ziku 自身が同期の前提として必要とする。
  * `SPECIAL_SYNC_PATHS` から導くので、種別を足せば下の入口すべてが自動的に追随する。
  */
-const ALWAYS_TRACKED_PATHS: readonly RepoRelPath[] = Object.values(SPECIAL_SYNC_PATHS);
+const ALWAYS_TRACKED_PATHS: readonly RepoRelPath[] = SPECIAL_SYNC_PATH_LIST.map(
+  (special) => special.path,
+);
+
+/** パス → 特別扱いの分類結果。{@link classifySyncPath} の逆引き表。 */
+const SPECIAL_SYNC_PATH_BY_PATH: ReadonlyMap<RepoRelPath, SyncPath> = new Map(
+  SPECIAL_SYNC_PATH_LIST.map((special) => [special.path, special]),
+);
 
 /**
  * パスの種別を判定する。
@@ -62,8 +81,7 @@ const ALWAYS_TRACKED_PATHS: readonly RepoRelPath[] = Object.values(SPECIAL_SYNC_
  * （{@link isZikuConfigPath}、分類結果の仕分け）はすべてここを経由する。
  */
 export function classifySyncPath(path: RepoRelPath): SyncPath {
-  if (path === SPECIAL_SYNC_PATHS.zikuConfig) return { kind: "zikuConfig", path };
-  return { kind: "syncedFile", path };
+  return SPECIAL_SYNC_PATH_BY_PATH.get(path) ?? { kind: "syncedFile", path };
 }
 
 /**
