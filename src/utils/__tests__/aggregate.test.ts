@@ -177,6 +177,66 @@ describe("aggregateTemplateUsage", () => {
     expect(report.summary.totalRepositories).toBe(0);
   });
 
+  // lock.source.ref でテンプレートの特定リビジョンに固定している利用リポジトリは、
+  // 既定ブランチの先頭と比較すると「追随していないだけの差分」が未同期として並ぶ。
+  it("テンプレートの別リビジョンに固定している利用リポジトリは、理由付きで skipped に残す", async () => {
+    mockListOwnerRepos.mockReturnValue(
+      Effect.succeed([repoInfo({ owner: "acme", repo: "pinned" })]),
+    );
+    setLockFixture(
+      lockFixtures,
+      "acme",
+      "pinned",
+      Effect.succeed(
+        Option.some(lockJson({ source: { owner: "acme", repo: "template", ref: "v1.0.0" } })),
+      ),
+    );
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        tmpBaseDir: "/tmp-base",
+      }),
+    );
+
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(1);
+    expect(report.skipped[0]).toMatchObject({ owner: "acme", repo: "pinned" });
+    expect(report.skipped[0]?.reason).toContain("v1.0.0");
+  });
+
+  it("lock.source.ref がスキャンの比較基準と一致していれば対象に含める", async () => {
+    mockListOwnerRepos.mockReturnValue(
+      Effect.succeed([repoInfo({ owner: "acme", repo: "same-ref" })]),
+    );
+    setLockFixture(
+      lockFixtures,
+      "acme",
+      "same-ref",
+      Effect.succeed(
+        Option.some(lockJson({ source: { owner: "acme", repo: "template", ref: "tmpl-sha" } })),
+      ),
+    );
+    shaFixtures.set("acme/same-ref", "same-ref-sha");
+    dirsBySource.set("gh:acme/same-ref#same-ref-sha", "/same-ref-dir");
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/same-ref-tmpl-dir");
+    vol.fromJSON({
+      "/same-ref-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["**"] }),
+      "/same-ref-tmpl-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["**"] }),
+    });
+    queueGlobResults([], []);
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        tmpBaseDir: "/tmp-base",
+      }),
+    );
+
+    expect(report.skipped).toEqual([]);
+    expect(report.repositories.map((r) => r.repo)).toEqual(["same-ref"]);
+  });
+
   it("lock.source が別テンプレートを指すリポジトリは除外される", async () => {
     mockListOwnerRepos.mockReturnValue(
       Effect.succeed([repoInfo({ owner: "acme", repo: "other-template-user" })]),

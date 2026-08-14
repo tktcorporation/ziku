@@ -443,6 +443,18 @@ function readCandidateLock(
     if (!isGitHubSource(lock.source) || !isSameRepo(lock.source, template)) {
       return { _tag: "excluded" as const };
     }
+
+    // テンプレートの特定リビジョンに固定している利用リポジトリは、このスキャンの
+    // 比較基準（既定ブランチの先頭、または呼び出し側が指定した ref）とは別の系列を
+    // 追っている。そのまま比較すると、追随していないだけの差分が未同期として並ぶ。
+    // 対象外だが「見つかったのに比較しなかった」ことは伝える必要があるため、
+    // 黙って除外せず理由付きで残す。
+    if (lock.source.ref !== undefined && lock.source.ref !== template.ref) {
+      return skippedEvaluation(
+        candidate,
+        `Pinned to template ref "${lock.source.ref}", which differs from the revision this scan compares against (${template.ref ?? "the template's default branch"})`,
+      );
+    }
     return { _tag: "usable" as const, lock };
   });
 }
