@@ -973,6 +973,53 @@ describe("listOwnerRepos", () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/user/repos"))).toBe(false);
   });
 
+  it("トークンが無い場合は /user を呼ばず public 限定エンドポイントで動作する", async () => {
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+    const items = [repoFixture({ name: "public-repo", owner: { login: "someone" } })];
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/someone") {
+        return Promise.resolve(jsonResponse(404, undefined));
+      }
+      if (url === "https://api.github.com/user") {
+        throw new Error("must not call /user without a token");
+      }
+      expect(url).toContain("https://api.github.com/users/someone/repos");
+      return Promise.resolve(jsonResponse(200, items));
+    });
+    globalThis.fetch = fetchMock;
+
+    const result = await Effect.runPromise(listOwnerRepos("someone"));
+
+    expect(result).toHaveLength(1);
+    expect(
+      fetchMock.mock.calls.some(([url]) => String(url) === "https://api.github.com/user"),
+    ).toBe(false);
+  });
+
+  it("トークンはあるが認証ユーザー情報の取得に失敗した場合、public 限定エンドポイントへ黙って落とさず失敗する", async () => {
+    process.env.GITHUB_TOKEN = "ghp_self_token";
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/self-owner") {
+        return Promise.resolve(jsonResponse(404, undefined));
+      }
+      if (url === "https://api.github.com/user") {
+        return Promise.resolve(jsonResponse(403, undefined, "rate limit exceeded"));
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    globalThis.fetch = fetchMock;
+
+    const error = await Effect.runPromise(listOwnerRepos("self-owner").pipe(Effect.flip));
+
+    expect(error._tag).toBe("GitHubApiError");
+    // 判定不能のまま public 限定 (/users/{owner}/repos) へ落ちていないことを確認する。
+    // 落ちてしまうと private リポジトリが黙って報告から漏れる。
+    expect(
+      fetchMock.mock.calls.some(([url]) => String(url).includes("/users/self-owner/repos")),
+    ).toBe(false);
+  });
+
   it("/orgs/{owner} が 404 以外で失敗した場合は user へフォールバックせずエラーにする", async () => {
     const fetchMock = vi.fn().mockImplementation((url: string) => {
       if (url === "https://api.github.com/orgs/acme") {

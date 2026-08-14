@@ -719,6 +719,85 @@ describe("aggregateTemplateUsage", () => {
     );
   });
 
+  it("--since 指定時、コミット日時の取得は concurrency 分だけ並列実行される（#2）", async () => {
+    mockListOwnerRepos.mockReturnValue(
+      Effect.succeed([repoInfo({ owner: "acme", repo: "many-files" })]),
+    );
+    const paths = ["f1.txt", "f2.txt", "f3.txt", "f4.txt"];
+    const baseHashes = Object.fromEntries(paths.map((p) => [p, hashContent("v1")]));
+    setLockFixture(
+      lockFixtures,
+      "acme",
+      "many-files",
+      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    );
+    shaFixtures.set("acme/many-files", "mf-sha");
+    dirsBySource.set("gh:acme/many-files#mf-sha", "/mf-dir");
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-mf");
+
+    vol.fromJSON({
+      "/mf-dir/.ziku/ziku.jsonc": JSON.stringify({ include: paths }),
+      "/mf-dir/f1.txt": "v2",
+      "/mf-dir/f2.txt": "v2",
+      "/mf-dir/f3.txt": "v2",
+      "/mf-dir/f4.txt": "v2",
+      "/tmpl-dir-mf/.ziku/ziku.jsonc": JSON.stringify({ include: paths }),
+      "/tmpl-dir-mf/f1.txt": "v1",
+      "/tmpl-dir-mf/f2.txt": "v1",
+      "/tmpl-dir-mf/f3.txt": "v1",
+      "/tmpl-dir-mf/f4.txt": "v1",
+    });
+    queueGlobResults(paths, paths);
+
+    // 各呼び出しが同時に何件走っているかを記録し、逐次実行 (常に 1) との違いを検出する。
+    let inFlight = 0;
+    let maxInFlight = 0;
+    mockGetLastCommitDate.mockImplementation(() =>
+      Effect.gen(function* () {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        yield* Effect.sleep("20 millis");
+        inFlight -= 1;
+        return Option.some("2026-08-10T00:00:00Z");
+      }),
+    );
+
+    await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 4,
+        since: "2026-08-01T00:00:00.000Z",
+      }),
+    );
+
+    expect(mockGetLastCommitDate).toHaveBeenCalledTimes(4);
+    // 逐次実行なら maxInFlight は常に 1 のまま。並列化されていれば 1 より大きくなる。
+    expect(maxInFlight).toBeGreaterThan(1);
+  });
+
+  it("skipped の reason は英語である（#5: 後段のエージェント/他の CLI 出力との一貫性）", async () => {
+    mockListOwnerRepos.mockReturnValue(
+      Effect.succeed([repoInfo({ owner: "acme", repo: "broken" })]),
+    );
+    setLockFixture(lockFixtures, "acme", "broken", Effect.succeed(Option.some("{ not valid json")));
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        tmpBaseDir: "/tmp-base",
+      }),
+    );
+
+    expect(report.skipped).toHaveLength(1);
+    const reason = report.skipped[0]?.reason ?? "";
+    // 日本語文字（ひらがな・カタカナ・漢字・全角記号: U+3000-U+9FFF, U+FF00-U+FFEF）を
+    // 含まないことを確認する。
+    const JAPANESE_CHAR_PATTERN = /[　-鿿＀-￯]/;
+    expect(JAPANESE_CHAR_PATTERN.test(reason)).toBe(false);
+    expect(reason).toContain("Failed to parse lock.json as JSON");
+  });
+
   it("tmpBaseDir を明示指定した場合は削除しない（#10）", async () => {
     mockListOwnerRepos.mockReturnValue(Effect.succeed([]));
 

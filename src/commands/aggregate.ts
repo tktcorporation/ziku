@@ -64,20 +64,38 @@ type SinceParseResult =
 const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
+ * 明示的なタイムゾーンオフセット（`Z` または `+HH:MM` / `-HH:MM`）を持つかどうかを判定する。
+ * 日付のみの入力（`YYYY-MM-DD`）はこの正規表現にはマッチしない
+ * （呼び出し側で `DATE_ONLY_PATTERN` により別扱いする）。
+ */
+const HAS_EXPLICIT_OFFSET_PATTERN = /(?:Z|[+-]\d{2}:?\d{2})$/;
+
+/**
  * `--since` を UTC の ISO 8601 文字列へ正規化する。
  *
  * 背景: `aggregateTemplateUsage`（src/utils/aggregate.ts の `newestCommittedAt`）は
  * 日時を ISO 8601 文字列の辞書順で比較する。オフセット付き入力（例: "+09:00"）を
  * そのまま渡すと辞書順比較が UTC 基準からずれて壊れるため、コマンド層で UTC へ
- * 正規化してから渡す。日付のみの入力（YYYY-MM-DD）は UTC の 0 時として扱う。
+ * 正規化してから渡す。
+ *
+ * - 日付のみの入力（`YYYY-MM-DD`）は UTC の 0 時として扱う。
+ * - オフセットを持たない日時入力（例: `2026-01-01T00:00:00`）も UTC として解釈する。
+ *   `new Date(...)` にオフセット無しの日時文字列を渡すと実行環境のローカルタイムとして
+ *   解釈される仕様があり、同じ `--since` の指定でも実行環境のタイムゾーンによって
+ *   結果が変わってしまう。日付のみの入力と同じ扱いに揃えるため、オフセットが
+ *   無ければ `Z` を補って UTC として固定する。
  */
 export function normalizeSince(raw: string): SinceParseResult {
-  const candidate = DATE_ONLY_PATTERN.test(raw) ? `${raw}T00:00:00.000Z` : raw;
+  const candidate = DATE_ONLY_PATTERN.test(raw)
+    ? `${raw}T00:00:00.000Z`
+    : HAS_EXPLICIT_OFFSET_PATTERN.test(raw)
+      ? raw
+      : `${raw}Z`;
   const parsed = new Date(candidate);
   if (Number.isNaN(parsed.getTime())) {
     return {
       ok: false,
-      message: `Invalid --since value: "${raw}". Use an ISO 8601 date (e.g. "2026-01-01") or a date-time with an explicit offset (e.g. "2026-01-01T00:00:00+09:00").`,
+      message: `Invalid --since value: "${raw}". Use an ISO 8601 date (e.g. "2026-01-01") or a date-time (an explicit offset such as "2026-01-01T00:00:00+09:00" is honored; without one, it is interpreted as UTC).`,
     };
   }
   return { ok: true, value: parsed.toISOString() };
@@ -136,7 +154,7 @@ export const aggregateCommand = defineCommand({
     since: {
       type: "string",
       description:
-        "Only include repositories with pending-push/conflict changes on or after this date/time (ISO 8601)",
+        "Only include repositories with pending-push/conflict changes on or after this date/time (ISO 8601; interpreted as UTC unless an explicit offset is given)",
     },
     json: {
       type: "boolean",

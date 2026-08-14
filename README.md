@@ -338,7 +338,7 @@ ARGUMENTS
 OPTIONS
 
               --owner=<owner>    GitHub owner to search for template usage (default: origin owner)
-              --since=<since>    Only include repositories with pending-push/conflict changes on or after this date/time (ISO 8601)
+              --since=<since>    Only include repositories with pending-push/conflict changes on or after this date/time (ISO 8601; interpreted as UTC unless an explicit offset is given)
                        --json    Print the JSON report to stdout (no decoration; safe to pipe) (Default: false)
                   --out=<out>    Write the JSON report to this file path
            --include-archived    Include archived repositories (Default: false)

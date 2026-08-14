@@ -100,6 +100,13 @@ describe("normalizeSince", () => {
     expect(result).toEqual({ ok: true, value: "2026-06-15T12:34:56.000Z" });
   });
 
+  it("オフセット無しの日時は実行環境のタイムゾーンに関わらず UTC として解釈する", () => {
+    // オフセット無しの日時文字列を new Date() に渡すとローカルタイムとして解釈される
+    // 仕様があるため、CI (UTC) とローカル (JST 等) で --since の結果がずれないことを保証する。
+    const result = normalizeSince("2026-01-01T00:00:00");
+    expect(result).toEqual({ ok: true, value: "2026-01-01T00:00:00.000Z" });
+  });
+
   it("パースできない入力はエラーになる", () => {
     const result = normalizeSince("not-a-date");
     expect(result.ok).toBe(false);

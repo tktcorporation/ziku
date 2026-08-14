@@ -56,13 +56,30 @@ function renderSkippedLines(report: AggregateReport): string[] {
 }
 
 /**
+ * ヘッダー行（テンプレートと集計件数のサマリ）を作る。
+ *
+ * `summary.totalRepositories` は `--since` フィルタと `skipped` 適用後の件数であり
+ * 「テンプレートを使っているリポジトリ数」ではない。「使っている数」と誤読されないよう、
+ * レポートに載った件数であることを明示し、skipped があれば同じ行で件数を示す
+ * （読み手が両者を区別できるようにする）。
+ */
+function renderHeaderLine(report: AggregateReport): string {
+  const total = report.summary.totalRepositories;
+  const skippedCount = report.skipped.length;
+  if (skippedCount === 0) {
+    return `Report includes ${pc.bold(String(total))} repositories.`;
+  }
+  return `Report includes ${pc.bold(String(total))} repositories (${pc.bold(String(skippedCount))} skipped — see below).`;
+}
+
+/**
  * long モード（既定・非 `--json`）の出力を生成する。
  * `clack/prompts` の log.message に渡す前提のプレーン文字列を返す。
  */
 export function renderAggregateSummary(report: AggregateReport): string {
   const lines: string[] = [
     `Template: ${pc.cyan(`${report.template.owner}/${report.template.repo}`)} ${pc.dim(`@ ${report.template.ref.slice(0, 7)}`)}`,
-    `Found ${pc.bold(String(report.summary.totalRepositories))} repositories using this template.`,
+    renderHeaderLine(report),
   ];
 
   if (report.repositories.length > 0) {
@@ -86,9 +103,19 @@ export function renderAggregateSummary(report: AggregateReport): string {
  *
  * `aggregate` はレポートを作るだけで統合（push）は行わないため、次の行動として
  * 「このレポートを後段のエージェント/オペレーターに渡す」ことを明示する。
+ *
+ * `totalRepositories === 0` は「レポートに載った件数が 0」であって「テンプレートを
+ * 使っているリポジトリが無い」ことの証明ではない。skipped が 1 件以上あるなら、
+ * 実際には候補が見つかったが処理できなかっただけの可能性があるため、
+ * 「無かった」と読めるメッセージを出さず skipped 件数を案内する。
  */
 export function aggregateOutroLine(report: AggregateReport): string {
   if (report.summary.totalRepositories === 0) {
+    if (report.skipped.length > 0) {
+      return pc.yellow(
+        `No repositories included in the report — ${report.skipped.length} repositories could not be processed (see Skipped above). This does not mean no repositories use this template.`,
+      );
+    }
     return pc.dim("No repositories found using this template.");
   }
   return `${pc.cyan("→")} Read-only report generated. Pass the JSON (--json / --out) to an agent or operator to consolidate diffs back into the template — this command does not push changes itself.`;

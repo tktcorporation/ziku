@@ -167,6 +167,7 @@ export function aggregateTemplateUsage(
                   candidateIndex,
                   tmpBaseDir,
                   since,
+                  concurrency,
                 }),
               { concurrency },
             );
@@ -312,10 +313,7 @@ function evaluateCandidate(
       fetchRepoTextFile(candidate.owner, candidate.repo, LOCK_FILE),
     );
     if (Either.isLeft(fetched)) {
-      return skippedEvaluation(
-        candidate,
-        `lock.json の取得に失敗しました: ${fetched.left.message}`,
-      );
+      return skippedEvaluation(candidate, `Failed to fetch lock.json: ${fetched.left.message}`);
     }
     if (Option.isNone(fetched.right)) {
       return { _tag: "excluded" as const };
@@ -329,17 +327,14 @@ function evaluateCandidate(
       }),
     );
     if (Either.isLeft(parsedJson)) {
-      return skippedEvaluation(
-        candidate,
-        `lock.json の JSON パースに失敗しました: ${parsedJson.left}`,
-      );
+      return skippedEvaluation(candidate, `Failed to parse lock.json as JSON: ${parsedJson.left}`);
     }
 
     const parsedLock = lockSchema.safeParse(parsedJson.right);
     if (!parsedLock.success) {
       return skippedEvaluation(
         candidate,
-        `lock.json のスキーマ検証に失敗しました: ${parsedLock.error.message}`,
+        `lock.json failed schema validation: ${parsedLock.error.message}`,
       );
     }
 
@@ -376,6 +371,12 @@ interface ProcessCandidateOptions {
   readonly candidateIndex: number;
   readonly tmpBaseDir: string;
   readonly since: string | undefined;
+  /**
+   * `since` 指定時、変更ファイルごとのコミット日時取得（`attachLastCommittedAt`）を
+   * 同時に何件まで並列実行するか。`aggregateTemplateUsage` の `concurrency` オプションを
+   * そのまま渡す（新しいノブを増やさない）。
+   */
+  readonly concurrency: number;
 }
 
 /**
@@ -395,6 +396,7 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
     candidateIndex,
     tmpBaseDir,
     since,
+    concurrency,
   } = opts;
   const { repoInfo, lock } = candidate;
 
@@ -406,10 +408,10 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
       }),
     );
     if (Either.isLeft(refResult)) {
-      return processSkipped(repoInfo, `最新コミット SHA の解決に失敗しました: ${refResult.left}`);
+      return processSkipped(repoInfo, `Failed to resolve the latest commit SHA: ${refResult.left}`);
     }
     if (refResult.right === undefined) {
-      return processSkipped(repoInfo, "最新コミット SHA を解決できませんでした");
+      return processSkipped(repoInfo, "Could not resolve the latest commit SHA");
     }
     const ref = refResult.right;
 
@@ -430,7 +432,7 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
     if (Either.isLeft(classificationResult)) {
       return processSkipped(
         repoInfo,
-        `テンプレート差分の分類に失敗しました: ${classificationResult.left}`,
+        `Failed to classify the diff against the template: ${classificationResult.left}`,
       );
     }
     const classification = classificationResult.right;
@@ -444,8 +446,8 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
       // 「利用リポジトリ側でいつ変更されたか」という since フィルタの関心事に該当しない。
       // 対象を pendingPush/conflicts だけに絞ることで、この関数の GitHub API 呼び出し回数を
       // 増やさない。
-      const pushResult = yield* attachLastCommittedAt(repoInfo, ref, pendingPush);
-      const conflictResult = yield* attachLastCommittedAt(repoInfo, ref, conflicts);
+      const pushResult = yield* attachLastCommittedAt(repoInfo, ref, pendingPush, concurrency);
+      const conflictResult = yield* attachLastCommittedAt(repoInfo, ref, conflicts, concurrency);
       pendingPush = pushResult.entries;
       conflicts = conflictResult.entries;
 
@@ -457,7 +459,7 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
       if (pushResult.anyFetchFailed || conflictResult.anyFetchFailed) {
         return processSkipped(
           repoInfo,
-          "コミット日時の取得に失敗したファイルがあるため、--since による絞り込みを判定できませんでした",
+          "Could not determine the --since filter because fetching the commit date failed for some files",
         );
       }
 
@@ -622,29 +624,37 @@ interface AttachLastCommittedAtResult<T> {
  * しないと、失敗したリポジトリを「変更なし」と誤判定して `since` フィルタが静かに
  * 取りこぼす（呼び出し側 `processCandidate` が `anyFetchFailed` を見て `skipped` に
  * 振り分ける）。
+ *
+ * 変更ファイル 1 件ごとに直列で呼ぶと差分の多いリポジトリほど遅くなり、レート制限にも
+ * 当たりやすくなる。`concurrency` で並列実行し、呼び出し元（`aggregateTemplateUsage`）の
+ * 並列度設定に揃える。
  */
 function attachLastCommittedAt<T extends { readonly path: string }>(
   repoInfo: OwnerRepoInfo,
   ref: string,
   entries: readonly T[],
+  concurrency: number,
 ): Effect.Effect<AttachLastCommittedAtResult<T>> {
   return Effect.gen(function* () {
-    const results = yield* Effect.forEach(entries, (entry) =>
-      getLastCommitDate(repoInfo.owner, repoInfo.repo, entry.path, ref).pipe(
-        Effect.map((opt) => ({
-          entry: {
-            ...entry,
-            lastCommittedAt: Option.match(opt, {
-              onNone: () => undefined,
-              onSome: normalizeCommitDateToUtc,
-            }),
-          },
-          fetchFailed: false,
-        })),
-        Effect.catchAll(() =>
-          Effect.succeed({ entry: { ...entry, lastCommittedAt: undefined }, fetchFailed: true }),
+    const results = yield* Effect.forEach(
+      entries,
+      (entry) =>
+        getLastCommitDate(repoInfo.owner, repoInfo.repo, entry.path, ref).pipe(
+          Effect.map((opt) => ({
+            entry: {
+              ...entry,
+              lastCommittedAt: Option.match(opt, {
+                onNone: () => undefined,
+                onSome: normalizeCommitDateToUtc,
+              }),
+            },
+            fetchFailed: false,
+          })),
+          Effect.catchAll(() =>
+            Effect.succeed({ entry: { ...entry, lastCommittedAt: undefined }, fetchFailed: true }),
+          ),
         ),
-      ),
+      { concurrency },
     );
     return {
       entries: results.map((r) => r.entry),

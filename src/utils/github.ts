@@ -624,6 +624,41 @@ function fetchAllRepoPages(
 }
 
 /**
+ * `listOwnerRepos` 用に、認証済み GitHub ユーザーのログイン名を Effect で取得する。
+ *
+ * `getAuthenticatedUserLogin`（Promise 版、テンプレートソースの自動検出向け）とは
+ * 失敗の扱いを変える。ここでの用途は「探索対象 owner が認証ユーザー自身かどうか」の
+ * 判定であり、誤って `false` 側（他人）に倒すと private リポジトリしか返さない
+ * `/user/repos?affiliation=owner` を使わず public 限定の `/users/{owner}/repos` に
+ * 落ち、private リポジトリが黙って報告から漏れる。`isOrganization` と同じ
+ * 「取りこぼしを黙って返すより失敗させる」方針で、次のように区別する:
+ *
+ * - トークンが無い: `Option.none()` で成功する。認証ユーザーは存在しないので
+ *   owner が誰であっても「自分ではない」が正しい判定。
+ * - トークンはあるが `/user` の取得に失敗した（401/403/ネットワークエラー等）:
+ *   `GitHubApiError` で失敗させる。判定不能のまま public 限定へ丸めない。
+ */
+function resolveAuthenticatedUserLogin(): Effect.Effect<Option.Option<string>, GitHubApiError> {
+  const token = getGitHubToken();
+  if (!token) return Effect.succeed(Option.none());
+
+  return Effect.gen(function* () {
+    const res = yield* githubFetch("https://api.github.com/user");
+    if (!res.ok) return yield* Effect.fail(githubResponseError(res));
+    const data = yield* parseGitHubJson<{ login?: string }>(res);
+    if (!data.login) {
+      return yield* Effect.fail(
+        new GitHubApiError({ message: "GitHub /user response did not include a login" }),
+      );
+    }
+    // Option.some(...) は unicorn/no-array-callback-reference が Array.prototype.some
+    // との名前衝突で誤検知するため、fromNullable で同じ意味を表現する
+    // (data.login は直前の !data.login チェックで非 null/undefined/空文字が確定している)。
+    return Option.fromNullable(data.login);
+  });
+}
+
+/**
  * Personal アカウント owner のリポジトリ一覧を取得する。
  *
  * `GET /users/{owner}/repos` は認証していても public リポジトリしか返さない
@@ -638,14 +673,12 @@ function fetchPersonalOwnerRepoPages(
   owner: string,
 ): Effect.Effect<readonly GitHubRepoListItem[], GitHubApiError> {
   return Effect.gen(function* () {
-    const authenticatedLogin = yield* Effect.tryPromise({
-      try: () => getAuthenticatedUserLogin(),
-      catch: (cause) =>
-        new GitHubApiError({ message: cause instanceof Error ? cause.message : String(cause) }),
-    });
+    const authenticatedLogin = yield* resolveAuthenticatedUserLogin();
     // login はケースを区別しないため、比較前に正規化する。
-    const isSelf =
-      authenticatedLogin !== undefined && authenticatedLogin.toLowerCase() === owner.toLowerCase();
+    const isSelf = Option.match(authenticatedLogin, {
+      onNone: () => false,
+      onSome: (login) => login.toLowerCase() === owner.toLowerCase(),
+    });
     if (isSelf) {
       return yield* fetchAllRepoPages("https://api.github.com/user/repos", {
         affiliation: "owner",
