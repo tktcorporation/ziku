@@ -4,8 +4,8 @@ import ignore, { type Ignore } from "ignore";
 import { globSync } from "tinyglobby";
 import type { AbsPath, GlobPattern, RepoRelPath } from "../modules/schemas";
 import { joinAbs, repoRelPaths } from "./paths";
-import type { FlatPatterns } from "./patterns";
 import { resolvePatterns } from "./patterns";
+import type { DeclaredPatterns } from "./sync-scope";
 
 export interface UntrackedFile {
   path: RepoRelPath;
@@ -117,11 +117,16 @@ export async function loadAllGitignores(
 }
 
 /**
- * ホワイトリスト外のファイルをフォルダごとに検出
+ * ホワイトリスト外のファイルをフォルダごとに検出する。
+ *
+ * パターンを {@link DeclaredPatterns} でしか受け取らないのは、探索の基点
+ * （{@link getBaseDirsFromPatterns}）がパターンの先頭セグメントから決まるため。走査用の
+ * パターンを渡せる形にすると、ziku が走査のために足す `.ziku/ziku.jsonc` が基点 `.ziku` を
+ * 生み、同期対象ではない `.ziku/lock.json` が追跡候補として提示される。
  */
 export async function detectUntrackedFiles(options: {
   targetDir: AbsPath;
-  patterns: FlatPatterns;
+  patterns: DeclaredPatterns;
 }): Promise<UntrackedFilesByFolder[]> {
   const { targetDir, patterns } = options;
 

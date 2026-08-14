@@ -36,7 +36,6 @@ const {
   classifySyncPath,
   isZikuConfigPath,
   withConfigTracked,
-  withoutConfigTracked,
   SPECIAL_SYNC_PATHS,
   ZIKU_CONFIG_FILE,
 } = await import("../ziku-config");
@@ -351,23 +350,6 @@ describe("classifySyncPath", () => {
       zikuConfig: { kind: "syncedFile", path: ZIKU_CONFIG_FILE },
     };
     expect(mismatched.zikuConfig.path).toBe(ZIKU_CONFIG_FILE);
-  });
-});
-
-describe("withoutConfigTracked", () => {
-  it("常に追跡されるパスだけを取り除く", () => {
-    expect(
-      withoutConfigTracked([
-        ...globPatterns([".claude/**"]),
-        pathAsPattern(ZIKU_CONFIG_FILE),
-        ...globPatterns([".ziku/lock.json"]),
-      ]),
-    ).toEqual([".claude/**", ".ziku/lock.json"]);
-  });
-
-  it("withConfigTracked と往復すると元の include に戻る", () => {
-    const include = globPatterns([".claude/**", ".mcp.json"]);
-    expect(withoutConfigTracked(withConfigTracked(include))).toEqual(include);
   });
 });
 

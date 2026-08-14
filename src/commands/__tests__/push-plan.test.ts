@@ -39,7 +39,6 @@ import {
   planUntrackedTracking,
   resolvePrBaseBranch,
   selectedUnresolvedConflicts,
-  withNewlyTrackedPatterns,
   zikuConfigWriteBack,
 } from "../push-plan";
 import type { ChangedFileDiff, DeletablePath, PushContent, PushFile } from "../push-plan";
@@ -877,28 +876,6 @@ describe("planUntrackedTracking", () => {
       _tag: "SkipTracking",
       reason: "dryRun",
     });
-  });
-});
-
-describe("withNewlyTrackedPatterns", () => {
-  const patterns = { include: globPatterns([".github/**"]), exclude: globPatterns(["**/*.log"]) };
-
-  it("選んだファイルのパスを 1 本の include として足す", () => {
-    const { effectivePatterns, newlyTrackedPaths } = withNewlyTrackedPatterns(
-      patterns,
-      repoRelPaths(["docs/a.md"]),
-    );
-
-    expect(effectivePatterns.include).toEqual(globPatterns([".github/**", "docs/a.md"]));
-    expect(effectivePatterns.exclude).toEqual(globPatterns(["**/*.log"]));
-    expect(newlyTrackedPaths).toEqual(["docs/a.md"]);
-  });
-
-  it("何も選ばなければパターンは変わらない", () => {
-    const { effectivePatterns, newlyTrackedPaths } = withNewlyTrackedPatterns(patterns, []);
-
-    expect(effectivePatterns).toEqual(patterns);
-    expect(newlyTrackedPaths).toEqual([]);
   });
 });
 

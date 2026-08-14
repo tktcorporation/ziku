@@ -1,18 +1,12 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { Effect } from "effect";
-import {
-  type ParseError as JsoncParseError,
-  applyEdits,
-  modify,
-  parse,
-  printParseErrorCode,
-} from "jsonc-parser";
 import { dirname } from "pathe";
 import { match } from "ts-pattern";
 import type { AbsPath, GlobPattern, RepoRelPath, ZikuConfig } from "../modules/schemas";
 import { zikuConfigSchema } from "../modules/schemas";
 import { FileNotFoundError, ParseError, ValidationError } from "../errors";
+import { applyEdits, modify, parseJsonc } from "./jsonc";
 import { globPattern, joinAbs, pathAsPattern, repoRelPath } from "./paths";
 
 export const ZIKU_CONFIG_FILE: RepoRelPath = repoRelPath(".ziku/ziku.jsonc");
@@ -117,19 +111,6 @@ export function withConfigTracked(include: readonly GlobPattern[]): GlobPattern[
 }
 
 /**
- * {@link withConfigTracked} が足した合成エントリを取り除いた include パターンを返す。
- *
- * 未追跡ファイルの探索のように「ユーザーが明示的に追跡すると決めたパターン」だけを見たい
- * 入口で使う。合成エントリを混ぜると `.ziku` が探索のスコープ基点とみなされ、同期対象外の
- * `.ziku/lock.json`（テンプレート取得元 source を含むローカル専用ファイル）まで追跡候補に
- * 出てしまう。特別扱いのファイルは常に追跡されるので、探索対象から外しても追跡漏れは起きない。
- */
-export function withoutConfigTracked(include: readonly GlobPattern[]): GlobPattern[] {
-  const alwaysTracked = new Set<string>(ALWAYS_TRACKED_PATHS);
-  return include.filter((pattern) => !alwaysTracked.has(pattern));
-}
-
-/**
  * 走査結果から漏れても同期対象へ戻すパスのうち、`dir` に実在するものを返す。
  *
  * 走査の入口はパターン解決・ハッシュ計算・diff 検出の 3 つあり、1 つの関数にはまとめられない。
@@ -140,7 +121,8 @@ export function withoutConfigTracked(include: readonly GlobPattern[]): GlobPatte
  * - ハッシュ計算は 1 ディレクトリの glob 結果へ戻す。exclude で消えた分が対象で、include に
  *   明示されているときだけ戻す（設定ファイルを追跡しないパターンで呼ぶ利用者に押し付けない）。
  * - diff 検出はローカルとテンプレートを突き合わせた集合へ戻す。gitignore で消えた分が対象で、
- *   include の明示は問わない（`ziku diff` は合成エントリを足さない生の include で走るため）。
+ *   include の明示は問わない。走査は {@link withConfigTracked} 済みの include で走るので
+ *   合成エントリは常に在り、明示を条件にすると gitignore で消えた分を戻せなくなる。
  *
  * 3 者が共有できるのは「どのパスが対象か」だけなので、その一覧をこの関数と
  * {@link withConfigTracked} が同じ定数から引く。
@@ -151,19 +133,6 @@ export function alwaysTrackedPathsIn(dir: AbsPath): RepoRelPath[] {
 
 export const ZIKU_CONFIG_SCHEMA_URL =
   "https://raw.githubusercontent.com/tktcorporation/ziku/main/schema/ziku.json";
-
-/**
- * jsonc-parser の診断を、エディタで開ける位置つきの 1 行に落とす。
- *
- * 診断が持つのはエラーコードと文字オフセットだけなので、行・桁へ直して示す。
- * オフセットのままだと、ユーザーは壊れた箇所へ辿り着けない。
- */
-function describeJsoncError(error: JsoncParseError, content: string): string {
-  const linesBefore = content.slice(0, error.offset).split("\n");
-  const line = linesBefore.length;
-  const column = (linesBefore.at(-1)?.length ?? 0) + 1;
-  return `${printParseErrorCode(error.error)} at line ${line}, column ${column}`;
-}
 
 /**
  * `.ziku/ziku.jsonc` を読み込む。
@@ -189,22 +158,15 @@ export function loadZikuConfig(
       catch: () => new FileNotFoundError({ path: ZIKU_CONFIG_FILE }),
     });
 
-    // jsonc-parser の parse は不正入力でも例外を投げず、渡した配列へ診断を積む設計。
-    // 例外の有無で判定すると、どんな入力でも構文が通ったことになる。
-    //
-    // 末尾カンマを許容するのは、この設定ファイルが JSONC 方言で書かれるため。
-    const syntaxErrors: JsoncParseError[] = [];
-    const parsed: unknown = parse(content, syntaxErrors, { allowTrailingComma: true });
-    // 後続の診断は最初の破綻から派生した連鎖なので、直すべき箇所である先頭だけを報告する。
-    const firstSyntaxError = syntaxErrors[0];
-    if (firstSyntaxError !== undefined) {
+    const document = parseJsonc(content);
+    if (document.kind === "unparsable") {
       return yield* new ParseError({
         path: ZIKU_CONFIG_FILE,
-        cause: new SyntaxError(describeJsoncError(firstSyntaxError, content)),
+        cause: new SyntaxError(document.detail),
       });
     }
 
-    const result = zikuConfigSchema.safeParse(parsed);
+    const result = zikuConfigSchema.safeParse(document.value);
     if (!result.success) {
       return yield* new ValidationError({
         path: ZIKU_CONFIG_FILE,
@@ -282,23 +244,46 @@ export function newIncludePatterns(
  * `exclude` が空なら触らない。加法 union はパターンを消さないため、空になるのはどちらの側にも
  * exclude が無い場合に限られ、書き足す意味がない。
  *
- * 元の内容がオブジェクトとして読めないときは {@link generateZikuJsonc} で作り直す。残すべき
- * 構造が読み取れず、部分編集を重ねても壊れた JSONC にしかならないため。
+ * 元の内容が構文として壊れているか、オブジェクトとして読めないときは {@link generateZikuJsonc}
+ * で作り直す。残すべき構造が読み取れず、部分編集を重ねても壊れた JSONC にしかならないため。
+ *
+ * 「壊れているか」は必ず {@link parseJsonc} の診断で判定する。jsonc-parser のエラー回復は
+ * 閉じ括弧を失ったテキストからでも部分的なオブジェクトを返すので、戻り値の形だけで判定すると
+ * 壊れたテキストが編集可能と判定され、`modify` / `applyEdits` がそれを土台に走る。この関数の
+ * 判定は「作り直す」か「生のテキストを編集する」かを決めるので、誤った「読めた」がそのまま
+ * 壊れたファイルの書き出しになる。
  */
 export function withPatterns(
   rawContent: string,
   patterns: { readonly include: readonly GlobPattern[]; readonly exclude: readonly GlobPattern[] },
 ): string {
-  const parsed: unknown = parse(rawContent);
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+  const current = editableObjectOf(rawContent);
+  if (current === undefined) {
     return generateZikuJsonc(patterns);
   }
 
-  const current = parsed as { include?: unknown; exclude?: unknown };
   const withInclude = replaceArray(rawContent, "include", current.include, patterns.include);
   return patterns.exclude.length === 0
     ? withInclude
     : replaceArray(withInclude, "exclude", current.exclude, patterns.exclude);
+}
+
+/**
+ * 部分編集の土台にしてよい内容だけを返す。土台にできなければ undefined。
+ *
+ * 配列と原始値を弾くのは、`modify` がキーを差し込む先を持たないため。
+ */
+function editableObjectOf(
+  rawContent: string,
+): { include?: unknown; exclude?: unknown } | undefined {
+  return match(parseJsonc(rawContent))
+    .with({ kind: "unparsable" }, () => undefined)
+    .with({ kind: "parsed" }, ({ value }) =>
+      typeof value === "object" && value !== null && !Array.isArray(value)
+        ? (value as { include?: unknown; exclude?: unknown })
+        : undefined,
+    )
+    .exhaustive();
 }
 
 /** 配列キー 1 つを差し替える。並びまで一致していれば元の内容をそのまま返す。 */
@@ -323,11 +308,15 @@ function replaceArray(
 
 /**
  * ziku.jsonc の include にパターンを追加
+ *
+ * 元の内容が壊れていれば既存パターン無しとして扱い、{@link withPatterns} の作り直しへ落ちる。
+ * 呼び出し元は {@link loadZikuConfig} を通った内容を渡すので、この経路に入るのは読み込みと
+ * 書き換えの間にファイルが壊れた場合だけ。そのとき部分編集を続けると壊れたまま書き戻る。
+ *
  * @returns 更新後の JSONC 文字列
  */
 export function addIncludePattern(rawContent: string, patterns: readonly GlobPattern[]): string {
-  const parsed = parse(rawContent) as { include?: string[] } | undefined;
-  const existing = (parsed?.include ?? []).map((pattern) => globPattern(pattern));
+  const existing = includePatternsOf(rawContent);
   const newPatterns = newIncludePatterns(existing, patterns);
 
   if (newPatterns.length === 0) {
@@ -335,4 +324,14 @@ export function addIncludePattern(rawContent: string, patterns: readonly GlobPat
   }
 
   return withPatterns(rawContent, { include: [...existing, ...newPatterns], exclude: [] });
+}
+
+/** ziku.jsonc の内容から include パターンを取り出す。土台にできない内容なら空。 */
+function includePatternsOf(rawContent: string): GlobPattern[] {
+  const include = editableObjectOf(rawContent)?.include;
+  return Array.isArray(include)
+    ? include
+        .filter((pattern) => typeof pattern === "string")
+        .map((pattern) => globPattern(pattern))
+    : [];
 }

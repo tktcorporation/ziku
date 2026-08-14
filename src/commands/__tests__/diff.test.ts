@@ -68,11 +68,14 @@ vi.mock("../../ui/renderer", () => ({
 const { diffCommand } = await import("../diff");
 const { loadCommandContext } = await import("../../services/command-context");
 const { detectDiff, hasDiff } = await import("../../utils/diff");
+const { detectUntrackedFiles } = await import("../../utils/untracked");
+const { ZIKU_CONFIG_FILE } = await import("../../utils/ziku-config");
 const { log, outro, logDiffSummary } = await import("../../ui/renderer");
 const { renderFileDiff } = await import("../../ui/diff-view");
 
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
 const mockDetectDiff = vi.mocked(detectDiff);
+const mockDetectUntrackedFiles = vi.mocked(detectUntrackedFiles);
 const mockHasDiff = vi.mocked(hasDiff);
 const mockLog = vi.mocked(log);
 const mockOutro = vi.mocked(outro);
@@ -191,6 +194,39 @@ describe("diffCommand", () => {
       });
 
       expect(mockOutro).toHaveBeenCalledWith("No changes — in sync with template.");
+    });
+
+    it("未追跡探索は宣言されたパターンで走り、比較は制御ファイルを含む走査パターンで走る", async () => {
+      const { effect } = mockContext();
+      mockLoadCommandContext.mockReturnValue(effect);
+      mockDetectDiff.mockResolvedValueOnce(emptyDiff);
+      mockHasDiff.mockReturnValueOnce(false);
+
+      await (diffCommand.run as any)({
+        args: { dir: "/test", verbose: false },
+        rawArgs: [],
+        cmd: diffCommand,
+      });
+
+      // 走査パターンで探索すると `.ziku` が探索の基点になり、同期対象ではない
+      // `.ziku/lock.json` が追跡候補として提示される。
+      expect(mockDetectUntrackedFiles).toHaveBeenCalledWith({
+        targetDir: "/test",
+        patterns: expect.objectContaining({
+          purpose: "declared",
+          include: expect.not.arrayContaining([ZIKU_CONFIG_FILE]),
+        }),
+      });
+      // 比較の側は制御ファイルを含む（落とすとパターンの追加が双方向に伝わらない）。
+      expect(mockDetectDiff).toHaveBeenCalledWith(
+        expect.objectContaining({
+          scope: expect.objectContaining({
+            scan: expect.objectContaining({
+              include: expect.arrayContaining([ZIKU_CONFIG_FILE]),
+            }),
+          }),
+        }),
+      );
     });
 
     it("差分がある場合は logDiffSummary を呼ぶ", async () => {

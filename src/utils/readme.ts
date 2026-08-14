@@ -4,9 +4,10 @@
 
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import { parse } from "jsonc-parser";
 import { join } from "pathe";
+import { match } from "ts-pattern";
 import { zikuConfigSchema } from "../modules/schemas";
+import { parseJsonc } from "./jsonc";
 import { ZIKU_CONFIG_FILE } from "./ziku-config";
 
 // マーカー定義
@@ -34,10 +35,18 @@ const MARKERS = {
  * README の更新は同期処理の付随作業であり、これを理由に同期そのものを
  * 止めたくない。読めない場合はパターン無しとして扱い、
  * マーカー間を書き換えずに現状の README を残す。
+ *
+ * 構文の破綻を検証違反と同じ「パターン無し」に倒すのは、エラー回復が拾えた分だけの
+ * 部分的な include を採ると、実際より短いファイル一覧を載せた README を、正しい一覧として
+ * 書き出してしまうため。手を触れない README は古いだけだが、書き換えた README は嘘になる。
+ * 壊れている事実は `ziku.jsonc` を読む他の入口が報告するので、ここで重ねて止める必要はない。
  */
 function parseIncludePatterns(config: string): string[] {
-  const parsed = zikuConfigSchema.safeParse(parse(config));
-  return parsed.success ? parsed.data.include : [];
+  const parsed = match(parseJsonc(config))
+    .with({ kind: "parsed" }, ({ value }) => zikuConfigSchema.safeParse(value))
+    .with({ kind: "unparsable" }, () => undefined)
+    .exhaustive();
+  return parsed?.success === true ? parsed.data.include : [];
 }
 
 /** ディスク上の ziku.jsonc から include パターンを読む。無ければパターン無し。 */

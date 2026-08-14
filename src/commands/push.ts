@@ -25,7 +25,6 @@ import {
   isZikuConfigPath,
   loadZikuConfig,
   saveZikuConfig,
-  withoutConfigTracked,
 } from "../utils/ziku-config";
 import { loadCommandContext, runCommandEffect, toZikuFailure } from "../services/command-context";
 import { mergeConflictFiles } from "../utils/merge";
@@ -96,7 +95,6 @@ import {
   resolvePrBaseBranch,
   selectedUnresolvedConflicts,
   templateContentOf,
-  withNewlyTrackedPatterns,
   zikuConfigWriteBack,
 } from "./push-plan";
 
@@ -984,11 +982,11 @@ async function warnIfConfigWouldBeAutoIncluded(params: {
 /**
  * 未追跡ファイルを検知し、追跡対象を決定する。
  *
- * 対話時はユーザーに追跡対象（include 追加）を選択させ、選択分を含めた effectivePatterns を返す。
+ * 対話時はユーザーに追跡対象（include 追加）を選択させ、選択分を足した走査範囲を返す。
  * 対話を省く実行では暗黙追加せず、除外されるファイルを通知する（進め方の判断は
  * `planUntrackedTracking`）。
  *
- * @returns effectivePatterns（追跡選択を反映したパターン。以降の hash/classify/diff に使う）と
+ * @returns effectiveScope（追跡選択を反映した走査範囲。以降の hash/classify/diff に使う）と
  *   newlyTrackedPaths（push 成功後に永続化する候補パス。対話を省いた場合は空）。
  */
 async function resolveUntrackedTracking(
@@ -999,13 +997,10 @@ async function resolveUntrackedTracking(
   effectiveScope: SyncScope;
   newlyTrackedPaths: RepoRelPath[];
 }> {
-  // 未追跡探索は、ユーザーが明示的に追跡すると決めたパターンだけを見る（除外の理由は
-  // withoutConfigTracked の JSDoc を参照）。
-  const discoveryPatterns = {
-    include: withoutConfigTracked(scope.include),
-    exclude: scope.exclude,
-  };
-  const untrackedByFolder = await detectUntrackedFiles({ targetDir, patterns: discoveryPatterns });
+  const untrackedByFolder = await detectUntrackedFiles({
+    targetDir,
+    patterns: scope.declared,
+  });
   const untrackedCount = getTotalUntrackedCount(untrackedByFolder);
 
   const plan = planUntrackedTracking({ untrackedCount, yes: args.yes, dryRun: args.dryRun });
@@ -1033,16 +1028,14 @@ async function resolveUntrackedTracking(
     .with({ _tag: "AskUser" }, () => selectUntrackedToTrack(untrackedByFolder))
     .exhaustive();
 
-  const { newlyTrackedPaths } = withNewlyTrackedPatterns(
-    { include: [...scope.include], exclude: [...scope.exclude] },
-    selected,
-  );
+  // 選んだファイルは、そのパス 1 本だけに一致する include として範囲へ加える。分類は
+  // 送信候補を確定させるので、ここで加えないと追跡したファイルが候補に乗らない。
   return {
     effectiveScope: extendScope(
       scope,
-      newlyTrackedPaths.map((path) => pathAsPattern(path)),
+      selected.map((path) => pathAsPattern(path)),
     ),
-    newlyTrackedPaths,
+    newlyTrackedPaths: selected,
   };
 }
 

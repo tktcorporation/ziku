@@ -562,9 +562,7 @@ describe("statusCommand", () => {
       // 送れない。同じ範囲から両方を導いていることを、渡した値そのもので確かめる。
       expect(mockAnalyzeSync).toHaveBeenCalledWith(expect.objectContaining({ scope }));
       expect(mockDetectUntrackedFiles).toHaveBeenCalledWith(
-        expect.objectContaining({
-          patterns: { include: scope.include, exclude: scope.exclude },
-        }),
+        expect.objectContaining({ patterns: scope.declared }),
       );
       // ユーザー向けの新パターン通知
       const infoCalls = mockLog.info.mock.calls.flat().join(" ");

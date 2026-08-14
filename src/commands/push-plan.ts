@@ -693,28 +693,6 @@ export function planUntrackedTracking(params: {
 }
 
 /**
- * 追跡すると決めたパスを include へ加えた、以降の走査に使うパターンを組み立てる。
- *
- * 個別に選んだファイルは、そのパス 1 本だけに一致する include として登録する。ハッシュ計算・
- * 分類・差分検出はここで返したパターンで走るため、追跡したファイルがそのまま送信候補に乗る。
- */
-export function withNewlyTrackedPatterns(
-  patterns: { readonly include: readonly GlobPattern[]; readonly exclude: readonly GlobPattern[] },
-  selected: readonly RepoRelPath[],
-): {
-  effectivePatterns: { include: GlobPattern[]; exclude: GlobPattern[] };
-  newlyTrackedPaths: RepoRelPath[];
-} {
-  return {
-    effectivePatterns: {
-      include: [...patterns.include, ...selected.map((path) => pathAsPattern(path))],
-      exclude: [...patterns.exclude],
-    },
-    newlyTrackedPaths: [...selected],
-  };
-}
-
-/**
  * push 成功後に `ziku.jsonc` の include へ永続化するパターンを決める。
  *
  * 実際に送ったファイルのパターンだけを残す。選択で外した追跡候補を落とすことで、

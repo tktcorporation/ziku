@@ -8,10 +8,10 @@
 import { Effect } from "effect";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { parse } from "jsonc-parser";
 import { zikuConfigSchema } from "../modules/schemas";
 import type { AbsPath, GlobPattern, ZikuConfig } from "../modules/schemas";
 import { ParseError, TemplateNotConfiguredError } from "../errors";
+import { parseJsonc } from "./jsonc";
 import { joinAbs } from "./paths";
 import { ZIKU_CONFIG_FILE } from "./ziku-config";
 
@@ -20,6 +20,13 @@ import { ZIKU_CONFIG_FILE } from "./ziku-config";
  *
  * テンプレートリポジトリの include/exclude パターンを取得する。
  * init 時にどのディレクトリを同期するか選択するためのデータソース。
+ *
+ * 構文が壊れていれば `ParseError` を返す。パターン無しとして扱わないのは、この戻り値が
+ * 「テンプレートが同期対象と定めた範囲」そのものであり、欠けた範囲は下流で「テンプレートが
+ * そう決めた」と読まれるため。init は取り込むディレクトリの選択肢をここから作るので、
+ * エラー回復が拾えた分だけの部分的なパターンを返すと、利用者はテンプレートの一部だけを
+ * 取り込んだプロジェクトを、全部取り込んだつもりで作ることになる。壊れている事実を
+ * 報告すれば、テンプレート側を直すという行動が取れる。
  */
 export function loadTemplateConfig(
   templateDir: AbsPath,
@@ -36,13 +43,16 @@ export function loadTemplateConfig(
       catch: () => new ParseError({ path: configPath, cause: "Failed to read file" }),
     });
 
-    const parsed = yield* Effect.try({
-      try: () => parse(content),
-      catch: (e) => new ParseError({ path: configPath, cause: e }),
-    });
+    const document = parseJsonc(content);
+    if (document.kind === "unparsable") {
+      return yield* new ParseError({
+        path: configPath,
+        cause: new SyntaxError(document.detail),
+      });
+    }
 
     const validated = yield* Effect.try({
-      try: () => zikuConfigSchema.parse(parsed),
+      try: () => zikuConfigSchema.parse(document.value),
       catch: (e) => new ParseError({ path: configPath, cause: e }),
     });
 

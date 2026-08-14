@@ -219,29 +219,31 @@ export function planOverwriteStrategy(opts: {
 export type BaseHashOrigin =
   /** init が書き込んだので、ディスクの内容は書いた内容（テンプレート / 生成物）と一致する。 */
   | { readonly _tag: "Written" }
-  /** 書き込みが起きなかったので、ディスクにある実内容から取る。 */
-  | { readonly _tag: "LocalFile" };
+  /** init がテンプレートの内容を採らなかったので、ベースを持たせない。 */
+  | { readonly _tag: "Untouched" };
 
 /**
  * ファイル 1 つの扱いから、ベースに載せるハッシュの出どころを決める。
  *
- * `undefined`（そのファイルについて操作結果が無い）を書き込み側へ倒さないのは、init が
- * 触っていないファイルはディスクに在るとも無いとも言えないため。ディスクを見にいけば、
- * 在れば実内容が、無ければ「ベース無し」が得られ、どちらも実態と一致する。
+ * ベースは「テンプレートと最後に足並みを揃えた内容」を表す。init が書いたファイルは
+ * その時点で揃っているのでベースに載る。
+ *
+ * 書かなかったファイル（既存を残した・そのパスに触れていない）はベースを持たせない。
+ * ローカルの内容をベースにすると「ローカルは変えていない・テンプレートだけが変わった」と
+ * 読まれ、次の pull が確認なくテンプレートの内容へ置き換える。既存ファイルを残すのは
+ * `--yes` が約束する挙動（プロンプトを省くだけで、内容を失う承認は含まない）なので、
+ * その決定を直後の pull が無効化することになる。ベースが無ければローカルとテンプレートの
+ * 両方に在るファイルとして `conflicts` に入り、どちらを残すかをユーザーが決められる。
+ *
+ * ベースが無いことは push 側の保護も保つ。未解決の衝突として扱われるため、既定の送信集合に
+ * 入らず、pull で解決してから push するよう案内される。
  */
 export function baseHashOrigin(action: FileAction | undefined): BaseHashOrigin {
   return match(action)
     .with("copied", "created", "overwritten", (): BaseHashOrigin => ({ _tag: "Written" }))
-    .with("skipped", "skipped_ignored", undefined, (): BaseHashOrigin => ({ _tag: "LocalFile" }))
+    .with("skipped", "skipped_ignored", (): BaseHashOrigin => ({ _tag: "Untouched" }))
+    .with(undefined, (): BaseHashOrigin => ({ _tag: "Untouched" }))
     .exhaustive();
-}
-
-/** lock の同期ベースに載せるハッシュ表を、確定分とディスク参照分に分けたもの。 */
-export interface LockBaseHashPlan {
-  /** init が書いた内容から確定したハッシュ。そのままベースへ載る。 */
-  readonly written: HashMap;
-  /** ディスク上の実内容を読んでハッシュを取るファイル。 */
-  readonly fromLocalFile: readonly RepoRelPath[];
 }
 
 /**
@@ -269,9 +271,12 @@ export interface LockBaseHashPlan {
  * 「テンプレートへ送って全プロジェクトへ配る」で取り消せないのに対し、こちらは 1 つの
  * プロジェクトの中で完結し、利用者が残す側を選べる。
  *
- * ## 判断とディスク読み取りの分離
- * ここはどのファイルをどちらの内容から取るかだけを決め、ディスクは読まない。`fromLocalFile`
- * のファイルを読んでハッシュを取るのは呼び出し側の役目。
+ * ## 書かなかったファイルにはベースを持たせない
+ * 既存ファイルを残した場合も、そのパスに触れていない場合も、テンプレートとは足並みが
+ * 揃っていない。ローカルの内容をベースにすると「ローカルは変えていない・テンプレートだけが
+ * 変わった」と読まれ、次の pull が確認なくテンプレートの内容へ置き換える。既存を残すのは
+ * `--yes` が約束する挙動（{@link planOverwriteStrategy}）なので、その決定を直後の pull が
+ * 無効化することになる。ベースが無ければ `conflicts` として扱われ、利用者が残す側を選べる。
  *
  * @param params.templateHashes    テンプレートを走査して得たハッシュ表
  * @param params.generatedContents init が自分で組み立てて書く本文（パス → 本文）。テンプレートに
@@ -288,7 +293,7 @@ export function planLockBaseHashes(params: {
   readonly templateHashes: HashMap;
   readonly generatedContents: ReadonlyMap<RepoRelPath, string>;
   readonly results: readonly FileOperationResult[];
-}): LockBaseHashPlan {
+}): HashMap {
   const actions = new Map<string, FileAction>(params.results.map((r) => [r.path, r.action]));
 
   // init が書き込んだ場合にベースへ載る内容。生成物はその本文から、それ以外はテンプレートの
@@ -299,19 +304,18 @@ export function planLockBaseHashes(params: {
   }
 
   const written: HashMap = {};
-  const fromLocalFile: RepoRelPath[] = [];
   for (const [rawPath, hash] of Object.entries(ifWritten)) {
     const path = repoRelPath(rawPath);
     match(baseHashOrigin(actions.get(rawPath)))
       .with({ _tag: "Written" }, () => {
         written[path] = hash;
       })
-      .with({ _tag: "LocalFile" }, () => {
-        fromLocalFile.push(path);
+      .with({ _tag: "Untouched" }, () => {
+        // ベースを持たせない。分類は base 無しで走り、利用者が残す側を決める。
       })
       .exhaustive();
   }
-  return { written, fromLocalFile };
+  return written;
 }
 
 /**

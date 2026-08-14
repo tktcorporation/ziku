@@ -5,6 +5,46 @@ import { mergeTemplatePatterns } from "./template-patterns";
 import { alwaysTrackedPathsIn, withConfigTracked } from "./ziku-config";
 
 /**
+ * パターン集合の用途。
+ *
+ * 走査用と宣言用は同じ形（include / exclude）なので、識別子が無いと互いに代入でき、
+ * 取り違えても型検査を通る。用途を値として持たせることで、受け取る側が
+ * {@link ScanPatterns} / {@link DeclaredPatterns} のどちらを要求するかをシグネチャで
+ * 表明でき、渡し間違いがコンパイルエラーになる。
+ */
+export type PatternPurpose = "scan" | "declared";
+
+interface PurposedPatterns<P extends PatternPurpose> {
+  readonly purpose: P;
+  readonly include: readonly GlobPattern[];
+  readonly exclude: readonly GlobPattern[];
+}
+
+/**
+ * ローカルとテンプレートを突き合わせるために走査するパターン。
+ *
+ * 宣言されたパターンに加えて、ziku 自身が同期の前提として必要とする制御ファイル
+ * （`alwaysTrackedPathsIn` の対象）を含む。ハッシュ計算・分類・差分検出はこれで走る。
+ */
+export type ScanPatterns = PurposedPatterns<"scan">;
+
+/**
+ * 追跡対象として `.ziku/ziku.jsonc` に宣言されたパターン。
+ *
+ * ziku が走査のために足す制御ファイルのエントリを含まない。未追跡ファイルの探索は
+ * こちらで走らせる。走査用のパターンで探索すると `.ziku` が探索の基点とみなされ、
+ * 同期対象ではない `.ziku/lock.json`（テンプレート取得元とベースを持つマシン固有の
+ * ファイル）が追跡候補として提示される。案内に従って追跡すると、そのマシン固有の内容が
+ * テンプレートへ送られる。
+ *
+ * テンプレート側にしかなかったパターンはこちらにも含む。パターン同期は加法 union なので、
+ * それらは次の `pull` / `push` でローカルの `ziku.jsonc` へ書き込まれる宣言そのものになる。
+ * 除くと、実際に同期されているディレクトリが探索の基点から外れ、そこに置いた新規ファイルを
+ * 追跡候補として提示できなくなる。
+ */
+export type DeclaredPatterns = PurposedPatterns<"declared">;
+
+/**
  * 同期対象のファイルを走査する範囲。
  *
  * ローカルとテンプレートは同じ範囲で走査しなければならない。片側だけ条件がずれると、
@@ -22,8 +62,10 @@ import { alwaysTrackedPathsIn, withConfigTracked } from "./ziku-config";
  * 表す。
  */
 export interface SyncScope {
-  readonly include: readonly GlobPattern[];
-  readonly exclude: readonly GlobPattern[];
+  /** 走査に使うパターン。 */
+  readonly scan: ScanPatterns;
+  /** 追跡対象として宣言されたパターン。 */
+  readonly declared: DeclaredPatterns;
   readonly gitignore: Ignore;
   /**
    * gitignore や exclude に関わらず走査へ戻すパス。
@@ -39,6 +81,40 @@ export interface ResolvedSyncScope {
   readonly scope: SyncScope;
   /** テンプレート側にしかなかった include パターン。取り込みの通知に使う。 */
   readonly newInclude: readonly GlobPattern[];
+}
+
+/**
+ * 宣言されたパターンから走査範囲を組み立てる。
+ *
+ * 走査用の include は宣言に制御ファイルを足したもので、それ以外の差は作らない。2 つの
+ * 集合を別々に組み立てると、宣言には有るのに走査されないパターン（またはその逆）が
+ * 生まれ、「追跡していると表示されるのに同期されない」ずれになる。
+ */
+async function composeScope(params: {
+  targetDir: AbsPath;
+  templateDir: AbsPath;
+  include: readonly GlobPattern[];
+  exclude: readonly GlobPattern[];
+}): Promise<SyncScope> {
+  const gitignore = await loadMergedGitignore([params.targetDir, params.templateDir]);
+  const alwaysTracked = [
+    ...new Set([
+      ...alwaysTrackedPathsIn(params.targetDir),
+      ...alwaysTrackedPathsIn(params.templateDir),
+    ]),
+  ];
+  return {
+    scan: {
+      purpose: "scan",
+      // ziku 自身の設定ファイルを走査対象へ含める。他の追跡ファイルと同じ差分検出に
+      // 乗せることで、パターンの追加が双方向に伝わる。
+      include: withConfigTracked(params.include),
+      exclude: params.exclude,
+    },
+    declared: { purpose: "declared", include: params.include, exclude: params.exclude },
+    gitignore,
+    alwaysTracked,
+  };
 }
 
 /**
@@ -64,24 +140,32 @@ export async function resolveSyncScope(params: {
     params.include,
     params.exclude,
   );
-  const gitignore = await loadMergedGitignore([params.targetDir, params.templateDir]);
-  const alwaysTracked = [
-    ...new Set([
-      ...alwaysTrackedPathsIn(params.targetDir),
-      ...alwaysTrackedPathsIn(params.templateDir),
-    ]),
-  ];
-  return {
-    scope: {
-      // ziku 自身の設定ファイルを走査対象へ含める。他の追跡ファイルと同じ差分検出に
-      // 乗せることで、パターンの追加が双方向に伝わる。
-      include: withConfigTracked(mergedInclude),
-      exclude: mergedExclude,
-      gitignore,
-      alwaysTracked,
-    },
-    newInclude,
-  };
+  const scope = await composeScope({
+    targetDir: params.targetDir,
+    templateDir: params.templateDir,
+    include: mergedInclude,
+    exclude: mergedExclude,
+  });
+  return { scope, newInclude };
+}
+
+/**
+ * 渡したパターンだけで走査範囲を決める（テンプレート側の追加を取り込まない）。
+ *
+ * `init` は導入するディレクトリをユーザーに選ばせるので、テンプレートのパターン全体を
+ * 走査すると、配置していないファイルのハッシュまで次の同期ベースに載る。ベースだけが
+ * 存在するそのパスは「ローカルは変えていない・テンプレートだけが変わった」と読まれ、
+ * 次の `pull` がユーザーの既存ファイルを確認なくテンプレートの内容で置き換える。
+ * 選んだ範囲に閉じておけば、選ばなかったディレクトリのファイルはベースを持たず、
+ * ローカルとテンプレートの両方に在るファイルとして `conflicts` に入る（ユーザーが決める）。
+ */
+export function resolveDeclaredScope(params: {
+  targetDir: AbsPath;
+  templateDir: AbsPath;
+  include: readonly GlobPattern[];
+  exclude: readonly GlobPattern[];
+}): Promise<SyncScope> {
+  return composeScope(params);
 }
 
 /**
@@ -89,11 +173,20 @@ export async function resolveSyncScope(params: {
  *
  * `push` が未追跡ファイルを追跡対象へ加えるときに使う。分類は送信候補を確定させるので、
  * 加えたパターンを分類の前に範囲へ入れておかないと、新しく追跡したファイルが候補に乗らない。
+ * 宣言側にも同じパターンを足す。push 成功後に `ziku.jsonc` へ書き込む宣言そのものなので、
+ * 走査だけに足すと「同期はされるが宣言には無い」状態を範囲が表せなくなる。
  * gitignore は据え置く。無視されるファイルは追跡対象に選んでも同期しない。
  */
 export function extendScope(scope: SyncScope, include: readonly GlobPattern[]): SyncScope {
   if (include.length === 0) return scope;
-  return { ...scope, include: [...new Set([...scope.include, ...include])] };
+  return {
+    ...scope,
+    scan: { ...scope.scan, include: [...new Set([...scope.scan.include, ...include])] },
+    declared: {
+      ...scope.declared,
+      include: [...new Set([...scope.declared.include, ...include])],
+    },
+  };
 }
 
 /** 走査結果から、範囲外のパスを落とす。 */

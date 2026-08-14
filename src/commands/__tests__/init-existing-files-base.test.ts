@@ -235,15 +235,16 @@ describe("init が残した既存ファイルは、次のコマンドでロー�
     vi.clearAllMocks();
   });
 
-  it("--yes で保持したファイルのベースは、保持された内容のハッシュになる", async () => {
+  it("--yes で保持したファイルにはベースを記録しない", async () => {
     setupTemplate({ "foo.txt": LOCAL_FOO });
 
     await runInit();
 
     // 既存ファイルは保持される（--yes は上書きを承認しない）
     expect(readProjectFile("foo.txt")).toBe(LOCAL_FOO);
-    // ここにテンプレート側のハッシュが入ると、ディスクに無い内容がベースになる
-    expect(baseHashOf("foo.txt")).toBe(hashContent(LOCAL_FOO));
+    // 保持した内容をベースにすると「ローカルは変えていない・テンプレートだけが変わった」と
+    // 読まれ、次の pull が確認なくテンプレートの内容へ置き換える
+    expect(baseHashOf("foo.txt")).toBeUndefined();
     // コピーされたファイルはテンプレートの内容がベース
     expect(baseHashOf("bar.txt")).toBe(hashContent(TEMPLATE_BAR));
   });
@@ -267,22 +268,47 @@ describe("init が残した既存ファイルは、次のコマンドでロー�
     await runInit();
     await runPushDryRun();
 
-    expect(mockLog.info).toHaveBeenCalledWith("No changes to push");
-    // 送信候補が 1 件でもあればプレビューへ進む。進んでいない = 候補ゼロ。
-    expect(mockLog.step).not.toHaveBeenCalledWith("Files that would be pushed:");
+    // ベースが無いファイルは未解決の衝突として既定の送信集合から外れる。送ってしまうと、
+    // ユーザーの無関係な既存ファイルがテンプレート経由で全プロジェクトへ配られる。
+    expect(mockLog.info).toHaveBeenCalledWith(
+      "No files match the current selection — nothing would be pushed.",
+    );
     // テンプレートは init 前の内容のまま（送信候補に出ていない証拠を実体でも確かめる）
     expect(vol.readFileSync(`${TEMPLATE_DIR}/foo.txt`, "utf8")).toBe(TEMPLATE_FOO);
   });
 
-  it("--yes の直後の pull で、保持したファイルにテンプレート版が降りてくる", async () => {
+  it("--yes の直後の pull は、保持したファイルを確認なく置き換えない", async () => {
     setupTemplate({ "foo.txt": LOCAL_FOO });
 
     await runInit();
     await runPull();
 
-    // ベースが保持内容と一致するので「テンプレートだけが変わった」と読める。ベースが
-    // テンプレートと一致していると差分が消え、テンプレート版が永久に降りてこない。
+    // init のヘルプは既存ファイルを残すと約束している。ベースを記録するとこのファイルは
+    // autoUpdate に分類され、直後の pull が約束を無効化する。
+    expect(readProjectFile("foo.txt")).toBe(LOCAL_FOO);
+  });
+
+  it("--yes の直後の pull は、保持したファイルを解決待ちとして提示する", async () => {
+    setupTemplate({ "foo.txt": LOCAL_FOO });
+
+    await runInit();
+    await runPull();
+
+    // 残す側の選択はユーザーが決める。黙って据え置くのではなく、解決を促して止まる。
+    expect(mockOutro).toHaveBeenCalledWith(
+      expect.stringContaining("resolve conflicts then run `ziku pull --continue`"),
+    );
+  });
+
+  it("--force で上書きしたファイルは、次の pull で差分として現れない", async () => {
+    setupTemplate({ "foo.txt": LOCAL_FOO });
+
+    await runInit({ force: true });
+    await runPull();
+
+    // 上書きした内容がベースに載っているので、pull から見て動かすものが無い
     expect(readProjectFile("foo.txt")).toBe(TEMPLATE_FOO);
+    expect(mockOutro).toHaveBeenCalledWith(expect.stringContaining("No changes needed"));
   });
 
   it("テンプレートと同じ内容の既存ファイルがあるだけなら、status は同期済みと報告する", async () => {

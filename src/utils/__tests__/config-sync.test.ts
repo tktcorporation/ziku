@@ -29,12 +29,7 @@ import { partitionSyncPlan, zikuConfigActions, zikuConfigStatusCategory } from "
 import { detectDiff } from "../diff";
 import { resolveSyncScope } from "../sync-scope";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../untracked";
-import {
-  ZIKU_CONFIG_FILE,
-  generateZikuJsonc,
-  withConfigTracked,
-  withoutConfigTracked,
-} from "../ziku-config";
+import { ZIKU_CONFIG_FILE, generateZikuJsonc, withConfigTracked } from "../ziku-config";
 
 async function createTempDir(label: string): Promise<AbsPath> {
   const dir = absPath(
@@ -260,26 +255,27 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
     expect(hashes[ZIKU_CONFIG_FILE]).toEqual(expect.any(String));
   });
 
-  it("未追跡探索: ziku.jsonc を含めると `.ziku/lock.json` を追跡候補として拾ってしまう（バグの再現）", async () => {
-    const dir = await createTempDir("untracked-bug");
+  it("走査用の include にだけ合成エントリが入り、宣言側には入らない", async () => {
+    const dir = await createTempDir("scope-split");
     tempDirs.push(dir);
     await writeFiles(dir, {
       ".ziku/ziku.jsonc": JSON.stringify({ include: [".claude/**"] }, null, 2),
-      ".ziku/lock.json": JSON.stringify({ source: { owner: "o", repo: "r" } }, null, 2),
       ".claude/rules.md": "rule",
     });
 
-    // withConfigTracked をそのまま渡すと `.ziku` がスコープ基点になり lock.json が拾われる
-    const untracked = await detectUntrackedFiles({
+    const { scope } = await resolveSyncScope({
       targetDir: dir,
-      patterns: { include: withConfigTracked(globPatterns([".claude/**"])), exclude: [] },
+      templateDir: dir,
+      include: globPatterns([".claude/**"]),
+      exclude: [],
     });
-    const paths = untracked.flatMap((g) => g.files.map((f) => f.path));
-    expect(paths).toContain(".ziku/lock.json");
+
+    expect(scope.scan.include).toContain(ZIKU_CONFIG_FILE);
+    expect(scope.declared.include).not.toContain(ZIKU_CONFIG_FILE);
   });
 
-  it("未追跡探索: 合成エントリ ziku.jsonc を除けば `.ziku/lock.json` は追跡候補に出ない（修正）", async () => {
-    const dir = await createTempDir("untracked-fix");
+  it("未追跡探索: 初期化済みプロジェクトでも `.ziku/lock.json` は追跡候補に出ない", async () => {
+    const dir = await createTempDir("untracked-lock");
     tempDirs.push(dir);
     await writeFiles(dir, {
       ".ziku/ziku.jsonc": JSON.stringify({ include: [".claude/**"] }, null, 2),
@@ -287,14 +283,17 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
       ".claude/rules.md": "rule",
     });
 
-    // push の resolveUntrackedTracking と同じ関数で探索 include から合成エントリを除く
-    const discoveryInclude = withoutConfigTracked(withConfigTracked(globPatterns([".claude/**"])));
-    const untracked = await detectUntrackedFiles({
+    const { scope } = await resolveSyncScope({
       targetDir: dir,
-      patterns: { include: discoveryInclude, exclude: [] },
+      templateDir: dir,
+      include: globPatterns([".claude/**"]),
+      exclude: [],
     });
+    const untracked = await detectUntrackedFiles({ targetDir: dir, patterns: scope.declared });
+
+    // 走査用のパターンで探索すると `.ziku` が探索の基点になり lock.json が候補に出る。
+    // 追跡すると、マシン固有の取得元とベースがテンプレートへ送られる。
     const paths = untracked.flatMap((g) => g.files.map((f) => f.path));
-    // lock.json も ziku.jsonc も追跡候補に出ない（`.ziku` がスコープ基点にならない）
     expect(paths).not.toContain(".ziku/lock.json");
     expect(paths).not.toContain(ZIKU_CONFIG_FILE);
     expect(getTotalUntrackedCount(untracked)).toBe(0);

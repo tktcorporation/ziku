@@ -1,5 +1,4 @@
 import { existsSync, mkdirSync, readdirSync, rmdirSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { defineCommand } from "citty";
 import { Effect } from "effect";
 import { dirname } from "pathe";
@@ -47,8 +46,8 @@ import {
   unauthorizedError,
 } from "../utils/github";
 import type { RepoExistence } from "../utils/github";
-import { hashBytes, hashFiles } from "../utils/hash";
-import { resolveSyncScope } from "../utils/sync-scope";
+import { hashFiles } from "../utils/hash";
+import { resolveDeclaredScope } from "../utils/sync-scope";
 import { absPath, joinAbs, repoRelPath } from "../utils/paths";
 import { LOCK_FILE, saveLock } from "../utils/lock";
 import { ZIKU_CONFIG_FILE, generateZikuJsonc, zikuConfigExists } from "../utils/ziku-config";
@@ -83,13 +82,7 @@ import {
   splitOwnerRepo,
   withReadyFlags,
 } from "./init-plan";
-import type {
-  BlockingExistence,
-  InitOutcome,
-  LockBaseHashPlan,
-  ProbeGate,
-  UnverifiedExistence,
-} from "./init-plan";
+import type { BlockingExistence, InitOutcome, ProbeGate, UnverifiedExistence } from "./init-plan";
 
 // ビルド時に置換される定数
 declare const __VERSION__: string;
@@ -402,10 +395,12 @@ async function applyTemplate(
     allResults.push(await createEnvExample(targetDir, strategy, args.dryRun));
   }
 
-  // テンプレートファイルのハッシュを計算（pull 時の差分検出用）。走査範囲は
-  // pull / push / status と同じ規則から決める。ここだけ範囲がずれると、init 直後の
-  // status がベースと実ファイルの食い違いを差分として見せる。
-  const { scope } = await resolveSyncScope({
+  // テンプレートファイルのハッシュを計算（pull 時の差分検出用）。走査範囲は配置した
+  // パターン、つまりユーザーが選んだ範囲に限る。テンプレート側のパターンをここで取り込むと、
+  // 選ばなかったディレクトリのファイルまでベースに載り、次の pull がユーザーの既存ファイルを
+  // 確認なく置き換える（resolveDeclaredScope の JSDoc）。取り込みは pull / status が
+  // resolveSyncScope で行うので、選ばなかったパターンも次の同期でユーザーへ提示される。
+  const scope = await resolveDeclaredScope({
     targetDir,
     templateDir: template.templateDir,
     include: flatPatterns.include,
@@ -436,14 +431,11 @@ async function applyTemplate(
     ...(writesEnvExample ? [[ENV_EXAMPLE_PATH, ENV_EXAMPLE_CONTENT] as const] : []),
   ]);
 
-  const baseHashes = await resolveLockBaseHashes(
-    targetDir,
-    planLockBaseHashes({
-      templateHashes,
-      generatedContents,
-      results: allResults,
-    }),
-  );
+  const baseHashes = planLockBaseHashes({
+    templateHashes,
+    generatedContents,
+    results: allResults,
+  });
 
   // ベースのコミット SHA: GitHub ソースの場合のみ取得。
   // テンプレートを取得した ref とベースの SHA が食い違うと、3-way マージのベースが
@@ -464,24 +456,6 @@ async function applyTemplate(
   );
 
   reportOutcome(planInitOutcome({ summary: logFileResults(allResults), dryRun: args.dryRun }));
-}
-
-/**
- * lock の同期ベースに載せるハッシュ表を確定させる。
- *
- * {@link planLockBaseHashes} がディスクを読むと決めたファイルだけを読む。書き込みが起き
- * なかったのにディスクにも無いファイルは、ベースに載せられる内容がどこにも無いので落とす。
- * 代わりにテンプレートのハッシュを書くと、次回の比較が「ローカルが消した」と読んでテンプレート
- * 側の削除へ進む。ベースが無ければ次回の pull がテンプレートから取り直すだけで済む。
- */
-async function resolveLockBaseHashes(targetDir: AbsPath, plan: LockBaseHashPlan): Promise<HashMap> {
-  const hashes: HashMap = { ...plan.written };
-  for (const path of plan.fromLocalFile) {
-    const localPath = joinAbs(targetDir, path);
-    if (!existsSync(localPath)) continue;
-    hashes[path] = hashBytes(await readFile(localPath));
-  }
-  return hashes;
 }
 
 /**

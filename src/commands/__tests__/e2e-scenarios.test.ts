@@ -747,7 +747,9 @@ describe("E2E: multi-scenario tests", () => {
       expect(mockDetectDiff).toHaveBeenCalledWith(
         expect.objectContaining({
           scope: expect.objectContaining({
-            include: expect.arrayContaining([".mcp.json", ".github/workflows/ci.yml"]),
+            scan: expect.objectContaining({
+              include: expect.arrayContaining([".mcp.json", ".github/workflows/ci.yml"]),
+            }),
           }),
         }),
       );

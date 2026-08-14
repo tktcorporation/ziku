@@ -171,7 +171,7 @@ export const statusCommand = defineCommand({
           );
           const untracked = await detectUntrackedFiles({
             targetDir,
-            patterns: { include: scope.include, exclude: scope.exclude },
+            patterns: scope.declared,
           });
           const recommendation = decideRecommendation(buckets, lock);
 

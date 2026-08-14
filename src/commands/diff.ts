@@ -100,7 +100,7 @@ export const diffCommand = defineCommand({
 
           const untrackedByFolder = await detectUntrackedFiles({
             targetDir,
-            patterns: { include: scope.include, exclude: scope.exclude },
+            patterns: scope.declared,
           });
           const untrackedCount = getTotalUntrackedCount(untrackedByFolder);
 

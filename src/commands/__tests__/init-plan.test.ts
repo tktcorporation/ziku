@@ -35,7 +35,7 @@ import {
   splitOwnerRepo,
   withReadyFlags,
 } from "../init-plan";
-import type { LockBaseHashPlan, ProbedItem } from "../init-plan";
+import type { ProbedItem } from "../init-plan";
 
 const CONFIG_PATH = repoRelPath(".ziku/ziku.jsonc");
 
@@ -227,20 +227,24 @@ describe("planOverwriteStrategy", () => {
   });
 });
 
-describe("baseHashOrigin（ベースをどちらの内容から取るか）", () => {
-  it.each(["copied", "created", "overwritten"] as const)("%s は書いた内容から取る", (action) => {
-    expect(baseHashOrigin(action)).toEqual({ _tag: "Written" });
-  });
-
-  it.each(["skipped", "skipped_ignored"] as const)(
-    "%s はディスクの実内容から取る（書いた内容はディスクに無い）",
+describe("baseHashOrigin（ベースを記録するか）", () => {
+  it.each(["copied", "created", "overwritten"] as const)(
+    "%s は書いた内容をベースにする",
     (action) => {
-      expect(baseHashOrigin(action)).toEqual({ _tag: "LocalFile" });
+      expect(baseHashOrigin(action)).toEqual({ _tag: "Written" });
     },
   );
 
-  it("操作結果が無いファイルもディスクの実内容から取る", () => {
-    expect(baseHashOrigin(undefined)).toEqual({ _tag: "LocalFile" });
+  it.each(["skipped", "skipped_ignored"] as const)("%s はベースを持たせない", (action) => {
+    // 残した既存ファイルにベースを与えると「ローカルは変えていない・テンプレートだけが
+    // 変わった」と読まれ、次の pull が確認なくテンプレートの内容へ置き換える
+    expect(baseHashOrigin(action)).toEqual({ _tag: "Untouched" });
+  });
+
+  it("操作結果が無いファイルはベースを持たせない", () => {
+    // init が触れていないパスにベースを与えると、次の pull が「テンプレートだけが変わった」
+    // と読んでユーザーの内容を確認なく置き換える
+    expect(baseHashOrigin(undefined)).toEqual({ _tag: "Untouched" });
   });
 });
 
@@ -254,7 +258,7 @@ describe("planLockBaseHashes", () => {
   function plan(
     templateHashes: HashMap,
     results: readonly { action: FileAction; path: string }[],
-  ): LockBaseHashPlan {
+  ): HashMap {
     return planLockBaseHashes({ templateHashes, generatedContents, results });
   }
 
@@ -262,37 +266,34 @@ describe("planLockBaseHashes", () => {
     const result = plan(hashMap({ ".mcp.json": "template-hash" }), [
       { action: "copied", path: ".mcp.json" },
     ]);
-    expect(result.written[repoRelPath(".mcp.json")]).toBe("template-hash");
-    expect(result.fromLocalFile).not.toContain(repoRelPath(".mcp.json"));
+    expect(result[repoRelPath(".mcp.json")]).toBe("template-hash");
   });
 
   it("上書きされたファイルもテンプレートの内容のハッシュをベースにする", () => {
     const result = plan(hashMap({ ".mcp.json": "template-hash" }), [
       { action: "overwritten", path: ".mcp.json" },
     ]);
-    expect(result.written[repoRelPath(".mcp.json")]).toBe("template-hash");
+    expect(result[repoRelPath(".mcp.json")]).toBe("template-hash");
   });
 
-  it("スキップされたファイルはディスクの実内容を読む対象にする", () => {
+  it("スキップされたファイルはベースに載せない", () => {
     const result = plan(hashMap({ ".mcp.json": "template-hash" }), [
       { action: "skipped", path: ".mcp.json" },
     ]);
-    // テンプレートの内容はディスクに載っていないので、ベースとして確定させない
-    expect(result.written[repoRelPath(".mcp.json")]).toBeUndefined();
-    expect(result.fromLocalFile).toContain(repoRelPath(".mcp.json"));
+    // ローカルの内容をベースにすると、次の pull がテンプレートの内容で確認なく置き換える
+    expect(result).toEqual({});
   });
 
-  it("gitignore 由来のスキップもディスクの実内容を読む対象にする", () => {
+  it("gitignore 由来のスキップもベースに載せない", () => {
     const result = plan(hashMap({ ".mcp.json": "template-hash" }), [
       { action: "skipped_ignored", path: ".mcp.json" },
     ]);
-    expect(result.fromLocalFile).toContain(repoRelPath(".mcp.json"));
+    expect(result).toEqual({});
   });
 
-  it("操作結果に現れないファイルもディスクの実内容を読む対象にする", () => {
+  it("操作結果に現れないファイルはベースに載せない", () => {
     const result = plan(hashMap({ ".mcp.json": "template-hash" }), []);
-    expect(result.written).toEqual({});
-    expect(result.fromLocalFile).toContain(repoRelPath(".mcp.json"));
+    expect(result).toEqual({});
   });
 
   it("書き込まれた ziku.jsonc のベースは生成した本文のハッシュ（テンプレ側ではない）", () => {
@@ -301,7 +302,7 @@ describe("planLockBaseHashes", () => {
     ]);
     // テンプレートのハッシュを載せると、初回 push が「local がパターンを削除した」と
     // 解釈してテンプレートからパターンを削る
-    expect(result.written[CONFIG_PATH]).toBe(hashContent(generatedConfigContent));
+    expect(result[CONFIG_PATH]).toBe(hashContent(generatedConfigContent));
   });
 
   it("init が書く本文を持つファイルは、テンプレートに同じパスがあっても本文側のハッシュを載せる", () => {
@@ -311,15 +312,14 @@ describe("planLockBaseHashes", () => {
       generatedContents: new Map([[envExample, "GH_TOKEN=\n"]]),
       results: [{ action: "overwritten", path: envExample }],
     });
-    expect(result.written[envExample]).toBe(hashContent("GH_TOKEN=\n"));
+    expect(result[envExample]).toBe(hashContent("GH_TOKEN=\n"));
   });
 
-  it("スキップされた ziku.jsonc はディスクの実内容を読む対象にする", () => {
+  it("スキップされた ziku.jsonc はベースに載せない", () => {
     const result = plan(hashMap({ ".ziku/ziku.jsonc": "template-hash" }), [
       { action: "skipped", path: ".ziku/ziku.jsonc" },
     ]);
-    expect(result.written).toEqual({});
-    expect(result.fromLocalFile).toEqual([CONFIG_PATH]);
+    expect(result).toEqual({});
   });
 
   it("テンプレートに無いファイルでも、init が書いたなら本文のハッシュをベースにする", () => {
@@ -334,7 +334,7 @@ describe("planLockBaseHashes", () => {
         { action: "created", path: envExample },
       ],
     });
-    expect(result.written[envExample]).toBe(hashContent("GH_TOKEN=\n"));
+    expect(result[envExample]).toBe(hashContent("GH_TOKEN=\n"));
   });
 
   it("渡されたハッシュ表を書き換えない", () => {

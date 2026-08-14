@@ -22,8 +22,10 @@
  */
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { parse } from "jsonc-parser";
+import { match } from "ts-pattern";
+import { zikuFailure } from "../errors";
 import type { AbsPath, GlobPattern, RepoRelPath } from "../modules/schemas";
+import { parseJsonc } from "./jsonc";
 import { globPatterns, joinAbs, selectPatternsMatchingPaths } from "./paths";
 import { unionPatterns } from "./patterns";
 import { ZIKU_CONFIG_FILE, generateZikuJsonc, withPatterns } from "./ziku-config";
@@ -66,13 +68,36 @@ interface ConfigDocument {
 /**
  * 指定ディレクトリの `.ziku/ziku.jsonc` を読む。
  * ファイルが無ければ undefined（base が無いケースの判定に使う）。
+ *
+ * 構文が壊れていれば、ユーザーが手で直せる失敗として報告して中断する。パターン無しとして
+ * 扱わないのは、ここで読んだ内容が union の入力であると同時に、{@link renderMergedConfig} が
+ * 書き戻す先の土台でもあるため。壊れた側を空集合とみなすと、その側のパターンを 1 つ残らず
+ * 落とした内容を「マージ結果」として書き出す。テンプレート側でそれが起きると、パターンを
+ * 失った `ziku.jsonc` が PR に載り、マージされた時点で全プロジェクトの init / pull が
+ * 同期対象を見失う。エラー回復が返す部分的な値を採るのも同じ理由で採れない（回復できな
+ * かった分だけが静かに消える）。
+ *
+ * 中断が安全側なのは、`ziku.jsonc` が人の手で直せるテキストであり、直すまで待っても
+ * 何も失われないため。ローカル側は `loadZikuConfig` が同じ理由で先に弾いており、
+ * テンプレート側もここで同じ扱いに揃う。
+ *
+ * 失敗は `ZikuFailure` を throw して返す。この関数の呼び出し元は Effect ではない async
+ * 関数の連なりで、その先はコマンド層が defect ごと拾ってトップレベルへ運ぶ。`ZikuFailure`
+ * は `Error` を継承するのでその経路をそのまま通り、文言と hint が保たれる。
  */
 async function readConfigAt(dir: AbsPath): Promise<ConfigDocument | undefined> {
   const path = joinAbs(dir, ZIKU_CONFIG_FILE);
   if (!existsSync(path)) return undefined;
   const raw = await readFile(path, "utf-8");
+
   // ディスク上の JSONC はスキーマを通っていない生の値。ここがパターンの brand 入口になる。
-  const parsed = parse(raw) as { include?: string[]; exclude?: string[] } | undefined;
+  const parsed = match(parseJsonc(raw))
+    .with({ kind: "parsed" }, ({ value }) => value as { include?: string[]; exclude?: string[] })
+    .with({ kind: "unparsable" }, ({ detail }): never => {
+      throw zikuFailure({ kind: "ConfigUnparsable", path, detail });
+    })
+    .exhaustive();
+
   return {
     raw,
     patterns: {

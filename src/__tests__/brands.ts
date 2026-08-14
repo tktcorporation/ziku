@@ -32,21 +32,33 @@ export {
  * 用意せずに範囲だけを決めたい。省略した項目は「何も無視しない・何も戻さない」になるので、
  * `include` だけを渡せば include が対象をそのまま決める範囲になる。
  *
+ * `declaredInclude` を省くと宣言側も `include` と同じになる。両者の差（走査側にだけ在る
+ * 制御ファイルの合成エントリ）が主題のテストだけが指定する。
+ *
  * 範囲の解決規則そのものを確かめるテストは、この関数ではなく `resolveSyncScope` を使う。
  */
 export function syncScope(
   params: {
     readonly include?: readonly string[];
     readonly exclude?: readonly string[];
+    /** 追跡対象として宣言されたパターン。省略時は `include` と同じ。 */
+    readonly declaredInclude?: readonly string[];
     /** `.gitignore` の記法で書いた無視パターン。 */
     readonly gitignore?: readonly string[];
     /** gitignore や exclude を越えて走査へ戻すパス。 */
     readonly alwaysTracked?: readonly string[];
   } = {},
 ): SyncScope {
+  const include = globPatterns(params.include ?? []);
+  const exclude = globPatterns(params.exclude ?? []);
   return {
-    include: globPatterns(params.include ?? []),
-    exclude: globPatterns(params.exclude ?? []),
+    scan: { purpose: "scan", include, exclude },
+    declared: {
+      purpose: "declared",
+      include:
+        params.declaredInclude === undefined ? include : globPatterns(params.declaredInclude),
+      exclude,
+    },
     gitignore: ignore().add([...(params.gitignore ?? [])]),
     alwaysTracked: repoRelPaths(params.alwaysTracked ?? []),
   };

@@ -28,10 +28,13 @@ export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
   const files: FileDiff[] = [];
 
   const templateFiles = withinScope(
-    resolvePatterns(templateDir, scope.include, scope.exclude),
+    resolvePatterns(templateDir, scope.scan.include, scope.scan.exclude),
     scope,
   );
-  const localFiles = withinScope(resolvePatterns(targetDir, scope.include, scope.exclude), scope);
+  const localFiles = withinScope(
+    resolvePatterns(targetDir, scope.scan.include, scope.scan.exclude),
+    scope,
+  );
 
   const allFiles = new Set<RepoRelPath>([...templateFiles, ...localFiles]);
 

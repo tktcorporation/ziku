@@ -5,9 +5,13 @@ import { match } from "ts-pattern";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { baseHashesOf, lockSchema, templateRefToString } from "../../modules/schemas";
 import { absPath, globPatterns, hashMap, repoRelPath } from "../../__tests__/brands";
-import type { AbsPath, GitHubSource } from "../../modules/schemas";
+import type { AbsPath, GitHubSource, HashMap } from "../../modules/schemas";
 import { classifyFiles } from "../../utils/merge";
-import { partitionSyncPlan, zikuConfigPushAction } from "../../utils/merge/sync-plan";
+import {
+  partitionSyncPlan,
+  zikuConfigPullAction,
+  zikuConfigPushOutcome,
+} from "../../utils/merge/sync-plan";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -802,13 +806,15 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
-      // ベースはテンプレートディレクトリを、他コマンドと同じ規則で決めた範囲で走査して作る。
-      // 範囲がここだけずれると、init 直後の status がベースと実ファイルの食い違いを見せる。
+      // ベースはテンプレートディレクトリを、配置したパターンの範囲で走査して作る。走査用の
+      // include には ziku 自身の設定ファイルが入る（これが落ちるとパターンの同期が始まらない）。
       expect(mockHashFiles).toHaveBeenCalledWith(
         "/tmp/template",
         expect.objectContaining({
-          include: expect.arrayContaining([ZIKU_CONFIG_FILE]),
-          exclude: expect.any(Array),
+          scan: expect.objectContaining({
+            include: expect.arrayContaining([ZIKU_CONFIG_FILE]),
+            exclude: expect.any(Array),
+          }),
         }),
       );
 
@@ -982,7 +988,7 @@ describe("initCommand", () => {
     });
   });
 
-  describe("同期ベースの ziku.jsonc はディスクの実内容から取る", () => {
+  describe("ziku.jsonc の同期ベースは init が書いたときだけ載る", () => {
     /**
      * テンプレート側の `ziku.jsonc`。init が組み立てる本文とは書式が異なる（コメント付き）。
      *
@@ -1006,10 +1012,11 @@ describe("initCommand", () => {
 
     const configPath = "/test/.ziku/ziku.jsonc";
     const readDisk = (): string => vol.readFileSync(configPath, "utf-8") as string;
-    const readLockBase = (): string | undefined =>
+    const readLockBases = (): HashMap =>
       baseHashesOf(
         lockSchema.parse(JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string)),
-      )[repoRelPath(".ziku/ziku.jsonc")];
+      );
+    const readLockBase = (): string | undefined => readLockBases()[repoRelPath(".ziku/ziku.jsonc")];
 
     beforeEach(() => {
       // 実装と同じ判定（新規作成 / 上書き / スキップ）を memfs 上で再現する。既定のモックは
@@ -1042,7 +1049,7 @@ describe("initCommand", () => {
       );
     });
 
-    it("--yes で既存 ziku.jsonc を保持したら、ベースは保持された内容のハッシュになる", async () => {
+    it("--yes で既存 ziku.jsonc を保持したら、ベースを記録しない", async () => {
       vol.fromJSON({ [configPath]: existingConfigContent });
 
       await (initCommand.run as any)({
@@ -1053,7 +1060,8 @@ describe("initCommand", () => {
 
       // --yes は既存ファイルを上書きしない
       expect(readDisk()).toBe(existingConfigContent);
-      expect(readLockBase()).toBe(hashContent(existingConfigContent));
+      // 保持した内容をベースにすると、次の pull がテンプレートの本文へ確認なく寄せる
+      expect(readLockBase()).toBeUndefined();
     });
 
     it("--force で上書きしたら、ベースは書いた内容のハッシュになる", async () => {
@@ -1081,7 +1089,7 @@ describe("initCommand", () => {
       expect(readLockBase()).toBe(hashContent(readDisk()));
     });
 
-    it("初期化済みへの --yes の直後、ziku.jsonc は 3-way 比較で conflicts に入らない", async () => {
+    it("初期化済みへの --yes の直後、保持した ziku.jsonc は union で解決される", async () => {
       vol.fromJSON({ [configPath]: existingConfigContent });
 
       await (initCommand.run as any)({
@@ -1093,16 +1101,20 @@ describe("initCommand", () => {
       // status / push が使う 3-way 比較へ、書き込まれた lock のベースをそのまま渡す。
       const plan = partitionSyncPlan(
         classifyFiles({
-          baseHashes: hashMap({ ".ziku/ziku.jsonc": readLockBase() ?? "" }),
+          baseHashes: readLockBases(),
           localHashes: hashMap({ ".ziku/ziku.jsonc": hashContent(readDisk()) }),
           templateHashes: hashMap({ ".ziku/ziku.jsonc": hashContent(templateConfigContent) }),
         }),
       );
 
-      // 誰も編集していないので、テンプレート側の更新を取り込むだけ（コンフリクトではない）。
-      expect(plan.config).toEqual({ _tag: "Tracked", category: "autoUpdate" });
-      // ローカル発の変更は無いので push は何も送らない。
-      expect(zikuConfigPushAction(plan.config)).toEqual({ _tag: "TemplateOnly" });
+      // 保持した本文はテンプレートと足並みが揃っていないので、未解決として扱われる。
+      expect(plan.config).toEqual({ _tag: "Tracked", category: "conflicts" });
+      // 設定ファイルの解決は加法 union なので、保持したローカルのパターンは失われない。
+      expect(zikuConfigPullAction(plan.config)).toEqual({ _tag: "UnionMerge" });
+      // ローカルにしか無いパターンが無いので、push はテンプレートへ何も送らず、取り込みだけを勧める。
+      expect(
+        zikuConfigPushOutcome(plan.config, { pullRelevant: true, pushRelevant: false }),
+      ).toEqual({ _tag: "PullToSync" });
     });
   });
 
