@@ -177,6 +177,41 @@ describe("aggregateTemplateUsage", () => {
     expect(report.summary.totalRepositories).toBe(0);
   });
 
+  // pull の途中で止まっているリポジトリは、ファイルに衝突マーカーが残りうる一方
+  // baseHashes は前進していない。その中間状態を統合の対象に上げてはいけない。
+  it("pull の衝突が未解決のリポジトリは、理由付きで skipped に残す", async () => {
+    mockListOwnerRepos.mockReturnValue(
+      Effect.succeed([repoInfo({ owner: "acme", repo: "mid-pull" })]),
+    );
+    setLockFixture(
+      lockFixtures,
+      "acme",
+      "mid-pull",
+      Effect.succeed(
+        Option.some(
+          lockJson({
+            pendingMerge: {
+              conflicts: [".claude/rules/a.md", ".claude/rules/b.md"],
+              templateHashes: {},
+            },
+          }),
+        ),
+      ),
+    );
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        tmpBaseDir: "/tmp-base",
+      }),
+    );
+
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(1);
+    expect(report.skipped[0]).toMatchObject({ owner: "acme", repo: "mid-pull" });
+    expect(report.skipped[0]?.reason).toContain("pull --continue");
+  });
+
   // lock.source.ref でテンプレートの特定リビジョンに固定している利用リポジトリは、
   // 既定ブランチの先頭と比較すると「追随していないだけの差分」が未同期として並ぶ。
   it("テンプレートの別リビジョンに固定している利用リポジトリは、理由付きで skipped に残す", async () => {

@@ -455,6 +455,17 @@ function readCandidateLock(
         `Pinned to template ref "${lock.source.ref}", which differs from the revision this scan compares against (${template.ref ?? "the template's default branch"})`,
       );
     }
+
+    // `ziku pull` の途中（衝突未解決）で止まっているリポジトリ。ファイルには衝突マーカーや
+    // 未確定の解決内容が入りうる一方、baseHashes は pull 前のまま前進していない。この状態を
+    // 比較すると、中間状態が未還元の差分として統合の対象に上がる。`push` も同じ状態を
+    // ブロックしている。
+    if (lock.pendingMerge) {
+      return skippedEvaluation(
+        candidate,
+        `Has unresolved merge conflicts from \`ziku pull\` (${lock.pendingMerge.conflicts.length} files); run \`ziku pull --continue\` in that repository first`,
+      );
+    }
     return { _tag: "usable" as const, lock };
   });
 }
