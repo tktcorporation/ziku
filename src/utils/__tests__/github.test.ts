@@ -51,8 +51,13 @@ vi.mock("@octokit/rest", () => ({
 }));
 
 // モック後にインポート
-const { createPullRequest, scaffoldTemplateRepo, resolveDefaultBranch, resolveLatestCommitSha } =
-  await import("../github");
+const {
+  createPullRequest,
+  scaffoldTemplateRepo,
+  resolveDefaultBranch,
+  resolveLatestCommitSha,
+  resolveSourceCommitSha,
+} = await import("../github");
 
 describe("getGitHubToken", () => {
   const originalEnv = process.env;
@@ -802,5 +807,86 @@ describe("resolveLatestCommitSha", () => {
     expect(
       await resolveLatestCommitSha("owner", "repo", { kind: "branch", name: "develop" }),
     ).toBeUndefined();
+  });
+});
+
+describe("コミット SHA 取得の認証", () => {
+  const originalFetch = globalThis.fetch;
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env = { ...originalEnv };
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+    // getGitHubToken は gh CLI (`gh auth token`) にフォールバックするため、
+    // gh 認証済みのマシンではトークンが漏れ込む。PATH を空にして
+    // execFileSync("gh", ...) を ENOENT にし、確実に未認証状態を作る。
+    process.env.PATH = "";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    process.env = originalEnv;
+  });
+
+  it("トークンがある場合は Authorization ヘッダを付与する", async () => {
+    process.env.GITHUB_TOKEN = "ghp_test";
+    globalThis.fetch = vi.fn().mockResolvedValue(shaResponse("sha-develop"));
+
+    await resolveLatestCommitSha("owner", "repo", { kind: "branch", name: "develop" });
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "https://api.github.com/repos/owner/repo/commits/develop",
+      { headers: { Accept: "application/vnd.github.sha", Authorization: "Bearer ghp_test" } },
+    );
+  });
+
+  it("タグの解決も認証付きで問い合わせる", async () => {
+    process.env.GITHUB_TOKEN = "ghp_test";
+    globalThis.fetch = vi.fn().mockResolvedValue(shaResponse("sha-v1"));
+
+    const sha = await resolveSourceCommitSha("owner", "repo", { kind: "tag", name: "v1.0.0" });
+
+    expect(sha).toBe("sha-v1");
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "https://api.github.com/repos/owner/repo/commits/v1.0.0",
+      { headers: { Accept: "application/vnd.github.sha", Authorization: "Bearer ghp_test" } },
+    );
+  });
+
+  it("トークンがない場合は Authorization ヘッダを付けず、公開リポジトリは解決できる", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(shaResponse("sha-public"));
+
+    const sha = await resolveLatestCommitSha("owner", "repo", { kind: "branch", name: "main" });
+
+    expect(sha).toBe("sha-public");
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "https://api.github.com/repos/owner/repo/commits/main",
+      { headers: { Accept: "application/vnd.github.sha" } },
+    );
+  });
+
+  it("プライベートリポジトリでも認証付きなら 404 にならず SHA を解決できる", async () => {
+    // GitHub は未認証のプライベートリポジトリを 404 として返す。認証が漏れると
+    // ベースコミットが lock に記録されず、3-way マージの共通祖先を失う。
+    globalThis.fetch = vi
+      .fn()
+      .mockImplementation((_url: string, init: { headers: Record<string, string> }) =>
+        Promise.resolve(
+          init.headers.Authorization === "Bearer ghp_test"
+            ? shaResponse("sha-private")
+            : { ok: false, status: 404 },
+        ),
+      );
+
+    expect(
+      await resolveLatestCommitSha("owner", "private-repo", { kind: "branch", name: "main" }),
+    ).toBeUndefined();
+
+    process.env.GITHUB_TOKEN = "ghp_test";
+    expect(
+      await resolveLatestCommitSha("owner", "private-repo", { kind: "branch", name: "main" }),
+    ).toBe("sha-private");
   });
 });

@@ -238,6 +238,18 @@ export async function getAuthenticatedUserLogin(): Promise<string | undefined> {
 }
 
 /**
+ * GitHub REST API に載せる認証ヘッダを組み立てる。
+ *
+ * トークンが無ければヘッダを付けない。未認証でも公開リポジトリは読めるので、
+ * トークン未設定の環境を弾かないため。逆にトークンがあるのに付け忘れると、
+ * GitHub はプライベートリポジトリを 404 として返すため、参照できるはずの
+ * リポジトリや ref を「存在しない」と誤判定する。
+ */
+function githubAuthHeaders(token: string | undefined): Record<string, string> {
+  return token === undefined ? {} : { Authorization: `Bearer ${token}` };
+}
+
+/**
  * GitHub リポジトリの存在確認結果。
  *
  * 背景: 単純な boolean では「確実に存在しない（404）」と「確認不能
@@ -290,10 +302,7 @@ export type RepoExistence =
  */
 export function checkRepoExists(owner: string, repo: string): Promise<RepoExistence> {
   const token = getGitHubToken();
-  const headers: Record<string, string> = {};
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
+  const headers = githubAuthHeaders(token);
   return Effect.runPromise(
     Effect.tryPromise({
       try: () =>
@@ -379,11 +388,7 @@ function classifyRepoResponse(res: Response, authenticated: boolean): RepoExiste
  * GitHub Contents API で軽量に確認。
  */
 export function checkRepoSetup(owner: string, repo: string): Promise<boolean> {
-  const token = getGitHubToken();
-  const headers: Record<string, string> = {};
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
+  const headers = githubAuthHeaders(getGitHubToken());
   return Effect.runPromise(
     Effect.tryPromise(() =>
       fetch(`https://api.github.com/repos/${owner}/${repo}/contents/.ziku/ziku.jsonc`, {
@@ -470,20 +475,27 @@ export async function resolveDefaultBranch(
  * 任意の git ref（ブランチ名 / タグ名 / コミット SHA）が指すコミット SHA を取得する。
  *
  * GitHub API の `Accept: application/vnd.github.sha` を使い、SHA 文字列のみを取得する。
- * 認証不要（公開リポジトリの場合）。取得できない場合は undefined を返す。
+ * トークンがあれば付与する: プライベートなテンプレートリポジトリは未認証だと 404 になり、
+ * ベースコミットが lock に記録されないまま 3-way マージの共通祖先を失う。
+ *
+ * 取得できない場合は undefined を返す。ベース未解決として呼び出し側のフォールバックに
+ * 倒すほうが、誤った SHA でマージのベースを取り違えるより安全なため。
  */
 async function fetchCommitSha(
   owner: string,
   repo: string,
   ref: string,
 ): Promise<CommitSha | undefined> {
+  const headers = {
+    Accept: "application/vnd.github.sha",
+    ...githubAuthHeaders(getGitHubToken()),
+  };
+
   return Option.getOrUndefined(
     await Effect.runPromise(
       Effect.tryPromise(async () => {
         const url = `https://api.github.com/repos/${owner}/${repo}/commits/${ref}`;
-        const res = await fetch(url, {
-          headers: { Accept: "application/vnd.github.sha" },
-        });
+        const res = await fetch(url, { headers });
         if (!res.ok) return undefined;
         // API レスポンスがコミット SHA の入口。ここから先は brand 付きで流れる。
         return commitShaSchema.parse((await res.text()).trim());
