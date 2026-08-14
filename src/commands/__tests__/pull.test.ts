@@ -288,6 +288,22 @@ function mockContext(overrides?: {
 }
 
 /**
+ * hashFiles の走査結果（template → local の順）を与える。
+ *
+ * 既定の空マップのままだと、分類がローカルに実在するとしているファイル（`deletedFiles` や
+ * `deletedWithLocalEdits`）が走査結果に現れず、実装では作れない状態になる。削除の扱いは
+ * 走査結果を見て決まるので、そこを合わせないと本番と違う経路を検証してしまう。
+ */
+function mockScannedHashes(files: {
+  template?: Record<string, string>;
+  local: Record<string, string>;
+}): void {
+  mockHashFiles
+    .mockResolvedValueOnce(hashMap(files.template ?? {}))
+    .mockResolvedValueOnce(hashMap(files.local));
+}
+
+/**
  * mergeOneFile の mock を設定するヘルパー。
  *
  * マージ結果の内容から `MergeOutcome` を組み立てる。判定を本物の
@@ -760,8 +776,9 @@ describe("pullCommand", () => {
     });
 
     it("削除ファイルがある場合に selectDeletedFiles を呼ぶ", async () => {
-      vol.fromJSON({ "/test": null });
+      vol.fromJSON({ "/test/old-file.txt": "old content" });
 
+      mockScannedHashes({ local: { "old-file.txt": "hash-old" } });
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
@@ -788,6 +805,7 @@ describe("pullCommand", () => {
         "/test/old-file.txt": "old content",
       });
 
+      mockScannedHashes({ local: { "old-file.txt": "hash-old" } });
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
@@ -814,6 +832,7 @@ describe("pullCommand", () => {
         "/test/old-file.txt": "old content",
       });
 
+      mockScannedHashes({ local: { "old-file.txt": "hash-old" } });
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
@@ -842,6 +861,7 @@ describe("pullCommand", () => {
         "/test/old-file.txt": "old content",
       });
 
+      mockScannedHashes({ local: { "old-file.txt": "hash-old" } });
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
@@ -868,6 +888,7 @@ describe("pullCommand", () => {
         "/test/edited.md": "local edits",
       });
 
+      mockScannedHashes({ local: { "edited.md": "hash-edited" } });
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
@@ -894,6 +915,7 @@ describe("pullCommand", () => {
         "/test/edited.md": "local edits",
       });
 
+      mockScannedHashes({ local: { "edited.md": "hash-edited" } });
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
@@ -925,6 +947,7 @@ describe("pullCommand", () => {
         "/test/kept.md": "local edits",
       });
 
+      mockScannedHashes({ local: { "chosen.md": "hash-chosen", "kept.md": "hash-kept" } });
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
@@ -953,6 +976,7 @@ describe("pullCommand", () => {
         "/test/b.txt": "bbb",
       });
 
+      mockScannedHashes({ local: { "a.txt": "hash-a", "b.txt": "hash-b" } });
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
@@ -1305,6 +1329,34 @@ describe("pullCommand", () => {
 
       expect(mockSaveLock).not.toHaveBeenCalled();
       expect(mockLog.info).toHaveBeenCalledWith("Dry run mode");
+    });
+
+    it("--continue --dryRun --yes: 選択を求められる見込みでもプレビューを出して正常終了する", async () => {
+      // プレビューは「実行すると何が起きるか」を見せるためのもの。選択できない実行だから
+      // といって中断すると、中断の理由を実行前に確かめる手段が無くなる。
+      vol.fromJSON({ "/test/icon.png": "local bytes" });
+
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(
+          mergingLock([pendingConflict("icon.png", "binary")], {
+            hashes: hashMap({ "icon.png": "newhash" }),
+          }),
+        ),
+      );
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true, continue: true, dryRun: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockLog.info).toHaveBeenCalledWith("Dry run mode");
+      // 対象ファイルと、この実行が中断する見込みの両方が出る
+      expect(mockLog.message).toHaveBeenCalledWith(expect.stringContaining("icon.png"));
+      expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining("would stop"));
+      // プレビューなので確定もしないし、選択も求めない
+      expect(mockSaveLock).not.toHaveBeenCalled();
+      expect(mockSelectUnmergedResolution).not.toHaveBeenCalled();
     });
 
     it("--continue: 自動マージを試みていないファイルは、マーカーが無くても完了扱いにしない", async () => {
@@ -1904,10 +1956,10 @@ describe("pullCommand", () => {
       });
     });
 
-    it("ローカルからも消えているファイルは、削除を適用しなくてもベースから落ちる", async () => {
-      // 据え置きはローカルに残るファイルが localOnly へ化けるのを防ぐためのもの。ローカルに
-      // 無いファイルは push の送信集合に入りようがなく、据え置くとベースのエントリだけが
-      // 永久に残って毎回削除候補として報告される。
+    /**
+     * 「テンプレートからもローカルからも消え、ベースにだけエントリが残っている」状態を作る。
+     */
+    function setupGoneLocally(): void {
       vol.fromJSON({ "/test": null });
 
       const { effect } = mockContext({
@@ -1929,6 +1981,13 @@ describe("pullCommand", () => {
         deletedLocally: [],
         unchanged: repoRelPaths([".mcp.json"]),
       });
+    }
+
+    it("ローカルからも消えているファイルは、削除を適用しなくてもベースから落ちる", async () => {
+      // 据え置きはローカルに残るファイルが localOnly へ化けるのを防ぐためのもの。ローカルに
+      // 無いファイルは push の送信集合に入りようがなく、据え置くとベースのエントリだけが
+      // 永久に残って毎回削除候補として報告される。
+      setupGoneLocally();
 
       await (pullCommand.run as any)({
         args: { dir: "/test", force: false, yes: true },
@@ -1936,6 +1995,24 @@ describe("pullCommand", () => {
         cmd: pullCommand,
       });
 
+      expect(baseHashesOf(lastSavedLock())).toEqual({ ".mcp.json": "hash-mcp" });
+    });
+
+    it("ローカルに無いファイルは、削除候補としても削除ログとしても出さない", async () => {
+      // 消すものが無いので、選ばせても削除したと報告しても実体を伴わない。
+      setupGoneLocally();
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: true, yes: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockSelectDeletedFiles).not.toHaveBeenCalled();
+      for (const logged of [mockLog.info, mockLog.warn, mockLog.message, mockLog.success]) {
+        expect(logged).not.toHaveBeenCalledWith(expect.stringContaining("gone.txt"));
+      }
+      // 提示しなくてもベースのエントリは落ちる（次回も同じ状態で走らない）
       expect(baseHashesOf(lastSavedLock())).toEqual({ ".mcp.json": "hash-mcp" });
     });
 
@@ -2177,6 +2254,7 @@ describe("pullCommand", () => {
         "/test/old-file.txt": "old content",
       });
 
+      mockScannedHashes({ local: { "old-file.txt": "hash-old" } });
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
@@ -2211,6 +2289,14 @@ describe("pullCommand", () => {
         "/tmp/template/.mcp.json": "template content",
       });
 
+      mockScannedHashes({
+        template: { ".mcp.json": "hash-template" },
+        local: {
+          ".mcp.json": "hash-local",
+          "old-file.txt": "hash-old",
+          "edited.txt": "hash-edited",
+        },
+      });
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],

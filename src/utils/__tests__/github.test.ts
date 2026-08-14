@@ -150,6 +150,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: "content" }],
       title: "Test PR",
+      baseBranch: "main",
     });
 
     expect(result.url).toBe("https://github.com/owner/repo/pull/123");
@@ -166,6 +167,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("assets/icon.png"), content: bytes.toString("latin1") }],
       title: "Test PR",
+      baseBranch: "main",
     });
 
     const sent = mockReposCreateOrUpdateFileContents.mock.calls[0][0] as { content: string };
@@ -180,6 +182,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("README.md"), content }],
       title: "Test PR",
+      baseBranch: "main",
     });
 
     const sent = mockReposCreateOrUpdateFileContents.mock.calls[0][0] as { content: string };
@@ -196,6 +199,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: "content" }],
       title: "Test PR",
+      baseBranch: "main",
     });
 
     expect(mockReposGet).toHaveBeenCalledWith({
@@ -216,6 +220,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: "content" }],
       title: "Test PR",
+      baseBranch: "main",
     });
 
     expect(mockReposCreateFork).toHaveBeenCalledWith({
@@ -233,6 +238,7 @@ describe("createPullRequest", () => {
         { path: repoRelPath("file2.txt"), content: "content2" },
       ],
       title: "Test PR",
+      baseBranch: "main",
     });
 
     expect(mockReposCreateOrUpdateFileContents).toHaveBeenCalledTimes(2);
@@ -251,6 +257,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("existing.txt"), content: "new content" }],
       title: "Test PR",
+      baseBranch: "main",
     });
 
     expect(mockReposCreateOrUpdateFileContents).toHaveBeenCalledWith(
@@ -260,7 +267,7 @@ describe("createPullRequest", () => {
     );
   });
 
-  it("カスタム baseBranch を使用する", async () => {
+  it("渡された baseBranch を宛先にする", async () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
@@ -288,6 +295,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: "content" }],
       title: "Test PR",
+      baseBranch: "main",
       body: "Custom body content",
     });
 
@@ -304,6 +312,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: "content" }],
       title: "Test PR",
+      baseBranch: "main",
     });
 
     expect(mockPullsCreate).toHaveBeenCalledWith(
@@ -319,6 +328,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: "content" }],
       title: "Test PR",
+      baseBranch: "main",
     });
 
     expect(mockPullsCreate).toHaveBeenCalledWith(
@@ -334,6 +344,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: "content" }],
       title: "Test PR",
+      baseBranch: "main",
     });
 
     expect(mockGitGetTree).toHaveBeenCalledWith(
@@ -355,6 +366,7 @@ describe("createPullRequest", () => {
         repo: "repo",
         files: [{ path: repoRelPath("file.txt"), content: "content" }],
         title: "Test PR",
+        baseBranch: "main",
       }),
     ).rejects.toThrow("Repository tree is too large");
   });
@@ -373,6 +385,7 @@ describe("createPullRequest", () => {
       files: [],
       deletions: [{ path: repoRelPath("to-delete.txt") }],
       title: "Test PR with deletion",
+      baseBranch: "main",
     });
 
     expect(mockReposDeleteFile).toHaveBeenCalledWith(
@@ -394,6 +407,7 @@ describe("createPullRequest", () => {
       files: [{ path: repoRelPath("file.txt"), content: "content" }],
       deletions: [{ path: repoRelPath("nonexistent.txt") }],
       title: "Test PR",
+      baseBranch: "main",
     });
 
     expect(mockReposDeleteFile).not.toHaveBeenCalled();
@@ -405,6 +419,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: "Hello, World!" }],
       title: "Test PR",
+      baseBranch: "main",
     });
 
     const expectedBase64 = Buffer.from("Hello, World!").toString("base64");

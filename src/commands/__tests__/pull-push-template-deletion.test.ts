@@ -261,6 +261,19 @@ describe("テンプレートの削除は pull → push を往復しても復活�
     }
   });
 
+  it("ローカルに無いファイルは、削除候補にも削除ログにも出ない", async () => {
+    setupDeletionGoneLocally();
+
+    // --force は削除の承認だが、消すものが無い。承認済みでも「削除した」とは報告しない。
+    await runPull({ force: true, yes: false });
+
+    expect(mockSelectDeletedFiles).not.toHaveBeenCalled();
+    for (const logged of [mockLog.info, mockLog.warn, mockLog.message, mockLog.success]) {
+      expect(logged).not.toHaveBeenCalledWith(expect.stringContaining("removed.md"));
+    }
+    expect(baseHashesOf(currentLock())).not.toHaveProperty("removed.md");
+  });
+
   it("削除を承認したファイルはベースから消え、次の pull に出てこない", async () => {
     setupTemplateDeletion(REMOVED_CONTENT);
 

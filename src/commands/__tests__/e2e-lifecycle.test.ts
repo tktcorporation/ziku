@@ -226,7 +226,8 @@ const { selectPushFiles, selectDeletedFiles } = await import("../../ui/prompts")
 const { createPullRequest } = await import("../../utils/github");
 const { detectDiff } = await import("../../utils/diff");
 const { classifyFiles } = await import("../../utils/merge");
-const { repoRelPath, repoRelPaths } = await import("../../__tests__/brands");
+const { hashFiles } = await import("../../utils/hash");
+const { hashMap, repoRelPath, repoRelPaths } = await import("../../__tests__/brands");
 const { loadTemplateConfig } = await import("../../utils/template-config");
 
 const mockFetchTemplates = vi.mocked(fetchTemplates);
@@ -235,6 +236,17 @@ const mockSelectDeletedFiles = vi.mocked(selectDeletedFiles);
 const mockCreatePullRequest = vi.mocked(createPullRequest);
 const mockDetectDiff = vi.mocked(detectDiff);
 const mockClassifyFiles = vi.mocked(classifyFiles);
+const mockHashFiles = vi.mocked(hashFiles);
+
+/**
+ * 削除対象がローカルに実在する状態の走査結果を与える（template → local の順）。
+ *
+ * pull は走査結果を見て削除を問うかどうかを決める。既定の空マップのままだと、分類が
+ * ローカルにあるとしているファイルが走査結果に現れず、実装では作れない状態になる。
+ */
+function mockLocalScan(local: Record<string, string>): void {
+  mockHashFiles.mockResolvedValueOnce(hashMap({})).mockResolvedValueOnce(hashMap(local));
+}
 const mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
 
 // ── helpers ─────────────────────────────────────────────────────
@@ -871,6 +883,7 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
     vol.unlinkSync("/template/.eslintrc.json");
 
     // classifyFiles: .eslintrc.json が deletedFiles に分類
+    mockLocalScan({ ".eslintrc.json": "hash-eslintrc" });
     mockClassifyFiles.mockReturnValueOnce({
       autoUpdate: [],
       localOnly: [],
@@ -905,6 +918,7 @@ describe("E2E ライフサイクル (ローカル): setup → init --from-dir �
     // Step 12: プロジェクトA でも pull → 同じ削除が反映
     // ═══════════════════════════════════════════════════════════
 
+    mockLocalScan({ ".eslintrc.json": "hash-eslintrc" });
     mockClassifyFiles.mockReturnValueOnce({
       autoUpdate: [],
       localOnly: [],

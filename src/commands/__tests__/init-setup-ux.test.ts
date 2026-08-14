@@ -58,6 +58,7 @@ vi.mock("../../utils/github", async () => {
     resolveSourceCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
     checkRepoExists: vi.fn(() => Promise.resolve({ _tag: "Exists" as const })),
     checkRepoSetup: vi.fn(() => Promise.resolve(true)),
+    resolveDefaultBranch: vi.fn(() => Promise.resolve<string | undefined>("main")),
     getGitHubToken: vi.fn(() => {}),
     getAuthenticatedUserLogin: vi.fn(() => Promise.resolve()),
     scaffoldTemplateRepo: vi.fn(() =>
@@ -164,6 +165,7 @@ const {
   createPullRequest,
   getAuthenticatedUserLogin,
   getGitHubToken,
+  resolveDefaultBranch,
   scaffoldTemplateRepo,
 } = await import("../../utils/github");
 const { loadTemplateConfig } = await import("../../utils/template-config");
@@ -187,6 +189,7 @@ const mockGetGitHubToken = vi.mocked(getGitHubToken);
 const mockScaffoldTemplateRepo = vi.mocked(scaffoldTemplateRepo);
 const mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
 const mockCreatePullRequest = vi.mocked(createPullRequest);
+const mockResolveDefaultBranch = vi.mocked(resolveDefaultBranch);
 const mockConfirmAction = vi.mocked(confirmAction);
 const mockOutro = vi.mocked(outro);
 const mockLog = vi.mocked(log);
@@ -636,6 +639,7 @@ describe("setup: セットアップ UX", () => {
     mockDetectGitHubOwner.mockReturnValue("detected-org");
     mockCheckRepoExists.mockResolvedValue({ _tag: "Exists" });
     mockGetGitHubToken.mockReturnValue("ghp_test_token");
+    mockResolveDefaultBranch.mockResolvedValue("main");
     mockConfirmAction.mockResolvedValue(true);
     mockCreatePullRequest.mockResolvedValue({
       url: "https://github.com/org/repo/pull/1",
@@ -684,6 +688,28 @@ describe("setup: セットアップ UX", () => {
         "ghp_test_token",
         expect.objectContaining({ owner: "my-org", repo: "my-templates" }),
       );
+    });
+
+    it("PR はリポジトリの既定ブランチへ向ける", async () => {
+      // 既定が master のテンプレートで main を宛先にすると、GitHub API が存在しない
+      // ブランチとして 404 を返し、原因の分からない失敗になる。
+      mockResolveDefaultBranch.mockResolvedValue("master");
+
+      await runSetup(["--remote", "--from", "my-org/my-templates"]);
+
+      expect(mockCreatePullRequest).toHaveBeenCalledWith(
+        "ghp_test_token",
+        expect.objectContaining({ baseBranch: "master" }),
+      );
+    });
+
+    it("既定ブランチを取得できなければ main を仮定せず失敗する", async () => {
+      mockResolveDefaultBranch.mockResolvedValue(undefined);
+
+      await expect(runSetup(["--remote", "--from", "my-org/my-templates"])).rejects.toThrow(
+        "Cannot determine the default branch of my-org/my-templates",
+      );
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
     it("--dryRun では PR を作らず、作成される内容を表示する", async () => {

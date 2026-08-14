@@ -94,7 +94,7 @@ export const pullLifecycle: CommandLifecycle = {
   notes: [
     "`ziku.jsonc` 自体が追跡ファイルとして加法 union マージされる。テンプレ側で追加されたパターンはユーザーの `ziku.jsonc` へ取り込まれる（push と双方向に同期）。パターンの削除は自動伝播しない（安全側）。",
     "テンプレートで削除されたファイルは、対話実行ではユーザーが選択的に削除できる。`--force` は削除の承認なので全て削除し、`--yes` はプロンプトを省くだけなので全て残す。ローカルに編集があるものはどちらのフラグでも削除せず、対話実行で明示的に選んだものだけを削除する。",
-    "ローカルに残したファイルは同期ベースを据え置くため、次回の `pull` でも同じ削除候補として提示される。ベースを進めるとローカルにしかないファイルと区別できなくなり、続く `push` がテンプレート側の削除を巻き戻してしまう。テンプレートとローカルの双方から既に消えているファイルはベースからエントリを落とすため、削除候補として繰り返し提示されることはない。",
+    "ローカルに残したファイルは同期ベースを据え置くため、次回の `pull` でも同じ削除候補として提示される。ベースを進めるとローカルにしかないファイルと区別できなくなり、続く `push` がテンプレート側の削除を巻き戻してしまう。テンプレートとローカルの双方から既に消えているファイルは、消すものが無いので削除候補として提示せず、ベースからエントリを落とす。",
     "自動マージを試みなかったファイル（共通祖先を取得できない / バイナリ）は、`--continue` がローカルとテンプレートのどちらを残すか尋ねる。ziku がそれらのファイルへ何も書いていないため、コンフリクトマーカーの有無では解決を判定できない。`--yes` / `--force` を付けた実行では代わりに決めず中断する。",
   ],
 };
@@ -221,9 +221,15 @@ export const pullCommand = defineCommand({
           );
           const { autoUpdate, conflicts, deletedFiles, deletedWithLocalEdits } = plan.files;
 
+          const { deletable: deletableFiles, hasStaleBaseEntries } = splitTemplateDeletions(
+            deletedFiles,
+            hashes.localHashes,
+          );
+
           // テンプレートが削除したファイルは、どちらのカテゴリでも「削除するか残すか」が
           // 実行時に決まる。ベースの確定にはその結果が要るので、候補を 1 本にまとめて
-          // 通常フローと中断の両方から同じ集合を渡す。
+          // 通常フローと中断の両方から同じ集合を渡す。ここは実在しないファイルも含めた
+          // まま渡す。ベースのエントリを落とす判断は {@link baseAfterDeletions} が持つ。
           const deletionCandidates: readonly RepoRelPath[] = [
             ...deletedFiles,
             ...deletedWithLocalEdits,
@@ -241,25 +247,24 @@ export const pullCommand = defineCommand({
             autoUpdate.length +
             plan.files.newFiles.length +
             conflicts.length +
-            deletedFiles.length +
+            deletableFiles.length +
             deletedWithLocalEdits.length +
             (configSync.write !== undefined ? 1 : 0);
 
-          // ファイル変更が無くても、ziku.jsonc の base を union に揃える必要がある場合
-          // （例: conflict だが union==local で書き込み不要）は lock を更新しないと、
-          // 古い base が残って status/push が誤判定する。その場合は early-return しない。
-          const configBaseChanged =
-            configSync.baseHash !== undefined &&
-            configSync.baseHash !== hashes.baseHashes[ZIKU_CONFIG_FILE];
+          const rewriteLock = lockNeedsRewrite({
+            configBaseHash: configSync.baseHash,
+            recordedConfigBaseHash: hashes.baseHashes[ZIKU_CONFIG_FILE],
+            hasStaleBaseEntries,
+          });
 
-          if (totalChanges === 0 && !configBaseChanged) {
+          if (totalChanges === 0 && !rewriteLock) {
             log.success("Already up to date");
             outro("No changes needed");
             return;
           }
 
           if (totalChanges > 0) {
-            logPullSummary(plan.files);
+            logPullSummary({ ...plan.files, deletedFiles: deletableFiles });
           }
 
           if (args.dryRun) {
@@ -268,7 +273,7 @@ export const pullCommand = defineCommand({
               templateDir,
               lock,
               conflicts,
-              deletedFiles,
+              deletedFiles: deletableFiles,
               deletedWithLocalEdits,
               configWrite: configSync.write,
               flags: approvalFlags,
@@ -322,8 +327,8 @@ export const pullCommand = defineCommand({
 
           // 削除されたファイルを処理（plan.files に ziku.jsonc は入らない）
           const appliedDeletions = new Set<RepoRelPath>();
-          if (deletedFiles.length > 0) {
-            for (const path of await handleDeletedFiles(deletedFiles, targetDir, approvalFlags)) {
+          if (deletableFiles.length > 0) {
+            for (const path of await handleDeletedFiles(deletableFiles, targetDir, approvalFlags)) {
               appliedDeletions.add(path);
             }
           }
@@ -657,6 +662,53 @@ function isNonInteractive(flags: PullApprovalFlags): boolean {
 }
 
 /**
+ * ユーザーへ見せる変更が 1 件も無くても、lock だけは書き直す必要があるか。
+ *
+ * 該当するのは 2 つ。ziku.jsonc の base を union の内容へ揃える必要がある場合（例: conflict
+ * だが union==local で書き込みが要らない）と、ベースにだけ残ったエントリを落とす場合。
+ * どちらも古い base を残すと `status` / `push` が誤判定し、同じ状態のまま毎回走ることになる。
+ *
+ * @param configBaseHash union マージが決めた ziku.jsonc の base。揃える必要が無ければ undefined。
+ * @param recordedConfigBaseHash lock に記録されている ziku.jsonc の base。
+ */
+function lockNeedsRewrite(params: {
+  readonly configBaseHash: ContentHash | undefined;
+  readonly recordedConfigBaseHash: ContentHash | undefined;
+  readonly hasStaleBaseEntries: boolean;
+}): boolean {
+  const configBaseChanged =
+    params.configBaseHash !== undefined && params.configBaseHash !== params.recordedConfigBaseHash;
+  return configBaseChanged || params.hasStaleBaseEntries;
+}
+
+/** テンプレートが削除したファイルを、削除を問える側と問う意味が無い側に分けた結果。 */
+interface TemplateDeletions {
+  /** ローカルに実在し、削除するか残すかを問える候補。 */
+  readonly deletable: readonly RepoRelPath[];
+  /** ベースにだけエントリが残っているファイルがあるか。 */
+  readonly hasStaleBaseEntries: boolean;
+}
+
+/**
+ * テンプレートが削除したファイルを、ローカルでの実在で分ける。
+ *
+ * `deletedFiles` には「テンプレートにもワークツリーにも無く、ベースにだけ残っている」
+ * ファイルも入る（`utils/merge/classify.ts`）。消すものが無いので、候補として見せても
+ * 選択も削除ログも実体を伴わない。
+ *
+ * ベースにだけ残ったエントリは、見せる変更が無くても lock を書き直して落とす必要がある
+ * （{@link baseAfterDeletions}）。落とさないと毎回同じ状態で走り、`status` も同期済みに
+ * ならないため、その有無を呼び出し側へ返す。
+ */
+function splitTemplateDeletions(
+  deletedFiles: readonly RepoRelPath[],
+  localHashes: HashMap,
+): TemplateDeletions {
+  const deletable = deletedFiles.filter((path) => localHashes[path] !== undefined);
+  return { deletable, hasStaleBaseEntries: deletable.length < deletedFiles.length };
+}
+
+/**
  * テンプレート側の削除候補と、そのうち実際にローカルから消したもの。
  *
  * 候補と適用結果を 1 つの値で運ぶことで、{@link baseAfterDeletions} が「残ったのはどれか」を
@@ -895,25 +947,17 @@ async function runContinue(
     });
   }
 
-  // 非対話を意図する実行で選択を代行しない。どちらを選んでも片側の変更が消えるため、
-  // ツールが黙って決めてよい判断ではない。
-  if (unmerged.length > 0 && isNonInteractive(opts.flags)) {
-    throw zikuFailure({
-      kind: "UnmergedChoiceRequired",
-      files: unmerged.map((c) => c.path),
-    });
-  }
-
   // dryRun: --continue は同期ベースの確定（lock 更新）が本体の副作用なので、書き込みだけ
   // 省略する。マーカーの残存チェックは読み取りのみなので dryRun でも実行してよい
   // （他の dryRun 分岐と同じくプレビュー精度を保つため）。選択を伴う問い合わせは、
   // プレビューが入力待ちで止まらないよう予告に留める。
+  //
+  // 選択を代行できないことによる中断より手前に置く。プレビューは「実行すると何が起きるか」を
+  // 見せるものなので、その実行が中断する見込みであること自体もプレビューの内容に含まれる。
   if (opts.dryRun) {
     log.info("Dry run mode");
     if (unmerged.length > 0) {
-      log.warn(
-        `${unmerged.length} file(s) could not be auto-merged — continue would ask whether to keep your local version or take the template's:`,
-      );
+      log.warn(describeUnmergedPreview(unmerged.length, opts.flags));
       for (const conflict of unmerged) log.message(`  ${pc.yellow("!")} ${conflict.path}`);
     }
     outro(
@@ -922,6 +966,15 @@ async function runContinue(
         : "Dry run complete — no changes were made. Conflicts are resolved and ready to finalize.",
     );
     return;
+  }
+
+  // 非対話を意図する実行で選択を代行しない。どちらを選んでも片側の変更が消えるため、
+  // ツールが黙って決めてよい判断ではない。
+  if (unmerged.length > 0 && isNonInteractive(opts.flags)) {
+    throw zikuFailure({
+      kind: "UnmergedChoiceRequired",
+      files: unmerged.map((c) => c.path),
+    });
   }
 
   if (unmerged.length > 0) {
@@ -933,6 +986,18 @@ async function runContinue(
 
   log.success("All conflicts resolved");
   outro("Pull complete");
+}
+
+/**
+ * dry-run で、自動マージできなかったファイルを `--continue` がどう扱うかを伝える。
+ *
+ * 非対話を意図する実行では選択を求められないまま中断するため、プレビューの時点でそれを
+ * 伝える。プレビューだけ通って本番が止まると、ユーザーは理由を掴めないまま失敗を受け取る。
+ */
+function describeUnmergedPreview(count: number, flags: PullApprovalFlags): string {
+  return isNonInteractive(flags)
+    ? `${count} file(s) could not be auto-merged — continue asks whether to keep your local version or take the template's, so this run would stop instead (--yes / --force skip prompts):`
+    : `${count} file(s) could not be auto-merged — continue would ask whether to keep your local version or take the template's:`;
 }
 
 /** 自動マージを試みなかった経路か。マーカーの有無では解決を判定できない側。 */

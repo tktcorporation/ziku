@@ -27,7 +27,12 @@ export interface PushOptions {
   deletions?: Array<{ path: RepoRelPath }>;
   title: string;
   body?: string;
-  baseBranch?: string;
+  /**
+   * PR の宛先ブランチ。既定値を持たせない理由: 既定ブランチは `main` とは限らず
+   * （`master` / `trunk` 等）、仮定すると存在しないブランチを宛先にした PR 作成が
+   * 404 になる。必須にすることで、宛先の解決を呼び出し側へ強制する。
+   */
+  baseBranch: string;
 }
 
 /**
@@ -35,7 +40,7 @@ export interface PushOptions {
  */
 export async function createPullRequest(token: string, options: PushOptions): Promise<PrResult> {
   const octokit = new Octokit({ auth: token });
-  const { owner, repo, files, title, body, baseBranch = "main" } = options;
+  const { owner, repo, files, title, body, baseBranch } = options;
 
   // 1. 認証ユーザー情報を取得
   const { data: user } = await octokit.users.getAuthenticated();
