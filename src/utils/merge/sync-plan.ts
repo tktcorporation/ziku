@@ -13,8 +13,8 @@
  * 扱いの決定は「分類 → pull / push のアクション → push の結論 → 利用者へ見せる結論」の一方向で
  * 流す。表示や案内が独自にカテゴリを決めると、勧めた操作を実行しても何も起きない案内に
  * なりうるため、push の結論（{@link zikuConfigPushOutcome}）は {@link zikuConfigActions} が
- * 返すアクションからしか導かず、status の表示カテゴリ（{@link zikuConfigStatusCategory}）は
- * その push の結論からしか導かない。分岐が枝分かれしないので、片方だけが直った状態を作れない。
+ * 返すアクションからしか導かず、status の表示（{@link zikuConfigStatus}）はその push の結論から
+ * しか導かない。分岐が枝分かれしないので、片方だけが直った状態を作れない。
  */
 import { P, match } from "ts-pattern";
 import type { RepoRelPath } from "../../modules/schemas";
@@ -293,7 +293,39 @@ export type ZikuConfigStatusCategory = Extract<
 >;
 
 /**
- * status で設定ファイルを入れるカテゴリを決める。
+ * status が設定ファイルについて見せる状態。
+ *
+ * 通常の同期ファイルと同じカテゴリでは表せない状態が 1 つある: ローカルにしか無いパターンが
+ * 残っているのに、push が設定ファイルを送らない状態（{@link ZikuConfigStatus.LocalOnlyPatterns}
+ * の説明を参照）。カテゴリへ畳むと「同期済み」と区別できず、status が事実と食い違う。
+ *
+ * 判別可能な union にしておくと、状態を足したときに `match().exhaustive()` が全消費者へ対応を
+ * 要求するので、表示だけがその状態を落とすことがない。
+ */
+export type ZikuConfigStatus =
+  /** 通常の同期ファイルと同じカテゴリに載せて数え上げる。 */
+  | { readonly _tag: "Categorized"; readonly category: ZikuConfigStatusCategory }
+  /**
+   * ローカルの `ziku.jsonc` にテンプレートへ無いパターンが残っているが、push は設定ファイルを
+   * 送らない。
+   *
+   * 加法 union の下では、`base == local` の分類（`autoUpdate`）から「テンプレートがパターンを
+   * 削除した」と「ローカルが独自のパターンを持つ」を区別できない。送ればテンプレートが消した
+   * パターンを復活させ、全下流のプロジェクトへ波及するので、送信は安全側（送らない）に倒す。
+   *
+   * ただし利用者から見れば同期済みではない。ローカル限定のパターンは、それに一致するファイルを
+   * push したときにスコープ限定の union として同梱されて初めてテンプレートへ届く。status が
+   * この状態を見せることで、届いていない事実と、届けるために取れる操作が分かる。
+   */
+  | { readonly _tag: "LocalOnlyPatterns" };
+
+/** 通常の同期ファイルと同じカテゴリに載せる状態を作る。 */
+function categorized(category: ZikuConfigStatusCategory): ZikuConfigStatus {
+  return { _tag: "Categorized", category };
+}
+
+/**
+ * status で設定ファイルをどう見せるかを決める。
  *
  * 結論は push の結論（{@link zikuConfigPushOutcome}）と、pull が実際にローカルを書き換えるか
  * から導く。分類カテゴリや drift から直接カテゴリを決めると、status だけが別の結論を持つ
@@ -301,24 +333,27 @@ export type ZikuConfigStatusCategory = Extract<
  * push 方向（`localOnly` / `conflicts`）を見せるので、status が pull だけを勧めた状態で
  * `ziku push` が PR を作ることはない。
  *
- * テンプレートがパターンを削除し、ローカルが変更していない状態は `unchanged`（同期済み）に
- * なる。加法 union の下でこの状態は終端で、pull は削除を伝播せず、push はテンプレートが
- * 消したパターンを復活させない。どちらのコマンドも何も変えない以上、操作待ちとして見せる
- * 相手が存在しない。テンプレートに合わせてローカルからもパターンを消したい利用者は、
- * ローカルの `ziku.jsonc` を自分で編集する（それが「削除は伝播しない」方針の帰結）。
+ * どちらのコマンドも設定ファイルを書き換えないときは、ローカルにしか無いパターンが残っているか
+ * （`pushRelevant`）で分かれる。残っていなければ `unchanged`（同期済み）で、これが加法 union の
+ * 終端状態: テンプレートがパターンを削除しローカルが変更していない場合がここに入り、pull は
+ * 削除を伝播せず、push はテンプレートが消したパターンを復活させない。テンプレートに合わせて
+ * ローカルからもパターンを消したい利用者は、ローカルの `ziku.jsonc` を自分で編集する
+ * （それが「削除は伝播しない」方針の帰結）。残っていれば {@link ZikuConfigStatus} の
+ * `LocalOnlyPatterns` で、送信の可否は変えずに、届いていない事実だけを見せる。
  */
-export function zikuConfigStatusCategory(
-  state: ZikuConfigState,
-  drift: ConfigDrift,
-): ZikuConfigStatusCategory {
+export function zikuConfigStatus(state: ZikuConfigState, drift: ConfigDrift): ZikuConfigStatus {
   return match({
     push: zikuConfigPushOutcome(state, drift),
     pull: pullWritesLocal(zikuConfigActions(state).pull, drift),
   })
-    .with({ push: { _tag: "SendUnion" }, pull: true }, (): ZikuConfigStatusCategory => "conflicts")
-    .with({ push: { _tag: "SendUnion" }, pull: false }, (): ZikuConfigStatusCategory => "localOnly")
-    .with({ push: { _tag: "PullToSync" } }, (): ZikuConfigStatusCategory => "autoUpdate")
-    .with({ push: { _tag: "Skip" } }, (): ZikuConfigStatusCategory => "unchanged")
+    .with({ push: { _tag: "SendUnion" }, pull: true }, () => categorized("conflicts"))
+    .with({ push: { _tag: "SendUnion" }, pull: false }, () => categorized("localOnly"))
+    .with({ push: { _tag: "PullToSync" } }, () => categorized("autoUpdate"))
+    .with(
+      { push: { _tag: "Skip" } },
+      (): ZikuConfigStatus =>
+        drift.pushRelevant ? { _tag: "LocalOnlyPatterns" } : categorized("unchanged"),
+    )
     .exhaustive();
 }
 
@@ -373,14 +408,19 @@ function pushWritesTemplate(
 }
 
 /**
- * 仕分けで外した設定ファイルを、指定カテゴリへ戻した分類結果を返す。
+ * 仕分けで外した設定ファイルを、status の状態に応じて分類結果へ戻す。
  *
- * 表示のように「通常の同期ファイルと同じ土俵で数え上げたい」場面のための逆操作。
- * どのカテゴリへ戻すかは {@link zikuConfigStatusCategory} が決める。
+ * 表示のように「通常の同期ファイルと同じ土俵で数え上げたい」場面のための逆操作。どこへ戻すかは
+ * {@link zikuConfigStatus} が決める。
+ *
+ * `LocalOnlyPatterns` はどのカテゴリへも戻さない。pull も push もこのファイルを書き換えないので
+ * 操作待ちのバケツには入らず、テンプレートと一致してもいないので同期済みの数にも入らない。
+ * この状態は分類結果ではなく {@link ZikuConfigStatus} のまま表示側へ渡し、専用の案内として
+ * 見せる。
  */
-export function withZikuConfigAt(
+export function withZikuConfigStatus(
   files: FileClassification,
-  category: ZikuConfigStatusCategory,
+  status: ZikuConfigStatus,
 ): FileClassification {
   const merged: FileClassification = {
     autoUpdate: [...files.autoUpdate],
@@ -392,6 +432,11 @@ export function withZikuConfigAt(
     deletedLocally: [...files.deletedLocally],
     unchanged: [...files.unchanged],
   };
-  merged[category].push(ZIKU_CONFIG_FILE);
+  match(status)
+    .with({ _tag: "Categorized" }, ({ category }) => {
+      merged[category].push(ZIKU_CONFIG_FILE);
+    })
+    .with({ _tag: "LocalOnlyPatterns" }, () => {})
+    .exhaustive();
   return merged;
 }

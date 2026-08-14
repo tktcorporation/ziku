@@ -10,7 +10,9 @@
  */
 import { match } from "ts-pattern";
 import pc from "picocolors";
+import type { ZikuConfigStatus } from "../utils/merge/sync-plan";
 import type { EntryCategory, Recommendation, StatusBuckets, StatusEntry } from "../utils/status";
+import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
 
 /**
  * カテゴリごとのラベルとカラーの SSOT。
@@ -69,6 +71,11 @@ export function recommendationLine(rec: Recommendation): string {
   return match(rec)
     .with({ kind: "inSync" }, () => `${pc.green("✓")} In sync — nothing to do.`)
     .with(
+      { kind: "localOnlyConfigPatterns" },
+      () =>
+        `${pc.yellow("⚠")} ${pc.yellow(ZIKU_CONFIG_FILE)} has patterns the template does not have — push a file matching them to send them along.`,
+    )
+    .with(
       { kind: "pullOnly" },
       ({ pullCount }) =>
         `${pc.cyan("→")} Run ${pc.cyan("`ziku pull`")} to apply ${pullCount} incoming change(s).`,
@@ -104,6 +111,11 @@ export interface StatusViewModel {
   readonly buckets: StatusBuckets;
   readonly untracked: ReadonlyArray<UntrackedGroup>;
   readonly recommendation: Recommendation;
+  /**
+   * 設定ファイルの状態。バケツへ載る状態（`Categorized`）は `buckets` 側に現れるので、
+   * ここを読むのは載せられない状態を案内するためだけ。
+   */
+  readonly config: ZikuConfigStatus;
 }
 
 /**
@@ -116,6 +128,18 @@ export interface StatusViewModel {
 export function renderStatusLong(model: StatusViewModel): string {
   const { buckets, untracked, recommendation } = model;
   const untrackedFiles = untracked.flatMap((g) => g.files);
+
+  // 設定ファイルがバケツに載らない状態は、専用の区画で見せる。バケツへ載せると「実行しても
+  // 何も起きないコマンド」を勧めることになり、載せなければ黙って消える。
+  const configLines: string[] = match(model.config)
+    .with({ _tag: "Categorized" }, (): string[] => [])
+    .with({ _tag: "LocalOnlyPatterns" }, () => [
+      `  ${pc.yellow("!")} ${pc.bold("Local-only patterns")} — the template does not have them yet`,
+      `    ${pc.dim(`(sent with the next file you push that matches; or add them to the template's ${ZIKU_CONFIG_FILE})`)}`,
+      `    ${pc.yellow(ZIKU_CONFIG_FILE)}`,
+      "",
+    ])
+    .exhaustive();
 
   const untrackedLines: string[] =
     untrackedFiles.length === 0
@@ -165,6 +189,7 @@ export function renderStatusLong(model: StatusViewModel): string {
       buckets.push,
     ),
     ...renderSection("⚠", "Conflict — both sides changed", conflictHint, buckets.conflict),
+    ...configLines,
     ...untrackedLines,
     ...cleanLines,
   ].join("\n");

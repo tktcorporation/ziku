@@ -115,6 +115,19 @@ export type FailureReason =
       readonly paths: readonly string[];
     }
   /**
+   * 同じパスを、内容の更新と削除の両方として送ろうとした。
+   *
+   * 取る行動はそのファイルを今回の push から外し、更新か削除のどちらか一方だけを送ること。
+   * 更新は新しい blob を作り、削除は宛先ブランチの blob SHA を要求するので、両方を含む PR は
+   * GitHub が受け付けない。`PushDeletionTargetMissing` と違い宛先の状態は関係なく、送ろうと
+   * している指示そのものが 2 つに割れている。
+   */
+  | {
+      readonly kind: "PushPathUpdatedAndDeleted";
+      readonly repo: string;
+      readonly paths: readonly string[];
+    }
+  /**
    * PR の head に使う名前のリポジトリが認証ユーザー配下に既にあるが、対象の fork ではない。
    *
    * 取る行動はそのリポジトリを改名するか消すこと。ziku は対象リポジトリと同じ名前で fork を
@@ -291,6 +304,10 @@ export function describeFailure(reason: FailureReason): FailureDisplay {
     .with({ kind: "PushCreateTargetExists" }, (r) => ({
       message: `${r.repo} already has: ${r.paths.join(", ")}`,
       hint: `ziku setup adds these files to a template that does not have them yet, and never replaces what is already there — replacing them would reset the sync patterns for every project using this template. Edit the file in ${r.repo} directly to change what the template tracks.`,
+    }))
+    .with({ kind: "PushPathUpdatedAndDeleted" }, (r) => ({
+      message: `Cannot push ${r.paths.join(", ")} to ${r.repo} as both new content and a deletion`,
+      hint: `A pull request carries one intent per file: updating it writes a new blob, deleting it needs the blob the target branch has now. Leave ${r.paths.length === 1 ? "that file" : "those files"} out of this push (name the other files with --files, or unselect it in the interactive list), then push the update or the deletion on its own.`,
     }))
     .with({ kind: "ForkNameTaken" }, (r) => ({
       message: `${r.existing} already exists and is not a fork of ${r.repo}`,

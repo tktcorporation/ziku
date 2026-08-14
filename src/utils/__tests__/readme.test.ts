@@ -22,7 +22,8 @@ const {
   updateSection,
 } = await import("../readme");
 
-const CONFIG_PATH = "/project/.ziku/ziku.jsonc";
+const CONFIG_DIR = "/project";
+const CONFIG_PATH = `${CONFIG_DIR}/.ziku/ziku.jsonc`;
 
 describe("generateReadme", () => {
   beforeEach(() => {
@@ -34,7 +35,7 @@ describe("generateReadme", () => {
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      configPath: CONFIG_PATH,
+      configDir: CONFIG_DIR,
     });
 
     expect(result.updated).toBe(false);
@@ -50,7 +51,7 @@ describe("generateReadme", () => {
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      configPath: CONFIG_PATH,
+      configDir: CONFIG_DIR,
     });
 
     expect(result.updated).toBe(false);
@@ -76,7 +77,7 @@ Other content`;
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      configPath: CONFIG_PATH,
+      configDir: CONFIG_DIR,
     });
 
     expect(result.updated).toBe(true);
@@ -100,7 +101,7 @@ Old files
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      configPath: CONFIG_PATH,
+      configDir: CONFIG_DIR,
     });
 
     expect(result.updated).toBe(true);
@@ -124,7 +125,7 @@ Old files
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      configPath: CONFIG_PATH,
+      configDir: CONFIG_DIR,
     });
 
     expect(result.content).toContain(".mcp.json");
@@ -143,7 +144,7 @@ Old content
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      configPath: CONFIG_PATH,
+      configDir: CONFIG_DIR,
     });
 
     expect(result.updated).toBe(false);
@@ -164,7 +165,7 @@ Old content
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      configPath: CONFIG_PATH,
+      configDir: CONFIG_DIR,
     });
 
     expect(result.updated).toBe(false);
@@ -185,7 +186,7 @@ Old commands
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      configPath: CONFIG_PATH,
+      configDir: CONFIG_DIR,
       generateCommandsSection: async () => "## Commands\n\n- `pnpm dev`\n",
     });
 
@@ -214,7 +215,7 @@ Old files
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      configPath: CONFIG_PATH,
+      configDir: CONFIG_DIR,
     });
 
     expect(result.updated).toBe(true);
@@ -236,7 +237,7 @@ Old files
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      configPath: CONFIG_PATH,
+      configDir: CONFIG_DIR,
     });
 
     expect(result.content).toContain("(パターン)");
@@ -261,7 +262,7 @@ describe("updateReadmeFile", () => {
 
     const result = await updateReadmeFile({
       readmePath: "/project/README.md",
-      configPath: CONFIG_PATH,
+      configDir: CONFIG_DIR,
     });
 
     expect(result.updated).toBe(true);
@@ -280,7 +281,7 @@ describe("updateReadmeFile", () => {
 
     await updateReadmeFile({
       readmePath: "/project/README.md",
-      configPath: CONFIG_PATH,
+      configDir: CONFIG_DIR,
     });
 
     const savedContent = vol.readFileSync("/project/README.md", "utf8");

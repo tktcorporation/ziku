@@ -22,6 +22,7 @@ import { execFileSync } from "node:child_process";
 import * as p from "@clack/prompts";
 import { P, match } from "ts-pattern";
 import type { ChangedFileDiff, PushFile, PushSend } from "../../commands/push-plan";
+import { pushPayloadOf } from "../../commands/push-plan";
 import type { DeletablePath, FileDiff, RepoRelPath } from "../../modules/schemas";
 import { asDeletablePath, asPushContent } from "../../modules/schemas";
 import { classifySyncPath } from "../../utils/ziku-config";
@@ -101,7 +102,7 @@ function sendOf(params: {
   }
 
   return {
-    payload: { files, deletions },
+    payload: pushPayloadOf({ files, deletions }),
     pushableFiles: params.changes,
     restoresTemplateDeletion: new Set(),
   };

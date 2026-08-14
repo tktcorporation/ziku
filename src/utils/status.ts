@@ -1,5 +1,6 @@
 import { match } from "ts-pattern";
 import type { LockState, RepoRelPath } from "../modules/schemas";
+import type { ZikuConfigStatus } from "./merge/sync-plan";
 import type { FileClassification } from "./merge/types";
 
 /**
@@ -70,9 +71,14 @@ export interface StatusBuckets {
  * - resolveConflict  : conflict があるので pull で 3-way merge を始める
  * - continueMerge    : コンフリクト解決待ち。`ziku pull --continue` で再開。
  *                     解決待ちのファイルは必ず 1 件以上ある（lock の型が空を許さない）。
+ * - localOnlyConfigPatterns : ファイルはすべて一致しているが、ローカルの `ziku.jsonc` にだけ
+ *                     あるパターンがテンプレートへ届いていない（`ZikuConfigStatus` の
+ *                     `LocalOnlyPatterns`）。pull も push もこのファイルを書き換えないので
+ *                     どちらのコマンドも勧められないが、同期済みでもない。
  */
 export type Recommendation =
   | { readonly kind: "inSync" }
+  | { readonly kind: "localOnlyConfigPatterns" }
   | { readonly kind: "pullOnly"; readonly pullCount: number }
   | { readonly kind: "pushOnly"; readonly pushCount: number }
   | {
@@ -190,16 +196,26 @@ export function categorizeForStatus(classification: FileClassification): StatusB
  *   3. pull も push もある → pullThenPush（pull 先行で取りこぼし防止）
  *   4. pull だけ → pullOnly
  *   5. push だけ → pushOnly
- *   6. 何もない → inSync
+ *   6. 何も無いが、ローカルにしか無い同期パターンが残っている → localOnlyConfigPatterns
+ *   7. 何もない → inSync
  *
- * 判断材料はバケツと lock だけにする。テンプレート側のパターン追加は、`ziku.jsonc` 自体が
- * pull のバケツへ入ることで現れる（`src/utils/merge/sync-plan.ts` の
- * `zikuConfigStatusCategory`）。パターンの差分をバケツと別軸の信号として足すと、
- * `pull` が何も書き換えない状態でも pull を勧めてしまう。
+ * コマンドを勧める判断材料はバケツと lock だけにする。テンプレート側のパターン追加は、
+ * `ziku.jsonc` 自体が pull のバケツへ入ることで現れる（`src/utils/merge/sync-plan.ts` の
+ * `zikuConfigStatus`）。パターンの差分をバケツと別軸の信号として足すと、`pull` が何も書き換え
+ * ない状態でも pull を勧めてしまう。
+ *
+ * `config` を受け取るのは、どのコマンドも勧められない状態を「同期済み」と言い切らないため。
+ * `LocalOnlyPatterns` はどのバケツにも入らない（`withZikuConfigStatus`）ので、バケツだけを見ると
+ * inSync に落ちる。ここで見るのはバケツが全部空のときだけなので、勧める操作が別の信号で
+ * すり替わることはない。
  *
  * 参考: schemas.ts の lockSchema — `merging` の間は push がブロックされる仕様。
  */
-export function decideRecommendation(buckets: StatusBuckets, lock: LockState): Recommendation {
+export function decideRecommendation(
+  buckets: StatusBuckets,
+  lock: LockState,
+  config: ZikuConfigStatus,
+): Recommendation {
   if (lock.sync === "merging") {
     return {
       kind: "continueMerge",
@@ -224,5 +240,14 @@ export function decideRecommendation(buckets: StatusBuckets, lock: LockState): R
   if (pushCount > 0) {
     return { kind: "pushOnly", pushCount };
   }
-  return { kind: "inSync" };
+
+  return match(config)
+    .with(
+      { _tag: "LocalOnlyPatterns" },
+      (): Recommendation => ({
+        kind: "localOnlyConfigPatterns",
+      }),
+    )
+    .with({ _tag: "Categorized" }, (): Recommendation => ({ kind: "inSync" }))
+    .exhaustive();
 }

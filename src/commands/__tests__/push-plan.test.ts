@@ -35,7 +35,10 @@ import {
   planPushCandidates,
   planPushDelivery,
   planUntrackedTracking,
+  pushPayloadOf,
   pushSummaryRows,
+  pushedDeletions,
+  pushedFiles,
   resolvePrBaseBranch,
   selectedUnresolvedConflicts,
   withAutoUpdatedFile,
@@ -497,17 +500,17 @@ describe("planPushDelivery", () => {
       mergedContents,
     );
 
-    expect(payload.files).toEqual([
+    expect(pushedFiles(payload)).toEqual([
       { path: "a.txt", content: "local a", origin: { _tag: "LocalContent" } },
       { path: "b.txt", content: "merged content", origin: { _tag: "Synthesized" } },
     ]);
-    expect(payload.deletions).toEqual([{ path: "gone.txt" }]);
+    expect(pushedDeletions(payload)).toEqual([{ path: "gone.txt" }]);
   });
 
   it("マージ結果が無いファイルはローカルの内容をそのまま送る", () => {
     const payload = deliveryPayload([added("a.txt", "local a")], new Map());
 
-    expect(payload.files).toEqual([
+    expect(pushedFiles(payload)).toEqual([
       { path: "a.txt", content: "local a", origin: { _tag: "LocalContent" } },
     ]);
   });
@@ -521,7 +524,7 @@ describe("planPushDelivery", () => {
 
     const payload = deliveryPayload([added("a.txt", "local a")], mergedContents);
 
-    expect(payload.files).toEqual([
+    expect(pushedFiles(payload)).toEqual([
       { path: "a.txt", content: "local a", origin: { _tag: "Synthesized" } },
     ]);
   });
@@ -531,8 +534,8 @@ describe("planPushDelivery", () => {
     // init / pull が同期対象パターンを引けなくなる。
     const payload = deliveryPayload([deleted(".ziku/ziku.jsonc"), deleted("gone.txt")], new Map());
 
-    expect(payload.deletions).toEqual([{ path: "gone.txt" }]);
-    expect(payload.files).toEqual([]);
+    expect(pushedDeletions(payload)).toEqual([{ path: "gone.txt" }]);
+    expect(pushedFiles(payload)).toEqual([]);
   });
 
   it("送る内容がテンプレートと同一になったファイルは送らない", () => {
@@ -574,7 +577,7 @@ describe("planPushDelivery", () => {
     const { payload } = delivery.send;
     const rows = pushSummaryRows(delivery.send);
 
-    expect(payload.files.map((f) => f.path)).toEqual(["differs.txt"]);
+    expect(pushedFiles(payload).map((f) => f.path)).toEqual(["differs.txt"]);
     expect(rows.map((row) => (row._tag === "Change" ? row.diff.path : row.path))).toEqual([
       "differs.txt",
     ]);
@@ -631,7 +634,7 @@ describe("baseAfterPush", () => {
     const base = baseAfterPush({
       templateHashes,
       previousBase,
-      pushed: { files: [localFile("sent.txt", "x")], deletions: [] },
+      pushed: pushPayloadOf({ files: [localFile("sent.txt", "x")] }),
       alreadySynced: new Set(repoRelPaths(["same.txt"])),
       writtenBackToLocal: NOTHING_WRITTEN_BACK,
     });
@@ -649,7 +652,7 @@ describe("baseAfterPush", () => {
     const base = baseAfterPush({
       templateHashes: hashMap({ "same.txt": "same" }),
       previousBase: hashMap({ "gone.txt": "old", "same.txt": "same" }),
-      pushed: { files: [], deletions: [{ path: deletablePath("gone.txt") }] },
+      pushed: pushPayloadOf({ deletions: [{ path: deletablePath("gone.txt") }] }),
       alreadySynced: new Set(repoRelPaths(["same.txt"])),
       writtenBackToLocal: NOTHING_WRITTEN_BACK,
     });
@@ -663,7 +666,7 @@ describe("baseAfterPush", () => {
     const base = baseAfterPush({
       templateHashes: hashMap({}),
       previousBase: hashMap({ "gone-everywhere.txt": "old" }),
-      pushed: { files: [], deletions: [] },
+      pushed: pushPayloadOf({}),
       alreadySynced: new Set(repoRelPaths(["gone-everywhere.txt"])),
       writtenBackToLocal: NOTHING_WRITTEN_BACK,
     });
@@ -675,7 +678,7 @@ describe("baseAfterPush", () => {
     const base = baseAfterPush({
       templateHashes: hashMap({ "new.txt": "new-hash", "untouched.txt": "template-only" }),
       previousBase: hashMap({}),
-      pushed: { files: [localFile("new.txt", "x")], deletions: [] },
+      pushed: pushPayloadOf({ files: [localFile("new.txt", "x")] }),
       alreadySynced: new Set(),
       writtenBackToLocal: NOTHING_WRITTEN_BACK,
     });
@@ -689,10 +692,9 @@ describe("baseAfterPush", () => {
     const base = baseAfterPush({
       templateHashes: hashMap({ ".ziku/ziku.jsonc": "scoped", "sent.txt": "sent-new" }),
       previousBase: hashMap({ ".ziku/ziku.jsonc": "local", "sent.txt": "sent-old" }),
-      pushed: {
+      pushed: pushPayloadOf({
         files: [synthesizedFile(".ziku/ziku.jsonc", "scoped"), localFile("sent.txt", "x")],
-        deletions: [],
-      },
+      }),
       alreadySynced: new Set(),
       writtenBackToLocal: NOTHING_WRITTEN_BACK,
     });
@@ -704,7 +706,7 @@ describe("baseAfterPush", () => {
     const base = baseAfterPush({
       templateHashes: hashMap({ ".ziku/ziku.jsonc": "scoped" }),
       previousBase: hashMap({ ".ziku/ziku.jsonc": "local" }),
-      pushed: { files: [synthesizedFile(".ziku/ziku.jsonc", "scoped")], deletions: [] },
+      pushed: pushPayloadOf({ files: [synthesizedFile(".ziku/ziku.jsonc", "scoped")] }),
       alreadySynced: new Set([CONFIG_PATH]),
       writtenBackToLocal: NOTHING_WRITTEN_BACK,
     });
@@ -716,7 +718,7 @@ describe("baseAfterPush", () => {
     const base = baseAfterPush({
       templateHashes: hashMap({ ".ziku/ziku.jsonc": "merged" }),
       previousBase: hashMap({ ".ziku/ziku.jsonc": "local" }),
-      pushed: { files: [synthesizedFile(".ziku/ziku.jsonc", "merged")], deletions: [] },
+      pushed: pushPayloadOf({ files: [synthesizedFile(".ziku/ziku.jsonc", "merged")] }),
       alreadySynced: new Set(),
       writtenBackToLocal: new Set([CONFIG_PATH]),
     });
@@ -729,7 +731,7 @@ describe("baseAfterPush", () => {
     const base = baseAfterPush({
       templateHashes: hashMap({ "doc.md": "merged" }),
       previousBase: hashMap({ "doc.md": "old" }),
-      pushed: { files: [synthesizedFile("doc.md", "merged")], deletions: [] },
+      pushed: pushPayloadOf({ files: [synthesizedFile("doc.md", "merged")] }),
       alreadySynced: new Set(),
       writtenBackToLocal: NOTHING_WRITTEN_BACK,
     });
@@ -747,7 +749,7 @@ describe("baseAfterPush", () => {
     const base = baseAfterPush({
       templateHashes: hashMap({ "doc.md": mergedHash }),
       previousBase: hashMap({ "doc.md": "old" }),
-      pushed: { files: [synthesizedFile("doc.md", "merged content")], deletions: [] },
+      pushed: pushPayloadOf({ files: [synthesizedFile("doc.md", "merged content")] }),
       alreadySynced: new Set(),
       writtenBackToLocal: NOTHING_WRITTEN_BACK,
     });
@@ -963,7 +965,7 @@ describe("pushSummaryRows", () => {
     restoresTemplateDeletion?: ReadonlySet<RepoRelPath>;
   }): PushSend {
     return {
-      payload: { files: params.files ?? [], deletions: params.deletions ?? [] },
+      payload: pushPayloadOf({ files: params.files, deletions: params.deletions }),
       pushableFiles: params.pushableFiles,
       restoresTemplateDeletion: params.restoresTemplateDeletion ?? noRestores,
     };
@@ -1054,7 +1056,7 @@ describe("pushSummaryRows", () => {
 
     const after = withAutoUpdatedFile(before, synthesizedFile("README.md", "generated"));
 
-    expect(after.payload.files.map((f) => f.path)).toEqual(["a.txt", "README.md"]);
+    expect(pushedFiles(after.payload).map((f) => f.path)).toEqual(["a.txt", "README.md"]);
     expect(pushSummaryRows(after)).toContainEqual({ _tag: "AutoUpdated", path: "README.md" });
   });
 
@@ -1067,6 +1069,27 @@ describe("pushSummaryRows", () => {
 
     const after = withAutoUpdatedFile(before, synthesizedFile("README.md", "rebuilt"));
 
-    expect(after.payload.files).toEqual([synthesizedFile("README.md", "rebuilt")]);
+    expect(pushedFiles(after.payload)).toEqual([synthesizedFile("README.md", "rebuilt")]);
+  });
+
+  it("削除として送るパスには内容を足さない", () => {
+    // 内容と削除を同じパスに載せると、GitHub は内容の書き込みで変わった blob と削除に
+    // 渡す SHA の食い違いで PR の作成を拒み、同期ブランチだけが残る。
+    const before = sendOf({
+      pushableFiles: [deleted("README.md")],
+      deletions: [{ path: deletablePath("README.md") }],
+    });
+
+    const after = withAutoUpdatedFile(before, synthesizedFile("README.md", "generated"));
+
+    expect(pushedFiles(after.payload)).toEqual([]);
+    expect(pushedDeletions(after.payload)).toEqual([{ path: "README.md" }]);
+    expect(pushSummaryRows(after)).toEqual([
+      {
+        _tag: "Change",
+        diff: { path: "README.md", type: "deleted", templateContent: "template" },
+        restoresTemplateDeletion: false,
+      },
+    ]);
   });
 });

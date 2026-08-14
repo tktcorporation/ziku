@@ -12,6 +12,7 @@ import { pullCommand } from "./commands/pull";
 import { pushCommand } from "./commands/push";
 import { setupCommand } from "./commands/setup";
 import { SUBCOMMAND_NAMES, type SubCommandName } from "./commands/names";
+import { subCommands } from "./commands/registry";
 import { statusCommand } from "./commands/status";
 import { trackCommand } from "./commands/track";
 import { ZikuFailure, zikuFailure } from "./errors";
@@ -23,18 +24,7 @@ const main = defineCommand({
     version,
     description: "Dev environment template manager",
   },
-  // `satisfies` で SUBCOMMAND_NAMES との一致を型に検査させる。citty へ登録したのに
-  // 名前一覧へ足し忘れる（= メニューに出ない・打ち間違い判定の対象外になる）ことと、
-  // 逆に一覧だけに書いて登録し忘れることの両方がコンパイルエラーになる。
-  subCommands: {
-    init: initCommand,
-    setup: setupCommand,
-    push: pushCommand,
-    pull: pullCommand,
-    diff: diffCommand,
-    status: statusCommand,
-    track: trackCommand,
-  } satisfies Record<SubCommandName, unknown>,
+  subCommands,
 });
 
 function isSubCommandName(value: string): value is SubCommandName {

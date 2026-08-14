@@ -475,6 +475,45 @@ describe("createPullRequest", () => {
     expect(mockGitCreateRef).not.toHaveBeenCalled();
   });
 
+  it("同じパスを内容と削除の両方で送ろうとしたら、GitHub 上に何も作らずに止める", async () => {
+    // 内容の書き込みは新しい blob を作り、その後の削除がベースの blob SHA と食い違って
+    // 弾かれる。弾かれた時点でブランチとコミットは既にあるので、PR の無い同期ブランチが残る。
+    mockGitGetTree.mockResolvedValue({
+      data: {
+        tree: [{ path: "README.md", type: "blob", sha: "readme-sha" }],
+        truncated: false,
+      },
+    });
+
+    const thrown = await createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [{ path: repoRelPath("README.md"), content: asPushContent("rebuilt") }],
+      deletions: [{ path: deletablePath("README.md") }],
+      title: "Test PR",
+      body: "Test body",
+      baseBranch: "main",
+    }).then(
+      () => expect.unreachable("PR が作成されてしまった"),
+      (error: unknown) => error,
+    );
+
+    expect(thrown).toBeInstanceOf(ZikuFailure);
+    expect(thrown).toMatchObject({
+      reason: {
+        kind: "PushPathUpdatedAndDeleted",
+        repo: "owner/repo",
+        paths: ["README.md"],
+      },
+    });
+    // 読み取りより前に弾くので、fork もブランチも作られない。
+    expect(mockReposCreateFork).not.toHaveBeenCalled();
+    expect(mockGitCreateRef).not.toHaveBeenCalled();
+    expect(mockReposCreateOrUpdateFileContents).not.toHaveBeenCalled();
+    expect(mockReposDeleteFile).not.toHaveBeenCalled();
+    expect(mockPullsCreate).not.toHaveBeenCalled();
+  });
+
   it("onExistingFiles: fail は、宛先に既にあるファイルを置き換えずに止める", async () => {
     // setup が既存の設定を規定値へ戻す PR を作らないための歯止め。
     mockGitGetTree.mockResolvedValue({

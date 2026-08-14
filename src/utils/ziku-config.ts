@@ -138,11 +138,13 @@ export const ZIKU_CONFIG_SCHEMA_URL =
  * 構文エラーとして報告され、利用者は壊れていない JSONC の中で構文ミスを探すことになる。
  *
  * 読む入口はローカル側（{@link loadZikuConfig}）・マージ側（`src/utils/config-merge.ts`）・
- * テンプレート側（`src/utils/template-config.ts`）の 3 つあり、失敗の運び方（Effect の
- * エラーチャネル / throw）が入口ごとに違う。分類まで入口ごとに書くと、同じ内容の
- * `ziku.jsonc` が入口によって構文エラーになったりスキーマ違反になったりする。分類を
- * {@link readZikuConfig} だけが持ち、各入口はこの union を自分の失敗の形へ写すだけにする
- * ことで、ケースを足したとき全入口の `match().exhaustive()` がコンパイルエラーになる。
+ * テンプレート側（`src/utils/template-config.ts`）・README 生成（`src/utils/readme.ts`）の
+ * 4 つあり、失敗の運び方（Effect のエラーチャネル / throw / パターン無しへの縮退）が入口ごとに
+ * 違う。分類まで入口ごとに書くと、同じ内容の `ziku.jsonc` が入口によって構文エラーになったり
+ * スキーマ違反になったりする。分類を {@link readZikuConfig}（ディスク）と
+ * {@link classifyZikuConfigText}（テキスト）だけが持ち、各入口はこの union を自分の失敗の形へ
+ * 写すだけにすることで、ケースを足したとき全入口の `match().exhaustive()` がコンパイルエラーに
+ * なる。
  *
  * `Ok` が生のテキストも持つのは、書き戻す入口が「新しく生成した内容」ではなく「元の内容の
  * include / exclude だけを差し替えたもの」を作るため（{@link withPatterns}）。パターンだけを
@@ -170,8 +172,14 @@ export async function readZikuConfig(dir: AbsPath): Promise<ZikuConfigRead> {
   return classifyZikuConfigText(await readFile(configPath, "utf-8"));
 }
 
-/** 読み出したテキストを分類する。ディスクを見ないので `NotFound` は返らない。 */
-function classifyZikuConfigText(raw: string): Exclude<ZikuConfigRead, { _tag: "NotFound" }> {
+/**
+ * 読み出したテキストを分類する。ディスクを見ないので `NotFound` は返らない。
+ *
+ * ディスク上のファイルではなく、これから配る内容（push のペイロードに載る文字列）から
+ * 判断する入口が使う。ディスク経路（{@link readZikuConfig}）と同じ分類を共有することで、
+ * 同じ内容の `ziku.jsonc` が入口によって違う結果になることがなくなる。
+ */
+export function classifyZikuConfigText(raw: string): Exclude<ZikuConfigRead, { _tag: "NotFound" }> {
   return match(parseJsonc(raw))
     .with({ kind: "unparsable" }, ({ detail }) => ({ _tag: "Unparsable", detail }) as const)
     .with({ kind: "parsed" }, ({ value }) => {

@@ -10,7 +10,7 @@ import { intro, log, outro, pc, withSpinner } from "../ui/renderer";
 import { recommendationLine, renderStatusLong, type StatusViewModel } from "../ui/status-view";
 import { LOCK_FILE, loadLock } from "../utils/lock";
 import { categorizeForStatus, decideRecommendation, type Recommendation } from "../utils/status";
-import { withZikuConfigAt, zikuConfigStatusCategory } from "../utils/merge/sync-plan";
+import { withZikuConfigStatus, zikuConfigStatus } from "../utils/merge/sync-plan";
 import { analyzeSync } from "../utils/sync-analysis";
 import { analyzeConfigDrift } from "../utils/config-merge";
 import { absPath } from "../utils/paths";
@@ -163,15 +163,20 @@ export const statusCommand = defineCommand({
 
           // ziku.jsonc は加法 union で同期されるため、ハッシュ差分がそのまま「やること」に
           // ならない。pull / push が実際にこのファイルを書き換えるかで入れるバケツを決め直して
-          // から表示に載せる（判断は zikuConfigStatusCategory）。
+          // から表示に載せる（判断は zikuConfigStatus）。どのバケツにも載らない状態は
+          // 表示側へそのまま渡し、専用の案内として見せる。
           const drift = await analyzeConfigDrift(targetDir, templateDir);
-          const buckets = categorizeForStatus(
-            withZikuConfigAt(plan.files, zikuConfigStatusCategory(plan.config, drift)),
-          );
+          const configStatus = zikuConfigStatus(plan.config, drift);
+          const buckets = categorizeForStatus(withZikuConfigStatus(plan.files, configStatus));
           const untracked = await detectUntrackedFiles({ targetDir, scope });
-          const recommendation = decideRecommendation(buckets, lock);
+          const recommendation = decideRecommendation(buckets, lock, configStatus);
 
-          const model: StatusViewModel = { buckets, untracked, recommendation };
+          const model: StatusViewModel = {
+            buckets,
+            untracked,
+            recommendation,
+            config: configStatus,
+          };
           log.message(renderStatusLong(model));
           // recommendation を outro として強調表示する。renderStatusLong には含めず
           // ここで一元化することで、メッセージの SSOT を保つ。

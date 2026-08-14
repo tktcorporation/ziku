@@ -686,6 +686,45 @@ describe("pushCommand", () => {
         );
       });
 
+      it("ローカルで削除した README は、削除としてだけ送る", async () => {
+        // 内容と削除が同じパスに載ると、GitHub は内容の書き込みで変わった blob と削除に
+        // 渡す SHA の食い違いで PR の作成を拒み、コミット済みの同期ブランチだけが残る。
+        mockClassifyFiles.mockReturnValueOnce({
+          ...emptyClassification,
+          deletedLocally: repoRelPaths(["README.md"]),
+        });
+        mockDetectDiff.mockResolvedValueOnce({
+          files: [
+            { path: repoRelPath("README.md"), type: "deleted", templateContent: "# Template\n" },
+          ],
+        });
+        mockGetGitHubToken.mockReturnValue("ghp_token");
+        mockCreatePullRequest.mockResolvedValueOnce({
+          url: "https://github.com/owner/repo/pull/1",
+          branch: "update-template-123",
+          number: 1,
+        });
+        mockRenderTemplateReadme.mockResolvedValueOnce(rebuiltReadme);
+
+        await (pushCommand.run as any)({
+          args: {
+            dir: "/test",
+            dryRun: false,
+            yes: true,
+            edit: false,
+            includeDeletions: true,
+          },
+          rawArgs: [],
+          cmd: pushCommand,
+        });
+
+        const prArg = mockCreatePullRequest.mock.calls[0]?.[1];
+        expect(prArg?.files).toEqual([]);
+        expect(prArg?.deletions?.map((d) => d.path)).toEqual(["README.md"]);
+        // 消すと決めたファイルの中身は組み直さない
+        expect(mockRenderTemplateReadme).not.toHaveBeenCalled();
+      });
+
       it("マーカーが無ければ同梱も案内もしない", async () => {
         setupSinglePushableFile();
 
@@ -3476,6 +3515,72 @@ describe("--files でファイル本体だけを指定した場合の ziku.jsonc
     const configFile = prArg.files.find((f) => f.path === ".ziku/ziku.jsonc");
     const pushed = JSON.parse(configFile?.content as string);
     expect(pushed.include).toContain(".claude/rules/unrelated.md");
+  });
+
+  /** dry-run のログに出た `ziku.jsonc` の同梱予告。 */
+  function configAutoIncludeWarnings(): string[] {
+    return mockLog.warn.mock.calls
+      .map((call) => call[0])
+      .filter((text) => text.includes(".ziku/ziku.jsonc"));
+  }
+
+  it("--dry-run はローカル限定パターンの同梱を予告する", async () => {
+    seedZikuConfig([".github/**", ".claude/skills/new-skill/SKILL.md"]);
+    vol.fromJSON({
+      "/tmp/template/.ziku/ziku.jsonc": `${JSON.stringify({ include: [".github/**"] }, null, 2)}\n`,
+    });
+
+    setupPushableFiles([
+      {
+        path: repoRelPath(".claude/skills/new-skill/SKILL.md"),
+        type: "added",
+        localContent: "# skill",
+      },
+    ]);
+
+    await (pushCommand.run as any)({
+      args: {
+        dir: "/test",
+        dryRun: true,
+        yes: false,
+        edit: false,
+        files: ".claude/skills/new-skill/SKILL.md",
+      },
+      rawArgs: [],
+      cmd: pushCommand,
+    });
+
+    expect(configAutoIncludeWarnings()).toEqual([
+      ".ziku/ziku.jsonc would also be pushed — it registers 1 pattern(s) needed by the file(s) above:",
+    ]);
+  });
+
+  it("テンプレートに ziku.jsonc が無ければ --dry-run は同梱を予告しない", async () => {
+    // 足す先の文書が無いと実 push は送らない。予告だけが出ると、dry-run で見た集合と
+    // 実際に送られる集合が食い違う。
+    seedZikuConfig([".github/**", ".claude/skills/new-skill/SKILL.md"]);
+
+    setupPushableFiles([
+      {
+        path: repoRelPath(".claude/skills/new-skill/SKILL.md"),
+        type: "added",
+        localContent: "# skill",
+      },
+    ]);
+
+    await (pushCommand.run as any)({
+      args: {
+        dir: "/test",
+        dryRun: true,
+        yes: false,
+        edit: false,
+        files: ".claude/skills/new-skill/SKILL.md",
+      },
+      rawArgs: [],
+      cmd: pushCommand,
+    });
+
+    expect(configAutoIncludeWarnings()).toEqual([]);
   });
 
   it("ローカルソースへの push でも、自動同梱はテンプレのみに書かれ、ローカルの他パターンは消えない", async () => {

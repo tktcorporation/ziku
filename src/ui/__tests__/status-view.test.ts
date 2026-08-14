@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { recommendationLine, renderStatusLong, type StatusViewModel } from "../status-view";
+import type { ZikuConfigStatus } from "../../utils/merge/sync-plan";
 import type { Recommendation, StatusBuckets, StatusEntry } from "../../utils/status";
 import { repoRelPath } from "../../__tests__/brands";
 
@@ -22,6 +23,7 @@ function buckets(partial: Partial<StatusBuckets> = {}): StatusBuckets {
 }
 
 const DEFAULT_REC: Recommendation = { kind: "inSync" };
+const SYNCED_CONFIG: ZikuConfigStatus = { _tag: "Categorized", category: "unchanged" };
 
 function model(
   partial: Partial<StatusViewModel> = {},
@@ -31,6 +33,7 @@ function model(
     buckets: partial.buckets ?? buckets(),
     untracked: partial.untracked ?? [],
     recommendation: partial.recommendation ?? recommendation,
+    config: partial.config ?? SYNCED_CONFIG,
   };
 }
 
@@ -87,6 +90,13 @@ describe("status-view", () => {
       const line = strip(recommendationLine({ kind: "continueMerge", conflictCount: 2 }));
       expect(line).toContain("ziku pull --continue");
       expect(line).toContain("2");
+    });
+
+    it("localOnlyConfigPatterns は in sync と言わず、届け方を案内する", () => {
+      const line = strip(recommendationLine({ kind: "localOnlyConfigPatterns" }));
+      expect(line).not.toContain("In sync");
+      expect(line).toContain(".ziku/ziku.jsonc");
+      expect(line).toContain("push");
     });
 
     it("continueMerge は解決すべき件数と `pull --continue` を案内する", () => {
@@ -219,6 +229,23 @@ describe("status-view", () => {
         ),
       );
       expect(out).not.toContain("Tracked files are in sync");
+    });
+
+    it("ローカルにしか無いパターンは、届け方と一緒に見せる", () => {
+      const out = strip(
+        renderStatusLong(
+          model(
+            { buckets: buckets({ inSyncCount: 3 }), config: { _tag: "LocalOnlyPatterns" } },
+            { kind: "localOnlyConfigPatterns" },
+          ),
+        ),
+      );
+
+      // 「同期済み」とは言わず、テンプレートへ届いていない事実と次の操作を示す。
+      expect(out).not.toContain("Tracked files are in sync");
+      expect(out).toContain("Local-only patterns");
+      expect(out).toContain(".ziku/ziku.jsonc");
+      expect(out).toContain("push");
     });
   });
 });

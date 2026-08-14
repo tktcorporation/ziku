@@ -5,22 +5,19 @@
  * コマンドへ散らばっていないことは、コマンドを経由せずここだけで仕様を固定できる形で表れる。
  */
 import { describe, expect, it } from "vitest";
+import { match } from "ts-pattern";
 import { repoRelPath, repoRelPaths } from "../../__tests__/brands";
 import type { RepoRelPath } from "../../modules/schemas";
 import type { FileCategory, FileClassification } from "../merge/types";
-import type {
-  ZikuConfigPushOutcome,
-  ZikuConfigState,
-  ZikuConfigStatusCategory,
-} from "../merge/sync-plan";
+import type { ZikuConfigPushOutcome, ZikuConfigState, ZikuConfigStatus } from "../merge/sync-plan";
 import {
   partitionSyncPlan,
-  withZikuConfigAt,
+  withZikuConfigStatus,
   zikuConfigActions,
   zikuConfigPullAction,
   zikuConfigPushAction,
   zikuConfigPushOutcome,
-  zikuConfigStatusCategory,
+  zikuConfigStatus,
 } from "../merge/sync-plan";
 import type { ConfigDrift } from "../config-merge";
 import { directionOfCategory, isEntryCategory } from "../status";
@@ -243,72 +240,76 @@ describe("zikuConfigPushOutcome", () => {
   });
 });
 
-describe("zikuConfigStatusCategory", () => {
+describe("zikuConfigStatus", () => {
   it("双方に取り込む余地があれば conflict として見せる", () => {
     expect(
-      zikuConfigStatusCategory(
+      zikuConfigStatus(
         { _tag: "Tracked", category: "conflicts" },
         { pullRelevant: true, pushRelevant: true },
       ),
-    ).toBe("conflicts");
+    ).toEqual({ _tag: "Categorized", category: "conflicts" });
   });
 
   it("pull だけが内容を書き換えるなら pull 方向", () => {
     expect(
-      zikuConfigStatusCategory(
+      zikuConfigStatus(
         { _tag: "Tracked", category: "autoUpdate" },
         { pullRelevant: true, pushRelevant: false },
       ),
-    ).toBe("autoUpdate");
+    ).toEqual({ _tag: "Categorized", category: "autoUpdate" });
   });
 
   it("push だけが内容を書き換えるなら push 方向", () => {
     expect(
-      zikuConfigStatusCategory(
+      zikuConfigStatus(
         { _tag: "Tracked", category: "localOnly" },
         { pullRelevant: false, pushRelevant: true },
       ),
-    ).toBe("localOnly");
+    ).toEqual({ _tag: "Categorized", category: "localOnly" });
   });
 
-  it("テンプレートがパターンを削除しローカルが未変更なら同期済みとして扱う", () => {
-    // union はローカルの内容と一致するので pull は書き込まず、テンプレートが消した
-    // パターンを push が復活させることもない。どちらのコマンドも何もしない終端状態。
+  it("どちらのコマンドも書き換えないが、ローカルにしか無いパターンが残るなら同期済みと言わない", () => {
+    // `ziku track` で足したパターンを pull の union が base まで進めた後の状態。push はこの
+    // ファイルを送らない（テンプレートの削除を復活させないため）が、テンプレートには届いて
+    // いないので終端ではない。
     expect(
-      zikuConfigStatusCategory(
+      zikuConfigStatus(
         { _tag: "Tracked", category: "autoUpdate" },
         { pullRelevant: false, pushRelevant: true },
       ),
-    ).toBe("unchanged");
+    ).toEqual({ _tag: "LocalOnlyPatterns" });
   });
 
   it("ローカルがパターンを削除しテンプレートが未変更なら同期済みとして扱う", () => {
+    // union はテンプレートの内容と一致するので push は送らず、ローカルの削除も伝播しない。
+    // どちらのコマンドも何もしない終端状態。
     expect(
-      zikuConfigStatusCategory(
+      zikuConfigStatus(
         { _tag: "Tracked", category: "localOnly" },
         { pullRelevant: true, pushRelevant: false },
       ),
-    ).toBe("unchanged");
+    ).toEqual({ _tag: "Categorized", category: "unchanged" });
   });
 
-  it("分類に現れなければ同期済みとして扱う", () => {
+  it("分類に現れず、どちらにも届いていないパターンが無ければ同期済みとして扱う", () => {
     expect(
-      zikuConfigStatusCategory({ _tag: "Untracked" }, { pullRelevant: true, pushRelevant: true }),
-    ).toBe("unchanged");
+      zikuConfigStatus({ _tag: "Untracked" }, { pullRelevant: true, pushRelevant: false }),
+    ).toEqual({ _tag: "Categorized", category: "unchanged" });
   });
 });
 
-describe("status が見せるカテゴリと、push が実際に取る結論", () => {
+describe("status が見せる状態と、push が実際に取る結論", () => {
   // status が pull だけを勧めた状態で push が PR を作る、のような食い違いは、片方の分岐だけを
   // 直したときに生まれる。位置づけ × drift の全組み合わせで対応表どおりかを突き合わせる。
-  const categoriesOfOutcome: Record<
-    ZikuConfigPushOutcome["_tag"],
-    readonly ZikuConfigStatusCategory[]
-  > = {
+  const statusesOfOutcome: Record<ZikuConfigPushOutcome["_tag"], readonly ZikuConfigStatus[]> = {
     // 送るなら、status も push 待ちとして見せる（pull にも取り込む余地があれば conflicts）。
-    SendUnion: ["localOnly", "conflicts"],
-    PullToSync: ["autoUpdate"],
-    Skip: ["unchanged"],
+    SendUnion: [
+      { _tag: "Categorized", category: "localOnly" },
+      { _tag: "Categorized", category: "conflicts" },
+    ],
+    PullToSync: [{ _tag: "Categorized", category: "autoUpdate" }],
+    // 送らないなら操作待ちには見せない。ローカルにしか無いパターンが残るかで終端かが決まる。
+    Skip: [{ _tag: "Categorized", category: "unchanged" }, { _tag: "LocalOnlyPatterns" }],
   };
 
   const combinations = ALL_STATES.flatMap((state) => ALL_DRIFTS.map((drift) => ({ state, drift })));
@@ -316,7 +317,7 @@ describe("status が見せるカテゴリと、push が実際に取る結論", (
   it.each(combinations)("%o は status と push が同じ判断をする", ({ state, drift }) => {
     const outcome = zikuConfigPushOutcome(state, drift);
 
-    expect(categoriesOfOutcome[outcome._tag]).toContain(zikuConfigStatusCategory(state, drift));
+    expect(statusesOfOutcome[outcome._tag]).toContainEqual(zikuConfigStatus(state, drift));
   });
 });
 
@@ -326,7 +327,7 @@ describe("status が見せる方向と、pull / push が実際に行う操作", 
   const combinations = ALL_STATES.flatMap((state) => ALL_DRIFTS.map((drift) => ({ state, drift })));
 
   it.each(combinations)("%o は勧めた操作だけが実際に動く", ({ state, drift }) => {
-    const category = zikuConfigStatusCategory(state, drift);
+    const status = zikuConfigStatus(state, drift);
     const { pull, push } = zikuConfigActions(state);
 
     // 加法 union は片側にしか無いパターンを足すだけなので、足すものがある（drift）ときだけ
@@ -336,7 +337,13 @@ describe("status が見せる方向と、pull / push が実際に行う操作", 
       push: push._tag === "SendUnion" && drift.pushRelevant,
     };
 
-    const direction = isEntryCategory(category) ? directionOfCategory(category) : undefined;
+    // どのコマンドも動かない状態（LocalOnlyPatterns）はバケツに載らないので、方向も見せない。
+    const direction = match(status)
+      .with({ _tag: "Categorized" }, ({ category }) =>
+        isEntryCategory(category) ? directionOfCategory(category) : undefined,
+      )
+      .with({ _tag: "LocalOnlyPatterns" }, () => undefined)
+      .exhaustive();
     const shown = {
       pull: direction === "pull" || direction === "conflict",
       push: direction === "push" || direction === "conflict",
@@ -346,18 +353,29 @@ describe("status が見せる方向と、pull / push が実際に行う操作", 
   });
 });
 
-describe("withZikuConfigAt", () => {
+describe("withZikuConfigStatus", () => {
   it("仕分けで外した設定ファイルを指定カテゴリへ戻す", () => {
     const plan = partitionSyncPlan(classificationWith("deletedFiles"));
-    const restored = withZikuConfigAt(plan.files, "localOnly");
+    const restored = withZikuConfigStatus(plan.files, {
+      _tag: "Categorized",
+      category: "localOnly",
+    });
 
     expect(restored.localOnly).toEqual([ZIKU_CONFIG_FILE]);
     expect(restored.deletedFiles).toEqual(["a.txt"]);
   });
 
+  it("どのカテゴリにも載らない状態では設定ファイルを戻さない", () => {
+    // 操作待ちのバケツにも、テンプレートと一致した数にも入らない。表示は専用の案内で行う。
+    const plan = partitionSyncPlan(classificationWith("autoUpdate"));
+    const restored = withZikuConfigStatus(plan.files, { _tag: "LocalOnlyPatterns" });
+
+    expect(allPaths(restored)).toEqual(["a.txt"]);
+  });
+
   it("元の分類結果を破壊しない", () => {
     const files = { ...emptyClassification(), localOnly: repoRelPaths(["a.txt"]) };
-    withZikuConfigAt(files, "localOnly");
+    withZikuConfigStatus(files, { _tag: "Categorized", category: "localOnly" });
 
     expect(files.localOnly).toEqual(["a.txt"]);
   });

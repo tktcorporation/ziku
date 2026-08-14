@@ -245,7 +245,7 @@ describe("README 生成（壊れていればマーカー間を書き換えない
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      configPath: "/project/.ziku/ziku.jsonc",
+      configDir: "/project",
     });
 
     expect(result.updated).toBe(false);

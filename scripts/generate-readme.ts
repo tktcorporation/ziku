@@ -25,17 +25,12 @@ import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import type { ArgsDef, CommandDef } from "citty";
+import type { CommandDef } from "citty";
 import { renderUsage } from "citty";
 import { match } from "ts-pattern";
 import { z } from "zod";
-import { diffCommand } from "../src/commands/diff";
-import { initCommand } from "../src/commands/init";
-import { pullCommand } from "../src/commands/pull";
-import { pushCommand } from "../src/commands/push";
-import { setupCommand } from "../src/commands/setup";
-import { statusCommand } from "../src/commands/status";
-import { trackCommand } from "../src/commands/track";
+import { SUBCOMMAND_NAMES, type SubCommandName } from "../src/commands/names";
+import { subCommands } from "../src/commands/registry";
 import { zikuConfigSchema } from "../src/modules/schemas";
 import {
   generateLifecycleDocument,
@@ -226,28 +221,59 @@ function getCommandDescription(meta: unknown): string {
   return "";
 }
 
+/** 登録簿に載っているコマンド定義。args スキーマはコマンドごとに違う。 */
+type RegisteredCommand = (typeof subCommands)[SubCommandName];
+
+/**
+ * usage の描画に必要な部分だけを写した定義を返す。
+ *
+ * `CommandDef<T>` は `run` / `setup` / `cleanup` の引数を通じて `T`（args スキーマ）に反変で、
+ * コマンドごとに `T` が違うため、既定の args スキーマで `CommandDef` を受ける `renderUsage` へ
+ * そのままは渡せない。
+ * 描画が読むのは meta / args / subCommands だけなので、その 3 つを写して渡す。
+ */
+function usageDefinitionOf(cmd: RegisteredCommand): CommandDef {
+  return { meta: cmd.meta, args: cmd.args, subCommands: cmd.subCommands };
+}
+
+/**
+ * README の `## Commands` にコマンドを並べる順。
+ *
+ * テンプレートを用意する側の作業（setup）から、使う側の作業（init 以降）へ読み進められる
+ * 並びにする。`Record<SubCommandName, number>` なので、コマンドを足すと順位の指定が必須になり、
+ * 並びを決めていないコマンドが黙って末尾に落ちることがない。
+ */
+const COMMAND_DOC_ORDER: Record<SubCommandName, number> = {
+  setup: 0,
+  init: 1,
+  push: 2,
+  pull: 3,
+  diff: 4,
+  status: 5,
+  track: 6,
+};
+
 /**
  * Generate Commands section
+ *
+ * 描くコマンドはサブコマンドの登録簿（`src/commands/registry.ts`）から引く。ここで名前を
+ * 並べ直すと、CLI に登録したコマンドが README から黙って落ちる。
  */
 async function generateCommandsSection(): Promise<string> {
-  const commandSection = async <T extends ArgsDef>(name: string, cmd: CommandDef<T>) => [
+  const commandSection = async (name: SubCommandName, cmd: RegisteredCommand) => [
     `### \`${name}\`\n`,
     `${getCommandDescription(cmd.meta)}\n`,
     "```",
-    cleanUsageOutput(await renderUsage(cmd)),
+    cleanUsageOutput(await renderUsage(usageDefinitionOf(cmd))),
     "```\n",
   ];
 
-  const sections: string[] = [
-    "## Commands\n",
-    ...(await commandSection("setup", setupCommand)),
-    ...(await commandSection("init", initCommand)),
-    ...(await commandSection("push", pushCommand)),
-    ...(await commandSection("pull", pullCommand)),
-    ...(await commandSection("diff", diffCommand)),
-    ...(await commandSection("status", statusCommand)),
-    ...(await commandSection("track", trackCommand)),
-  ];
+  const sections: string[] = ["## Commands\n"];
+  for (const name of SUBCOMMAND_NAMES.toSorted(
+    (a, b) => COMMAND_DOC_ORDER[a] - COMMAND_DOC_ORDER[b],
+  )) {
+    sections.push(...(await commandSection(name, subCommands[name])));
+  }
 
   return sections.join("\n");
 }

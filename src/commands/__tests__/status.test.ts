@@ -498,10 +498,12 @@ describe("statusCommand", () => {
       expect(outroArg).not.toContain("In sync");
     });
 
-    it("テンプレートがパターンを削除しローカルが未変更なら outro は in sync（push も pull も送るものが無い）", async () => {
+    it("ローカルにしか無いパターンが残っていれば outro は in sync と言わず、届け方を示す", async () => {
       const { effect } = mockContext();
       mockLoadCommandContext.mockReturnValue(effect);
-      // テンプレートが `.old/**` を削除。ローカルは保持したまま。
+      // ローカルにだけ `.old/**` がある状態。`ziku track` で足したパターンを pull の union が
+      // base まで進めた後と、テンプレートが `.old/**` を削除した後は、加法 union では
+      // 区別できない同じ状態になる。
       writeConfigs({ local: [".claude/**", ".old/**"], template: [".claude/**"] });
       mockAnalyzeSync.mockResolvedValueOnce({
         plan: trackedConfigPlan("autoUpdate"),
@@ -515,8 +517,12 @@ describe("statusCommand", () => {
         cmd: statusCommand,
       });
 
+      // push は設定ファイルを送らない（テンプレートが消したパターンを復活させないため）が、
+      // テンプレートには届いていない。同期済みと言い切ると事実と食い違う。
       const outroArg = mockOutro.mock.calls.at(-1)?.[0] ?? "";
-      expect(outroArg).toContain("In sync");
+      expect(outroArg).not.toContain("In sync");
+      expect(outroArg).toContain(".ziku/ziku.jsonc");
+      expect(outroArg).toContain("push");
     });
 
     it("ローカルがパターンを削除しテンプレートが未変更でも outro は in sync（pull は削除を巻き戻さない）", async () => {

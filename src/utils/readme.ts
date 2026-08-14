@@ -6,9 +6,10 @@ import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "pathe";
 import { match } from "ts-pattern";
-import { zikuConfigSchema } from "../modules/schemas";
-import { parseJsonc } from "./jsonc";
-import { ZIKU_CONFIG_FILE } from "./ziku-config";
+import type { GlobPattern } from "../modules/schemas";
+import { absPath } from "./paths";
+import type { ZikuConfigRead } from "./ziku-config";
+import { classifyZikuConfigText, readZikuConfig } from "./ziku-config";
 
 /**
  * ziku がマーカー間を組み直す README の区画。
@@ -34,7 +35,7 @@ export const MARKERS = {
 } as const;
 
 /**
- * ziku.jsonc の内容から include パターンを取り出す。
+ * ziku.jsonc の読み取り結果から include パターンを取り出す。
  *
  * 同期対象パターンの SSOT は ziku.jsonc なので、README の機能一覧と
  * ファイル一覧はここから導出する。
@@ -47,27 +48,28 @@ export const MARKERS = {
  * 部分的な include を採ると、実際より短いファイル一覧を載せた README を、正しい一覧として
  * 書き出してしまうため。手を触れない README は古いだけだが、書き換えた README は嘘になる。
  * 壊れている事実は `ziku.jsonc` を読む他の入口が報告するので、ここで重ねて止める必要はない。
+ *
+ * 読み取りと失敗の分類そのものは持たず、他の入口と同じ分類（`src/utils/ziku-config.ts` の
+ * `ZikuConfigRead`）を受け取って倒すだけにする。分類をここで組み直すと、`ziku.jsonc` の
+ * 読み方が変わったときに README 生成だけが取り残され、実際の同期対象と食い違うファイル一覧を
+ * 「正しい一覧」として書き出す。
  */
-function parseIncludePatterns(config: string): string[] {
-  const parsed = match(parseJsonc(config))
-    .with({ kind: "parsed" }, ({ value }) => zikuConfigSchema.safeParse(value))
-    .with({ kind: "unparsable" }, () => undefined)
+function includePatternsOf(read: ZikuConfigRead): readonly GlobPattern[] {
+  return match(read)
+    .with({ _tag: "Ok" }, ({ config }) => config.include)
+    .with(
+      { _tag: "NotFound" },
+      { _tag: "Unparsable" },
+      { _tag: "Invalid" },
+      (): readonly GlobPattern[] => [],
+    )
     .exhaustive();
-  return parsed?.success === true ? parsed.data.include : [];
-}
-
-/** ディスク上の ziku.jsonc から include パターンを読む。無ければパターン無し。 */
-async function loadIncludePatterns(configPath: string): Promise<string[]> {
-  if (!existsSync(configPath)) {
-    return [];
-  }
-  return parseIncludePatterns(await readFile(configPath, "utf-8"));
 }
 
 /**
  * 機能セクションを生成
  */
-function generateFeaturesSection(patterns: string[]): string {
+function generateFeaturesSection(patterns: readonly GlobPattern[]): string {
   const lines: string[] = ["## 機能\n"];
 
   // パターンをディレクトリごとにグルーピング
@@ -90,7 +92,7 @@ function generateFeaturesSection(patterns: string[]): string {
 /**
  * 生成されるファイルセクションを生成
  */
-function generateFilesSection(patterns: string[]): string {
+function generateFilesSection(patterns: readonly GlobPattern[]): string {
   const lines: string[] = [
     "## 生成されるファイル\n",
     "以下のパターンに一致するファイルが同期されます：\n",
@@ -147,8 +149,8 @@ export function updateSection(
 export interface GenerateReadmeOptions {
   /** README.md のパス */
   readmePath: string;
-  /** 同期パターンを定義する ziku.jsonc のパス */
-  configPath: string;
+  /** 同期パターンを定義する ziku.jsonc があるディレクトリ */
+  configDir: string;
   /** コマンドセクションを生成する関数（オプション） */
   generateCommandsSection?: () => Promise<string>;
 }
@@ -175,7 +177,7 @@ export interface RenderedReadme {
  */
 function applyGeneratedSections(params: {
   readme: string;
-  include: readonly string[];
+  include: readonly GlobPattern[];
   commands: string | undefined;
 }): RenderedReadme {
   const sections: { start: string; end: string; body: string }[] = [];
@@ -183,14 +185,14 @@ function applyGeneratedSections(params: {
   if (params.include.length > 0) {
     sections.push({
       ...MARKERS.features,
-      body: generateFeaturesSection([...params.include]),
+      body: generateFeaturesSection(params.include),
     });
   }
   if (params.commands !== undefined) {
     sections.push({ ...MARKERS.commands, body: params.commands });
   }
   if (params.include.length > 0) {
-    sections.push({ ...MARKERS.files, body: generateFilesSection([...params.include]) });
+    sections.push({ ...MARKERS.files, body: generateFilesSection(params.include) });
   }
 
   return sections.reduce<RenderedReadme>(
@@ -217,7 +219,7 @@ function applyGeneratedSections(params: {
 export async function generateReadme(
   options: GenerateReadmeOptions,
 ): Promise<GenerateReadmeResult> {
-  const { readmePath, configPath, generateCommandsSection } = options;
+  const { readmePath, configDir, generateCommandsSection } = options;
 
   // README が存在しない場合はスキップ
   if (!existsSync(readmePath)) {
@@ -226,7 +228,7 @@ export async function generateReadme(
 
   const rendered = applyGeneratedSections({
     readme: await readFile(readmePath, "utf-8"),
-    include: await loadIncludePatterns(configPath),
+    include: includePatternsOf(await readZikuConfig(absPath(configDir))),
     commands: generateCommandsSection === undefined ? undefined : await generateCommandsSection(),
   });
 
@@ -273,10 +275,11 @@ export async function renderTemplateReadme(params: {
   const readme = params.readme ?? (await readFile(readmePath, "utf-8"));
   if (!hasGeneratedSections(readme)) return null;
 
-  const include =
+  const include = includePatternsOf(
     params.config === undefined
-      ? await loadIncludePatterns(join(params.templateDir, ZIKU_CONFIG_FILE))
-      : parseIncludePatterns(params.config);
+      ? await readZikuConfig(absPath(params.templateDir))
+      : classifyZikuConfigText(params.config),
+  );
 
   return applyGeneratedSections({ readme, include, commands: undefined });
 }
@@ -302,7 +305,6 @@ export async function detectReadmeUpdate(
   templateDir: string,
 ): Promise<GenerateReadmeResult | null> {
   const readmePath = join(targetDir, "README.md");
-  const configPath = join(templateDir, ZIKU_CONFIG_FILE);
 
   // README にマーカーがあるか確認
   if (!existsSync(readmePath)) {
@@ -313,5 +315,5 @@ export async function detectReadmeUpdate(
     return null;
   }
 
-  return generateReadme({ readmePath, configPath });
+  return generateReadme({ readmePath, configDir: templateDir });
 }

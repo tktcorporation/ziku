@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { absPath, pendingConflict, repoRelPath, repoRelPaths } from "../../__tests__/brands";
 import type { LockState } from "../../modules/schemas";
+import type { ZikuConfigStatus } from "../merge/sync-plan";
 import type { FileClassification } from "../merge/types";
 import {
   categorizeForStatus,
@@ -24,6 +25,9 @@ function emptyClassification(): FileClassification {
     unchanged: [],
   };
 }
+
+/** 既定の設定ファイル状態: 同期済み（バケツに現れない差分を持たない）。 */
+const SYNCED_CONFIG: ZikuConfigStatus = { _tag: "Categorized", category: "unchanged" };
 
 /** ヘルパー: 空の StatusBuckets を作る */
 function emptyBuckets(): StatusBuckets {
@@ -201,7 +205,7 @@ describe("status", () => {
     };
 
     it("全バケツ空 → inSync", () => {
-      const rec = decideRecommendation(emptyBuckets(), syncedLock);
+      const rec = decideRecommendation(emptyBuckets(), syncedLock, SYNCED_CONFIG);
       expect(rec).toEqual({ kind: "inSync" });
     });
 
@@ -217,7 +221,10 @@ describe("status", () => {
           },
         ],
       };
-      expect(decideRecommendation(buckets, syncedLock)).toEqual({ kind: "pullOnly", pullCount: 1 });
+      expect(decideRecommendation(buckets, syncedLock, SYNCED_CONFIG)).toEqual({
+        kind: "pullOnly",
+        pullCount: 1,
+      });
     });
 
     it("push のみ → pushOnly", () => {
@@ -232,7 +239,10 @@ describe("status", () => {
           },
         ],
       };
-      expect(decideRecommendation(buckets, syncedLock)).toEqual({ kind: "pushOnly", pushCount: 1 });
+      expect(decideRecommendation(buckets, syncedLock, SYNCED_CONFIG)).toEqual({
+        kind: "pushOnly",
+        pushCount: 1,
+      });
     });
 
     it("pull + push → pullThenPush", () => {
@@ -255,7 +265,7 @@ describe("status", () => {
           },
         ],
       };
-      expect(decideRecommendation(buckets, syncedLock)).toEqual({
+      expect(decideRecommendation(buckets, syncedLock, SYNCED_CONFIG)).toEqual({
         kind: "pullThenPush",
         pullCount: 1,
         pushCount: 1,
@@ -290,7 +300,7 @@ describe("status", () => {
           },
         ],
       };
-      expect(decideRecommendation(buckets, syncedLock)).toEqual({
+      expect(decideRecommendation(buckets, syncedLock, SYNCED_CONFIG)).toEqual({
         kind: "resolveConflict",
         conflictCount: 1,
         pullCount: 1,
@@ -328,7 +338,7 @@ describe("status", () => {
           },
         ],
       };
-      expect(decideRecommendation(buckets, lock)).toEqual({
+      expect(decideRecommendation(buckets, lock, SYNCED_CONFIG)).toEqual({
         kind: "continueMerge",
         conflictCount: 2,
       });
@@ -338,7 +348,33 @@ describe("status", () => {
       // テンプレ側のパターン追加は ziku.jsonc 自体が pull バケツへ入ることで現れる。
       // バケツと別軸の信号を足すと、pull が何も書き換えない状態でも pull を勧めてしまう。
       const buckets = emptyBuckets();
-      expect(decideRecommendation(buckets, syncedLock)).toEqual({ kind: "inSync" });
+      expect(decideRecommendation(buckets, syncedLock, SYNCED_CONFIG)).toEqual({ kind: "inSync" });
+    });
+
+    it("ローカルにしか無いパターンが残っていれば inSync と言わない", () => {
+      // ziku.jsonc はどのバケツにも載らない（pull も push も書き換えない）が、テンプレートには
+      // 届いていない。バケツだけを見て inSync に落とすと、status が事実と食い違う。
+      expect(
+        decideRecommendation(emptyBuckets(), syncedLock, { _tag: "LocalOnlyPatterns" }),
+      ).toEqual({ kind: "localOnlyConfigPatterns" });
+    });
+
+    it("送るファイルがあるときは、そのコマンドの案内が優先される", () => {
+      const buckets: StatusBuckets = {
+        ...emptyBuckets(),
+        push: [
+          {
+            path: repoRelPath("a"),
+            direction: "push",
+            category: "localOnly",
+            isDestructive: false,
+          },
+        ],
+      };
+      expect(decideRecommendation(buckets, syncedLock, { _tag: "LocalOnlyPatterns" })).toEqual({
+        kind: "pushOnly",
+        pushCount: 1,
+      });
     });
 
     it("ベース未確定 (sync: pending) の lock でも通常どおり推奨を出す", () => {
@@ -354,7 +390,7 @@ describe("status", () => {
           { path: repoRelPath("a"), direction: "pull", category: "newFiles", isDestructive: false },
         ],
       };
-      expect(decideRecommendation(buckets, pendingLock)).toEqual({
+      expect(decideRecommendation(buckets, pendingLock, SYNCED_CONFIG)).toEqual({
         kind: "pullOnly",
         pullCount: 1,
       });

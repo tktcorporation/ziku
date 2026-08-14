@@ -314,10 +314,113 @@ export interface PushFile {
   readonly origin: PushedContentOrigin;
 }
 
-/** テンプレートへ実際に送る内容。GitHub / ローカルテンプレートのどちらの経路も同じ形を受け取る。 */
+/** 1 つのパスに対してテンプレートへ送る指示。内容を書くか、消すかのどちらか。 */
+export type PushEntry =
+  | { readonly _tag: "Content"; readonly file: PushFile }
+  | { readonly _tag: "Deletion"; readonly path: DeletablePath };
+
+/**
+ * テンプレートへ実際に送る内容。GitHub / ローカルテンプレートのどちらの経路も同じ形を受け取る。
+ *
+ * パスをキーにした写像で持つことで、「1 つのパスに対する指示は 1 つだけ」を値の形で保証する。
+ * 内容と削除を独立した 2 本の配列にすると同じパスが両方に載る状態を作れ、GitHub への送信が
+ * 内容を先に書いて新しい blob を作った後、削除がベースの blob SHA と食い違って弾かれる。
+ * 弾かれる時点でブランチとコミットは作られているので、PR の無い同期ブランチだけが残る。
+ *
+ * 組み立ての入口は {@link pushPayloadOf}（外から渡された内容と削除）と
+ * {@link withAutoUpdatedFile}（送信対象へ後から足す）で、選択から組み立てる経路も含めて
+ * すべて 1 パス 1 エントリで写像へ積む。送信対象へ足す関数が増えても、同じパスを内容と
+ * 削除の両方に載せる書き方ができない。
+ */
 export interface PushPayload {
-  readonly files: readonly PushFile[];
-  readonly deletions: readonly { readonly path: DeletablePath }[];
+  readonly entries: ReadonlyMap<RepoRelPath, PushEntry>;
+}
+
+/** 送る内容として載っているファイル。積んだ順に並ぶ。 */
+export function pushedFiles(payload: PushPayload): PushFile[] {
+  return [...payload.entries.values()].flatMap((entry) =>
+    match(entry)
+      .with({ _tag: "Content" }, ({ file }) => [file])
+      .with({ _tag: "Deletion" }, () => [])
+      .exhaustive(),
+  );
+}
+
+/** 削除として載っているパス。積んだ順に並ぶ。 */
+export function pushedDeletions(payload: PushPayload): { readonly path: DeletablePath }[] {
+  return [...payload.entries.values()].flatMap((entry) =>
+    match(entry)
+      .with({ _tag: "Content" }, () => [])
+      .with({ _tag: "Deletion" }, ({ path }) => [{ path }])
+      .exhaustive(),
+  );
+}
+
+/**
+ * そのパスをテンプレートから消す送信か。
+ *
+ * 送信対象へ内容を足す側（README の自動更新）が、消すと決めたファイルを組み直そうとして
+ * いないかを確かめるのに使う。内容として載っているパスと、載っていないパスはどちらも false。
+ */
+export function isPushedDeletion(payload: PushPayload, path: RepoRelPath): boolean {
+  return match(payload.entries.get(path))
+    .with({ _tag: "Deletion" }, () => true)
+    .with(P.union({ _tag: "Content" }, undefined), () => false)
+    .exhaustive();
+}
+
+/** 何も送らないペイロード。組み立ての出発点。 */
+const EMPTY_PUSH_PAYLOAD: PushPayload = { entries: new Map() };
+
+/** 1 パス分の指示を写像へ積む。同じパスの既存エントリは置き換わる。 */
+function withPushEntry(payload: PushPayload, path: RepoRelPath, entry: PushEntry): PushPayload {
+  return { entries: new Map([...payload.entries, [path, entry]]) };
+}
+
+/**
+ * 送る内容として 1 ファイルを載せる。同じパスが削除として載っていれば載せない。
+ *
+ * 削除は利用者が選んだ指示（`--include-deletions` か対話の選択）で、ziku が導出した内容が
+ * それを取り消してよい理由が無い。取り消すと、消したはずのファイルが残る PR ができる。
+ * 逆向き（{@link withPushedDeletion}）は内容を置き換えるので、どちらを先に積んでも削除が残る。
+ */
+function withPushedContent(payload: PushPayload, file: PushFile): PushPayload {
+  return match(payload.entries.get(file.path))
+    .with({ _tag: "Deletion" }, () => payload)
+    .with(P.union({ _tag: "Content" }, undefined), () =>
+      withPushEntry(payload, file.path, { _tag: "Content", file }),
+    )
+    .exhaustive();
+}
+
+/** 削除として 1 パスを載せる。同じパスの内容は削除で置き換える。 */
+function withPushedDeletion(payload: PushPayload, path: DeletablePath): PushPayload {
+  return withPushEntry(payload, path, { _tag: "Deletion", path });
+}
+
+/** 1 件の指示を、削除が内容に優先する規則（{@link withPushedContent}）に従って積む。 */
+function withPushedEntry(payload: PushPayload, entry: PushEntry): PushPayload {
+  return match(entry)
+    .with({ _tag: "Content" }, ({ file }) => withPushedContent(payload, file))
+    .with({ _tag: "Deletion" }, ({ path }) => withPushedDeletion(payload, path))
+    .exhaustive();
+}
+
+/**
+ * 送る内容と削除からペイロードを組み立てる。
+ *
+ * 同じパスが両方に渡された場合は削除だけが残る（{@link withPushedContent}）。
+ */
+export function pushPayloadOf(params: {
+  readonly files?: readonly PushFile[];
+  readonly deletions?: readonly { readonly path: DeletablePath }[];
+}): PushPayload {
+  let payload = EMPTY_PUSH_PAYLOAD;
+  for (const file of params.files ?? []) payload = withPushedContent(payload, file);
+  for (const deletion of params.deletions ?? []) {
+    payload = withPushedDeletion(payload, deletion.path);
+  }
+  return payload;
 }
 
 /**
@@ -361,7 +464,7 @@ export function planPushDelivery(params: {
   readonly restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
 }): PushDelivery {
   const payload = buildPushPayload(params.selected, params.mergedContents);
-  if (payload.files.length === 0 && payload.deletions.length === 0) return { _tag: "Nothing" };
+  if (payload.entries.size === 0) return { _tag: "Nothing" };
   return {
     _tag: "Send",
     send: {
@@ -375,21 +478,12 @@ export function planPushDelivery(params: {
 /**
  * 選択とは別に ziku が付け足すファイル（README の自動更新）を送信対象へ載せる。
  *
- * 同じパスが既に載っていれば内容を差し替え、無ければ足す。送る集合への追加をこの関数に
- * 限ることで、PR には出るのにサマリには出ないファイルを作れない（行は常に payload から
- * 導き直される）。
+ * 同じパスが既に内容として載っていれば差し替え、無ければ足す。削除として載っている
+ * パスには載せない（{@link withPushedContent}）。送る集合への追加をこの関数に限ることで、
+ * PR には出るのにサマリには出ないファイルを作れない（行は常に payload から導き直される）。
  */
 export function withAutoUpdatedFile(send: PushSend, file: PushFile): PushSend {
-  const replaced = send.payload.files.some((f) => f.path === file.path);
-  return {
-    ...send,
-    payload: {
-      ...send.payload,
-      files: replaced
-        ? send.payload.files.map((f) => (f.path === file.path ? file : f))
-        : [...send.payload.files, file],
-    },
-  };
+  return { ...send, payload: withPushedContent(send.payload, file) };
 }
 
 /**
@@ -418,23 +512,36 @@ function buildPushPayload(
   selected: readonly ChangedFileDiff[],
   mergedContents: ReadonlyMap<RepoRelPath, PushContent>,
 ): PushPayload {
-  const files: PushFile[] = [];
-  const deletions: { path: DeletablePath }[] = [];
+  let payload = EMPTY_PUSH_PAYLOAD;
 
   for (const diff of selected) {
-    match(diff)
-      .with({ type: "deleted" }, (deleted) => {
-        const path = asDeletablePath(classifySyncPath(deleted.path));
-        if (path !== undefined) deletions.push({ path });
-      })
-      .with({ type: P.union("added", "modified") }, (changed) => {
-        const file = pushFileOf(changed, mergedContents.get(changed.path));
-        if (file !== undefined) files.push(file);
-      })
-      .exhaustive();
+    const entry = pushEntryOf(diff, mergedContents);
+    if (entry !== undefined) payload = withPushedEntry(payload, entry);
   }
 
-  return { files, deletions };
+  return payload;
+}
+
+/**
+ * 1 つの差分をテンプレートへの指示に直す。送るものが無ければ `undefined`。
+ *
+ * 削除が落ちるのは {@link asDeletablePath} を通らないパス（設定ファイル）、内容が落ちるのは
+ * 送る内容がテンプレートと同一になった場合（{@link pushFileOf}）。
+ */
+function pushEntryOf(
+  diff: ChangedFileDiff,
+  mergedContents: ReadonlyMap<RepoRelPath, PushContent>,
+): PushEntry | undefined {
+  return match(diff)
+    .with({ type: "deleted" }, (deleted): PushEntry | undefined => {
+      const path = asDeletablePath(classifySyncPath(deleted.path));
+      return path === undefined ? undefined : { _tag: "Deletion", path };
+    })
+    .with({ type: P.union("added", "modified") }, (changed): PushEntry | undefined => {
+      const file = pushFileOf(changed, mergedContents.get(changed.path));
+      return file === undefined ? undefined : { _tag: "Content", file };
+    })
+    .exhaustive();
 }
 
 /**
@@ -523,11 +630,9 @@ export function baseAfterPush(params: {
 }): HashMap {
   const withheld = withheldFromLocal(params.pushed, params.writtenBackToLocal);
   const advanced = new Set<RepoRelPath>(
-    [
-      ...params.alreadySynced,
-      ...params.pushed.files.map((file) => file.path),
-      ...params.pushed.deletions.map((deletion) => deletion.path),
-    ].filter((path) => !withheld.has(path)),
+    [...params.alreadySynced, ...params.pushed.entries.keys()].filter(
+      (path) => !withheld.has(path),
+    ),
   );
 
   const base: HashMap = {};
@@ -571,7 +676,7 @@ function withheldFromLocal(
   writtenBackToLocal: ReadonlySet<RepoRelPath>,
 ): ReadonlySet<RepoRelPath> {
   return new Set<RepoRelPath>(
-    pushed.files
+    pushedFiles(pushed)
       .filter((file) =>
         match(file.origin)
           .with({ _tag: "LocalContent" }, () => false)
@@ -806,15 +911,13 @@ export type PushSummaryRow =
  * から行を組み立てる経路を無くすため。表示したいものは、まず送る集合に載せる必要がある。
  */
 export function pushSummaryRows(send: PushSend): PushSummaryRow[] {
-  const pushedContentMap = new Map(send.payload.files.map((f) => [f.path, f.content]));
   const rows: PushSummaryRow[] = [];
 
   for (const file of send.pushableFiles) {
-    const pushedContent = pushedContentMap.get(file.path);
-    const isDeletion = send.payload.deletions.some((d) => d.path === file.path);
-    if (pushedContent === undefined && !isDeletion) continue;
+    const entry = send.payload.entries.get(file.path);
+    if (entry === undefined) continue;
 
-    const diff = effectivePushDiff(file, pushedContent);
+    const diff = effectivePushDiff(file, sentContentOf(entry));
     if (diff === undefined) continue;
     rows.push({
       _tag: "Change",
@@ -823,13 +926,25 @@ export function pushSummaryRows(send: PushSend): PushSummaryRow[] {
     });
   }
 
-  for (const file of send.payload.files) {
-    if (!send.pushableFiles.some((pf) => pf.path === file.path)) {
-      rows.push({ _tag: "AutoUpdated", path: file.path });
-    }
+  const selectedPaths = new Set<RepoRelPath>(send.pushableFiles.map((f) => f.path));
+  for (const [path, entry] of send.payload.entries) {
+    if (selectedPaths.has(path)) continue;
+    match(entry)
+      .with({ _tag: "Content" }, () => rows.push({ _tag: "AutoUpdated", path }))
+      // 削除は選択からしか載らないので、選択の外に現れることはない。
+      .with({ _tag: "Deletion" }, () => undefined)
+      .exhaustive();
   }
 
   return rows;
+}
+
+/** 送るエントリの内容。削除には内容が無い（{@link effectivePushDiff} の `undefined`）。 */
+function sentContentOf(entry: PushEntry): PushContent | undefined {
+  return match(entry)
+    .with({ _tag: "Content" }, ({ file }) => file.content)
+    .with({ _tag: "Deletion" }, () => undefined)
+    .exhaustive();
 }
 
 /**

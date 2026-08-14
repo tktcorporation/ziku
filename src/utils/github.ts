@@ -149,6 +149,8 @@ interface PreparedPush {
 async function preparePush(octokit: Octokit, options: PushOptions): Promise<PreparedPush> {
   const { owner, repo, files, title, body, baseBranch } = options;
 
+  checkSingleIntentPerPath(options);
+
   const { data: user } = await octokit.users.getAuthenticated();
   const forkOwner = user.login;
 
@@ -238,6 +240,29 @@ async function applyPush(octokit: Octokit, prepared: PreparedPush): Promise<PrRe
     number: pr.number,
     branch: branchName,
   };
+}
+
+/**
+ * 1 つのパスに対する指示が 1 つだけか確かめる。
+ *
+ * 内容の更新は新しい blob を作り、削除は宛先ブランチの blob SHA を要求する。同じパスへ
+ * 両方を送ると、削除が更新後の blob と食い違って GitHub に弾かれる。そのときブランチと
+ * コミットは既に作られているため、PR の無い同期ブランチだけが残る。読み取りしかしない
+ * この段で弾けば、GitHub 上には何も作られない。
+ *
+ * 送信を組み立てる層は 1 パス 1 指示を型で保証する（`src/commands/push-plan.ts` の
+ * `PushPayload`）。ここはその外から来る `PushOptions` に対する境界の検査になる。
+ */
+function checkSingleIntentPerPath(options: PushOptions): void {
+  const deleted = new Set<string>((options.deletions ?? []).map((deletion) => deletion.path));
+  const conflicting = options.files.filter((file) => deleted.has(file.path)).map((f) => f.path);
+  if (conflicting.length === 0) return;
+
+  throw zikuFailure({
+    kind: "PushPathUpdatedAndDeleted",
+    repo: `${options.owner}/${options.repo}`,
+    paths: conflicting,
+  });
 }
 
 /**

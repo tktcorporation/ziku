@@ -25,8 +25,8 @@ import {
 } from "../config-merge";
 import { hashContent, hashFiles } from "../hash";
 import { classifyFiles } from "../merge";
-import type { ZikuConfigStatusCategory } from "../merge/sync-plan";
-import { partitionSyncPlan, zikuConfigActions, zikuConfigStatusCategory } from "../merge/sync-plan";
+import type { ZikuConfigStatus } from "../merge/sync-plan";
+import { partitionSyncPlan, zikuConfigActions, zikuConfigStatus } from "../merge/sync-plan";
 import { detectDiff } from "../diff";
 import { resolveSyncScope } from "../sync-scope";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../untracked";
@@ -324,7 +324,7 @@ interface DriftScenario {
   readonly local: readonly string[];
   /** テンプレートの include。undefined はテンプレートから `ziku.jsonc` が消えた状態。 */
   readonly template: readonly string[] | undefined;
-  readonly expected: ZikuConfigStatusCategory;
+  readonly expected: ZikuConfigStatus;
 }
 
 /**
@@ -339,77 +339,80 @@ const DRIFT_SCENARIOS: readonly DriftScenario[] = [
     base: ["a/**"],
     local: ["a/**"],
     template: ["a/**"],
-    expected: "unchanged",
+    expected: { _tag: "Categorized", category: "unchanged" },
   },
   {
     name: "テンプレートがパターンを追加した",
     base: ["a/**"],
     local: ["a/**"],
     template: ["a/**", "b/**"],
-    expected: "autoUpdate",
+    expected: { _tag: "Categorized", category: "autoUpdate" },
   },
   {
+    // 加法 union では、この状態と「ローカルが独自のパターンを持つ」状態を base から区別できない。
+    // どちらも送らない（テンプレートが消したパターンを復活させない）が、ローカルにしか無い
+    // パターンが残る事実は見せる。
     name: "テンプレートがパターンを削除し、ローカルは変えていない",
     base: ["a/**", "b/**"],
     local: ["a/**", "b/**"],
     template: ["a/**"],
-    expected: "unchanged",
+    expected: { _tag: "LocalOnlyPatterns" },
   },
   {
     name: "ローカルがパターンを追加した",
     base: ["a/**"],
     local: ["a/**", "c/**"],
     template: ["a/**"],
-    expected: "localOnly",
+    expected: { _tag: "Categorized", category: "localOnly" },
   },
   {
     name: "ローカルがパターンを削除し、テンプレートは変えていない",
     base: ["a/**", "b/**"],
     local: ["a/**"],
     template: ["a/**", "b/**"],
-    expected: "unchanged",
+    expected: { _tag: "Categorized", category: "unchanged" },
   },
   {
     name: "双方が別のパターンを追加した",
     base: ["a/**"],
     local: ["a/**", "c/**"],
     template: ["a/**", "b/**"],
-    expected: "conflicts",
+    expected: { _tag: "Categorized", category: "conflicts" },
   },
   {
     name: "ローカルが追加し、テンプレートは削除した",
     base: ["a/**"],
     local: ["a/**", "c/**"],
     template: [],
-    expected: "localOnly",
+    expected: { _tag: "Categorized", category: "localOnly" },
   },
   {
     name: "ローカルが削除し、テンプレートは追加した",
     base: ["a/**"],
     local: [],
     template: ["a/**", "b/**"],
-    expected: "autoUpdate",
+    expected: { _tag: "Categorized", category: "autoUpdate" },
   },
   {
     name: "双方が同じパターンを削除した",
     base: ["a/**", "b/**"],
     local: ["a/**"],
     template: ["a/**"],
-    expected: "unchanged",
+    expected: { _tag: "Categorized", category: "unchanged" },
   },
   {
     name: "テンプレートから ziku.jsonc が消え、ローカルは変えていない",
     base: ["a/**"],
     local: ["a/**"],
     template: undefined,
-    expected: "unchanged",
+    expected: { _tag: "LocalOnlyPatterns" },
   },
   {
     name: "テンプレートから ziku.jsonc が消え、ローカルはパターンを追加した",
     base: ["a/**"],
     local: ["a/**", "c/**"],
     template: undefined,
-    expected: "localOnly",
+    expected: { _tag: "Categorized", category: "localOnly" },
   },
 ];
 
@@ -450,9 +453,9 @@ describe("status の推奨と pull / push の実動作の一致（実ファイ�
 
     const plan = partitionSyncPlan(classifyFiles({ baseHashes, localHashes, templateHashes }));
     const drift = await analyzeConfigDrift(projectDir, templateDir);
-    const category = zikuConfigStatusCategory(plan.config, drift);
+    const status = zikuConfigStatus(plan.config, drift);
 
-    expect(category).toBe(expected);
+    expect(status).toEqual(expected);
 
     // 実際に書き換えが起きるか。union の計算と、書き込む / 送る前の比較は pull の
     // resolveConfigMerge・push の送信内容の組み立てと同じ手順を踏む。
@@ -465,6 +468,8 @@ describe("status の推奨と pull / push の実動作の一致（実ファイ�
       push: push._tag === "SendUnion" && union !== templateContent,
     };
 
+    // どのコマンドも書き換えない状態（LocalOnlyPatterns）は、どちらの方向にも見せない。
+    const category = status._tag === "Categorized" ? status.category : undefined;
     const shown = {
       pull: category === "autoUpdate" || category === "conflicts",
       push: category === "localOnly" || category === "conflicts",
