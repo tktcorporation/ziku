@@ -1904,6 +1904,41 @@ describe("pullCommand", () => {
       });
     });
 
+    it("ローカルからも消えているファイルは、削除を適用しなくてもベースから落ちる", async () => {
+      // 据え置きはローカルに残るファイルが localOnly へ化けるのを防ぐためのもの。ローカルに
+      // 無いファイルは push の送信集合に入りようがなく、据え置くとベースのエントリだけが
+      // 永久に残って毎回削除候補として報告される。
+      vol.fromJSON({ "/test": null });
+
+      const { effect } = mockContext({
+        lock: lockWithBase({ ".mcp.json": "hash-mcp", "gone.txt": "hash-gone" }),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      mockHashFiles
+        .mockResolvedValueOnce(hashMap({ ".mcp.json": "hash-mcp" }))
+        .mockResolvedValueOnce(hashMap({ ".mcp.json": "hash-mcp" }));
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: repoRelPaths(["gone.txt"]),
+        deletedWithLocalEdits: [],
+        deletedLocally: [],
+        unchanged: repoRelPaths([".mcp.json"]),
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(baseHashesOf(lastSavedLock())).toEqual({ ".mcp.json": "hash-mcp" });
+    });
+
     it("--force で削除したファイルは、ベースからも消える", async () => {
       setupKeptDeletion({ localHash: "hash-old", category: "deletedFiles" });
 
@@ -2163,6 +2198,48 @@ describe("pullCommand", () => {
       expect(vol.existsSync("/test/old-file.txt")).toBe(true);
       expect(mockLog.info).toHaveBeenCalledWith(
         expect.stringContaining("would be candidates for deletion"),
+      );
+    });
+
+    it("コンフリクトで中断するプレビューは、削除の見込みを一切伝えない", async () => {
+      // 実 pull は解決待ちで中断すると削除の処理へ進まない。この実行では起きないことを
+      // 予告すると嘘になるので、2 つの削除カテゴリのどちらも黙らせる。
+      vol.fromJSON({
+        "/test/.mcp.json": "local content",
+        "/test/old-file.txt": "old content",
+        "/test/edited.txt": "edited content",
+        "/tmp/template/.mcp.json": "template content",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: repoRelPaths([".mcp.json"]),
+        newFiles: [],
+        deletedFiles: repoRelPaths(["old-file.txt"]),
+        deletedWithLocalEdits: repoRelPaths(["edited.txt"]),
+        deletedLocally: [],
+        unchanged: [],
+      });
+
+      mockBaseAvailable();
+      mockMergeResult(
+        ".mcp.json",
+        "<<<<<<< LOCAL\nlocal content\n=======\ntemplate content\n>>>>>>> TEMPLATE",
+      );
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false, dryRun: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining("Pull would pause here"));
+      expect(mockLog.info).not.toHaveBeenCalledWith(
+        expect.stringContaining("would be candidates for deletion"),
+      );
+      expect(mockLog.warn).not.toHaveBeenCalledWith(
+        expect.stringContaining("would ask you to pick which to delete"),
       );
     });
 

@@ -94,7 +94,7 @@ export const pullLifecycle: CommandLifecycle = {
   notes: [
     "`ziku.jsonc` 自体が追跡ファイルとして加法 union マージされる。テンプレ側で追加されたパターンはユーザーの `ziku.jsonc` へ取り込まれる（push と双方向に同期）。パターンの削除は自動伝播しない（安全側）。",
     "テンプレートで削除されたファイルは、対話実行ではユーザーが選択的に削除できる。`--force` は削除の承認なので全て削除し、`--yes` はプロンプトを省くだけなので全て残す。ローカルに編集があるものはどちらのフラグでも削除せず、対話実行で明示的に選んだものだけを削除する。",
-    "削除せずに残したファイルは同期ベースを据え置くため、次回の `pull` でも同じ削除候補として提示される。ベースを進めるとローカルにしかないファイルと区別できなくなり、続く `push` がテンプレート側の削除を巻き戻してしまう。",
+    "ローカルに残したファイルは同期ベースを据え置くため、次回の `pull` でも同じ削除候補として提示される。ベースを進めるとローカルにしかないファイルと区別できなくなり、続く `push` がテンプレート側の削除を巻き戻してしまう。テンプレートとローカルの双方から既に消えているファイルはベースからエントリを落とすため、削除候補として繰り返し提示されることはない。",
     "自動マージを試みなかったファイル（共通祖先を取得できない / バイナリ）は、`--continue` がローカルとテンプレートのどちらを残すか尋ねる。ziku がそれらのファイルへ何も書いていないため、コンフリクトマーカーの有無では解決を判定できない。`--yes` / `--force` を付けた実行では代わりに決めず中断する。",
   ],
 };
@@ -306,6 +306,7 @@ export const pullCommand = defineCommand({
                   hashes: baseAfterDeletions({
                     advancedBase: baseHashesForLock,
                     previousBase: hashes.baseHashes,
+                    localHashes: hashes.localHashes,
                     deletions: { candidates: deletionCandidates, applied: new Set() },
                   }),
                   // SHA を解決できなかった場合は既存のベース SHA を引き継ぐ。ハッシュだけ
@@ -347,6 +348,7 @@ export const pullCommand = defineCommand({
               hashes: baseAfterDeletions({
                 advancedBase: baseHashesForLock,
                 previousBase: hashes.baseHashes,
+                localHashes: hashes.localHashes,
                 deletions: { candidates: deletionCandidates, applied: appliedDeletions },
               }),
               commitSha: Option.getOrUndefined(latestRefOption) ?? baseCommitSha(lock),
@@ -462,9 +464,25 @@ async function previewPull(params: {
     dryRun: true,
   });
 
+  // 実 pull は解決待ちで中断すると削除の処理まで到達しない。中断するプレビューで削除の
+  // 見込みを伝えると、この実行では起きないことを予告することになる。削除候補は解決後の
+  // `--continue` を経て次の pull で改めて提示されるので、ここでは黙って中断だけを伝える。
   if (previewUnresolved.length > 0) {
     log.warn("Pull would pause here — resolve these conflicts, then run `ziku pull --continue`.");
-  } else if (params.deletedFiles.length > 0) {
+  } else {
+    logDeletionPreview(params);
+  }
+
+  outro("Dry run complete — no changes were made");
+}
+
+/** dry-run で、テンプレートから消えたファイルが 2 つのカテゴリそれぞれでどう扱われるかを伝える。 */
+function logDeletionPreview(params: {
+  deletedFiles: readonly RepoRelPath[];
+  deletedWithLocalEdits: readonly RepoRelPath[];
+  flags: PullApprovalFlags;
+}): void {
+  if (params.deletedFiles.length > 0) {
     log.info(describeDeletedFilesPreview(params.deletedFiles.length, params.flags));
   }
 
@@ -476,8 +494,6 @@ async function previewPull(params: {
         : `${count} file(s) removed from the template have local edits — pull would ask you to pick which to delete (never deleted automatically).`,
     );
   }
-
-  outro("Dry run complete — no changes were made");
 }
 
 /** dry-run で、テンプレートから消えたファイル（ローカル編集なし）がどう扱われるかを伝える。 */
@@ -663,10 +679,22 @@ interface DeletionOutcome {
  * だと識別するための集合）にも入らない。結果として、次の `ziku push --yes` がテンプレートの
  * 削除を黙って巻き戻す。
  *
- * そこで削除を適用しなかったファイルだけ、ベースのエントリを据え置く。次回の pull でも
- * 「テンプレートが削除した」状態として同じカテゴリに分類され、ユーザーは削除するか残すかを
- * 再び問われる。テンプレートとの差異が解消していない以上、問われ続けるのが正しい。
- * 黙ってテンプレートへ送り返すより、毎回目に入るほうが失うものが小さい。
+ * そこで据え置くのは、次の 2 つをどちらも満たすファイルだけ。
+ *
+ * 1. 今回の実行で削除を適用しなかった
+ * 2. ローカルのワークツリーにファイルが実在する（`localHashes` にエントリがある）
+ *
+ * 条件 2 が要るのは、据え置きが `localOnly` への化けを防ぐためのものだから。ローカルに無い
+ * ファイルは push の送信集合に入りようがなく、据え置く理由が無い。削除候補には
+ * 「テンプレートにもワークツリーにも無く、ベースにだけ残っている」ファイルも入る
+ * （`utils/merge/classify.ts`）。これは削除の適用対象にならないので、据え置くとベースの
+ * エントリだけが永久に残り、毎回削除候補として報告され `status` も同期済みにならない。
+ * エントリを落とせば以降は分類の対象から外れ、繰り返しても状態が収束する。
+ *
+ * 据え置いたファイルは次回の pull でも「テンプレートが削除した」状態として同じカテゴリに
+ * 分類され、ユーザーは削除するか残すかを再び問われる。テンプレートとの差異が解消していない
+ * 以上、問われ続けるのが正しい。黙ってテンプレートへ送り返すより、毎回目に入るほうが失う
+ * ものが小さい。
  *
  * lock を書く経路は 3 つある（通常フローの確定・解決待ちでの中断・`pull --continue` の確定）。
  * 前 2 つはこの関数を通し、`--continue` は中断時に書いた `merge.nextBase` をそのまま昇格
@@ -677,10 +705,12 @@ function baseAfterDeletions(params: {
   readonly advancedBase: HashMap;
   /** 今回の比較で共通祖先として使ったベース。 */
   readonly previousBase: HashMap;
+  /** 今回の走査で得たローカルのハッシュ。エントリの有無がワークツリーでの実在と一致する。 */
+  readonly localHashes: HashMap;
   readonly deletions: DeletionOutcome;
 }): HashMap {
   const retained = params.deletions.candidates.filter(
-    (path) => !params.deletions.applied.has(path),
+    (path) => !params.deletions.applied.has(path) && params.localHashes[path] !== undefined,
   );
   if (retained.length === 0) return params.advancedBase;
 

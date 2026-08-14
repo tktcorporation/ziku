@@ -110,6 +110,8 @@ const { hashContent } = await import("../../utils/hash");
 const { absPath, hashMap } = await import("../../__tests__/brands");
 const { selectDeletedFiles } = await import("../../ui/prompts");
 const mockSelectDeletedFiles = vi.mocked(selectDeletedFiles);
+const { log } = await import("../../ui/renderer");
+const mockLog = vi.mocked(log);
 
 const TEMPLATE_DIR = "/template";
 const PROJECT_DIR = "/project";
@@ -120,12 +122,12 @@ const KEPT_CONTENT = "# Keep\n";
 const REMOVED_CONTENT = "# Removed from the template\n";
 
 /**
- * 「テンプレートがファイルを削除し、ローカルにはまだ残っている」状態を作る。
+ * 削除前の `removed.md` をベースに持つ同期済み lock。
  *
- * ベースには削除前のハッシュを記録しておく。これが「テンプレートが消した」と
- * 「ローカルが足した」を分ける唯一の情報で、pull がここをどう書き換えるかが主題になる。
+ * ベースのこのエントリが「テンプレートが消した」と「ローカルが足した」を分ける唯一の情報で、
+ * pull がここをどう書き換えるかが主題になる。
  */
-function setupTemplateDeletion(localRemovedContent: string): void {
+function syncedLock(): string {
   const lock = markSynced(
     createPendingLock({ version: "1.0.0", installedAt: "2024-01-01T00:00:00.000Z", source }),
     {
@@ -136,14 +138,34 @@ function setupTemplateDeletion(localRemovedContent: string): void {
       }),
     },
   );
+  return JSON.stringify(lock, null, 2);
+}
 
+/** 「テンプレートがファイルを削除し、ローカルにはまだ残っている」状態を作る。 */
+function setupTemplateDeletion(localRemovedContent: string): void {
   vol.fromJSON({
     [`${TEMPLATE_DIR}/.ziku/ziku.jsonc`]: CONFIG,
     [`${TEMPLATE_DIR}/keep.md`]: KEPT_CONTENT,
     [`${PROJECT_DIR}/.ziku/ziku.jsonc`]: CONFIG,
-    [`${PROJECT_DIR}/.ziku/lock.json`]: JSON.stringify(lock, null, 2),
+    [`${PROJECT_DIR}/.ziku/lock.json`]: syncedLock(),
     [`${PROJECT_DIR}/keep.md`]: KEPT_CONTENT,
     [`${PROJECT_DIR}/removed.md`]: localRemovedContent,
+  });
+}
+
+/**
+ * 「テンプレートがファイルを削除し、ローカルからも既に消えている」状態を作る。
+ *
+ * ベースにだけエントリが残るため削除の適用対象が存在せず、ベースを据え置くと候補として
+ * 上がり続ける。pull を繰り返して状態が収束するかを見るための入口。
+ */
+function setupDeletionGoneLocally(): void {
+  vol.fromJSON({
+    [`${TEMPLATE_DIR}/.ziku/ziku.jsonc`]: CONFIG,
+    [`${TEMPLATE_DIR}/keep.md`]: KEPT_CONTENT,
+    [`${PROJECT_DIR}/.ziku/ziku.jsonc`]: CONFIG,
+    [`${PROJECT_DIR}/.ziku/lock.json`]: syncedLock(),
+    [`${PROJECT_DIR}/keep.md`]: KEPT_CONTENT,
   });
 }
 
@@ -215,6 +237,28 @@ describe("テンプレートの削除は pull → push を往復しても復活�
     await runPull({ force: false, yes: false });
 
     expect(mockSelectDeletedFiles).toHaveBeenCalledWith(["removed.md"]);
+  });
+
+  it("ローカルからも消えているファイルは、pull --yes を繰り返しても報告され続けない", async () => {
+    setupDeletionGoneLocally();
+
+    await runPull({ force: false, yes: true });
+
+    // 削除の適用対象が無いままベースを据え置くと、この報告が毎回出て status も同期済みに
+    // ならない。ベースから落ちていれば分類の対象から外れ、状態が収束する。
+    expect(baseHashesOf(currentLock())).not.toHaveProperty("removed.md");
+
+    mockLog.info.mockClear();
+    mockLog.warn.mockClear();
+    mockLog.message.mockClear();
+    mockLog.success.mockClear();
+
+    await runPull({ force: false, yes: true });
+
+    expect(mockLog.success).toHaveBeenCalledWith("Already up to date");
+    for (const logged of [mockLog.info, mockLog.warn, mockLog.message]) {
+      expect(logged).not.toHaveBeenCalledWith(expect.stringContaining("removed.md"));
+    }
   });
 
   it("削除を承認したファイルはベースから消え、次の pull に出てこない", async () => {
