@@ -61,6 +61,7 @@ vi.mock("../temp-tracker", () => ({
 const { aggregateTemplateUsage } = await import("../aggregate");
 const { hashContent } = await import("../hash");
 const { ZIKU_CONFIG_FILE } = await import("../ziku-config");
+const { LOCK_FILE } = await import("../lock");
 const { glob } = await import("tinyglobby");
 const mockedGlob = vi.mocked(glob);
 
@@ -160,6 +161,8 @@ describe("aggregateTemplateUsage", () => {
         repoInfo({ owner: "acme", repo: "no-lock" }),
       ]),
     );
+    // SHA 解決には成功する（回帰確認: SHA 解決成功後の 404 だけが黙って除外される対象）。
+    shaFixtures.set("acme/no-lock", "no-lock-sha");
     // lockFixtures に何も登録しない = fetchRepoTextFile は既定で Option.none()（404 相当）を返す
 
     const report = await Effect.runPromise(
@@ -178,6 +181,7 @@ describe("aggregateTemplateUsage", () => {
     mockListOwnerRepos.mockReturnValue(
       Effect.succeed([repoInfo({ owner: "acme", repo: "other-template-user" })]),
     );
+    shaFixtures.set("acme/other-template-user", "other-template-user-sha");
     setLockFixture(
       lockFixtures,
       "acme",
@@ -208,6 +212,7 @@ describe("aggregateTemplateUsage", () => {
     setLockFixture(lockFixtures, "acme", "broken", Effect.succeed(Option.some("{ not valid json")));
     setLockFixture(lockFixtures, "acme", "good", Effect.succeed(Option.some(lockJson())));
 
+    shaFixtures.set("acme/broken", "broken-sha");
     shaFixtures.set("acme/good", "good-sha");
     dirsBySource.set("gh:acme/good#good-sha", "/good-dir");
     dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-simple");
@@ -508,7 +513,8 @@ describe("aggregateTemplateUsage", () => {
         repoInfo({ owner: "acme", repo: "other" }),
       ]),
     );
-    // "other" は lock.json 未導入（fetchRepoTextFile 既定の Option.none()）
+    // "other" は lock.json 未導入（fetchRepoTextFile 既定の Option.none()）。SHA 解決は成功させる。
+    shaFixtures.set("acme/other", "other-sha");
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
@@ -881,6 +887,7 @@ describe("aggregateTemplateUsage", () => {
     mockListOwnerRepos.mockReturnValue(
       Effect.succeed([repoInfo({ owner: "acme", repo: "broken" })]),
     );
+    shaFixtures.set("acme/broken", "broken-sha");
     setLockFixture(lockFixtures, "acme", "broken", Effect.succeed(Option.some("{ not valid json")));
 
     const report = await Effect.runPromise(
@@ -911,5 +918,165 @@ describe("aggregateTemplateUsage", () => {
 
     expect(mockRegisterTempDirEffect).not.toHaveBeenCalled();
     expect(mockRemoveTempDirEffect).not.toHaveBeenCalled();
+  });
+
+  it("lock.json の取得は、リポジトリ内容のダウンロードと同じ commit SHA を ref に使う", async () => {
+    mockListOwnerRepos.mockReturnValue(Effect.succeed([repoInfo({ owner: "acme", repo: "proj" })]));
+    const baseHashes = { "f.txt": hashContent("v1") };
+    setLockFixture(
+      lockFixtures,
+      "acme",
+      "proj",
+      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    );
+    shaFixtures.set("acme/proj", "shared-sha");
+    dirsBySource.set("gh:acme/proj#shared-sha", "/proj-dir");
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-shared");
+
+    vol.fromJSON({
+      "/proj-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/proj-dir/f.txt": "v1",
+      "/tmpl-dir-shared/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/tmpl-dir-shared/f.txt": "v1",
+    });
+    queueGlobResults(["f.txt"], ["f.txt"]);
+
+    await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        tmpBaseDir: "/tmp-base",
+      }),
+    );
+
+    // lock.json の取得は resolveLatestCommitSha が返した SHA を ref として渡す。
+    expect(mockFetchRepoTextFile).toHaveBeenCalledWith("acme", "proj", LOCK_FILE, "shared-sha");
+    // リポジトリ内容のダウンロード（buildTemplateSource 経由の acquireTempTemplate）も
+    // 同じ SHA を使っている（"gh:acme/proj#shared-sha" 以外のソースでは呼ばれていない）。
+    const repoDownloadSources = mockAcquireTempTemplate.mock.calls
+      .map(([, source]) => source)
+      .filter((source) => typeof source === "string" && source.startsWith("gh:acme/proj#"));
+    expect(repoDownloadSources).toEqual(["gh:acme/proj#shared-sha"]);
+  });
+
+  it("利用リポジトリと分かった後に SHA 解決が undefined を返したら理由付きで skipped に残す", async () => {
+    mockListOwnerRepos.mockReturnValue(
+      Effect.succeed([repoInfo({ owner: "acme", repo: "no-sha" })]),
+    );
+    setLockFixture(lockFixtures, "acme", "no-sha", Effect.succeed(Option.some(lockJson())));
+    // shaFixtures に登録しない = mockResolveLatestCommitSha は undefined を返す
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        tmpBaseDir: "/tmp-base",
+      }),
+    );
+
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toEqual([
+      { owner: "acme", repo: "no-sha", reason: "Could not resolve the latest commit SHA" },
+    ]);
+  });
+
+  // owner 配下には空リポジトリなど SHA を解決できないものが混ざる。ziku を使っていない
+  // リポジトリまで skipped に並べると、レポートがノイズで読めなくなる。
+  it("ziku を使っていないリポジトリは、SHA 解決を試みずに黙って除外する", async () => {
+    mockListOwnerRepos.mockReturnValue(
+      Effect.succeed([repoInfo({ owner: "acme", repo: "empty-repo" })]),
+    );
+    // lockFixtures にも shaFixtures にも登録しない
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        tmpBaseDir: "/tmp-base",
+      }),
+    );
+
+    expect(report.skipped).toEqual([]);
+    expect(
+      mockResolveLatestCommitSha.mock.calls.some(
+        ([owner, repo]) => owner === "acme" && repo === "empty-repo",
+      ),
+    ).toBe(false);
+  });
+
+  it("SHA 解決が失敗（例外）したリポジトリは理由付きで skipped に残る", async () => {
+    mockListOwnerRepos.mockReturnValue(
+      Effect.succeed([repoInfo({ owner: "acme", repo: "unresolvable" })]),
+    );
+    setLockFixture(lockFixtures, "acme", "unresolvable", Effect.succeed(Option.some(lockJson())));
+    mockResolveLatestCommitSha.mockImplementation(async (owner: string, repo: string) => {
+      if (repo === "unresolvable") throw new Error("network error");
+      return shaFixtures.get(`${owner}/${repo}`);
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        tmpBaseDir: "/tmp-base",
+      }),
+    );
+
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(1);
+    expect(report.skipped[0]).toMatchObject({ owner: "acme", repo: "unresolvable" });
+    expect(report.skipped[0]?.reason).toContain("Failed to resolve the latest commit SHA");
+    expect(report.skipped[0]?.reason).toContain("network error");
+  });
+
+  it("--since で全件除外された場合、除外件数が summary.excludedBySince に載る", async () => {
+    mockListOwnerRepos.mockReturnValue(
+      Effect.succeed([
+        repoInfo({ owner: "acme", repo: "stale-a" }),
+        repoInfo({ owner: "acme", repo: "stale-b" }),
+      ]),
+    );
+    const baseHashes = { "f.txt": hashContent("v1") };
+    setLockFixture(
+      lockFixtures,
+      "acme",
+      "stale-a",
+      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    );
+    setLockFixture(
+      lockFixtures,
+      "acme",
+      "stale-b",
+      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    );
+    shaFixtures.set("acme/stale-a", "stale-a-sha");
+    shaFixtures.set("acme/stale-b", "stale-b-sha");
+    dirsBySource.set("gh:acme/stale-a#stale-a-sha", "/stale-a-dir");
+    dirsBySource.set("gh:acme/stale-b#stale-b-sha", "/stale-b-dir");
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-stale");
+
+    vol.fromJSON({
+      "/stale-a-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/stale-a-dir/f.txt": "v2-stale-a",
+      "/stale-b-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/stale-b-dir/f.txt": "v2-stale-b",
+      "/tmpl-dir-stale/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/tmpl-dir-stale/f.txt": "v1",
+    });
+    queueGlobResults(["f.txt"], ["f.txt"]);
+    queueGlobResults(["f.txt"], ["f.txt"]);
+
+    // 両リポジトリとも since より古いコミット日時を返す = 全件 filteredBySince
+    mockGetLastCommitDate.mockReturnValue(Effect.succeed(Option.some("2025-01-01T00:00:00Z")));
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+        since: "2026-08-01T00:00:00.000Z",
+      }),
+    );
+
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toEqual([]);
+    expect(report.summary.totalRepositories).toBe(0);
+    expect(report.summary.excludedBySince).toBe(2);
   });
 });

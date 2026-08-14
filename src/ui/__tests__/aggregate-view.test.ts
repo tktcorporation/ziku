@@ -24,6 +24,7 @@ function makeReport(overrides: Partial<AggregateReport> = {}): AggregateReport {
       repositoriesWithPendingPush: 0,
       pendingPushFiles: 0,
       conflictFiles: 0,
+      excludedBySince: 0,
     },
     ...overrides,
   };
@@ -48,6 +49,7 @@ describe("renderAggregateSummary", () => {
         repositoriesWithPendingPush: 0,
         pendingPushFiles: 0,
         conflictFiles: 0,
+        excludedBySince: 0,
       },
     });
 
@@ -74,12 +76,28 @@ describe("renderAggregateSummary", () => {
         repositoriesWithPendingPush: 0,
         pendingPushFiles: 0,
         conflictFiles: 0,
+        excludedBySince: 0,
       },
     });
 
     const line = strip(renderAggregateSummary(report));
     // レポートに載った件数 (1) と skipped の件数 (1) が読み手に区別できること。
     expect(line).toContain("Report includes 1 repositories (1 skipped — see below).");
+  });
+
+  it("--since で除外された件数があれば、レポート件数と区別して表示する", () => {
+    const report = makeReport({
+      summary: {
+        totalRepositories: 0,
+        repositoriesWithPendingPush: 0,
+        pendingPushFiles: 0,
+        conflictFiles: 0,
+        excludedBySince: 2,
+      },
+    });
+
+    const line = strip(renderAggregateSummary(report));
+    expect(line).toContain("Report includes 0 repositories (2 excluded by --since).");
   });
 });
 
@@ -102,6 +120,24 @@ describe("aggregateOutroLine", () => {
     expect(line).toContain("1 repositories could not be processed");
   });
 
+  it("--since で全件除外された場合（repositories=0, skipped=0, excludedBySince>0）は「見つからなかった」と読めるメッセージを出さない", () => {
+    const report = makeReport({
+      summary: {
+        totalRepositories: 0,
+        repositoriesWithPendingPush: 0,
+        pendingPushFiles: 0,
+        conflictFiles: 0,
+        excludedBySince: 3,
+      },
+    });
+
+    const line = strip(aggregateOutroLine(report));
+    expect(line).not.toContain("No repositories found using this template.");
+    expect(line).toContain(
+      "3 repositories use this template but had no changes on or after --since",
+    );
+  });
+
   it("repositories が 1 件以上あれば通常の案内を返す", () => {
     const report = makeReport({
       repositories: [
@@ -120,6 +156,7 @@ describe("aggregateOutroLine", () => {
         repositoriesWithPendingPush: 0,
         pendingPushFiles: 0,
         conflictFiles: 0,
+        excludedBySince: 0,
       },
     });
 

@@ -246,6 +246,16 @@ export const aggregateSummarySchema = z.object({
   pendingPushFiles: z.number().int().nonnegative(),
   /** conflict ファイルの総数 */
   conflictFiles: z.number().int().nonnegative(),
+  /**
+   * このテンプレートの利用リポジトリと判定されたが、`--since` フィルタにより
+   * `repositories` から除かれた件数。`--since` 未指定時は常に 0。
+   *
+   * `totalRepositories: 0` は「レポートに repositories が 0 件」を意味するだけで
+   * 「このテンプレートを使っているリポジトリが無い」ことの証明にはならない。
+   * この値が 0 でなければ、利用リポジトリは見つかったが変更が `--since` より
+   * 古かっただけと判別できる。
+   */
+  excludedBySince: z.number().int().nonnegative(),
 });
 export type AggregateSummary = z.infer<typeof aggregateSummarySchema>;
 

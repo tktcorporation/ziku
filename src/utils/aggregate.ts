@@ -94,7 +94,10 @@ const DEFAULT_CONCURRENCY = 4;
  *
  * 処理の流れ:
  * 1. `listOwnerRepos` で owner 配下の候補を列挙し、テンプレートリポジトリ自身を除外する
- * 2. 各候補の `.ziku/lock.json` を読み、対象テンプレートを指しているものだけを残す
+ * 2. 各候補の `.ziku/lock.json` を読んで対象テンプレートを指しているものだけを残し、
+ *    残ったものだけ commit SHA を解決してその ref で lock.json を読み直す
+ *    （{@link evaluateCandidate}）。以降のリポジトリ内容ダウンロードも同じ ref を使うため、
+ *    lock.json の読み取りとダウンロードが必ず同じコミットのスナップショットになる
  * 3. 残った各リポジトリについて、テンプレートとの内容差分をハッシュ比較で分類する
  * 4. `since` 指定時は pendingPush/conflicts の最終コミット日時でリポジトリ単位に絞り込む
  */
@@ -176,16 +179,22 @@ export function aggregateTemplateUsage(
 
       const repositories: AggregateRepositoryReport[] = [];
       const skippedFromProcessing: SkippedRepository[] = [];
+      let excludedBySince = 0;
       for (const outcome of outcomes) {
         if (outcome._tag === "ok") repositories.push(outcome.report);
         else if (outcome._tag === "skipped") skippedFromProcessing.push(outcome.skip);
-        // "filteredBySince" は since 条件を満たさなかったリポジトリで、意図的に結果から除く
+        // "filteredBySince" は since 条件を満たさなかったリポジトリで、意図的に repositories
+        // からは除くが、件数は summary.excludedBySince に残す（buildReport 参照）。
+        else excludedBySince += 1;
       }
 
-      return buildReport(template, templateRef, repositories, [
-        ...skippedFromEvaluation,
-        ...skippedFromProcessing,
-      ]);
+      return buildReport(
+        template,
+        templateRef,
+        repositories,
+        [...skippedFromEvaluation, ...skippedFromProcessing],
+        excludedBySince,
+      );
     }),
   );
 }
@@ -287,39 +296,127 @@ type CandidateEvaluation =
   | { readonly _tag: "excluded" }
   | { readonly _tag: "skipped"; readonly skip: SkippedRepository };
 
-/** lock.json 読み込み・検証まで完了し、以降の差分処理に進むリポジトリ */
+/**
+ * lock.json 読み込み・検証まで完了し、以降の差分処理に進むリポジトリ。
+ *
+ * `ref` は `.ziku/lock.json` の取得とリポジトリ内容のダウンロードの両方に使う
+ * 同一の commit SHA（{@link resolveCandidateRef} 参照）。processCandidate で
+ * 改めて解決し直さないことで、スキャン中に対象リポジトリの既定ブランチが
+ * 進んでも 2 つの読み取りが同じコミットを指すことを保証する。
+ */
 interface AcceptedCandidate {
   readonly repoInfo: OwnerRepoInfo;
   readonly lock: LockState;
+  readonly ref: string;
+}
+
+/** {@link resolveCandidateRef} の結果を表す判別 union */
+type CandidateRefResolution =
+  | { readonly _tag: "resolved"; readonly ref: string }
+  | { readonly _tag: "failed"; readonly reason: string };
+
+/**
+ * 候補リポジトリの比較用 commit SHA を解決する。
+ *
+ * `.ziku/lock.json` の取得とリポジトリ内容のダウンロードを同じ ref に固定するために使う。
+ * `resolveLatestCommitSha` は 404・ネットワークエラーいずれも例外を投げず `undefined` を
+ * 返すため、両方のケースを区別せず `failed` として扱う。
+ */
+function resolveCandidateRef(candidate: OwnerRepoInfo): Effect.Effect<CandidateRefResolution> {
+  return Effect.gen(function* () {
+    const refResult = yield* Effect.either(
+      Effect.tryPromise({
+        try: () => resolveLatestCommitSha(candidate.owner, candidate.repo, candidate.defaultBranch),
+        catch: toMessage,
+      }),
+    );
+    if (Either.isLeft(refResult)) {
+      return {
+        _tag: "failed" as const,
+        reason: `Failed to resolve the latest commit SHA: ${refResult.left}`,
+      };
+    }
+    if (refResult.right === undefined) {
+      return { _tag: "failed" as const, reason: "Could not resolve the latest commit SHA" };
+    }
+    return { _tag: "resolved" as const, ref: refResult.right };
+  });
 }
 
 /**
  * 候補リポジトリの `.ziku/lock.json` を取得・検証し、対象テンプレートの
  * 利用リポジトリかどうかを判定する。
  *
- * - 404（ziku 未導入）は `excluded` として静かに除外する。owner 配下の大半は
- *   ziku を使っていない無関係なリポジトリであり、これを `skipped` に積むと
- *   レポートがノイズだらけになるため。
- * - `lock.source` がローカルパス形式、または対象テンプレート以外を指す場合も
- *   `excluded`。こちらも「対象外」であって「処理に失敗した」わけではないため、
- *   `skipped` には積まない。
- * - fetch 自体の失敗（レート制限・権限不足）、JSON パース失敗、スキーマ検証失敗は
- *   個別リポジトリの事情として `skipped` に理由付きで積み、他リポジトリの処理は続行する。
+ * 判定は 2 段階で行う。まず ref を固定せず lock.json を読んで利用リポジトリかどうかを
+ * ふるいにかけ、通ったものだけ commit SHA を解決して同じ ref で lock.json を読み直す。
+ *
+ * この順序にする理由は 2 つ。
+ *
+ * - SHA 解決の失敗を、ziku を使っていないリポジトリにまで `skipped` として出さない。
+ *   owner 配下には空リポジトリや無関係なリポジトリが多数あり、先に SHA を解決すると
+ *   そのすべてが理由付きで `skipped` に並んでレポートが読めなくなる
+ * - 候補全件に SHA 解決の API 呼び出しを打たない。ふるいを通るのは利用リポジトリだけ
+ *
+ * 読み直しの結果を採用するのは、リポジトリ内容のダウンロードと同じコミットに固定するため。
+ * ふるい用の 1 回目とリポジトリ内容が別コミットになると、更新後のファイルを更新前の
+ * `baseHashes` と突き合わせて実在しない差分を報告する。
+ *
+ * - lock.json が無い（404 = ziku 未導入）、`lock.source` がローカルパス形式、
+ *   対象テンプレート以外を指す場合は `excluded` として静かに除外する。
+ *   「対象外」であって「処理に失敗した」わけではないため `skipped` には積まない
+ * - lock.json fetch 自体の失敗（レート制限・権限不足）、JSON パース失敗、スキーマ検証失敗、
+ *   および利用リポジトリと分かった後の SHA 解決失敗は、個別リポジトリの事情として
+ *   `skipped` に理由付きで積み、他リポジトリの処理は続行する
  */
 function evaluateCandidate(
   template: AggregateTemplateRepo,
   candidate: OwnerRepoInfo,
 ): Effect.Effect<CandidateEvaluation> {
   return Effect.gen(function* () {
+    const screening = yield* readCandidateLock(template, candidate, undefined);
+    if (screening._tag !== "usable") return screening;
+
+    const refResolution = yield* resolveCandidateRef(candidate);
+    if (refResolution._tag === "failed") {
+      return skippedEvaluation(candidate, refResolution.reason);
+    }
+    const ref = refResolution.ref;
+
+    // 固定した ref で読み直したものを採用する。ふるい用の読み取りとの間に
+    // 対象リポジトリが ziku を外した場合は、そのコミット時点では利用リポジトリではない。
+    const pinned = yield* readCandidateLock(template, candidate, ref);
+    if (pinned._tag !== "usable") return pinned;
+
+    return {
+      _tag: "accepted" as const,
+      candidate: { repoInfo: candidate, lock: pinned.lock, ref },
+    };
+  });
+}
+
+/** {@link readCandidateLock} の結果。`usable` は「対象テンプレートの利用リポジトリだった」 */
+type LockReadResult =
+  | { readonly _tag: "usable"; readonly lock: LockState }
+  | { readonly _tag: "excluded" }
+  | { readonly _tag: "skipped"; readonly skip: SkippedRepository };
+
+/**
+ * 候補リポジトリの `.ziku/lock.json` を取得・検証し、対象テンプレートを指しているか判定する。
+ * `ref` を省略すると既定ブランチの先頭を読む。
+ */
+function readCandidateLock(
+  template: AggregateTemplateRepo,
+  candidate: OwnerRepoInfo,
+  ref: string | undefined,
+): Effect.Effect<LockReadResult> {
+  return Effect.gen(function* () {
     const fetched = yield* Effect.either(
-      fetchRepoTextFile(candidate.owner, candidate.repo, LOCK_FILE),
+      fetchRepoTextFile(candidate.owner, candidate.repo, LOCK_FILE, ref),
     );
     if (Either.isLeft(fetched)) {
       return skippedEvaluation(candidate, `Failed to fetch lock.json: ${fetched.left.message}`);
     }
-    if (Option.isNone(fetched.right)) {
-      return { _tag: "excluded" as const };
-    }
+    if (Option.isNone(fetched.right)) return { _tag: "excluded" as const };
 
     const rawLock = fetched.right.value;
     const parsedJson = yield* Effect.either(
@@ -341,20 +438,19 @@ function evaluateCandidate(
     }
 
     const lock = parsedLock.data;
-    if (!isGitHubSource(lock.source)) {
-      // ローカルパス source（`{ path }`）は owner 配下探索の対象外
+    // ローカルパス source（`{ path }`）は owner 配下探索の対象外。
+    // 別のテンプレートを指しているものも対象外。
+    if (!isGitHubSource(lock.source) || !isSameRepo(lock.source, template)) {
       return { _tag: "excluded" as const };
     }
-    if (!isSameRepo(lock.source, template)) {
-      // 別のテンプレートリポジトリを利用している
-      return { _tag: "excluded" as const };
-    }
-
-    return { _tag: "accepted" as const, candidate: { repoInfo: candidate, lock } };
+    return { _tag: "usable" as const, lock };
   });
 }
 
-function skippedEvaluation(candidate: OwnerRepoInfo, reason: string): CandidateEvaluation {
+function skippedEvaluation(
+  candidate: OwnerRepoInfo,
+  reason: string,
+): { readonly _tag: "skipped"; readonly skip: SkippedRepository } {
   return { _tag: "skipped", skip: { owner: candidate.owner, repo: candidate.repo, reason } };
 }
 
@@ -388,6 +484,12 @@ interface ProcessCandidateOptions {
  * 抜ける時点で必ず削除する（候補数分のテンポラリが同時に残り続けるのを防ぐため、
  * リポジトリ 1 件ごとに閉じる設計）。テンプレート側のテンポラリは全リポジトリで
  * 共有するため、この Scope には含めない。
+ *
+ * commit SHA は `candidate.ref`（`evaluateCandidate` が lock.json 取得前に解決済み）を
+ * そのまま使い、ここでは解決し直さない。ここで改めて解決すると、lock.json を読んだ
+ * 時点と内容をダウンロードする時点で対象リポジトリの既定ブランチが進んでいた場合に
+ * 別コミットを見てしまい、新しいファイルと古い baseHashes を突き合わせて実在しない
+ * conflict/pending を報告する原因になる。
  */
 function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessOutcome> {
   const {
@@ -400,23 +502,9 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
     since,
     concurrency,
   } = opts;
-  const { repoInfo, lock } = candidate;
+  const { repoInfo, lock, ref } = candidate;
 
   return Effect.gen(function* () {
-    const refResult = yield* Effect.either(
-      Effect.tryPromise({
-        try: () => resolveLatestCommitSha(repoInfo.owner, repoInfo.repo, repoInfo.defaultBranch),
-        catch: toMessage,
-      }),
-    );
-    if (Either.isLeft(refResult)) {
-      return processSkipped(repoInfo, `Failed to resolve the latest commit SHA: ${refResult.left}`);
-    }
-    if (refResult.right === undefined) {
-      return processSkipped(repoInfo, "Could not resolve the latest commit SHA");
-    }
-    const ref = refResult.right;
-
     const classificationResult = yield* Effect.either(
       Effect.scoped(
         classifyAgainstTemplate({
@@ -726,6 +814,7 @@ function buildReport(
   templateRef: string,
   repositories: AggregateRepositoryReport[],
   skipped: SkippedRepository[],
+  excludedBySince: number,
 ): AggregateReport {
   return {
     template: { owner: template.owner, repo: template.repo, ref: templateRef },
@@ -737,6 +826,7 @@ function buildReport(
       repositoriesWithPendingPush: repositories.filter((r) => r.pendingPush.length > 0).length,
       pendingPushFiles: repositories.reduce((sum, r) => sum + r.pendingPush.length, 0),
       conflictFiles: repositories.reduce((sum, r) => sum + r.conflicts.length, 0),
+      excludedBySince,
     },
   };
 }

@@ -56,20 +56,35 @@ function renderSkippedLines(report: AggregateReport): string[] {
 }
 
 /**
+ * ヘッダー行の括弧内に添える補足（skipped 件数・`--since` による除外件数）を作る。
+ * どちらも 0 件なら空配列を返し、呼び出し側は括弧そのものを省略する。
+ */
+function headerNotes(report: AggregateReport): string[] {
+  const notes: string[] = [];
+  if (report.skipped.length > 0) {
+    notes.push(`${pc.bold(String(report.skipped.length))} skipped — see below`);
+  }
+  if (report.summary.excludedBySince > 0) {
+    notes.push(`${pc.bold(String(report.summary.excludedBySince))} excluded by --since`);
+  }
+  return notes;
+}
+
+/**
  * ヘッダー行（テンプレートと集計件数のサマリ）を作る。
  *
  * `summary.totalRepositories` は `--since` フィルタと `skipped` 適用後の件数であり
  * 「テンプレートを使っているリポジトリ数」ではない。「使っている数」と誤読されないよう、
- * レポートに載った件数であることを明示し、skipped があれば同じ行で件数を示す
- * （読み手が両者を区別できるようにする）。
+ * レポートに載った件数であることを明示し、skipped / `--since` による除外があれば
+ * 同じ行で件数を示す（読み手が両者を区別できるようにする）。
  */
 function renderHeaderLine(report: AggregateReport): string {
   const total = report.summary.totalRepositories;
-  const skippedCount = report.skipped.length;
-  if (skippedCount === 0) {
+  const notes = headerNotes(report);
+  if (notes.length === 0) {
     return `Report includes ${pc.bold(String(total))} repositories.`;
   }
-  return `Report includes ${pc.bold(String(total))} repositories (${pc.bold(String(skippedCount))} skipped — see below).`;
+  return `Report includes ${pc.bold(String(total))} repositories (${notes.join(", ")}).`;
 }
 
 /**
@@ -99,23 +114,41 @@ export function renderAggregateSummary(report: AggregateReport): string {
 }
 
 /**
+ * `totalRepositories === 0` のとき、その理由を読み手に伝える 1 文を組み立てる。
+ * skipped と `--since` による除外は互いに独立した理由なので両方あれば両方書く。
+ */
+function zeroRepositoriesReason(report: AggregateReport): string | undefined {
+  const reasons: string[] = [];
+  if (report.skipped.length > 0) {
+    reasons.push(
+      `${report.skipped.length} repositories could not be processed (see Skipped above)`,
+    );
+  }
+  if (report.summary.excludedBySince > 0) {
+    reasons.push(
+      `${report.summary.excludedBySince} repositories use this template but had no changes on or after --since`,
+    );
+  }
+  if (reasons.length === 0) return undefined;
+  return `No repositories included in the report — ${reasons.join("; ")}. This does not mean no repositories use this template.`;
+}
+
+/**
  * outro（コマンド末尾の 1 行案内）を生成する。
  *
  * `aggregate` はレポートを作るだけで統合（push）は行わないため、次の行動として
  * 「このレポートを後段のエージェント/オペレーターに渡す」ことを明示する。
  *
  * `totalRepositories === 0` は「レポートに載った件数が 0」であって「テンプレートを
- * 使っているリポジトリが無い」ことの証明ではない。skipped が 1 件以上あるなら、
- * 実際には候補が見つかったが処理できなかっただけの可能性があるため、
- * 「無かった」と読めるメッセージを出さず skipped 件数を案内する。
+ * 使っているリポジトリが無い」ことの証明ではない。skipped または `--since` による
+ * 除外が 1 件以上あるなら、実際には利用リポジトリが見つかったが処理できなかった／
+ * 変更が `--since` より古かっただけの可能性があるため、「無かった」と読めるメッセージを
+ * 出さずその件数を案内する（{@link zeroRepositoriesReason}）。
  */
 export function aggregateOutroLine(report: AggregateReport): string {
   if (report.summary.totalRepositories === 0) {
-    if (report.skipped.length > 0) {
-      return pc.yellow(
-        `No repositories included in the report — ${report.skipped.length} repositories could not be processed (see Skipped above). This does not mean no repositories use this template.`,
-      );
-    }
+    const reason = zeroRepositoriesReason(report);
+    if (reason !== undefined) return pc.yellow(reason);
     return pc.dim("No repositories found using this template.");
   }
   return `${pc.cyan("→")} Read-only report generated. Pass the JSON (--json / --out) to an agent or operator to consolidate diffs back into the template — this command does not push changes itself.`;

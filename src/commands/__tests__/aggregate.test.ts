@@ -70,6 +70,7 @@ function makeReport(overrides: Partial<AggregateReport> = {}): AggregateReport {
       repositoriesWithPendingPush: 0,
       pendingPushFiles: 0,
       conflictFiles: 0,
+      excludedBySince: 0,
     },
     ...overrides,
   };
@@ -257,6 +258,7 @@ describe("aggregateCommand", () => {
           repositoriesWithPendingPush: 0,
           pendingPushFiles: 0,
           conflictFiles: 0,
+          excludedBySince: 0,
         },
       });
       mockAggregateTemplateUsage.mockReturnValue(Effect.succeed(report));
@@ -309,6 +311,7 @@ describe("aggregateCommand", () => {
           repositoriesWithPendingPush: 1,
           pendingPushFiles: 1,
           conflictFiles: 0,
+          excludedBySince: 0,
         },
       });
       mockAggregateTemplateUsage.mockReturnValue(Effect.succeed(report));
