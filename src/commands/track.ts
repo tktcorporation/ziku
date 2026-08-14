@@ -19,6 +19,7 @@ import type { CommandLifecycle } from "../docs/lifecycle-types";
 export const trackLifecycle: CommandLifecycle = {
   name: "track",
   description: "Add file patterns to the sync whitelist",
+  audience: "Template user",
   ops: [
     {
       file: ZIKU_CONFIG_FILE,

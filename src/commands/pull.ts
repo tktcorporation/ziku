@@ -31,6 +31,7 @@ import { computeMergedZikuConfig } from "../utils/config-merge";
 export const pullLifecycle: CommandLifecycle = {
   name: "pull",
   description: "Pull latest template updates to local project",
+  audience: "Template user",
   ops: [
     { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "patterns を取得" },
     { file: LOCK_FILE, location: "local", op: "read", note: "source, baseHashes, baseRef を取得" },

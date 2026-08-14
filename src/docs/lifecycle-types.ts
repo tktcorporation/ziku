@@ -7,8 +7,16 @@
  * - lifecycle.ts → commands/*.ts（ライフサイクルオブジェクト）
  */
 
-/** ファイルが存在する場所 */
-export type Location = "template" | "local";
+/**
+ * ファイルが存在する場所。
+ *
+ * - `"local"`: コマンドを実行しているディレクトリ（ユーザープロジェクト。
+ *   `aggregate` の場合はテンプレートリポジトリ自身のローカルチェックアウト）
+ * - `"template"`: fetch/clone 済みのテンプレートリポジトリ
+ * - `"remote"`: ローカルに取得せず GitHub API 経由でのみ読む複数のリポジトリ
+ *   （`aggregate` が owner 配下の利用リポジトリを横断的に読む場合など）
+ */
+export type Location = "template" | "local" | "remote";
 
 /** ファイル操作の種類 */
 export type Op = "read" | "create" | "update";
@@ -25,12 +33,22 @@ export interface FileOp {
   readonly note: string;
 }
 
+/**
+ * そのコマンドを実行する役割。
+ *
+ * ファイル操作の内容からは導出できない。読み取り専用のコマンドでも
+ * テンプレート著者向けのものがあり、書き込みの有無と役割は対応しない。
+ */
+export type Audience = "Template author" | "Template user";
+
 /** 1 つのコマンドのライフサイクル */
 export interface CommandLifecycle {
   /** コマンド名（表示用） */
   readonly name: string;
   /** コマンドの説明 */
   readonly description: string;
+  /** このコマンドを実行する役割 */
+  readonly audience: Audience;
   /** ファイル操作のリスト */
   readonly ops: readonly FileOp[];
   /**

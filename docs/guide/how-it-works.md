@@ -43,14 +43,15 @@ Both the template and user project share the same `.ziku/ziku.jsonc` format — 
 
 ## Command overview
 
-| Command                   | Who runs it     | What it does                                                     |
-| ------------------------- | --------------- | ---------------------------------------------------------------- |
-| **`setup`**               | Template author | Initialize a template repository                                 |
-| **`init (user project)`** | Template user   | Initialize user project from template                            |
-| **`pull`**                | Template user   | Pull latest template updates to local project                    |
-| **`push`**                | Template user   | Push local changes to template (GitHub: PR / local: direct copy) |
-| **`diff`**                | Template user   | Show differences between local and template                      |
-| **`status`**              | Template user   | Show pending pull/push counts and recommend next action          |
-| **`track`**               | Template user   | Add file patterns to the sync whitelist                          |
+| Command                   | Who runs it     | What it does                                                                 |
+| ------------------------- | --------------- | ---------------------------------------------------------------------------- |
+| **`setup`**               | Template author | Initialize a template repository                                             |
+| **`init (user project)`** | Template user   | Initialize user project from template                                        |
+| **`pull`**                | Template user   | Pull latest template updates to local project                                |
+| **`push`**                | Template user   | Push local changes to template (GitHub: PR / local: direct copy)             |
+| **`diff`**                | Template user   | Show differences between local and template                                  |
+| **`status`**              | Template user   | Show pending pull/push counts and recommend next action                      |
+| **`track`**               | Template user   | Add file patterns to the sync whitelist                                      |
+| **`aggregate`**           | Template author | Inventory unsynced diffs across repositories using this template (read-only) |
 
 Template source info (owner/repo or local path) is stored in `.ziku/lock.json`, separate from patterns. When you `pull`, new patterns added to the template's `.ziku/ziku.jsonc` are automatically merged into yours.

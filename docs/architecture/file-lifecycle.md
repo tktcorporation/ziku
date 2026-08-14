@@ -152,6 +152,17 @@ Add file patterns to the sync whitelist
 | 読み取り | `.ziku/ziku.jsonc` | local | 現在の include パターンを取得   |
 | 更新     | `.ziku/ziku.jsonc` | local | 新しいパターンを include に追加 |
 
+### `aggregate`
+
+Inventory unsynced diffs across repositories using this template (read-only)
+
+| 操作     | ファイル           | 場所     | 詳細                                                                                    |
+| -------- | ------------------ | -------- | --------------------------------------------------------------------------------------- |
+| 読み取り | `.ziku/ziku.jsonc` | template | 比較基準となる include/exclude パターンを取得                                           |
+| 読み取り | `.ziku/lock.json`  | remote   | owner 配下の候補リポジトリの lock.json を取得し、対象テンプレートの利用リポジトリか判定 |
+| 読み取り | synced files       | template | 比較基準としてテンプレートを指定 commit でダウンロードしハッシュ計算                    |
+| 読み取り | synced files       | remote   | 利用リポジトリをダウンロードし、テンプレートとハッシュ比較して未同期差分を分類          |
+
 ## 補足
 
 ### init (user project)
@@ -179,5 +190,11 @@ Add file patterns to the sync whitelist
 ### track
 
 `ziku track` で追加したパターンはローカルの `ziku.jsonc` にのみ反映される。テンプレートに反映するには `ziku push` でテンプレートの `ziku.jsonc` を更新する。
+
+### aggregate
+
+`aggregate` は読み取り専用。GitHub 上のどのリポジトリの状態も変更しない。
+
+出力する JSON レポートは棚卸し結果であり、テンプレートへの統合（変更の反映）はこのコマンド自身では行わない。統合は後段のエージェントやオペレーターが別途 `push` 等で行う。
 
 <!-- LIFECYCLE:END -->

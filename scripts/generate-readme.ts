@@ -28,6 +28,7 @@ import { stripVTControlCharacters } from "node:util";
 import type { ArgsDef, CommandDef } from "citty";
 import { renderUsage } from "citty";
 import { z } from "zod";
+import { aggregateCommand } from "../src/commands/aggregate";
 import { diffCommand } from "../src/commands/diff";
 import { initCommand } from "../src/commands/init";
 import { pullCommand } from "../src/commands/pull";
@@ -174,12 +175,9 @@ function generateFeaturesSection(): string {
   );
 
   // lifecycle 配列からコマンドテーブルを自動生成
-  // setupLifecycle の name は "setup"、ops に template/create があれば template author
-  const commandRows = lifecycle.map((cmd) => {
-    const isTemplateAuthor = cmd.ops.some((op) => op.location === "template" && op.op === "create");
-    const role = isTemplateAuthor ? "Template author" : "Template user";
-    return `| **\`${cmd.name}\`** | ${role} | ${cmd.description} |`;
-  });
+  const commandRows = lifecycle.map(
+    (cmd) => `| **\`${cmd.name}\`** | ${cmd.audience} | ${cmd.description} |`,
+  );
 
   const lines: string[] = [
     "## How it Works\n",
@@ -249,6 +247,7 @@ async function generateCommandsSection(): Promise<string> {
     ...(await commandSection("diff", diffCommand)),
     ...(await commandSection("status", statusCommand)),
     ...(await commandSection("track", trackCommand)),
+    ...(await commandSection("aggregate", aggregateCommand)),
   ];
 
   return sections.join("\n");

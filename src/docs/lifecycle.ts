@@ -25,6 +25,7 @@ import type { CommandLifecycle, Op } from "./lifecycle-types";
 // 各コマンドからライフサイクルを集約
 // ──────────────────────────────────────────────
 
+import { aggregateLifecycle } from "../commands/aggregate";
 import { initUserLifecycle } from "../commands/init";
 import { pullLifecycle } from "../commands/pull";
 import { pushLifecycle } from "../commands/push";
@@ -41,6 +42,7 @@ export const lifecycle: readonly CommandLifecycle[] = [
   diffLifecycle,
   statusLifecycle,
   trackLifecycle,
+  aggregateLifecycle,
 ];
 
 // ──────────────────────────────────────────────
@@ -180,7 +182,7 @@ function generateCommandTables(): string {
     sections.push("| 操作 | ファイル | 場所 | 詳細 |");
     sections.push("|---|---|---|---|");
     for (const op of cmd.ops) {
-      const loc = op.location === "template" ? "template" : "local";
+      const loc = op.location;
       const fileDisplay = op.file === SYNCED_FILES ? "synced files" : `\`${op.file}\``;
       sections.push(`| ${opLabel(op.op)} | ${fileDisplay} | ${loc} | ${op.note} |`);
     }

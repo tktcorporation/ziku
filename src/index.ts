@@ -3,6 +3,7 @@ import * as p from "@clack/prompts";
 import { defineCommand, runMain } from "citty";
 import { Effect } from "effect";
 import { version } from "../package.json";
+import { aggregateCommand } from "./commands/aggregate";
 import { diffCommand } from "./commands/diff";
 import { initCommand } from "./commands/init";
 import { pullCommand } from "./commands/pull";
@@ -27,6 +28,7 @@ const main = defineCommand({
     diff: diffCommand,
     status: statusCommand,
     track: trackCommand,
+    aggregate: aggregateCommand,
   },
 });
 
@@ -116,6 +118,7 @@ async function run(): Promise<void> {
           "diff",
           "status",
           "track",
+          "aggregate",
           "--help",
           "-h",
           "--version",

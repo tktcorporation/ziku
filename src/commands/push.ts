@@ -47,6 +47,7 @@ import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked
 export const pushLifecycle: CommandLifecycle = {
   name: "push",
   description: "Push local changes to template (GitHub: PR / local: direct copy)",
+  audience: "Template user",
   ops: [
     { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "patterns を取得" },
     {
