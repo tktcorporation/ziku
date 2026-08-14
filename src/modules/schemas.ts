@@ -165,3 +165,100 @@ export const prResultSchema = z.object({
   branch: z.string(),
 });
 export type PrResult = z.infer<typeof prResultSchema>;
+
+// ────────────────────────────────────────────────────────────────
+// AggregateReport (`ziku aggregate` の出力) — テンプレート側で実行し、
+// owner 配下の利用リポジトリを横断して未同期差分を棚卸しした JSON レポート。
+// 後段の AI エージェント等が読む外部契約なので、形をここ 1 箇所にまとめる。
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * テンプレートへ未還元のファイルの理由。
+ * `classifyFiles` の分類カテゴリ（`src/utils/merge/types.ts` の `FileClassification`）に対応する:
+ * localOnly（ローカルのみ変更）/ deletedLocally（ローカルで削除）。
+ */
+export const pendingPushReasonSchema = z.enum(["localOnly", "deletedLocally"]);
+export type PendingPushReason = z.infer<typeof pendingPushReasonSchema>;
+
+/**
+ * 利用リポジトリへ未配布のファイルの理由。
+ * `classifyFiles` の分類カテゴリに対応する:
+ * autoUpdate（テンプレートのみ更新）/ newFiles（テンプレートで新規追加）/ deletedFiles（テンプレートで削除）。
+ */
+export const pendingPullReasonSchema = z.enum(["autoUpdate", "newFiles", "deletedFiles"]);
+export type PendingPullReason = z.infer<typeof pendingPullReasonSchema>;
+
+export const pendingPushEntrySchema = z.object({
+  path: z.string(),
+  reason: pendingPushReasonSchema,
+  /**
+   * 対象パスへの最終コミット日時（ISO 8601）。
+   * `since` フィルタ指定時のみ GitHub API から取得して設定される。
+   */
+  lastCommittedAt: z.string().optional(),
+});
+export type PendingPushEntry = z.infer<typeof pendingPushEntrySchema>;
+
+export const pendingPullEntrySchema = z.object({
+  path: z.string(),
+  reason: pendingPullReasonSchema,
+});
+export type PendingPullEntry = z.infer<typeof pendingPullEntrySchema>;
+
+export const conflictEntrySchema = z.object({
+  path: z.string(),
+  /** pendingPushEntrySchema と同じく、`since` フィルタ指定時のみ設定される */
+  lastCommittedAt: z.string().optional(),
+});
+export type ConflictEntry = z.infer<typeof conflictEntrySchema>;
+
+export const aggregateRepositoryReportSchema = z.object({
+  owner: z.string(),
+  repo: z.string(),
+  defaultBranch: z.string(),
+  /**
+   * このリポジトリの解決済み commit SHA。
+   * 後段のエージェントがこの SHA でファイル内容を決定的に取得できるようにするため必須。
+   */
+  ref: z.string(),
+  /** lock.json の baseRef。未設定（3-way マージのベース情報がない）なら省略される */
+  baseRef: z.string().optional(),
+  pendingPush: z.array(pendingPushEntrySchema),
+  pendingPull: z.array(pendingPullEntrySchema),
+  conflicts: z.array(conflictEntrySchema),
+});
+export type AggregateRepositoryReport = z.infer<typeof aggregateRepositoryReportSchema>;
+
+export const skippedRepositorySchema = z.object({
+  owner: z.string(),
+  repo: z.string(),
+  /** 処理できなかった理由（lock.json の取得失敗・パース失敗・スキーマ不一致など） */
+  reason: z.string(),
+});
+export type SkippedRepository = z.infer<typeof skippedRepositorySchema>;
+
+export const aggregateSummarySchema = z.object({
+  /** 集約対象になったリポジトリ総数（skipped・ziku 未導入・別テンプレート利用は含まない） */
+  totalRepositories: z.number().int().nonnegative(),
+  /** pendingPush が 1 件以上あるリポジトリ数 */
+  repositoriesWithPendingPush: z.number().int().nonnegative(),
+  /** pendingPush ファイルの総数 */
+  pendingPushFiles: z.number().int().nonnegative(),
+  /** conflict ファイルの総数 */
+  conflictFiles: z.number().int().nonnegative(),
+});
+export type AggregateSummary = z.infer<typeof aggregateSummarySchema>;
+
+export const aggregateReportSchema = z.object({
+  template: z.object({
+    owner: z.string(),
+    repo: z.string(),
+    /** 比較に使ったテンプレートリポジトリの commit SHA */
+    ref: z.string(),
+  }),
+  generatedAt: z.string().datetime({ offset: true }),
+  repositories: z.array(aggregateRepositoryReportSchema),
+  skipped: z.array(skippedRepositorySchema),
+  summary: aggregateSummarySchema,
+});
+export type AggregateReport = z.infer<typeof aggregateReportSchema>;
