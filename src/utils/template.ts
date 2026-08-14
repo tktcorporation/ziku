@@ -17,6 +17,7 @@ import { match } from "ts-pattern";
 import { TemplateError } from "../errors";
 import type { FileOperationResult, OverwriteStrategy } from "../modules/schemas";
 import { log } from "../ui/renderer";
+import { getGitHubToken } from "./github";
 import { loadMergedGitignore, separateByGitignore } from "./gitignore";
 import type { FlatPatterns } from "./patterns";
 import { resolvePatterns } from "./patterns";
@@ -67,6 +68,21 @@ function ensureGigetCacheDir(): void {
 
 // 後方互換性のためのエイリアス
 export type CopyResult = FileOperationResult;
+
+/**
+ * giget の downloadTemplate() に渡す認証トークンを取得する。
+ *
+ * 背景: プライベートリポジトリをテンプレートに指定した場合、認証なしでは
+ * ダウンロードが失敗する。getGitHubToken() が取得できない（未認証環境）場合は
+ * undefined を返し、giget にはトークン無しで渡す。giget は auth が undefined
+ * でも動作する（public リポジトリの取得を壊さないため、トークン必須にはしない）。
+ *
+ * giget は GIGET_AUTH 環境変数が設定されていればそちらを優先するが、
+ * このリポジトリの実行環境では通常未設定のため、ここで渡した値がそのまま使われる。
+ */
+function getTemplateAuth(): string | undefined {
+  return getGitHubToken();
+}
 
 /**
  * ZikuConfig の source フィールドから giget 用のテンプレートソース文字列を構築する。
@@ -128,7 +144,12 @@ export function acquireTempTemplate(
     yield* Effect.sync(ensureGigetCacheDir);
 
     const result = yield* Effect.tryPromise({
-      try: () => downloadTemplate(source ?? TEMPLATE_SOURCE, { dir: tempDir, force: true }),
+      try: () =>
+        downloadTemplate(source ?? TEMPLATE_SOURCE, {
+          dir: tempDir,
+          force: true,
+          auth: getTemplateAuth(),
+        }),
       catch: (e) => new TemplateError({ message: "Failed to download template", cause: e }),
     });
 
@@ -153,7 +174,11 @@ export function downloadTemplateToTemp(
   // 後段で同名 .ziku-temp* が新規作成された場合に process exit で
   // 誤って削除されうるので、reject 経路でも unregister + rmSync する。
   // try/catch は ast-grep で禁止のため Promise.then(onFulfilled, onRejected) を使う。
-  return downloadTemplate(source ?? TEMPLATE_SOURCE, { dir: tempDir, force: true }).then(
+  return downloadTemplate(source ?? TEMPLATE_SOURCE, {
+    dir: tempDir,
+    force: true,
+    auth: getTemplateAuth(),
+  }).then(
     ({ dir: templateDir }) => {
       const cleanup = () => {
         unregisterTempDir(tempDir);
@@ -276,6 +301,7 @@ export function fetchTemplates(options: DownloadOptions): Promise<FileOperationR
       const result = await downloadTemplate(TEMPLATE_SOURCE, {
         dir: tempDir,
         force: true,
+        auth: getTemplateAuth(),
       });
       templateDir = result.dir;
     } else {
