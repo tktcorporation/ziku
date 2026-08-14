@@ -37,6 +37,11 @@ import {
 } from "../prompts";
 import { globPatterns, repoRelPath, repoRelPaths } from "../../__tests__/brands";
 
+/** バイナリの内容を差分の string チャネルへ載せた形（バイト保存の latin1）。 */
+function asBinaryContent(bytes: number[]): string {
+  return Buffer.from(bytes).toString("latin1");
+}
+
 const testEntries = [
   {
     label: ".devcontainer",
@@ -152,6 +157,25 @@ describe("prompts", () => {
       // 衝突ファイルは hint で明示される
       const badOption = callArg.options.find((o) => o.value === "bad.ts");
       expect(badOption?.hint).toContain("conflict");
+    });
+
+    it("バイナリの hint は行数ではなく (binary) を出す", async () => {
+      const files: FileDiff[] = [
+        {
+          path: repoRelPath("assets/icon.png"),
+          type: "modified",
+          templateContent: asBinaryContent([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]),
+          localContent: asBinaryContent([0x89, 0x50, 0x4e, 0x47, 0x00, 0x02]),
+        },
+      ];
+      vi.mocked(p.multiselect).mockResolvedValue([]);
+      await selectPushFiles(files);
+
+      const callArg = vi.mocked(p.multiselect).mock.calls[0][0] as {
+        options: Array<{ value: string; hint?: string }>;
+      };
+      // バイナリは増減行数を持たないので、0 行を根拠に hint ごと落とすと種別が伝わらない
+      expect(callArg.options[0].hint).toContain("binary");
     });
   });
 

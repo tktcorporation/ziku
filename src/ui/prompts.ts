@@ -14,7 +14,7 @@ import pc from "picocolors";
 import { match } from "ts-pattern";
 import type { GlobPattern, FileDiff, OverwriteStrategy, RepoRelPath } from "../modules/schemas";
 import type { UntrackedFilesByFolder } from "../utils/untracked";
-import { calculateDiffStats, formatStats } from "./diff-view";
+import { formatStatHint } from "./diff-view";
 import { selectFilesWithDiffPreview } from "./file-select-with-diff";
 
 /** ユーザーが Ctrl+C でキャンセルした場合の統一処理 */
@@ -189,13 +189,6 @@ export async function inputTemplateSource(defaultValue?: string): Promise<string
 
 // ─── push ─────────────────────────────────────────────────────
 
-/** unified diff ベースで正確な変更行数を算出する（hint テキスト用） */
-function fileStatHint(file: FileDiff): string {
-  const stats = calculateDiffStats(file);
-  if (stats.additions === 0 && stats.deletions === 0) return "";
-  return formatStats(stats);
-}
-
 /**
  * push 対象ファイルの選択（Diff プレビュー付き）
  *
@@ -243,7 +236,7 @@ export async function selectPushFilesFallback(
     options: files.map((f) => {
       const hint = conflicted.has(f.path)
         ? pc.red("conflict — resolve with ziku pull")
-        : fileStatHint(f);
+        : formatStatHint(f);
       return {
         value: f.path,
         label: `${typeIcon(f.type)} ${f.path}`,

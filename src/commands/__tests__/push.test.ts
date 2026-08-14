@@ -656,23 +656,39 @@ describe("pushCommand", () => {
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
-    it("deletedWithLocalEdits を push 候補に含める", async () => {
-      mockClassifyFiles.mockReturnValueOnce({
-        autoUpdate: [],
-        localOnly: [],
-        conflicts: [],
-        newFiles: [],
-        deletedFiles: [],
-        deletedWithLocalEdits: repoRelPaths(["edited.md"]),
-        deletedLocally: [],
-        unchanged: [],
-      });
-      mockDetectDiff.mockResolvedValueOnce({
-        files: [{ path: repoRelPath("edited.md"), type: "added", localContent: "local edits" }],
-      });
+    it("deletedWithLocalEdits は候補に入るが、非対話の既定集合からは外れる", async () => {
+      const setupRestore = () => {
+        mockClassifyFiles.mockReturnValueOnce({
+          autoUpdate: [],
+          localOnly: [],
+          conflicts: [],
+          newFiles: [],
+          deletedFiles: [],
+          deletedWithLocalEdits: repoRelPaths(["edited.md"]),
+          deletedLocally: [],
+          unchanged: [],
+        });
+        mockDetectDiff.mockResolvedValueOnce({
+          files: [{ path: repoRelPath("edited.md"), type: "added", localContent: "local edits" }],
+        });
+      };
 
+      setupRestore();
       await (pushCommand.run as any)({
         args: { dir: "/test", dryRun: true, yes: false, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      // 候補が空なら "No changes to push" で先に終わる。選択の結果として外れたことを区別する。
+      expect(mockLog.info).toHaveBeenCalledWith(
+        expect.stringContaining("No files match the current selection"),
+      );
+      expect(mockLog.info).not.toHaveBeenCalledWith(expect.stringContaining("No changes to push"));
+
+      setupRestore();
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: true, yes: false, edit: false, files: "edited.md" },
         rawArgs: [],
         cmd: pushCommand,
       });
@@ -681,7 +697,7 @@ describe("pushCommand", () => {
       expect(previewArg.map((f) => f.path)).toEqual(["edited.md"]);
     });
 
-    it("deletedWithLocalEdits の push はテンプレの削除を取り消すとサマリで示す", async () => {
+    it("--yes はテンプレートの削除を取り消さない", async () => {
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: repoRelPaths(["plain.txt"]),
@@ -698,7 +714,6 @@ describe("pushCommand", () => {
           { path: repoRelPath("plain.txt"), type: "added", localContent: "plain" },
         ],
       });
-      // --yes なので既定集合（追加された 2 ファイル）がそのまま push 対象になる
       mockGetGitHubToken.mockReturnValue("ghp_token");
       mockCreatePullRequest.mockResolvedValueOnce({
         url: "https://github.com/owner/repo/pull/1",
@@ -711,6 +726,46 @@ describe("pushCommand", () => {
         rawArgs: [],
         cmd: pushCommand,
       });
+
+      // 削除の取り消しはテンプレートを使う全プロジェクトへ配られる。確認画面を見ていない
+      // 実行では送らない。
+      const prArg = mockCreatePullRequest.mock.calls[0]?.[1];
+      expect(prArg?.files.map((f) => f.path)).toEqual(["plain.txt"]);
+    });
+
+    it("deletedWithLocalEdits を対話で明示選択すると送られ、削除の取り消しだとサマリで示す", async () => {
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: repoRelPaths(["plain.txt"]),
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedWithLocalEdits: repoRelPaths(["edited.md"]),
+        deletedLocally: [],
+        unchanged: [],
+      });
+      const files: FileDiff[] = [
+        { path: repoRelPath("edited.md"), type: "added", localContent: "local edits" },
+        { path: repoRelPath("plain.txt"), type: "added", localContent: "plain" },
+      ];
+      mockDetectDiff.mockResolvedValueOnce({ files });
+      mockSelectPushFiles.mockResolvedValueOnce(files);
+      mockGetGitHubToken.mockReturnValue("ghp_token");
+      mockConfirmAction.mockResolvedValueOnce(true);
+      mockCreatePullRequest.mockResolvedValueOnce({
+        url: "https://github.com/owner/repo/pull/1",
+        branch: "update-template-123",
+        number: 1,
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: false, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      const prArg = mockCreatePullRequest.mock.calls[0]?.[1];
+      expect(prArg?.files.map((f) => f.path)).toEqual(["edited.md", "plain.txt"]);
 
       const summary = mockLog.message.mock.calls
         .map((call) => call[0])

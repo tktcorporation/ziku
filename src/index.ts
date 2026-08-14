@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { statSync } from "node:fs";
 import * as p from "@clack/prompts";
 import { defineCommand, runCommand, runMain } from "citty";
 import type { ArgsDef, CommandDef } from "citty";
@@ -168,6 +169,27 @@ function looksLikePath(value: string): boolean {
   );
 }
 
+/**
+ * 引数がディレクトリとして実在するか判定する。
+ *
+ * `dist` や `dish` のような、ありふれていてサブコマンド名とも編集距離が近い名前を打ち間違い
+ * 扱いにしないための判定。実在するディレクトリを指しているなら、それは `ziku <dir>` の init
+ * ショートハンドであって打ち間違いではない。
+ *
+ * `throwIfNoEntry: false` が畳むのは不在（ENOENT）だけで、パスに使えないバイトを含む・
+ * 名前が長すぎるといった入力は例外で飛ぶ。それを ziku の不具合として報告すると、ユーザーには
+ * 入力ミスに対してスタックトレースが出る。失敗はすべて「ディレクトリではない」に倒し、
+ * 後続の打ち間違い判定と init へ入力をそのまま流す。
+ */
+function isExistingDirectory(value: string): boolean {
+  return Effect.runSync(
+    Effect.try(() => statSync(value, { throwIfNoEntry: false })?.isDirectory() === true).pipe(
+      // 失敗は「ディレクトリではない」という答えそのものなので握り潰しにならない。
+      Effect.orElseSucceed(() => false),
+    ),
+  );
+}
+
 /** 2 つの文字列の Levenshtein 距離（挿入・削除・置換の最小回数）。 */
 function editDistance(a: string, b: string): number {
   // 直前の行だけを保持する DP。row[j] は「a の先頭 i 文字」と「b の先頭 j 文字」の距離。
@@ -190,16 +212,19 @@ function editDistance(a: string, b: string): number {
  * として扱う。この経路は `ziku pul` のような打ち間違いも受け取り、存在しないディレクトリを
  * 作ってテンプレートを展開してしまう。init へ流す前にここで候補を探す。
  *
- * 判定基準:
+ * 判定基準（この順に見る）:
  * 1. `looksLikePath` が真ならディレクトリ指定が確定なので候補なし
- * 2. 小文字化した入力とサブコマンド名の編集距離が `MAX_SUBCOMMAND_TYPO_DISTANCE` 以下なら候補
- * 3. 候補が複数あるときは距離が最小のものだけを返す
+ * 2. その名前のディレクトリが実在するならディレクトリ指定なので候補なし。距離より実在を先に
+ *    見るのは、`ziku dist` のように既存ディレクトリ名がサブコマンド名（`diff`）と近いだけの
+ *    ケースで init ショートハンドを潰さないため
+ * 3. 小文字化した入力とサブコマンド名の編集距離が `MAX_SUBCOMMAND_TYPO_DISTANCE` 以下なら候補
+ * 4. 候補が複数あるときは距離が最小のものだけを返す
  *
- * 打ち間違いではなく本当にその名前のディレクトリを作りたい場合のために、案内側では
+ * 打ち間違いではなく、まだ存在しない名前のディレクトリを作りたい場合のために、案内側では
  * `ziku init <name>` という逃げ道を示す。
  */
 function nearestSubCommands(value: string): SubCommandName[] {
-  if (looksLikePath(value)) return [];
+  if (looksLikePath(value) || isExistingDirectory(value)) return [];
 
   const normalized = value.toLowerCase();
   const candidates = SUBCOMMAND_NAMES.map((name) => ({

@@ -25,8 +25,7 @@ import type { FileDiff } from "../modules/schemas";
 import { generateUnifiedDiff } from "../utils/diff";
 import {
   applyWordDiffAndColorize,
-  calculateDiffStats,
-  formatStats,
+  formatStatHint,
   getTypeIcon,
   getTypeLabel,
   toDiffContentLines,
@@ -120,10 +119,10 @@ export function buildFileItems(files: FileDiff[], conflictedPaths?: Set<string>)
   return files.map((file) => {
     const icon = getTypeIcon(file.type);
 
-    const stats = calculateDiffStats(file);
-    const statHint = stats.additions === 0 && stats.deletions === 0 ? "" : formatStats(stats);
     // 未解決の衝突は hint で明示する。選ぶと push が中断する（要 ziku pull）ことを伝える。
-    const hint = conflicted.has(file.path) ? pc.red("conflict — resolve with ziku pull") : statHint;
+    const hint = conflicted.has(file.path)
+      ? pc.red("conflict — resolve with ziku pull")
+      : formatStatHint(file);
 
     return {
       file,

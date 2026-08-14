@@ -62,7 +62,9 @@ export interface PushCandidatePlan {
   readonly pushablePaths: ReadonlySet<RepoRelPath>;
   /**
    * 送るとテンプレート側の削除を取り消すことになるパス。
+   *
    * 同じ「追加」の見た目でも意味が違うので、サマリで区別して見せる。
+   * {@link defaultPushSelection} はこの集合を既定から外す。
    */
   readonly restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
   /** テンプレート側だけが変えたので送らないパス。pull を促す対象として見せる。 */
@@ -91,9 +93,8 @@ export function planPushCandidates(plan: SyncPlan): PushCandidatePlan {
     ...classification.localOnly,
     ...classification.conflicts,
     ...classification.deletedLocally,
-    // テンプレートに無く、ローカルにだけ編集済みの内容がある状態。テンプレートへ送る候補
-    // としては localOnly と同じ扱いになる（送るとテンプレート側の削除が取り消される点だけが
-    // 異なり、それはサマリで明示する）。
+    // テンプレートに無く、ローカルにだけ編集済みの内容がある状態。候補には入るが、送ると
+    // テンプレート側の削除が取り消されるため既定では選ばない（{@link defaultPushSelection}）。
     ...classification.deletedWithLocalEdits,
   ]);
   const restoresTemplateDeletion = new Set<RepoRelPath>(classification.deletedWithLocalEdits);
@@ -155,6 +156,7 @@ export type PushFileSelection =
       readonly _tag: "Default";
       readonly includeDeletions: boolean;
       readonly conflictedPaths: ReadonlySet<string>;
+      readonly restoresTemplateDeletion: ReadonlySet<string>;
     }
   /** 対話で選ばれた結果をそのまま使う。 */
   | { readonly _tag: "Chosen"; readonly paths: readonly RepoRelPath[] };
@@ -191,17 +193,34 @@ export function filterByFilesArg(
 }
 
 /**
- * 対話選択を経由しないときの既定集合を算出する。
+ * 対話選択を経由しないときの既定集合を算出する。dry-run のプレビューと `--yes` の実 push が
+ * 同じ集合になるよう共有する。
  *
- * 対話プロンプトの初期選択と同じ規則: 未解決の衝突と、`--include-deletions` でない削除を
- * 既定で外す。dry-run のプレビューと `--yes` の実 push が同じ集合になるよう共有する。
+ * 既定から外すもの:
+ * - 未解決の衝突。選ぶと push が中断する。
+ * - `--include-deletions` でない削除。テンプレートからファイルが消える。
+ * - テンプレート側の削除を取り消すファイル（`restoresTemplateDeletion`）。
+ *
+ * 削除の取り消しを外す理由は、テンプレートが消したファイルが復活し、そのテンプレートを使う
+ * 全プロジェクトへ配られるため。ファイルの削除を送るには `--include-deletions` というゲートが
+ * あるのに取り消し側に無いと、`pull` より先に走った非対話 push がテンプレートの削除を黙って
+ * 巻き戻す。フラグを増やさず既定から外すだけに留めるのは、削除の取り消しが必要になる場面が
+ * 稀で、必要なときはユーザーが対話の一覧（`restores file deleted in template` の注記付き）を
+ * 見て明示的に選べる状況だから。候補からは外さないので、意図があれば対話で送れる。
  */
 export function defaultPushSelection(
   candidates: readonly ChangedFileDiff[],
-  opts: { includeDeletions: boolean; conflictedPaths: ReadonlySet<string> },
+  opts: {
+    includeDeletions: boolean;
+    conflictedPaths: ReadonlySet<string>;
+    restoresTemplateDeletion: ReadonlySet<string>;
+  },
 ): ChangedFileDiff[] {
   return candidates.filter(
-    (f) => !opts.conflictedPaths.has(f.path) && (opts.includeDeletions || f.type !== "deleted"),
+    (f) =>
+      !opts.conflictedPaths.has(f.path) &&
+      !opts.restoresTemplateDeletion.has(f.path) &&
+      (opts.includeDeletions || f.type !== "deleted"),
   );
 }
 

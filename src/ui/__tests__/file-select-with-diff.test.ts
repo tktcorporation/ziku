@@ -19,6 +19,11 @@ import { repoRelPath } from "../../__tests__/brands";
 
 // ─── ヘルパー ──────────────────────────────────────────────────
 
+/** バイナリの内容を差分の string チャネルへ載せた形（バイト保存の latin1）。 */
+function asBinaryContent(bytes: number[]): string {
+  return Buffer.from(bytes).toString("latin1");
+}
+
 /** テスト用の RenderState を生成する */
 function createTestState(
   overrides?: Partial<Pick<RenderState, "cursorIndex" | "diffScrollOffset">>,
@@ -747,6 +752,35 @@ describe("file-select-with-diff", () => {
       expect(state.selected.size).toBe(40);
       applyAction(state, "toggleAll", 24);
       expect(state.selected.size).toBe(0);
+    });
+  });
+
+  describe("buildFileItems", () => {
+    it("バイナリの hint は行数ではなく (binary) を出す", () => {
+      const binary: FileDiff = {
+        path: repoRelPath("assets/icon.png"),
+        type: "modified",
+        templateContent: asBinaryContent([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]),
+        localContent: asBinaryContent([0x89, 0x50, 0x4e, 0x47, 0x00, 0x02]),
+      };
+
+      const [item] = buildFileItems([binary]);
+
+      // バイナリは増減行数を持たないので、0 行を根拠に hint ごと落とすと種別が伝わらない
+      expect(stripCsi(item.hint)).toContain("(binary)");
+    });
+
+    it("増減のないテキストは hint を出さない", () => {
+      const unchanged: FileDiff = {
+        path: repoRelPath("same.ts"),
+        type: "unchanged",
+        localContent: "same\n",
+        templateContent: "same\n",
+      };
+
+      const [item] = buildFileItems([unchanged]);
+
+      expect(item.hint).toBe("");
     });
   });
 });

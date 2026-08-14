@@ -198,17 +198,50 @@ describe("filterByFilesArg", () => {
 describe("defaultPushSelection", () => {
   const candidates = [added("a.txt"), deleted("gone.txt"), modified("conflict.txt")];
   const conflictedPaths = new Set<string>(["conflict.txt"]);
+  const noRestores = new Set<string>();
 
   it("未解決の衝突と削除を既定で外す", () => {
-    const selected = defaultPushSelection(candidates, { includeDeletions: false, conflictedPaths });
+    const selected = defaultPushSelection(candidates, {
+      includeDeletions: false,
+      conflictedPaths,
+      restoresTemplateDeletion: noRestores,
+    });
 
     expect(paths(selected)).toEqual(["a.txt"]);
   });
 
   it("--include-deletions を指定すると削除も含める", () => {
-    const selected = defaultPushSelection(candidates, { includeDeletions: true, conflictedPaths });
+    const selected = defaultPushSelection(candidates, {
+      includeDeletions: true,
+      conflictedPaths,
+      restoresTemplateDeletion: noRestores,
+    });
 
     expect(paths(selected)).toEqual(["a.txt", "gone.txt"]);
+  });
+
+  it("テンプレートの削除を取り消すファイルは既定で外す", () => {
+    const withRestore = [added("a.txt"), added("restored.txt")];
+
+    const selected = defaultPushSelection(withRestore, {
+      includeDeletions: false,
+      conflictedPaths: new Set<string>(),
+      restoresTemplateDeletion: new Set<string>(["restored.txt"]),
+    });
+
+    expect(paths(selected)).toEqual(["a.txt"]);
+  });
+
+  it("--include-deletions でも削除の取り消しは既定に入らない", () => {
+    const withRestore = [added("a.txt"), added("restored.txt")];
+
+    const selected = defaultPushSelection(withRestore, {
+      includeDeletions: true,
+      conflictedPaths: new Set<string>(),
+      restoresTemplateDeletion: new Set<string>(["restored.txt"]),
+    });
+
+    expect(paths(selected)).toEqual(["a.txt"]);
   });
 });
 
@@ -230,9 +263,29 @@ describe("applyPushSelection", () => {
       _tag: "Default",
       includeDeletions: false,
       conflictedPaths: new Set<string>(),
+      restoresTemplateDeletion: new Set<string>(),
     });
 
     expect(paths(selected)).toEqual(["a.txt", "b.txt"]);
+  });
+
+  it("削除の取り消しは対話で明示選択すれば送れる", () => {
+    const restoring = [added("a.txt"), added("restored.txt")];
+    const restoresTemplateDeletion = new Set<string>(["restored.txt"]);
+
+    const viaDefault = applyPushSelection(restoring, {
+      _tag: "Default",
+      includeDeletions: false,
+      conflictedPaths: new Set<string>(),
+      restoresTemplateDeletion,
+    });
+    const viaChosen = applyPushSelection(restoring, {
+      _tag: "Chosen",
+      paths: repoRelPaths(["restored.txt"]),
+    });
+
+    expect(paths(viaDefault.selected)).toEqual(["a.txt"]);
+    expect(paths(viaChosen.selected)).toEqual(["restored.txt"]);
   });
 
   it("対話の選択結果は候補の並び順で返す", () => {

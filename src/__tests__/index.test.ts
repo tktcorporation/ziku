@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockRunCommand = vi.fn();
@@ -227,6 +230,62 @@ describe("引数の振り分け", () => {
       const { initCommand } = await import("../commands/init");
       expect(cmd).toBe(initCommand);
       expect(rawArgs).toEqual(["my-new-project"]);
+    });
+
+    describe("サブコマンド名と近いが実在するディレクトリ名", () => {
+      let workDir: string;
+      let originalCwd: string;
+
+      beforeEach(() => {
+        originalCwd = process.cwd();
+        workDir = mkdtempSync(join(tmpdir(), "ziku-dispatch-"));
+        process.chdir(workDir);
+      });
+
+      afterEach(() => {
+        process.chdir(originalCwd);
+        rmSync(workDir, { recursive: true, force: true });
+      });
+
+      it("`ziku dist` は dist が実在すれば init として実行する", async () => {
+        mkdirSync(join(workDir, "dist"));
+
+        await runWithArgv(["dist"]);
+
+        const { cmd, rawArgs } = dispatchedCommand();
+        const { initCommand } = await import("../commands/init");
+        expect(cmd).toBe(initCommand);
+        expect(rawArgs).toEqual(["dist"]);
+      });
+
+      it("`ziku dist` は dist が実在しなければ diff の打ち間違いとして扱う", async () => {
+        await runWithArgv(["dist"]);
+
+        expect(mockRunCommand).not.toHaveBeenCalled();
+        expect(shownFailure().hint).toContain("ziku diff");
+      });
+
+      it("同名のファイルはディレクトリではないので打ち間違い判定にかける", async () => {
+        writeFileSync(join(workDir, "dist"), "");
+
+        await runWithArgv(["dist"]);
+
+        expect(mockRunCommand).not.toHaveBeenCalled();
+        expect(shownFailure().hint).toContain("ziku diff");
+      });
+
+      it("ディレクトリ名として使えない引数でも実在判定でクラッシュしない", async () => {
+        // ENAMETOOLONG は不在ではないので statSync が例外を投げる。ziku の不具合として
+        // スタックトレースを出さず、通常の入力として init へ渡す。
+        const tooLong = "x".repeat(5000);
+
+        await runWithArgv([tooLong]);
+
+        const { cmd, rawArgs } = dispatchedCommand();
+        const { initCommand } = await import("../commands/init");
+        expect(cmd).toBe(initCommand);
+        expect(rawArgs).toEqual([tooLong]);
+      });
     });
   });
 

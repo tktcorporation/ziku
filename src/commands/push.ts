@@ -595,6 +595,7 @@ async function pushProject(params: {
       templateDir: ctx.templateDir,
       candidates,
       unresolvedConflicts,
+      restoresTemplateDeletion: candidatePlan.restoresTemplateDeletion,
       args,
     });
     return;
@@ -604,6 +605,7 @@ async function pushProject(params: {
     filesArg: args.files,
     includeDeletions: args.includeDeletions,
     conflictedPaths: unresolvedConflicts,
+    restoresTemplateDeletion: candidatePlan.restoresTemplateDeletion,
     yes: args.yes,
   });
   if (selected.length === 0) return;
@@ -681,9 +683,10 @@ async function previewPush(params: {
   templateDir: AbsPath;
   candidates: readonly ChangedFileDiff[];
   unresolvedConflicts: ReadonlySet<RepoRelPath>;
+  restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
   args: PushArgs;
 }): Promise<void> {
-  const { candidates, unresolvedConflicts, args } = params;
+  const { candidates, unresolvedConflicts, restoresTemplateDeletion, args } = params;
   log.info("Dry run mode");
 
   let previewFiles: readonly ChangedFileDiff[];
@@ -695,6 +698,7 @@ async function previewPush(params: {
     previewFiles = defaultPushSelection(candidates, {
       includeDeletions: args.includeDeletions,
       conflictedPaths: unresolvedConflicts,
+      restoresTemplateDeletion,
     });
   }
 
@@ -921,6 +925,7 @@ async function selectFilesToPush(
     filesArg: string | undefined;
     includeDeletions: boolean;
     conflictedPaths: Set<RepoRelPath>;
+    restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
     yes: boolean;
   },
 ): Promise<readonly ChangedFileDiff[]> {
@@ -953,6 +958,7 @@ async function chooseSelection(
     filesArg: string | undefined;
     includeDeletions: boolean;
     conflictedPaths: Set<RepoRelPath>;
+    restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
     yes: boolean;
   },
 ): Promise<PushFileSelection> {
@@ -962,6 +968,7 @@ async function chooseSelection(
       _tag: "Default",
       includeDeletions: opts.includeDeletions,
       conflictedPaths: opts.conflictedPaths,
+      restoresTemplateDeletion: opts.restoresTemplateDeletion,
     };
   }
 

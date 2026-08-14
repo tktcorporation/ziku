@@ -114,6 +114,21 @@ export function formatStats(stats: DiffStats): string {
     .exhaustive();
 }
 
+/**
+ * ファイル選択一覧の hint に出す差分の要約。出すものが無ければ空文字列。
+ *
+ * 増減 0 を「ヒント不要」と読めるのはテキストのときだけ。バイナリの {@link DiffStats} は
+ * 行という単位を持たないので増減が 0 で固定されており、数値だけで切ると内容が変わった
+ * バイナリまでヒント無しで並ぶ。種別で切ってから増減を見る。
+ */
+export function formatStatHint(file: FileDiff): string {
+  const stats = calculateDiffStats(file);
+  return match(stats)
+    .with({ kind: "binary" }, (s) => formatStats(s))
+    .with({ kind: "text" }, (s) => (s.additions === 0 && s.deletions === 0 ? "" : formatStats(s)))
+    .exhaustive();
+}
+
 // ─── 種別の表示 ────────────────────────────────────────────────
 
 /**
