@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DefaultBranchUnresolvedError, GitHubAuthRejectedError, ZikuFailure } from "../../errors";
 import type { GitHubSource, LockState, TemplateSource } from "../../modules/schemas";
 import { createPendingLock, markSynced } from "../../modules/schemas";
+import type { LockWritePolicy } from "../command-context";
 import { absPath, commitSha, hashMap } from "../../__tests__/brands";
 
 const githubSource: GitHubSource = {
@@ -41,7 +42,10 @@ vi.mock("../../utils/ziku-config", async () => {
 
 vi.mock("../../utils/lock", async () => {
   const effectMod = await import("effect");
-  return { loadLock: vi.fn(() => effectMod.Effect.succeed(undefined)) };
+  return {
+    loadLock: vi.fn(() => effectMod.Effect.succeed(undefined)),
+    saveLock: vi.fn(() => Promise.resolve()),
+  };
 });
 
 vi.mock("../../utils/template-resolve", async () => {
@@ -66,16 +70,17 @@ vi.mock("../../utils/template-resolve", async () => {
 vi.mock("../../utils/github", () => ({ resolveSourceCommit: vi.fn() }));
 
 const { loadCommandContext, toZikuFailure } = await import("../command-context");
-const { loadLock } = await import("../../utils/lock");
+const { loadLock, saveLock } = await import("../../utils/lock");
 const { resolveSourceCommit } = await import("../../utils/github");
 
 const mockLoadLock = vi.mocked(loadLock);
+const mockSaveLock = vi.mocked(saveLock);
 const mockResolveSourceCommit = vi.mocked(resolveSourceCommit);
 
 /** 指定のソースを持つ lock でコンテキストを組み立てる。 */
-async function loadContextWith(source: TemplateSource) {
+async function loadContextWith(source: TemplateSource, lockWrite: LockWritePolicy = "readOnly") {
   mockLoadLock.mockReturnValue(Effect.succeed(lockWith(source)));
-  return Effect.runPromise(loadCommandContext(absPath("/test")));
+  return Effect.runPromise(loadCommandContext(absPath("/test"), lockWrite));
 }
 
 /** 指定のソースを持つ lock でコンテキストを組み立て、resolveBaseRef を走らせる。 */
@@ -162,6 +167,48 @@ describe("lock への既定ブランチの控え", () => {
     const ctx = await loadContextWith(localSource);
 
     expect(ctx.lock.source).toEqual(localSource);
+  });
+});
+
+/**
+ * 控えの書き出しを、コマンドの return 地点ではなくここが担うことの検証。
+ *
+ * コマンド側は方針（{@link LockWritePolicy}）を宣言するだけなので、書くものが無いと判断して
+ * 早期に戻る経路でも控えは残る。
+ */
+describe("控えの書き出し", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockResolveSourceCommit.mockResolvedValue({ _tag: "Resolved", sha: commitSha("sha-latest") });
+  });
+
+  it("persist なら、改名された既定ブランチ名を lock へ書き出す", async () => {
+    await loadContextWith({ ...githubSource, defaultBranch: "master" }, "persist");
+
+    expect(mockSaveLock).toHaveBeenCalledTimes(1);
+    expect(mockSaveLock.mock.calls[0][1].source).toEqual({
+      ...githubSource,
+      defaultBranch: "main",
+    });
+  });
+
+  it("persist でも、控えが変わっていなければ書き出さない", async () => {
+    await loadContextWith({ ...githubSource, defaultBranch: "main" }, "persist");
+
+    expect(mockSaveLock).not.toHaveBeenCalled();
+  });
+
+  it("readOnly は控えが変わっても書き出さない", async () => {
+    const ctx = await loadContextWith({ ...githubSource, defaultBranch: "master" }, "readOnly");
+
+    expect(mockSaveLock).not.toHaveBeenCalled();
+    expect(ctx.lock.source).toEqual({ ...githubSource, defaultBranch: "main" });
+  });
+
+  it("ローカルソースは控えを持たないので書き出さない", async () => {
+    await loadContextWith(localSource, "persist");
+
+    expect(mockSaveLock).not.toHaveBeenCalled();
   });
 });
 

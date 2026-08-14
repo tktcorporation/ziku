@@ -202,7 +202,6 @@ function mockContext(
       resolved: resolvedTemplate({ source: testSource, dir: absPath("/tmp/template") }),
       templateDir: absPath("/tmp/template"),
       cleanup,
-      lockRefreshed: false,
       resolveBaseRef: Effect.succeed(Option.none<CommitSha>()),
     }),
     cleanup,
@@ -341,6 +340,26 @@ describe("statusCommand", () => {
       expect(mockLog.warn).toHaveBeenCalledWith("No patterns configured");
       expect(mockOutro).toHaveBeenCalledWith("Nothing to compare.");
       expect(cleanup).toHaveBeenCalled();
+    });
+
+    it("lock を書き変えない方針で読み込む", async () => {
+      // status は読み取り専用なので、既定ブランチの控えもディスクへ残さない（書き出すかの
+      // 判断は loadCommandContext が方針から決める）。
+      const { effect } = mockContext();
+      mockLoadCommandContext.mockReturnValue(effect);
+      mockAnalyzeSync.mockResolvedValueOnce({
+        plan: syncPlanOf(emptyClassification()),
+        hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
+      });
+
+      // biome-ignore lint/suspicious/noExplicitAny: citty run signature
+      await (statusCommand.run as any)({
+        args: { dir: "/test" },
+        rawArgs: [],
+        cmd: statusCommand,
+      });
+
+      expect(mockLoadCommandContext).toHaveBeenCalledWith(absPath("/test"), "readOnly");
     });
 
     it("完全 in-sync のとき outro に 'In sync' のメッセージを渡す", async () => {

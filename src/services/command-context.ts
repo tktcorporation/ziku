@@ -22,7 +22,7 @@ import type {
   ZikuFailure,
 } from "../errors";
 import { loadZikuConfig } from "../utils/ziku-config";
-import { loadLock } from "../utils/lock";
+import { loadLock, saveLock } from "../utils/lock";
 import type { ResolvedTemplate } from "../utils/template-resolve";
 import { resolveTemplateDirScoped } from "../utils/template-resolve";
 import type { CommitShaResolution } from "../utils/github";
@@ -36,20 +36,11 @@ export interface CommandContextShape {
   /**
    * lock.json の同期状態（source 含む）。
    *
-   * ディスク上の lock と 1 箇所だけ違う場合がある。既定ブランチを GitHub から引けたときは
-   * その名前を `source.defaultBranch` へ控え直した状態で渡す（{@link loadCommandContext}）。
-   * lock を書き出すコマンドはこれを起点に次の状態を作ること。
+   * 既定ブランチを GitHub から引けたときは、その名前を `source.defaultBranch` へ控え直した
+   * 状態で渡す（{@link loadCommandContext}）。lock を書き出すコマンドはこれを起点に次の
+   * 状態を作ること。
    */
   readonly lock: LockState;
-  /**
-   * {@link lock} がディスク上の内容と違うか。
-   *
-   * 控え直した既定ブランチは lock を書き出したときだけ残る。書くものが無いと判断して早期に
-   * 戻る経路がこれを見ないと、GitHub 側でブランチが改名された直後の実行（内容は同じなので
-   * 取り込む変更が 0 件）で控えが古いまま残り、次に GitHub へ問い合わせられないときの
-   * 取得先が存在しないブランチを指す。
-   */
-  readonly lockRefreshed: boolean;
   /** テンプレートの取得元（lock.source のエイリアス） */
   readonly source: TemplateSource;
   /**
@@ -93,6 +84,20 @@ export class CommandContext extends Context.Tag("CommandContext")<
   CommandContextShape
 >() {}
 
+/**
+ * この実行が lock をディスクへ書き出してよいか。
+ *
+ * 控え直した既定ブランチが残るのは lock を書き出したときだけなので、書き出す判断は控えを
+ * 作る {@link loadCommandContext} が持つ。コマンドは実行ごとにこの方針を 1 回だけ宣言し、
+ * 個別の return 地点では判断しない。真偽値ではなく名前の付いた 2 値にするのは、呼び出し側で
+ * どちらの約束を選んだかが読めるようにするため。
+ */
+export type LockWritePolicy =
+  /** 控えが変わっていたら lock を書き出す。lock を更新する実行（pull / push）が選ぶ。 */
+  | "persist"
+  /** ディスクへ書かない。読むだけの実行（diff / status）と `--dry-run` が選ぶ。 */
+  | "readOnly";
+
 /** loadCommandContext / loadLock が返しうる、ユーティリティ層の失敗。 */
 export type ContextLoadError =
   | FileNotFoundError
@@ -114,7 +119,7 @@ export type ContextLoadError =
  *
  * 使い方:
  *   await runCommandEffect(
- *     loadCommandContext(targetDir).pipe(Effect.mapError(toZikuFailure)),
+ *     loadCommandContext(targetDir, "readOnly").pipe(Effect.mapError(toZikuFailure)),
  *   );
  */
 export async function runCommandEffect<A>(effect: Effect.Effect<A, ZikuFailure>): Promise<A> {
@@ -134,9 +139,13 @@ export async function runCommandEffect<A>(effect: Effect.Effect<A, ZikuFailure>)
  * 2. .ziku/lock.json を読み込み（source + 同期状態）
  * 3. source からテンプレートディレクトリを解決
  * 4. resolveBaseRef を source 種別に応じて構築
+ * 5. 控え直した既定ブランチを、`lockWrite` が許すなら lock へ書き出す
+ *
+ * @param lockWrite 控えをディスクへ残してよいか（{@link LockWritePolicy}）。
  */
 export function loadCommandContext(
   targetDir: AbsPath,
+  lockWrite: LockWritePolicy,
 ): Effect.Effect<CommandContextShape, ContextLoadError> {
   return Effect.gen(function* () {
     const { config } = yield* loadZikuConfig(targetDir);
@@ -184,17 +193,34 @@ export function loadCommandContext(
 
     // 引けた既定ブランチ名を lock へ控え直す。lock を書き出すコマンド（pull / push）は
     // ctx.lock を起点に次の状態を作るので、ここで載せておけば控えが GitHub 側の改名に
-    // 追随する。読むだけのコマンド（diff / status）では書き出されないまま捨てられる。
+    // 追随する。
     const lock = match(template)
       .with({ kind: "github" }, (t) => withRecordedDefaultBranch(loadedLock, t.defaultBranch))
       .with({ kind: "local" }, () => loadedLock)
       .exhaustive();
 
+    // 控えをここで書き切る。書き出す判断をコマンド側の return 地点へ置くと、書くものが無いと
+    // 判断して戻る経路が控えを捨て、次に GitHub へ問い合わせられないときの取得先が存在しない
+    // ブランチを指す。判断がこの 1 箇所に集まっていれば、コマンドに戻り口が増えても控えは残る。
+    //
+    // 書き込みの失敗は defect として運ぶ。控えの保存はどのコマンドの主目的でもなく、呼び出し元が
+    // 選び直せる分岐が無いので `ContextLoadError` の分類に居場所が無い。失敗したときは scope を
+    // 閉じ、テンプレートの一時ディレクトリを残さない。
+    yield* match(lockWrite)
+      .with("persist", () =>
+        // 同一なら控えは変わっていない（`withRecordedDefaultBranch` は値が同じなら元を返す）。
+        lock === loadedLock
+          ? Effect.void
+          : Effect.promise(() => saveLock(targetDir, lock)).pipe(
+              Effect.onError(() => Scope.close(scope, Exit.void)),
+            ),
+      )
+      .with("readOnly", () => Effect.void)
+      .exhaustive();
+
     return {
       config,
       lock,
-      // 同一なら控えは変わっていない（`withRecordedDefaultBranch` は値が同じなら元を返す）。
-      lockRefreshed: lock !== loadedLock,
       source: lock.source,
       resolved: template,
       templateDir: template.dir,
@@ -233,8 +259,9 @@ function toBaseRef(
  */
 export function makeCommandContextLayer(
   targetDir: AbsPath,
+  lockWrite: LockWritePolicy,
 ): Layer.Layer<CommandContext, ContextLoadError> {
-  return Layer.effect(CommandContext, loadCommandContext(targetDir));
+  return Layer.effect(CommandContext, loadCommandContext(targetDir, lockWrite));
 }
 
 /**

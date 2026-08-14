@@ -314,7 +314,6 @@ function mockContext(overrides?: {
   lock?: LockState;
   source?: TemplateSource;
   templateDir?: AbsPath;
-  lockRefreshed?: boolean;
   resolveBaseRef?: Effect.Effect<Option.Option<CommitSha>, ZikuFailure>;
 }) {
   const cleanup = vi.fn();
@@ -328,7 +327,6 @@ function mockContext(overrides?: {
       resolved: resolvedTemplate({ source, dir: templateDir }),
       templateDir,
       cleanup,
-      lockRefreshed: overrides?.lockRefreshed ?? false,
       resolveBaseRef: overrides?.resolveBaseRef ?? Effect.succeed(Option.none<CommitSha>()),
     }),
     cleanup,
@@ -449,23 +447,13 @@ describe("pullCommand", () => {
       expect(mockLog.success).toHaveBeenCalledWith("Already up to date");
     });
 
-    it("変更が無くても、控え直した既定ブランチは lock へ書き出す", async () => {
-      // 既定ブランチが改名されただけの実行は取り込む変更が 0 件になる。ここで書き出さないと、
-      // 次に GitHub へ問い合わせられないときの取得先が存在しないブランチを指す。
+    it("include が空でも、控えを書き出す方針で読み込む", async () => {
+      // 既定ブランチが改名されただけの実行は、取り込む変更もパターンも無いまま戻る。控えを
+      // 書き出すのは方針を受け取った loadCommandContext なので（実際に書き出すことの検証は
+      // services/__tests__/command-context.test.ts）、pull はどの経路で戻っても同じ方針を渡す。
       vol.fromJSON({ "/test": null });
 
-      mockClassifyFiles.mockReturnValueOnce({
-        autoUpdate: [],
-        localOnly: [],
-        conflicts: [],
-        newFiles: [],
-        deletedFiles: [],
-        deletedWithLocalEdits: [],
-        deletedLocally: [],
-        unchanged: repoRelPaths([".mcp.json"]),
-      });
-
-      const { effect } = mockContext({ lockRefreshed: true });
+      const { effect } = mockContext({ config: { include: [], exclude: [] } });
       mockLoadCommandContext.mockReturnValue(effect);
 
       await (pullCommand.run as any)({
@@ -474,8 +462,8 @@ describe("pullCommand", () => {
         cmd: pullCommand,
       });
 
-      expect(mockLog.success).toHaveBeenCalledWith("Already up to date");
-      expect(mockSaveLock).toHaveBeenCalled();
+      expect(mockLog.warn).toHaveBeenCalledWith("No patterns configured");
+      expect(mockLoadCommandContext).toHaveBeenCalledWith(absPath("/test"), "persist");
     });
 
     it("テンプレが新パターンを追加 → ziku.jsonc が union マージで同期され lock が更新される", async () => {
@@ -2687,6 +2675,31 @@ describe("pullCommand", () => {
       });
 
       expect(mockLog.success).toHaveBeenCalledWith("Already up to date");
+      expect(mockSaveLock).not.toHaveBeenCalled();
+    });
+
+    it("控えも書き出さない方針で読み込む", async () => {
+      // dry-run は何も書かない実行なので、既定ブランチの控えもディスクへ残さない。
+      vol.fromJSON({ "/test": null });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedWithLocalEdits: [],
+        deletedLocally: [],
+        unchanged: repoRelPaths([".mcp.json"]),
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false, dryRun: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockLoadCommandContext).toHaveBeenCalledWith(absPath("/test"), "readOnly");
       expect(mockSaveLock).not.toHaveBeenCalled();
     });
   });

@@ -160,8 +160,13 @@ export const pullCommand = defineCommand({
     }
 
     // loadCommandContext + runCommandEffect で DRY 化
+    //
+    // 控え直した既定ブランチをディスクへ残すかは、この 1 箇所で宣言する。`--dry-run` は何も
+    // 書かない実行なので、控えも残さない。
     const ctx = await runCommandEffect(
-      loadCommandContext(targetDir).pipe(Effect.mapError(toZikuFailure)),
+      loadCommandContext(targetDir, args.dryRun ? "readOnly" : "persist").pipe(
+        Effect.mapError(toZikuFailure),
+      ),
     );
 
     const { config, lock, source, templateDir, cleanup, resolveBaseRef } = ctx;
@@ -230,10 +235,6 @@ export const pullCommand = defineCommand({
           const changes = planPullChanges({ files: plan.files, hashes, configSync });
 
           if (changes.totalChanges === 0 && !changes.rewriteLock) {
-            // 取り込む変更が無くても、控え直した既定ブランチは書き出す。ここで捨てると、
-            // GitHub 側の改名に追随した値がディスクへ残らず、次に問い合わせられないときの
-            // 取得先が存在しないブランチを指す。ベースは動かさないので lock をそのまま書く。
-            if (ctx.lockRefreshed && !args.dryRun) await saveLock(targetDir, lock);
             log.success("Already up to date");
             outro("No changes needed");
             return;

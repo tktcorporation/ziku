@@ -343,7 +343,6 @@ function mockContext(overrides?: {
       }),
       templateDir,
       cleanup,
-      lockRefreshed: false,
       resolveBaseRef: Effect.succeed(Option.none<CommitSha>()),
     }),
     cleanup,
@@ -1188,6 +1187,50 @@ describe("pushCommand", () => {
       // loadCommandContext がモックなので 0 回）。push が宛先のために引き直すと、1 回の実行で
       // 同じ問い合わせが二度走り、未認証の 60 req/h を用途の数だけ消費する。
       expect(mockFetchDefaultBranch).not.toHaveBeenCalled();
+    });
+
+    it("PR を作って成功しても lock は書かないので、控えを書き出す方針で読み込む", async () => {
+      // GitHub への push は PR を作るだけで lock を書き出さない。控えの書き出しを
+      // loadCommandContext へ任せることで、この経路でも改名された既定ブランチ名が残る
+      // （実際に書き出すことの検証は services/__tests__/command-context.test.ts）。
+      const { effect } = mockContext({ defaultBranch: "master" });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      setupPushableFiles([
+        { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
+      ]);
+      mockGetGitHubToken.mockReturnValue("ghp_token");
+      mockCreatePullRequest.mockResolvedValueOnce({
+        url: "https://github.com/owner/repo/pull/1",
+        branch: "update-template-123",
+        number: 1,
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: true, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      expect(mockCreatePullRequest).toHaveBeenCalled();
+      expect(mockLoadCommandContext).toHaveBeenCalledWith(absPath("/test"), "persist");
+    });
+
+    it("--dryRun は控えも書き出さない方針で読み込む", async () => {
+      const { effect } = mockContext({ defaultBranch: "master" });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      setupPushableFiles([
+        { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
+      ]);
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: true, yes: true, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      expect(mockLoadCommandContext).toHaveBeenCalledWith(absPath("/test"), "readOnly");
     });
 
     it("トークンを拒否されたら PR を作らずトークンの直し方を案内する", async () => {

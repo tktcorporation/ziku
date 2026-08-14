@@ -111,8 +111,9 @@ export const statusCommand = defineCommand({
       }
     }
 
+    // status は読み取り専用（`statusLifecycle` の notes）なので lock へは書かない。
     const ctx = await runCommandEffect(
-      loadCommandContext(targetDir).pipe(Effect.mapError(toZikuFailure)),
+      loadCommandContext(targetDir, "readOnly").pipe(Effect.mapError(toZikuFailure)),
     );
 
     const { config, lock, source, templateDir, cleanup } = ctx;

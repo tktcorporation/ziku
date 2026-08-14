@@ -631,8 +631,13 @@ export const pushCommand = defineCommand({
 
     const targetDir = absPath(args.dir);
 
+    // 控え直した既定ブランチをディスクへ残すかは、この 1 箇所で宣言する。PR を作る経路は
+    // lock を書き出さないので、ここで書かなければ控えは残らない。`--dry-run` は何も書かない
+    // 実行なので、控えも残さない。
     const ctx = await runCommandEffect(
-      loadCommandContext(targetDir).pipe(Effect.mapError(toZikuFailure)),
+      loadCommandContext(targetDir, args.dryRun ? "readOnly" : "persist").pipe(
+        Effect.mapError(toZikuFailure),
+      ),
     );
     const { config, lock, cleanup } = ctx;
 

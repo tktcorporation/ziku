@@ -113,7 +113,6 @@ function mockContext(
       resolved: resolvedTemplate({ source, dir: templateDir }),
       templateDir,
       cleanup,
-      lockRefreshed: false,
       resolveBaseRef: Effect.succeed(Option.none<CommitSha>()),
     }),
     cleanup,
@@ -182,6 +181,23 @@ describe("diffCommand", () => {
       });
 
       expect(mockLog.warn).toHaveBeenCalledWith("No patterns configured");
+    });
+
+    it("lock を書き変えない方針で読み込む", async () => {
+      // diff は読むだけなので、既定ブランチの控えもディスクへ残さない（書き出すかの判断は
+      // loadCommandContext が方針から決める）。
+      const { effect } = mockContext();
+      mockLoadCommandContext.mockReturnValue(effect);
+      mockDetectDiff.mockResolvedValueOnce(emptyDiff);
+      mockHasDiff.mockReturnValueOnce(false);
+
+      await (diffCommand.run as any)({
+        args: { dir: "/test", verbose: false },
+        rawArgs: [],
+        cmd: diffCommand,
+      });
+
+      expect(mockLoadCommandContext).toHaveBeenCalledWith(absPath("/test"), "readOnly");
     });
 
     it("差分がない場合は outro で完了メッセージ", async () => {
@@ -288,7 +304,7 @@ describe("diffCommand", () => {
       });
 
       // loadCommandContext が呼ばれる（テンプレート解決は内部で完了）
-      expect(mockLoadCommandContext).toHaveBeenCalledWith(expect.any(String));
+      expect(mockLoadCommandContext).toHaveBeenCalledWith(expect.any(String), "readOnly");
     });
 
     it("エラー時も cleanup が呼ばれる", async () => {

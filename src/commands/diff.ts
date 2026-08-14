@@ -62,9 +62,10 @@ export const diffCommand = defineCommand({
 
     const targetDir = absPath(args.dir);
 
-    // loadCommandContext + runCommandEffect で設定読み込み・テンプレート解決を DRY 化
+    // loadCommandContext + runCommandEffect で設定読み込み・テンプレート解決を DRY 化。
+    // diff は読むだけなので lock へは書かない。
     const ctx = await runCommandEffect(
-      loadCommandContext(targetDir).pipe(Effect.mapError(toZikuFailure)),
+      loadCommandContext(targetDir, "readOnly").pipe(Effect.mapError(toZikuFailure)),
     );
 
     const { config, source, templateDir, cleanup } = ctx;
