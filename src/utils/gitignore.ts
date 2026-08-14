@@ -11,10 +11,10 @@ import { joinAbs } from "./paths";
  * 外すため。片側だけを読むと、無視されているはずのマシン固有の内容がもう一方へ流れる。
  *
  * `nestedDirs` 配下の `.gitignore` も同じ Ignore へ畳み込む。git は各ディレクトリの
- * `.gitignore` をそのディレクトリ起点で解釈するので、規則にディレクトリ名を接頭辞として
- * 付け直してから足す（否定パターンは `!` の後ろに付ける）。これを省くと、`.claude/.gitignore`
- * のようにネストして置かれた無視規則だけが判定から漏れ、リポジトリの他の場所にある同名の
- * ファイルまで巻き込んで無視する規則になる。
+ * `.gitignore` をそのディレクトリ起点で解釈するので、規則をルート起点へ読み替えてから足す
+ * （{@link scopeToDir}）。これを省くと、`.claude/.gitignore` のようにネストして置かれた
+ * 無視規則だけが判定から漏れ、リポジトリの他の場所にある同名のファイルまで巻き込んで
+ * 無視する規則になる。
  *
  * @param dirs `.gitignore` の探索起点（ローカル・テンプレートのリポジトリルート）。
  * @param nestedDirs 各起点の配下で `.gitignore` を追加で読むディレクトリ（起点からの相対）。
@@ -49,10 +49,29 @@ function prefixRules(content: string, dir: string): string {
     .map((line) => {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith("#")) return line;
-      if (trimmed.startsWith("!")) return `!${dir}/${trimmed.slice(1)}`;
-      return `${dir}/${trimmed}`;
+      const negated = trimmed.startsWith("!");
+      const pattern = negated ? trimmed.slice(1) : trimmed;
+      return `${negated ? "!" : ""}${scopeToDir(pattern, dir)}`;
     })
     .join("\n");
+}
+
+/**
+ * 1 つの規則を、それが書かれたディレクトリ起点の意味を保ったままルート起点へ読み替える。
+ *
+ * git は規則の形で適用範囲を変える。`/` を含む規則はその `.gitignore` のあるディレクトリに
+ * 固定され、含まない規則は配下のどの深さにも当たる。後者にディレクトリ名を前置するだけだと
+ * 固定された規則へ化けて、深い階層にある同名のファイルが無視されなくなる（`*.pem` を
+ * `.claude/*.pem` にすると `.claude/sub/key.pem` が追跡対象になる）。
+ */
+function scopeToDir(pattern: string, dir: string): string {
+  // 末尾の `/` はディレクトリ限定を表すだけで、適用範囲を決める `/` には数えない。
+  const body = pattern.endsWith("/") ? pattern.slice(0, -1) : pattern;
+  // 先頭の `/` は「このディレクトリ直下」を意味するので、区切りを重ねずに繋ぐ。
+  if (body.startsWith("/")) return `${dir}${pattern}`;
+  if (body.includes("/")) return `${dir}/${pattern}`;
+  // `**/` は 0 段以上のディレクトリに当たるので、直下と深い階層の両方を 1 つの規則で表せる。
+  return `${dir}/**/${pattern}`;
 }
 
 /**

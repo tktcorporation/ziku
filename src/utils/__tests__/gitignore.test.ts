@@ -170,6 +170,54 @@ node_modules/
       expect(ig.ignores(".claude/settings.local.md")).toBe(true);
     });
 
+    it("スラッシュを含まない規則はそのディレクトリ配下の全階層に当たる", async () => {
+      vol.fromJSON({
+        "/project/.claude/.gitignore": "*.pem",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], [".claude"]);
+
+      expect(ig.ignores(".claude/key.pem")).toBe(true);
+      expect(ig.ignores(".claude/sub/deep/key.pem")).toBe(true);
+      // ディレクトリの外へは広がらない
+      expect(ig.ignores("key.pem")).toBe(false);
+    });
+
+    it("スラッシュを含む規則はそのディレクトリ起点に固定される", async () => {
+      vol.fromJSON({
+        "/project/.claude/.gitignore": "sub/*.pem\n/root-only.key",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], [".claude"]);
+
+      expect(ig.ignores(".claude/sub/key.pem")).toBe(true);
+      expect(ig.ignores(".claude/other/key.pem")).toBe(false);
+      expect(ig.ignores(".claude/root-only.key")).toBe(true);
+      expect(ig.ignores(".claude/sub/root-only.key")).toBe(false);
+    });
+
+    it("ディレクトリ限定の規則も配下の全階層に当たる", async () => {
+      vol.fromJSON({
+        "/project/.claude/.gitignore": "cache/",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], [".claude"]);
+
+      expect(ig.ignores(".claude/cache/a.json")).toBe(true);
+      expect(ig.ignores(".claude/sub/cache/a.json")).toBe(true);
+    });
+
+    it("否定パターンも元の適用範囲を保つ", async () => {
+      vol.fromJSON({
+        "/project/.claude/.gitignore": "*.pem\n!keep.pem",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], [".claude"]);
+
+      expect(ig.ignores(".claude/sub/key.pem")).toBe(true);
+      expect(ig.ignores(".claude/sub/keep.pem")).toBe(false);
+    });
+
     it("ネストした .gitignore が無いディレクトリを渡しても動作する", async () => {
       vol.fromJSON({
         "/project/.gitignore": "*.log",
