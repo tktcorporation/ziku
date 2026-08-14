@@ -32,7 +32,7 @@ import {
   downloadTemplateToTemp,
 } from "../utils/template";
 import { resolveGitHubFetchSource } from "../utils/template-resolve";
-import { ZIKU_CONFIG_FILE, withConfigTracked, zikuConfigExists } from "../utils/ziku-config";
+import { ZIKU_CONFIG_FILE, zikuConfigExists } from "../utils/ziku-config";
 import { loadCommandContext, runCommandEffect, toZikuFailure } from "../services/command-context";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
@@ -48,7 +48,7 @@ import {
 import type { ZikuConfigPullAction } from "../utils/merge/sync-plan";
 import { zikuConfigPullAction } from "../utils/merge/sync-plan";
 import { analyzeSync } from "../utils/sync-analysis";
-import { mergeTemplatePatterns } from "../utils/template-patterns";
+import { resolveSyncScope } from "../utils/sync-scope";
 import { computeMergedZikuConfig } from "../utils/config-merge";
 import type { BaseAdvance, PullApprovalFlags, ZikuConfigMergeResult } from "./pull-plan";
 import {
@@ -192,17 +192,17 @@ export const pullCommand = defineCommand({
     await runCommandEffect(
       withCleanup(
         Effect.promise(async () => {
-          // mergeTemplatePatterns は「テンプレ側で追加されたパターン配下のファイルも
-          // 差分検出の対象に含める」ための include 和集合（discovery 用）を計算する。
-          // ziku.jsonc 自体の内容同期は、下の resolveConfigMerge が加法 union で行う。
-          const { mergedInclude, mergedExclude, newInclude } = await mergeTemplatePatterns(
+          // 走査範囲は全コマンドで同じ規則から決める。ziku.jsonc 自体の内容同期は、
+          // 下の resolveConfigMerge が加法 union で行う。
+          const { scope, newInclude } = await resolveSyncScope({
+            targetDir,
             templateDir,
             include,
             exclude,
-          );
+          });
 
           // テンプレ側で追加された include パターンをユーザー向けに通知。
-          // mergeTemplatePatterns 自体は副作用フリーなので、ログはここで行う。
+          // 範囲の解決は副作用フリーなので、ログはここで行う。
           logNewIncludeNotice(newInclude);
 
           log.step("Analyzing changes...");
@@ -211,9 +211,7 @@ export const pullCommand = defineCommand({
             targetDir,
             templateDir,
             baseHashes: baseHashesOf(lock),
-            // ziku.jsonc 自体を追跡対象に含め、他ファイルと同じ差分検出に乗せる。
-            include: withConfigTracked(mergedInclude),
-            exclude: mergedExclude,
+            scope,
           });
 
           // ziku.jsonc の扱いは分類カテゴリではなく sync-plan の判断に従う。テンプレートの

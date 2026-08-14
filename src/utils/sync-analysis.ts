@@ -1,8 +1,9 @@
-import type { AbsPath, GlobPattern, HashMap } from "../modules/schemas";
+import type { AbsPath, HashMap } from "../modules/schemas";
 import type { SyncPlan } from "./merge/sync-plan";
 import { partitionSyncPlan } from "./merge/sync-plan";
 import { classifyFiles } from "./merge";
 import { hashFiles } from "./hash";
+import type { SyncScope } from "./sync-scope";
 
 /**
  * 3-way ハッシュ比較に必要な3つのハッシュマップ。
@@ -25,8 +26,11 @@ export interface AnalyzeSyncOptions {
    * ベース未確定の lock では空になり、すべてのテンプレートファイルが `newFiles` に分類される。
    */
   readonly baseHashes: HashMap;
-  readonly include: readonly GlobPattern[];
-  readonly exclude?: readonly GlobPattern[];
+  /**
+   * ローカルとテンプレートを走査する範囲。両側に同じものを使う。
+   * {@link import("./sync-scope").resolveSyncScope} で作る。
+   */
+  readonly scope: SyncScope;
 }
 
 export interface SyncAnalysis {
@@ -44,8 +48,8 @@ export interface SyncAnalysis {
  * ローカル / テンプレート / lock(base) の3者を比較し、ファイルを分類する。
  *
  * 呼び出し側が前提にしてよいこと:
- * - ローカルとテンプレートのハッシュは同じ `include` / `exclude` で走査した結果である。
- *   走査条件が片側だけずれると、対象外のファイルが「片側にしか無い」と分類されてしまう。
+ * - ローカルとテンプレートのハッシュは同じ範囲で走査した結果である。走査条件が片側だけ
+ *   ずれると、対象外のファイルが「片側にしか無い」と分類されてしまう。
  * - 分類は `hashes` に入っている 3 つのマップだけから導かれる。同じハッシュを渡せば
  *   どのコマンドから呼んでも同じ分類になる。
  * - 返す `hashes.templateHashes` は分類に使ったものそのもので、次の同期ベースとして
@@ -57,10 +61,10 @@ export interface SyncAnalysis {
  * hashFiles を Effect 化する際は本関数も Effect.gen に書き直すこと。
  */
 export async function analyzeSync(options: AnalyzeSyncOptions): Promise<SyncAnalysis> {
-  const { targetDir, templateDir, baseHashes, include, exclude } = options;
+  const { targetDir, templateDir, baseHashes, scope } = options;
   const [templateHashes, localHashes] = await Promise.all([
-    hashFiles(templateDir, include, exclude),
-    hashFiles(targetDir, include, exclude),
+    hashFiles(templateDir, scope),
+    hashFiles(targetDir, scope),
   ]);
   const classification = classifyFiles({
     baseHashes,

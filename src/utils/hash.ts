@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { glob } from "tinyglobby";
-import type { AbsPath, ContentHash, GlobPattern, HashMap, RepoRelPath } from "../modules/schemas";
+import type { AbsPath, ContentHash, HashMap, RepoRelPath } from "../modules/schemas";
 import { contentHashSchema } from "../modules/schemas";
 import { joinAbs, repoRelPath } from "./paths";
+import type { SyncScope } from "./sync-scope";
+import { withinScope } from "./sync-scope";
 import { alwaysTrackedPathsIn } from "./ziku-config";
 
 /**
@@ -33,31 +35,35 @@ export function hashBytes(bytes: Uint8Array): ContentHash {
 }
 
 /**
- * ディレクトリ内のファイル群を glob パターンでマッチし、
- * 各ファイルの SHA-256 ハッシュを計算してマップを返す。
+ * 走査範囲に入るファイルのハッシュを計算する。
  *
- * 背景: init/pull 時に適用したテンプレートファイルのハッシュを
- * .ziku/lock.json に記録し、次回 pull 時の差分検出に使用する。
+ * 結果は分類の入力になり、そのまま次の同期ベースとして lock へ記録される。
+ * ローカルとテンプレートを同じ {@link SyncScope} で走査することが前提で、片側だけ範囲が
+ * ずれると、対象外のファイルが「片側にしか無い」と分類されて追加や削除として扱われる。
  *
- * @param dir - 対象ディレクトリのルートパス
- * @param patterns - glob パターンの配列（例: [".devcontainer/**"]）
- * @returns パス（dir からの相対パス）-> SHA-256 ハッシュのマップ
+ * @param dir - 走査の基点
+ * @returns 基点からの相対パス -> SHA-256 ハッシュのマップ
  */
-export async function hashFiles(
-  dir: AbsPath,
-  patterns: readonly GlobPattern[],
-  exclude?: readonly GlobPattern[],
-): Promise<HashMap> {
-  const files = await glob(patterns, { cwd: dir, dot: true, ignore: exclude ?? [] });
+export async function hashFiles(dir: AbsPath, scope: SyncScope): Promise<HashMap> {
+  const files = await glob([...scope.include], {
+    cwd: dir,
+    dot: true,
+    ignore: [...scope.exclude],
+  });
   // 走査結果はここで初めて brand を得る。ディレクトリを歩いて出てきた文字列が
   // 「基点からの相対パス」だと言えるのは、この呼び出しの直後だけ。
-  const fileSet = new Set<RepoRelPath>(files.map((file) => repoRelPath(file)));
+  const fileSet = new Set<RepoRelPath>(
+    withinScope(
+      files.map((file) => repoRelPath(file)),
+      scope,
+    ),
+  );
 
   // 常に追跡するファイルが include に明示指定されている場合、exclude（glob の ignore）で
   // 消されても必ずハッシュ対象に含める。`.ziku/**` や `**/*.jsonc` のような exclude が
   // あると、追跡対象であるはずの制御ファイルが分類経路から外れ、`ziku track` の変更が
   // 黙って同期されなくなる。include の明示指定は exclude より優先する。
-  const literalPatterns = new Set<string>(patterns);
+  const literalPatterns = new Set<string>(scope.include);
   for (const path of alwaysTrackedPathsIn(dir)) {
     if (literalPatterns.has(path)) fileSet.add(path);
   }

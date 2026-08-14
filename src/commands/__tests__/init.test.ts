@@ -129,7 +129,7 @@ vi.mock("../../utils/template-config", () => ({
 
 // モック後にインポート
 const { initCommand } = await import("../init");
-const { generateZikuJsonc } = await import("../../utils/ziku-config");
+const { ZIKU_CONFIG_FILE, generateZikuJsonc } = await import("../../utils/ziku-config");
 const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy, copyFile } =
   await import("../../utils/template");
 const { detectGitHubOwner, detectGitHubRepo } = await import("../../utils/git-remote");
@@ -803,11 +803,14 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
-      // hashFiles がテンプレートディレクトリとパターンで呼ばれる
+      // ベースはテンプレートディレクトリを、他コマンドと同じ規則で決めた範囲で走査して作る。
+      // 範囲がここだけずれると、init 直後の status がベースと実ファイルの食い違いを見せる。
       expect(mockHashFiles).toHaveBeenCalledWith(
         "/tmp/template",
-        expect.any(Array),
-        expect.any(Array),
+        expect.objectContaining({
+          include: expect.arrayContaining([ZIKU_CONFIG_FILE]),
+          exclude: expect.any(Array),
+        }),
       );
 
       // saveLock により .ziku/lock.json がファイルシステムに書き出される

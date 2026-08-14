@@ -19,8 +19,9 @@ vi.mock("tinyglobby", () => ({
   glob: vi.fn(),
 }));
 
-const { absPath, globPatterns, repoRelPath } = await import("../../__tests__/brands");
+const { absPath, repoRelPath, syncScope } = await import("../../__tests__/brands");
 const { hashBytes, hashContent, hashFiles } = await import("../hash");
+const { ZIKU_CONFIG_FILE } = await import("../ziku-config");
 const { glob } = await import("tinyglobby");
 const mockedGlob = vi.mocked(glob);
 
@@ -79,7 +80,7 @@ describe("hashFiles", () => {
 
     mockedGlob.mockResolvedValue([".github/ci.yml", ".github/label.yml"]);
 
-    const hashes = await hashFiles(absPath("/project"), globPatterns([".github/**"]));
+    const hashes = await hashFiles(absPath("/project"), syncScope({ include: [".github/**"] }));
     expect(Object.keys(hashes)).toHaveLength(2);
     expect(hashes[repoRelPath(".github/ci.yml")]).toBeDefined();
     expect(hashes[repoRelPath(".github/label.yml")]).toBeDefined();
@@ -90,7 +91,10 @@ describe("hashFiles", () => {
     vol.fromJSON({ "/project/README.md": "# Hello" });
     mockedGlob.mockResolvedValue([]);
 
-    const hashes = await hashFiles(absPath("/project"), globPatterns([".nonexistent/**"]));
+    const hashes = await hashFiles(
+      absPath("/project"),
+      syncScope({ include: [".nonexistent/**"] }),
+    );
     expect(hashes).toEqual({});
   });
 
@@ -98,7 +102,7 @@ describe("hashFiles", () => {
     vol.fromJSON({ "/project/file.txt": "content" });
     mockedGlob.mockResolvedValue(["file.txt"]);
 
-    const hashes = await hashFiles(absPath("/project"), globPatterns(["**"]));
+    const hashes = await hashFiles(absPath("/project"), syncScope({ include: ["**"] }));
     expect(hashes[repoRelPath("file.txt")]).toBe(hashContent("content"));
   });
 
@@ -109,7 +113,7 @@ describe("hashFiles", () => {
     vol.writeFileSync("/project/b.bin", Buffer.from([0x00, 0xfe, 0x41]));
     mockedGlob.mockResolvedValue(["a.bin", "b.bin"]);
 
-    const hashes = await hashFiles(absPath("/project"), globPatterns(["**"]));
+    const hashes = await hashFiles(absPath("/project"), syncScope({ include: ["**"] }));
     expect(hashes[repoRelPath("a.bin")]).not.toBe(hashes[repoRelPath("b.bin")]);
   });
 
@@ -118,7 +122,39 @@ describe("hashFiles", () => {
     vol.fromJSON({ "/project/lf.txt": "a\nb\n", "/project/crlf.txt": "a\r\nb\r\n" });
     mockedGlob.mockResolvedValue(["lf.txt", "crlf.txt"]);
 
-    const hashes = await hashFiles(absPath("/project"), globPatterns(["**"]));
+    const hashes = await hashFiles(absPath("/project"), syncScope({ include: ["**"] }));
     expect(hashes[repoRelPath("lf.txt")]).not.toBe(hashes[repoRelPath("crlf.txt")]);
+  });
+
+  it("gitignore されたファイルはハッシュ対象から外れる", async () => {
+    vol.fromJSON({ "/project/.env": "TOKEN=local", "/project/app.ts": "code" });
+    mockedGlob.mockResolvedValue([".env", "app.ts"]);
+
+    const hashes = await hashFiles(
+      absPath("/project"),
+      syncScope({ include: ["**"], gitignore: [".env"] }),
+    );
+
+    // ハッシュは分類の入力なので、ここに残ると `.env` が autoUpdate に落ちて pull が
+    // マシン固有の内容をテンプレートの内容で上書きする。
+    expect(hashes[repoRelPath(".env")]).toBeUndefined();
+    expect(hashes[repoRelPath("app.ts")]).toBeDefined();
+  });
+
+  it("常に追跡するパスは gitignore されていてもハッシュ対象に残る", async () => {
+    vol.fromJSON({ "/project/.ziku/ziku.jsonc": "{}" });
+    mockedGlob.mockResolvedValue([".ziku/ziku.jsonc"]);
+
+    const hashes = await hashFiles(
+      absPath("/project"),
+      syncScope({
+        include: ["**"],
+        gitignore: [".ziku/"],
+        alwaysTracked: [ZIKU_CONFIG_FILE],
+      }),
+    );
+
+    // 同期対象パターンの定義そのものなので、`.ziku/` を無視するプロジェクトでも分類へ乗せる。
+    expect(hashes[ZIKU_CONFIG_FILE]).toBeDefined();
   });
 });

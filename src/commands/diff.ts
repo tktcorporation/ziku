@@ -6,6 +6,7 @@ import { logUntrackedFilesNotice } from "../ui/prompts";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
 import { detectDiff, hasDiff } from "../utils/diff";
 import { absPath } from "../utils/paths";
+import { resolveSyncScope } from "../utils/sync-scope";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked";
 import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
 import { LOCK_FILE } from "../utils/lock";
@@ -77,23 +78,30 @@ export const diffCommand = defineCommand({
     await runCommandEffect(
       withCleanup(
         Effect.promise(async () => {
-          const patterns = {
-            include: config.include,
-            exclude: config.exclude ?? [],
-          };
-
-          if (patterns.include.length === 0) {
+          if (config.include.length === 0) {
             log.warn("No patterns configured");
             return;
           }
 
+          // 走査範囲は全コマンドで同じ規則から決める。pull / push と範囲がずれると、
+          // diff が見せる差分と実際に同期される内容が食い違う。
+          const { scope } = await resolveSyncScope({
+            targetDir,
+            templateDir,
+            include: config.include,
+            exclude: config.exclude ?? [],
+          });
+
           log.step("Detecting changes...");
 
           const diff = await withSpinner("Analyzing differences...", () =>
-            detectDiff({ targetDir, templateDir, patterns }),
+            detectDiff({ targetDir, templateDir, scope }),
           );
 
-          const untrackedByFolder = await detectUntrackedFiles({ targetDir, patterns });
+          const untrackedByFolder = await detectUntrackedFiles({
+            targetDir,
+            patterns: { include: scope.include, exclude: scope.exclude },
+          });
           const untrackedCount = getTotalUntrackedCount(untrackedByFolder);
 
           if (hasDiff(diff)) {

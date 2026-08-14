@@ -19,6 +19,7 @@ import {
   pendingConflict,
   repoRelPath,
   repoRelPaths,
+  syncScope,
 } from "../../__tests__/brands";
 
 // fs モジュールをモック
@@ -46,16 +47,12 @@ vi.mock("../../utils/sync-analysis", () => ({
   analyzeSync: vi.fn(),
 }));
 
-// utils/template-patterns をモック (デフォルトはマージ無し = テンプレ側に追加パターン無し)
-vi.mock("../../utils/template-patterns", () => ({
-  mergeTemplatePatterns: vi.fn().mockResolvedValue({
-    mergedInclude: globPatterns([".claude/**"]),
-    mergedExclude: [],
-    newInclude: [],
-    newExclude: [],
-    patternsUpdated: false,
-  }),
-}));
+// 走査範囲の解決をモック (実 I/O を避ける)。範囲の解決規則そのものは
+// sync-scope の単体テストと、コマンドをまたぐ回帰テストが持つ。
+vi.mock("../../utils/sync-scope", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../utils/sync-scope")>();
+  return { ...actual, resolveSyncScope: vi.fn() };
+});
 
 // utils/lock をモック (fast-path で読まれる)。
 // デフォルトは ENOENT 相当: status が loadLock に失敗 → fast-path をスルーして
@@ -70,8 +67,6 @@ vi.mock("../../utils/lock", () => ({
 vi.mock("../../utils/ziku-config", () => ({
   zikuConfigExists: vi.fn().mockReturnValue(false),
   ZIKU_CONFIG_FILE: ".ziku/ziku.jsonc",
-  withConfigTracked: (include: readonly string[]) =>
-    include.includes(".ziku/ziku.jsonc") ? [...include] : [...include, ".ziku/ziku.jsonc"],
 }));
 
 // utils/untracked をモック
@@ -106,7 +101,7 @@ vi.mock("../../ui/renderer", () => ({
 const { statusCommand } = await import("../status");
 const { loadCommandContext } = await import("../../services/command-context");
 const { analyzeSync } = await import("../../utils/sync-analysis");
-const { mergeTemplatePatterns } = await import("../../utils/template-patterns");
+const { resolveSyncScope } = await import("../../utils/sync-scope");
 const { detectUntrackedFiles } = await import("../../utils/untracked");
 const { loadLock } = await import("../../utils/lock");
 const { zikuConfigExists } = await import("../../utils/ziku-config");
@@ -114,7 +109,7 @@ const { log, outro } = await import("../../ui/renderer");
 
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
 const mockAnalyzeSync = vi.mocked(analyzeSync);
-const mockMergeTemplatePatterns = vi.mocked(mergeTemplatePatterns);
+const mockResolveSyncScope = vi.mocked(resolveSyncScope);
 const mockDetectUntrackedFiles = vi.mocked(detectUntrackedFiles);
 const mockLoadLock = vi.mocked(loadLock);
 const mockZikuConfigExists = vi.mocked(zikuConfigExists);
@@ -214,12 +209,9 @@ describe("statusCommand", () => {
     vol.reset();
     vi.clearAllMocks();
     // デフォルト: テンプレ側にパターン追加なし (P1 fix の no-op パス)
-    mockMergeTemplatePatterns.mockResolvedValue({
-      mergedInclude: globPatterns([".claude/**"]),
-      mergedExclude: [],
+    mockResolveSyncScope.mockResolvedValue({
+      scope: syncScope({ include: [".claude/**", ".ziku/ziku.jsonc"] }),
       newInclude: [],
-      newExclude: [],
-      patternsUpdated: false,
     });
     // デフォルト: lock 未作成相当 (fast-path をスキップし、通常の loadCommandContext 経路に進む)
     mockLoadLock.mockReturnValue(Effect.fail(new FileNotFoundError({ path: ".ziku/lock.json" })));
@@ -478,12 +470,9 @@ describe("statusCommand", () => {
       const { effect } = mockContext();
       mockLoadCommandContext.mockReturnValue(effect);
       // 新パターンに該当するファイルは無く、差分は ziku.jsonc 自体だけ。
-      mockMergeTemplatePatterns.mockResolvedValueOnce({
-        mergedInclude: globPatterns([".claude/**", ".new-pattern/**"]),
-        mergedExclude: [],
+      mockResolveSyncScope.mockResolvedValueOnce({
+        scope: syncScope({ include: [".claude/**", ".new-pattern/**", ".ziku/ziku.jsonc"] }),
         newInclude: globPatterns([".new-pattern/**"]),
-        newExclude: [],
-        patternsUpdated: true,
       });
       writeConfigs({ local: [".claude/**"], template: [".claude/**", ".new-pattern/**"] });
       mockAnalyzeSync.mockResolvedValueOnce({
@@ -547,15 +536,15 @@ describe("statusCommand", () => {
       expect(outroArg).toContain("In sync");
     });
 
-    it("テンプレ側で新規 include が追加されているとマージ済みパターンで analyzeSync を呼ぶ (codex P1)", async () => {
+    it("解決した走査範囲をそのまま比較と未追跡探索へ渡し、テンプレ側の新パターンを通知する", async () => {
       const { effect } = mockContext();
       mockLoadCommandContext.mockReturnValue(effect);
-      mockMergeTemplatePatterns.mockResolvedValueOnce({
-        mergedInclude: globPatterns([".claude/**", ".new-feature/**"]),
-        mergedExclude: [],
+      const scope = syncScope({
+        include: [".claude/**", ".new-feature/**", ".ziku/ziku.jsonc"],
+      });
+      mockResolveSyncScope.mockResolvedValueOnce({
+        scope,
         newInclude: globPatterns([".new-feature/**"]),
-        newExclude: [],
-        patternsUpdated: true,
       });
       mockAnalyzeSync.mockResolvedValueOnce({
         plan: syncPlanOf(emptyClassification()),
@@ -569,11 +558,12 @@ describe("statusCommand", () => {
         cmd: statusCommand,
       });
 
-      // analyzeSync がマージ済み include で呼ばれることを確認 (P1 の本質)。
-      // ziku.jsonc 自体も追跡ファイルとして include に含まれる（withConfigTracked）。
-      expect(mockAnalyzeSync).toHaveBeenCalledWith(
+      // 比較の範囲と未追跡探索の範囲が食い違うと、status が数えた push 候補を push が
+      // 送れない。同じ範囲から両方を導いていることを、渡した値そのもので確かめる。
+      expect(mockAnalyzeSync).toHaveBeenCalledWith(expect.objectContaining({ scope }));
+      expect(mockDetectUntrackedFiles).toHaveBeenCalledWith(
         expect.objectContaining({
-          include: globPatterns([".claude/**", ".new-feature/**", ".ziku/ziku.jsonc"]),
+          patterns: { include: scope.include, exclude: scope.exclude },
         }),
       );
       // ユーザー向けの新パターン通知

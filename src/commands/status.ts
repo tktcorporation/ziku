@@ -14,9 +14,9 @@ import { withZikuConfigAt, zikuConfigStatusCategory } from "../utils/merge/sync-
 import { analyzeSync } from "../utils/sync-analysis";
 import { analyzeConfigDrift } from "../utils/config-merge";
 import { absPath } from "../utils/paths";
-import { mergeTemplatePatterns } from "../utils/template-patterns";
+import { resolveSyncScope } from "../utils/sync-scope";
 import { detectUntrackedFiles } from "../utils/untracked";
-import { ZIKU_CONFIG_FILE, withConfigTracked, zikuConfigExists } from "../utils/ziku-config";
+import { ZIKU_CONFIG_FILE, zikuConfigExists } from "../utils/ziku-config";
 
 /**
  * status コマンドのファイル操作メタデータ。
@@ -135,15 +135,14 @@ export const statusCommand = defineCommand({
             return;
           }
 
-          // テンプレ側で追加された include/exclude パターンを取り込んだ後でハッシュ比較する。
-          // これをしないと、テンプレに新規パターンが追加されている状況で status が
-          // 「in sync」と誤判定し、その後 `pull` で大量の新ファイルが降ってくる現象が起きる
-          // (pull.ts と同じマージ処理を走らせて整合させる)。
-          const { mergedInclude, mergedExclude, newInclude } = await mergeTemplatePatterns(
+          // 走査範囲は全コマンドで同じ規則から決める。テンプレ側の追加パターンを取り込まないと
+          // 「in sync」と誤判定し、その後の `pull` で大量の新ファイルが降ってくる。
+          const { scope, newInclude } = await resolveSyncScope({
+            targetDir,
             templateDir,
             include,
             exclude,
-          );
+          });
 
           if (newInclude.length > 0) {
             log.info(
@@ -159,10 +158,7 @@ export const statusCommand = defineCommand({
               targetDir,
               templateDir,
               baseHashes: baseHashesOf(lock),
-              // ziku.jsonc 自体も追跡ファイルとして差分検出に含める（push/pull と一貫させ、
-              // config ドリフトを status に反映する）。
-              include: withConfigTracked(mergedInclude),
-              exclude: mergedExclude,
+              scope,
             }),
           );
 
@@ -175,7 +171,7 @@ export const statusCommand = defineCommand({
           );
           const untracked = await detectUntrackedFiles({
             targetDir,
-            patterns: { include: mergedInclude, exclude: mergedExclude },
+            patterns: { include: scope.include, exclude: scope.exclude },
           });
           const recommendation = decideRecommendation(buckets, lock);
 

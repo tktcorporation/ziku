@@ -15,7 +15,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "pathe";
 import { afterEach, describe, expect, it } from "vitest";
-import { absPath, globPatterns, repoRelPath } from "../../__tests__/brands";
+import { absPath, globPatterns, repoRelPath, syncScope } from "../../__tests__/brands";
 import type { AbsPath } from "../../modules/schemas";
 import { analyzeConfigDrift, computeMergedZikuConfig } from "../config-merge";
 import { hashContent, hashFiles } from "../hash";
@@ -23,6 +23,7 @@ import { classifyFiles } from "../merge";
 import type { ZikuConfigStatusCategory } from "../merge/sync-plan";
 import { partitionSyncPlan, zikuConfigActions, zikuConfigStatusCategory } from "../merge/sync-plan";
 import { detectDiff } from "../diff";
+import { resolveSyncScope } from "../sync-scope";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../untracked";
 import {
   ZIKU_CONFIG_FILE,
@@ -81,8 +82,9 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
 
     // push は「ローカルの config.include」を withConfigTracked で展開して両側をハッシュする
     const effectiveInclude = withConfigTracked(globPatterns([".claude/**", ".eslintrc.json"]));
-    const templateHashes = await hashFiles(templateDir, effectiveInclude);
-    const localHashes = await hashFiles(projectDir, effectiveInclude);
+    const scope = syncScope({ include: effectiveInclude });
+    const templateHashes = await hashFiles(templateDir, scope);
+    const localHashes = await hashFiles(projectDir, scope);
 
     // base = 前回 sync 時点（テンプレと一致していた）。ziku.jsonc はテンプレ版のハッシュ。
     const baseHashes = {
@@ -116,8 +118,9 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
 
     // pull は local+template のパターン和集合を discovery に使う
     const effectiveInclude = withConfigTracked(globPatterns([".claude/**", ".eslintrc.json"]));
-    const templateHashes = await hashFiles(templateDir, effectiveInclude);
-    const localHashes = await hashFiles(projectDir, effectiveInclude);
+    const scope = syncScope({ include: effectiveInclude });
+    const templateHashes = await hashFiles(templateDir, scope);
+    const localHashes = await hashFiles(projectDir, scope);
 
     // base = 前回 sync 時点（ローカル = テンプレ旧版）。ziku.jsonc はローカル版のハッシュ。
     const baseHashes = {
@@ -146,15 +149,46 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
       ".ziku/ziku.jsonc": JSON.stringify({ include: [".claude/**", ".eslintrc.json"] }, null, 2),
     });
 
-    const diff = await detectDiff({
+    // 範囲の解決も本番と同じ経路を通す。gitignore の読み込みと「常に追跡するパス」の
+    // 決定はここで行われるので、差し替えると検証対象が消える。
+    const { scope } = await resolveSyncScope({
       targetDir: projectDir,
       templateDir,
-      patterns: { include: withConfigTracked(globPatterns([".claude/**"])), exclude: [] },
+      include: globPatterns([".claude/**"]),
+      exclude: [],
     });
+
+    const diff = await detectDiff({ targetDir: projectDir, templateDir, scope });
 
     const configDiff = diff.files.find((f) => f.path === ZIKU_CONFIG_FILE);
     expect(configDiff).toBeDefined();
     expect(configDiff?.type).toBe("modified");
+  });
+
+  it("hashFiles: `.ziku/` を gitignore していても ziku.jsonc は分類の対象に残る", async () => {
+    const templateDir = await createTempDir("gi-hash-tpl");
+    const projectDir = await createTempDir("gi-hash-prj");
+    tempDirs.push(templateDir, projectDir);
+
+    await writeFiles(templateDir, {
+      ".gitignore": ".ziku/\n",
+      ".ziku/ziku.jsonc": JSON.stringify({ include: [".claude/**"] }, null, 2),
+    });
+    await writeFiles(projectDir, {
+      ".gitignore": ".ziku/\n",
+      ".ziku/ziku.jsonc": JSON.stringify({ include: [".claude/**", ".eslintrc.json"] }, null, 2),
+    });
+
+    const { scope } = await resolveSyncScope({
+      targetDir: projectDir,
+      templateDir,
+      include: globPatterns([".claude/**"]),
+      exclude: [],
+    });
+
+    // 分類はハッシュだけから導かれるので、ここで落ちるとパターンの追加が双方向に伝わらない。
+    expect(await hashFiles(projectDir, scope)).toHaveProperty([ZIKU_CONFIG_FILE]);
+    expect(await hashFiles(templateDir, scope)).toHaveProperty([ZIKU_CONFIG_FILE]);
   });
 
   it("hashFiles: exclude が ziku.jsonc にマッチしても include 明示なら必ずハッシュされる", async () => {
@@ -168,8 +202,10 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
     // exclude が `.ziku/**` と `**/*.jsonc` で ziku.jsonc を消そうとするケース
     const hashes = await hashFiles(
       dir,
-      withConfigTracked(globPatterns([".claude/**"])),
-      globPatterns([".ziku/**", "**/*.jsonc"]),
+      syncScope({
+        include: withConfigTracked(globPatterns([".claude/**"])),
+        exclude: [".ziku/**", "**/*.jsonc"],
+      }),
     );
 
     // include の明示指定が exclude より優先され、ziku.jsonc はハッシュされる
@@ -348,7 +384,7 @@ describe("status の推奨と pull / push の実動作の一致（実ファイ�
       await writeFiles(templateDir, { [ZIKU_CONFIG_FILE]: configText(template) });
     }
 
-    const tracked = withConfigTracked(globPatterns([]));
+    const tracked = syncScope({ include: withConfigTracked(globPatterns([])) });
     const localHashes = await hashFiles(projectDir, tracked);
     const templateHashes = await hashFiles(templateDir, tracked);
     const baseHashes = { [ZIKU_CONFIG_FILE]: hashContent(configText(base)) };

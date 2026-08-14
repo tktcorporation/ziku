@@ -744,10 +744,10 @@ describe("E2E: multi-scenario tests", () => {
         cmd: diffCommand,
       });
 
-      // detectDiff が更新後のパターンで呼ばれること
+      // detectDiff が更新後のパターンを含む走査範囲で呼ばれること
       expect(mockDetectDiff).toHaveBeenCalledWith(
         expect.objectContaining({
-          patterns: expect.objectContaining({
+          scope: expect.objectContaining({
             include: expect.arrayContaining([".mcp.json", ".github/workflows/ci.yml"]),
           }),
         }),

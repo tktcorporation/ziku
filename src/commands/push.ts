@@ -25,14 +25,15 @@ import {
   isZikuConfigPath,
   loadZikuConfig,
   saveZikuConfig,
-  withConfigTracked,
   withoutConfigTracked,
 } from "../utils/ziku-config";
 import { loadCommandContext, runCommandEffect, toZikuFailure } from "../services/command-context";
 import { mergeConflictFiles } from "../utils/merge";
 import { analyzeSync } from "../utils/sync-analysis";
+import type { SyncScope } from "../utils/sync-scope";
+import { extendScope, resolveSyncScope } from "../utils/sync-scope";
 import { transportTextToBytes } from "../utils/file-content";
-import { absPath, joinAbs, repoRelPath } from "../utils/paths";
+import { absPath, joinAbs, pathAsPattern, repoRelPath } from "../utils/paths";
 import {
   analyzeConfigDrift,
   computeMergedZikuConfig,
@@ -412,7 +413,7 @@ interface PushToLocalInput {
    * テンプレート走査に使うパターン。新規追跡ファイルを含む effectivePatterns を渡すことで、
    * 追跡したファイルもベースに乗り、lock と配置のズレを防ぐ。
    */
-  readonly patterns: { include: readonly GlobPattern[]; exclude: readonly GlobPattern[] };
+  readonly scope: SyncScope;
   /**
    * push される ziku.jsonc の内容をローカルへも残すか（`zikuConfigWriteBack` の判定結果）。
    * ローカルへの書き戻しと同期ベースの前進範囲は、どちらもこの値から決まる。
@@ -431,7 +432,7 @@ interface PushToLocalInput {
  * @returns push したら true、確認でキャンセルされたら false。
  */
 function pushToLocal(input: PushToLocalInput): Effect.Effect<boolean, ZikuFailure> {
-  const { localSource, target, ctx, projectDir, args, patterns } = input;
+  const { localSource, target, ctx, projectDir, args } = input;
   // 失敗の振り分けは `pushToGitHub` と同じ `pushFailure` に委ねる。ファイルコピーと lock の
   // 更新は、書き込み先の権限か空き容量で失敗したときだけユーザーが直せる。
   return Effect.tryPromise({
@@ -487,7 +488,7 @@ function pushToLocal(input: PushToLocalInput): Effect.Effect<boolean, ZikuFailur
       // 送ったパスと元から一致していたパスだけを前進させる（`baseAfterPush`）。ziku が
       // 組み立てた内容はローカルへ書いたものだけが前進の対象になるので、実際に書いた
       // パスの集合をそのまま渡す。
-      const templateHashes = await hashFiles(localSource.path, patterns.include, patterns.exclude);
+      const templateHashes = await hashFiles(localSource.path, input.scope);
       await saveLock(
         projectDir,
         markSynced(ctx.lock, {
@@ -699,21 +700,23 @@ export const pushCommand = defineCommand({
       });
     }
 
-    const patterns = {
-      // `.ziku/ziku.jsonc` 自体を追跡対象に含める。これにより `ziku track` で
-      // 追加したローカルパターンが、加法 union マージ経由でテンプレートの ziku.jsonc へ
-      // 伝播する。
-      include: withConfigTracked(config.include),
-      exclude: config.exclude ?? [],
-    };
-
-    // ガードは生の config.include で判定する（patterns.include は ziku.jsonc を
-    // 常に含むため 0 にならない）。
+    // ガードは生の config.include で判定する（走査範囲は ziku.jsonc を常に含むため
+    // 0 にならない）。
     if (config.include.length === 0) {
       log.warn("No patterns configured");
       await cleanup();
       return;
     }
+
+    // 走査範囲は全コマンドで同じ規則から決める。pull と範囲がずれると、pull が同期して
+    // いるファイルを push が未追跡として報告したり、status が勧めた push を実行できなく
+    // なったりする。
+    const { scope } = await resolveSyncScope({
+      targetDir,
+      templateDir: ctx.templateDir,
+      include: config.include,
+      exclude: config.exclude ?? [],
+    });
 
     const pushArgs: PushArgs = {
       dryRun: args.dryRun as boolean,
@@ -729,7 +732,7 @@ export const pushCommand = defineCommand({
     // 潰れるので、defect として運び runCommandEffect が投げられた値をそのまま再スローする。
     await runCommandEffect(
       withCleanup(
-        Effect.promise(() => pushProject({ ctx, targetDir, patterns, args: pushArgs })),
+        Effect.promise(() => pushProject({ ctx, targetDir, scope, args: pushArgs })),
         cleanup,
       ),
     );
@@ -745,17 +748,17 @@ export const pushCommand = defineCommand({
 async function pushProject(params: {
   ctx: CommandContextShape;
   targetDir: AbsPath;
-  patterns: { include: GlobPattern[]; exclude: GlobPattern[] };
+  scope: SyncScope;
   args: PushArgs;
 }): Promise<void> {
   const { ctx, targetDir, args } = params;
 
   // 未追跡ファイルの検知・選択は分類より「前」に行う。分類が送信候補を確定するため、
-  // ここで include を広げておかないと新規追跡ファイルが候補に乗らない。
+  // ここで範囲を広げておかないと新規追跡ファイルが候補に乗らない。
   // 永続化（saveZikuConfig）は push 成功後に行う。
-  const { effectivePatterns, newlyTrackedPaths } = await resolveUntrackedTracking(
+  const { effectiveScope, newlyTrackedPaths } = await resolveUntrackedTracking(
     targetDir,
-    params.patterns,
+    params.scope,
     args,
   );
 
@@ -765,13 +768,13 @@ async function pushProject(params: {
       targetDir,
       templateDir: ctx.templateDir,
       lock: ctx.lock,
-      patterns: effectivePatterns,
+      scope: effectiveScope,
     });
 
   log.step("Detecting changes...");
 
   const diff = await withSpinner("Analyzing differences...", () =>
-    detectDiff({ targetDir, templateDir: ctx.templateDir, patterns: effectivePatterns }),
+    detectDiff({ targetDir, templateDir: ctx.templateDir, scope: effectiveScope }),
   );
 
   const candidates = collectPushCandidates(diff.files, candidatePlan.pushablePaths);
@@ -855,7 +858,7 @@ async function pushProject(params: {
           ctx,
           projectDir: targetDir,
           args: { yes: args.yes },
-          patterns: effectivePatterns,
+          scope: effectiveScope,
           configWriteBack: configResult.writeBack,
           alreadySynced,
         }),
@@ -980,17 +983,17 @@ async function warnIfConfigWouldBeAutoIncluded(params: {
  */
 async function resolveUntrackedTracking(
   targetDir: AbsPath,
-  patterns: { include: GlobPattern[]; exclude: GlobPattern[] },
+  scope: SyncScope,
   args: { yes: boolean; dryRun: boolean },
 ): Promise<{
-  effectivePatterns: { include: GlobPattern[]; exclude: GlobPattern[] };
+  effectiveScope: SyncScope;
   newlyTrackedPaths: RepoRelPath[];
 }> {
   // 未追跡探索は、ユーザーが明示的に追跡すると決めたパターンだけを見る（除外の理由は
   // withoutConfigTracked の JSDoc を参照）。
   const discoveryPatterns = {
-    include: withoutConfigTracked(patterns.include),
-    exclude: patterns.exclude,
+    include: withoutConfigTracked(scope.include),
+    exclude: scope.exclude,
   };
   const untrackedByFolder = await detectUntrackedFiles({ targetDir, patterns: discoveryPatterns });
   const untrackedCount = getTotalUntrackedCount(untrackedByFolder);
@@ -1020,7 +1023,17 @@ async function resolveUntrackedTracking(
     .with({ _tag: "AskUser" }, () => selectUntrackedToTrack(untrackedByFolder))
     .exhaustive();
 
-  return withNewlyTrackedPatterns(patterns, selected);
+  const { newlyTrackedPaths } = withNewlyTrackedPatterns(
+    { include: [...scope.include], exclude: [...scope.exclude] },
+    selected,
+  );
+  return {
+    effectiveScope: extendScope(
+      scope,
+      newlyTrackedPaths.map((path) => pathAsPattern(path)),
+    ),
+    newlyTrackedPaths,
+  };
 }
 
 /**
@@ -1307,7 +1320,7 @@ async function analyzePushTargets(params: {
   targetDir: AbsPath;
   templateDir: AbsPath;
   lock: LockState;
-  patterns: { include: readonly GlobPattern[]; exclude: readonly GlobPattern[] };
+  scope: SyncScope;
 }): Promise<{
   candidatePlan: PushCandidatePlan;
   mergedContents: Map<RepoRelPath, PushContent>;
@@ -1319,8 +1332,7 @@ async function analyzePushTargets(params: {
     targetDir: params.targetDir,
     templateDir: params.templateDir,
     baseHashes: baseHashesOf(params.lock),
-    include: params.patterns.include,
-    exclude: params.patterns.exclude,
+    scope: params.scope,
   });
 
   // 設定ファイルの案内はパターン集合の実差分まで見て決める。ハッシュ差分だけを見ると、

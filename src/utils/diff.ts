@@ -3,48 +3,43 @@ import { createPatch } from "diff";
 import { match } from "ts-pattern";
 import type { AbsPath, DiffResult, FileDiff, RepoRelPath } from "../modules/schemas";
 import { isBinaryFileDiff, readFileContent, toTransportText } from "./file-content";
-import { filterByGitignore, loadMergedGitignore } from "./gitignore";
 import { joinAbs } from "./paths";
-import type { FlatPatterns } from "./patterns";
 import { resolvePatterns } from "./patterns";
-import { alwaysTrackedPathsIn } from "./ziku-config";
+import type { SyncScope } from "./sync-scope";
+import { withinScope } from "./sync-scope";
 
 export interface DiffOptions {
   targetDir: AbsPath;
   templateDir: AbsPath;
-  patterns: FlatPatterns;
+  /**
+   * 走査範囲。分類（{@link import("./sync-analysis").analyzeSync}）と同じものを渡す。
+   * 別々に決めると、分類では変更ありと出たファイルが差分に現れず、送信候補から黙って
+   * 落ちる。
+   */
+  scope: SyncScope;
 }
 
 /**
  * ローカルとテンプレート間の差分を検出
  */
 export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
-  const { targetDir, templateDir, patterns } = options;
+  const { targetDir, templateDir, scope } = options;
 
   const files: FileDiff[] = [];
 
-  // ローカルとテンプレート両方の .gitignore をマージして読み込み
-  const gitignore = await loadMergedGitignore([targetDir, templateDir]);
-
-  // フラットパターンでファイル一覧を取得し、gitignore でフィルタリング
-  const templateFiles = filterByGitignore(
-    resolvePatterns(templateDir, patterns.include, patterns.exclude),
-    gitignore,
+  const templateFiles = withinScope(
+    resolvePatterns(templateDir, scope.include, scope.exclude),
+    scope,
   );
-  const localFiles = filterByGitignore(
-    resolvePatterns(targetDir, patterns.include, patterns.exclude),
-    gitignore,
-  );
+  const localFiles = withinScope(resolvePatterns(targetDir, scope.include, scope.exclude), scope);
 
   const allFiles = new Set<RepoRelPath>([...templateFiles, ...localFiles]);
 
   // 常に追跡するファイルは ziku 自身の制御ファイル（追跡対象の SSOT）。プロジェクトや
   // テンプレートが `.ziku/` を gitignore していても、パターン同期のために必ず差分対象に
   // 含める。これをしないと `ziku track` の変更がテンプレへ届かない。
-  for (const dir of [targetDir, templateDir]) {
-    for (const path of alwaysTrackedPathsIn(dir)) {
-      allFiles.add(path);
-    }
+  for (const path of scope.alwaysTracked) {
+    allFiles.add(path);
   }
 
   for (const filePath of allFiles) {

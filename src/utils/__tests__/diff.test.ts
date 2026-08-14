@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "pathe";
 import { afterEach, describe, expect, it } from "vitest";
-import { absPath, globPatterns, repoRelPath } from "../../__tests__/brands";
+import { absPath, repoRelPath, syncScope } from "../../__tests__/brands";
 import type { AbsPath, FileDiff } from "../../modules/schemas";
 import { detectDiff, generateUnifiedDiff } from "../diff";
 
@@ -204,7 +204,7 @@ describe("diff", () => {
       return { targetDir, templateDir };
     }
 
-    const patterns = { include: globPatterns(["**"]), exclude: [] };
+    const scope = syncScope({ include: ["**"] });
 
     it("内容の違うバイナリを modified として検出する", async () => {
       const { targetDir, templateDir } = await dirs();
@@ -212,7 +212,7 @@ describe("diff", () => {
       await writeFile(join(targetDir, "icon.png"), Buffer.from([0x00, 0xff, 0x41]));
       await writeFile(join(templateDir, "icon.png"), Buffer.from([0x00, 0xfe, 0x41]));
 
-      const result = await detectDiff({ targetDir, templateDir, patterns });
+      const result = await detectDiff({ targetDir, templateDir, scope });
 
       expect(result.files.map((f) => [f.path, f.type])).toEqual([["icon.png", "modified"]]);
       expect(generateUnifiedDiff(result.files[0])).toBe(
@@ -226,7 +226,7 @@ describe("diff", () => {
       await writeFile(join(targetDir, "icon.png"), bytes);
       await writeFile(join(templateDir, "icon.png"), bytes);
 
-      const result = await detectDiff({ targetDir, templateDir, patterns });
+      const result = await detectDiff({ targetDir, templateDir, scope });
 
       expect(result.files.map((f) => [f.path, f.type])).toEqual([["icon.png", "unchanged"]]);
     });

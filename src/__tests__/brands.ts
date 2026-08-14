@@ -9,9 +9,11 @@
  * 「リテラルのオブジェクトをハッシュマップにする」ような、テスト側にしか現れない形の
  * 組み立てだけにする。
  */
+import ignore from "ignore";
 import type { BlobSha, CommitSha, ContentHash, HashMap, PendingConflict } from "../modules/schemas";
 import { blobShaSchema, commitShaSchema, contentHashSchema } from "../modules/schemas";
-import { repoRelPath } from "../utils/paths";
+import { globPatterns, repoRelPath, repoRelPaths } from "../utils/paths";
+import type { SyncScope } from "../utils/sync-scope";
 
 export {
   absPath,
@@ -21,6 +23,34 @@ export {
   repoRelPath,
   repoRelPaths,
 } from "../utils/paths";
+
+/**
+ * 走査範囲を組み立てる。
+ *
+ * 本番の {@link SyncScope} は `resolveSyncScope` がテンプレートの設定と両ディレクトリの
+ * `.gitignore` を読んで作る。走査範囲そのものが主題でないテストは、その入力をディスクに
+ * 用意せずに範囲だけを決めたい。省略した項目は「何も無視しない・何も戻さない」になるので、
+ * `include` だけを渡せば include が対象をそのまま決める範囲になる。
+ *
+ * 範囲の解決規則そのものを確かめるテストは、この関数ではなく `resolveSyncScope` を使う。
+ */
+export function syncScope(
+  params: {
+    readonly include?: readonly string[];
+    readonly exclude?: readonly string[];
+    /** `.gitignore` の記法で書いた無視パターン。 */
+    readonly gitignore?: readonly string[];
+    /** gitignore や exclude を越えて走査へ戻すパス。 */
+    readonly alwaysTracked?: readonly string[];
+  } = {},
+): SyncScope {
+  return {
+    include: globPatterns(params.include ?? []),
+    exclude: globPatterns(params.exclude ?? []),
+    gitignore: ignore().add([...(params.gitignore ?? [])]),
+    alwaysTracked: repoRelPaths(params.alwaysTracked ?? []),
+  };
+}
 
 /** 固定値のハッシュをテストで使うための変換。 */
 export function contentHash(value: string): ContentHash {

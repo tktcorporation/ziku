@@ -48,14 +48,10 @@ import {
 } from "../utils/github";
 import type { RepoExistence } from "../utils/github";
 import { hashBytes, hashFiles } from "../utils/hash";
+import { resolveSyncScope } from "../utils/sync-scope";
 import { absPath, joinAbs, repoRelPath } from "../utils/paths";
 import { LOCK_FILE, saveLock } from "../utils/lock";
-import {
-  ZIKU_CONFIG_FILE,
-  generateZikuJsonc,
-  withConfigTracked,
-  zikuConfigExists,
-} from "../utils/ziku-config";
+import { ZIKU_CONFIG_FILE, generateZikuJsonc, zikuConfigExists } from "../utils/ziku-config";
 import {
   buildTemplateSource,
   downloadTemplateToTemp,
@@ -406,13 +402,16 @@ async function applyTemplate(
     allResults.push(await createEnvExample(targetDir, strategy, args.dryRun));
   }
 
-  // テンプレートファイルのハッシュを計算（pull 時の差分検出用）。
-  // ziku.jsonc 自体も追跡ファイルになったため withConfigTracked で含める。
-  const templateHashes = await hashFiles(
-    template.templateDir,
-    withConfigTracked(flatPatterns.include),
-    flatPatterns.exclude,
-  );
+  // テンプレートファイルのハッシュを計算（pull 時の差分検出用）。走査範囲は
+  // pull / push / status と同じ規則から決める。ここだけ範囲がずれると、init 直後の
+  // status がベースと実ファイルの食い違いを差分として見せる。
+  const { scope } = await resolveSyncScope({
+    targetDir,
+    templateDir: template.templateDir,
+    include: flatPatterns.include,
+    exclude: flatPatterns.exclude,
+  });
+  const templateHashes = await hashFiles(template.templateDir, scope);
   const generatedConfigContent = generateZikuJsonc({
     include: flatPatterns.include,
     exclude: flatPatterns.exclude,

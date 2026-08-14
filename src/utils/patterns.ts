@@ -6,8 +6,8 @@ import { repoRelPaths } from "./paths";
  * フラットな include/exclude パターン
  */
 export interface FlatPatterns {
-  include: GlobPattern[];
-  exclude: GlobPattern[];
+  include: readonly GlobPattern[];
+  exclude: readonly GlobPattern[];
 }
 
 /**
