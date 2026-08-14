@@ -12,7 +12,15 @@ import type { SyncPlan, ZikuConfigState } from "../../utils/merge/sync-plan";
 import { partitionSyncPlan } from "../../utils/merge/sync-plan";
 import type { ConfigDrift } from "../../utils/config-merge";
 import type { DefaultBranchResolution } from "../../utils/github";
-import type { FileDiff, GitHubSource, RepoRelPath } from "../../modules/schemas";
+import type {
+  DeletablePath,
+  FileDiff,
+  GitHubSource,
+  PushContent,
+  RepoRelPath,
+} from "../../modules/schemas";
+import { asDeletablePath, asPushContent, mergedAsPushContent } from "../../modules/schemas";
+import { classifySyncPath } from "../../utils/ziku-config";
 import {
   commitSha,
   globPatterns,
@@ -23,14 +31,11 @@ import {
 import {
   alreadySyncedPaths,
   applyPushSelection,
-  asDeletablePath,
-  asPushContent,
   baseAfterPush,
   collectPushCandidates,
   configDiffToInject,
   defaultPushSelection,
   filterByFilesArg,
-  mergedAsPushContent,
   patternsToPersist,
   planConfigPropagation,
   planPushCandidates,
@@ -42,14 +47,7 @@ import {
   withAutoUpdatedFile,
   zikuConfigWriteBack,
 } from "../push-plan";
-import type {
-  ChangedFileDiff,
-  DeletablePath,
-  PushContent,
-  PushFile,
-  PushPayload,
-  PushSend,
-} from "../push-plan";
+import type { ChangedFileDiff, PushFile, PushPayload, PushSend } from "../push-plan";
 
 /** 送った内容をローカルへ書き戻していないケース。ベース前進の例外が要らない既定の入力。 */
 const NOTHING_WRITTEN_BACK: ReadonlySet<RepoRelPath> = new Set();
@@ -83,7 +81,7 @@ function synthesizedFile(path: string, content: string): PushFile {
  * 同期ファイルに限るので、弾かれたらフィクスチャの誤りとして落とす。
  */
 function deletablePath(path: string): DeletablePath {
-  const deletable = asDeletablePath(repoRelPath(path));
+  const deletable = asDeletablePath(classifySyncPath(repoRelPath(path)));
   if (deletable === undefined) throw new Error(`fixture must be deletable: ${path}`);
   return deletable;
 }
@@ -457,30 +455,6 @@ describe("selectedUnresolvedConflicts", () => {
   });
 });
 
-describe("PushContent", () => {
-  it("型: マーカー入りと確定した内容は送信対象へ変換できない", () => {
-    const outcome = classifyMergeOutcome(
-      "<<<<<<< LOCAL\nmine\n=======\ntheirs\n>>>>>>> TEMPLATE\n",
-    );
-    if (outcome._tag !== "Conflicted") throw new Error("fixture must conflict");
-
-    // マーカー入りの内容がテンプレートへ配られると、そのテンプレートを使う全プロジェクトへ
-    // 壊れたファイルが届く。これを「コンパイルできない」ことで防ぐのが PushContent の役目
-    // なので、@ts-expect-error が外れたら（= 変換できるようになったら）typecheck が失敗する。
-    // @ts-expect-error マージ由来の内容は asPushContent を通れない
-    const converted: PushContent = asPushContent(outcome.content);
-
-    expect(converted).toBe(outcome.content);
-  });
-
-  it("クリーンと判定された内容は専用の経路で送信対象になる", () => {
-    const outcome = classifyMergeOutcome("merged content");
-    if (outcome._tag !== "Clean") throw new Error("fixture must merge cleanly");
-
-    expect(mergedAsPushContent(outcome.content)).toBe("merged content");
-  });
-});
-
 /** 送るものがある前提で payload を取り出す。無ければテストの前提が崩れている。 */
 function deliveryPayload(
   selected: Parameters<typeof planPushDelivery>[0]["selected"],
@@ -771,16 +745,6 @@ describe("baseAfterPush", () => {
 
     expect(next.localOnly).toEqual([]);
     expect(next.conflicts).toEqual(["doc.md"]);
-  });
-});
-
-describe("asDeletablePath", () => {
-  it("通常の同期ファイルは削除として送れる", () => {
-    expect(asDeletablePath(repoRelPath("a.txt"))).toBe("a.txt");
-  });
-
-  it("ziku 自身の設定ファイルは削除として送れない", () => {
-    expect(asDeletablePath(CONFIG_PATH)).toBeUndefined();
   });
 });
 

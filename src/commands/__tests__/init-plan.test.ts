@@ -8,7 +8,13 @@ import { describe, expect, it } from "vitest";
 import type { RepoExistence } from "../../utils/github";
 import { hashContent } from "../../utils/hash";
 import { generateZikuJsonc } from "../../utils/ziku-config";
-import type { FileAction, GlobPattern, HashMap, TemplateSource } from "../../modules/schemas";
+import type {
+  FileAction,
+  GlobPattern,
+  HashMap,
+  RepoRelPath,
+  TemplateSource,
+} from "../../modules/schemas";
 import { baseCommitSha, baseHashesOf } from "../../modules/schemas";
 import { absPath, commitSha, globPatterns, hashMap, repoRelPath } from "../../__tests__/brands";
 import type { TemplateCandidate } from "../../ui/prompts";
@@ -257,28 +263,28 @@ describe("planLockBaseHashes", () => {
 
   function plan(
     templateHashes: HashMap,
-    results: readonly { action: FileAction; path: string }[],
+    results: readonly { action: FileAction; path: RepoRelPath }[],
   ): HashMap {
     return planLockBaseHashes({ templateHashes, generatedContents, results });
   }
 
   it("コピーされたファイルはテンプレートの内容のハッシュをベースにする", () => {
     const result = plan(hashMap({ ".mcp.json": "template-hash" }), [
-      { action: "copied", path: ".mcp.json" },
+      { action: "copied", path: repoRelPath(".mcp.json") },
     ]);
     expect(result[repoRelPath(".mcp.json")]).toBe("template-hash");
   });
 
   it("上書きされたファイルもテンプレートの内容のハッシュをベースにする", () => {
     const result = plan(hashMap({ ".mcp.json": "template-hash" }), [
-      { action: "overwritten", path: ".mcp.json" },
+      { action: "overwritten", path: repoRelPath(".mcp.json") },
     ]);
     expect(result[repoRelPath(".mcp.json")]).toBe("template-hash");
   });
 
   it("スキップされたファイルはベースに載せない", () => {
     const result = plan(hashMap({ ".mcp.json": "template-hash" }), [
-      { action: "skipped", path: ".mcp.json" },
+      { action: "skipped", path: repoRelPath(".mcp.json") },
     ]);
     // ローカルの内容をベースにすると、次の pull がテンプレートの内容で確認なく置き換える
     expect(result).toEqual({});
@@ -286,7 +292,7 @@ describe("planLockBaseHashes", () => {
 
   it("gitignore 由来のスキップもベースに載せない", () => {
     const result = plan(hashMap({ ".mcp.json": "template-hash" }), [
-      { action: "skipped_ignored", path: ".mcp.json" },
+      { action: "skipped_ignored", path: repoRelPath(".mcp.json") },
     ]);
     expect(result).toEqual({});
   });
@@ -298,7 +304,7 @@ describe("planLockBaseHashes", () => {
 
   it("書き込まれた ziku.jsonc のベースは生成した本文のハッシュ（テンプレ側ではない）", () => {
     const result = plan(hashMap({ ".ziku/ziku.jsonc": "template-hash" }), [
-      { action: "created", path: ".ziku/ziku.jsonc" },
+      { action: "created", path: repoRelPath(".ziku/ziku.jsonc") },
     ]);
     // テンプレートのハッシュを載せると、初回 push が「local がパターンを削除した」と
     // 解釈してテンプレートからパターンを削る
@@ -317,7 +323,7 @@ describe("planLockBaseHashes", () => {
 
   it("スキップされた ziku.jsonc はベースに載せない", () => {
     const result = plan(hashMap({ ".ziku/ziku.jsonc": "template-hash" }), [
-      { action: "skipped", path: ".ziku/ziku.jsonc" },
+      { action: "skipped", path: repoRelPath(".ziku/ziku.jsonc") },
     ]);
     expect(result).toEqual({});
   });
@@ -330,7 +336,7 @@ describe("planLockBaseHashes", () => {
       templateHashes: hashMap({ ".mcp.json": "a" }),
       generatedContents: new Map([[envExample, "GH_TOKEN=\n"]]),
       results: [
-        { action: "copied", path: ".mcp.json" },
+        { action: "copied", path: repoRelPath(".mcp.json") },
         { action: "created", path: envExample },
       ],
     });
@@ -339,7 +345,7 @@ describe("planLockBaseHashes", () => {
 
   it("渡されたハッシュ表を書き換えない", () => {
     const templateHashes = hashMap({ ".ziku/ziku.jsonc": "template-hash" });
-    plan(templateHashes, [{ action: "created", path: ".ziku/ziku.jsonc" }]);
+    plan(templateHashes, [{ action: "created", path: repoRelPath(".ziku/ziku.jsonc") }]);
     expect(templateHashes[CONFIG_PATH]).toBe("template-hash");
   });
 });

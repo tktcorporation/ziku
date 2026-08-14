@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { commitSha, repoRelPath } from "../../__tests__/brands";
+import type { DeletablePath } from "../../modules/schemas";
+import { asDeletablePath, asPushContent } from "../../modules/schemas";
+import { classifySyncPath } from "../ziku-config";
 import { ZikuFailure } from "../../errors";
 import {
   checkRepoExists,
@@ -11,6 +14,15 @@ import {
   rateLimitedError,
   unauthorizedError,
 } from "../github";
+
+/**
+ * 削除として送れるパスを組み立てる。設定ファイルを渡すのはフィクスチャの誤りなので落とす。
+ */
+function deletablePath(path: string): DeletablePath {
+  const deletable = asDeletablePath(classifySyncPath(repoRelPath(path)));
+  if (deletable === undefined) throw new Error(`fixture must be deletable: ${path}`);
+  return deletable;
+}
 
 // Octokit をモック
 const mockGetAuthenticated = vi.fn();
@@ -153,7 +165,7 @@ describe("createPullRequest", () => {
     const result = await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
       baseBranch: "main",
     });
@@ -170,7 +182,9 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("assets/icon.png"), content: bytes.toString("latin1") }],
+      files: [
+        { path: repoRelPath("assets/icon.png"), content: asPushContent(bytes.toString("latin1")) },
+      ],
       title: "Test PR",
       baseBranch: "main",
     });
@@ -185,7 +199,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("README.md"), content }],
+      files: [{ path: repoRelPath("README.md"), content: asPushContent(content) }],
       title: "Test PR",
       baseBranch: "main",
     });
@@ -202,7 +216,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
       baseBranch: "main",
     });
@@ -223,7 +237,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
       baseBranch: "main",
     });
@@ -242,7 +256,7 @@ describe("createPullRequest", () => {
     const thrown = await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
       baseBranch: "main",
     }).catch((e: unknown) => e);
@@ -257,8 +271,8 @@ describe("createPullRequest", () => {
       owner: "owner",
       repo: "repo",
       files: [
-        { path: repoRelPath("file1.txt"), content: "content1" },
-        { path: repoRelPath("file2.txt"), content: "content2" },
+        { path: repoRelPath("file1.txt"), content: asPushContent("content1") },
+        { path: repoRelPath("file2.txt"), content: asPushContent("content2") },
       ],
       title: "Test PR",
       baseBranch: "main",
@@ -278,7 +292,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("existing.txt"), content: "new content" }],
+      files: [{ path: repoRelPath("existing.txt"), content: asPushContent("new content") }],
       title: "Test PR",
       baseBranch: "main",
     });
@@ -294,7 +308,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
       baseBranch: "develop",
     });
@@ -316,7 +330,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
       baseBranch: "main",
       body: "Custom body content",
@@ -333,7 +347,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
       baseBranch: "main",
     });
@@ -349,7 +363,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
       baseBranch: "main",
     });
@@ -367,7 +381,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
       baseBranch: "main",
     });
@@ -388,7 +402,7 @@ describe("createPullRequest", () => {
     const thrown = await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
       baseBranch: "main",
     }).then(
@@ -418,7 +432,7 @@ describe("createPullRequest", () => {
       owner: "owner",
       repo: "repo",
       files: [],
-      deletions: [{ path: repoRelPath("to-delete.txt") }],
+      deletions: [{ path: deletablePath("to-delete.txt") }],
       title: "Test PR with deletion",
       baseBranch: "main",
     });
@@ -440,8 +454,8 @@ describe("createPullRequest", () => {
     const thrown = await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("file.txt"), content: "content" }],
-      deletions: [{ path: repoRelPath("nonexistent.txt") }],
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
+      deletions: [{ path: deletablePath("nonexistent.txt") }],
       title: "Test PR",
       baseBranch: "main",
     }).then(
@@ -475,7 +489,7 @@ describe("createPullRequest", () => {
     const thrown = await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath(".ziku/ziku.jsonc"), content: "defaults" }],
+      files: [{ path: repoRelPath(".ziku/ziku.jsonc"), content: asPushContent("defaults") }],
       title: "Test PR",
       baseBranch: "main",
       onExistingFiles: "fail",
@@ -501,7 +515,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath(".ziku/ziku.jsonc"), content: "defaults" }],
+      files: [{ path: repoRelPath(".ziku/ziku.jsonc"), content: asPushContent("defaults") }],
       title: "Test PR",
       baseBranch: "main",
       onExistingFiles: "fail",
@@ -522,7 +536,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("existing.txt"), content: "new content" }],
+      files: [{ path: repoRelPath("existing.txt"), content: asPushContent("new content") }],
       title: "Test PR",
       baseBranch: "main",
     });
@@ -539,7 +553,7 @@ describe("createPullRequest", () => {
       owner: "owner",
       repo: "repo",
       files: [],
-      deletions: [{ path: repoRelPath("gone.txt") }],
+      deletions: [{ path: deletablePath("gone.txt") }],
       title: "Test PR",
       baseBranch: "main",
     }).catch(() => undefined);
@@ -559,8 +573,8 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("file.txt"), content: "content" }],
-      deletions: [{ path: repoRelPath("present.txt") }, { path: repoRelPath("gone.txt") }],
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
+      deletions: [{ path: deletablePath("present.txt") }, { path: deletablePath("gone.txt") }],
       title: "Test PR",
       baseBranch: "main",
     }).catch(() => undefined);
@@ -577,7 +591,7 @@ describe("createPullRequest", () => {
     const thrown = await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
       baseBranch: "main",
     }).then(
@@ -601,7 +615,7 @@ describe("createPullRequest", () => {
     const thrown = await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
       baseBranch: "main",
     }).catch((e: unknown) => e);
@@ -623,7 +637,7 @@ describe("createPullRequest", () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
       baseBranch: "main",
     });
@@ -632,11 +646,80 @@ describe("createPullRequest", () => {
     expect(mockReposCreateFork).not.toHaveBeenCalled();
   });
 
+  it("認証ユーザーが対象リポジトリの所有者なら、fork を作らず対象リポジトリ本体を head にする", async () => {
+    // 自分のテンプレートリポジトリは自分の fork ではないので、fork を探しに行くと
+    // 「同名だが fork ではない」と判定され、push と setup --remote が必ず失敗する。
+    mockGetAuthenticated.mockResolvedValue({ data: { login: "owner" } });
+
+    await createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
+      title: "Test PR",
+      baseBranch: "main",
+    });
+
+    expect(mockReposCreateFork).not.toHaveBeenCalled();
+    // fork を探す問い合わせ自体が要らない。対象リポジトリ本体が head になる。
+    expect(mockReposGet).not.toHaveBeenCalled();
+    expect(mockGitCreateRef).toHaveBeenCalledWith(
+      expect.objectContaining({ owner: "owner", repo: "repo" }),
+    );
+    expect(mockReposCreateOrUpdateFileContents).toHaveBeenCalledWith(
+      expect.objectContaining({ owner: "owner", repo: "repo" }),
+    );
+    expect(mockPullsCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ head: expect.stringMatching(/^owner:ziku-sync-\d+$/) }),
+    );
+  });
+
+  it("所有者の判定は大文字小文字を区別しない", async () => {
+    // GitHub のログイン名は case-insensitive なので、表記違いで fork を探しに行かせない。
+    mockGetAuthenticated.mockResolvedValue({ data: { login: "TestUser" } });
+
+    await createPullRequest("token", {
+      owner: "testuser",
+      repo: "repo",
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
+      title: "Test PR",
+      baseBranch: "main",
+    });
+
+    expect(mockReposCreateFork).not.toHaveBeenCalled();
+    expect(mockReposGet).not.toHaveBeenCalled();
+    expect(mockGitCreateRef).toHaveBeenCalledWith(
+      expect.objectContaining({ owner: "testuser", repo: "repo" }),
+    );
+  });
+
+  it("削除も対象リポジトリ本体のブランチへ送る", async () => {
+    mockGetAuthenticated.mockResolvedValue({ data: { login: "owner" } });
+    mockGitGetTree.mockResolvedValue({
+      data: {
+        tree: [{ path: "to-delete.txt", type: "blob", sha: "delete-sha" }],
+        truncated: false,
+      },
+    });
+
+    await createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [],
+      deletions: [{ path: deletablePath("to-delete.txt") }],
+      title: "Test PR with deletion",
+      baseBranch: "main",
+    });
+
+    expect(mockReposDeleteFile).toHaveBeenCalledWith(
+      expect.objectContaining({ owner: "owner", repo: "repo", path: "to-delete.txt" }),
+    );
+  });
+
   it("ファイル内容を Base64 エンコードする", async () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
-      files: [{ path: repoRelPath("file.txt"), content: "Hello, World!" }],
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("Hello, World!") }],
       title: "Test PR",
       baseBranch: "main",
     });

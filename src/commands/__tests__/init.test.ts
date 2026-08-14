@@ -180,7 +180,7 @@ describe("initCommand", () => {
     );
     mockCopyFile.mockResolvedValue({
       action: "skipped",
-      path: ".ziku/ziku.jsonc",
+      path: repoRelPath(".ziku/ziku.jsonc"),
     });
     mockHashFiles.mockResolvedValue({});
   });
@@ -239,7 +239,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: true },
@@ -259,7 +259,7 @@ describe("initCommand", () => {
       mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/new-dir", force: false, yes: false },
@@ -278,7 +278,7 @@ describe("initCommand", () => {
 
       mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "init", force: false, yes: false },
@@ -437,7 +437,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: {
@@ -796,8 +796,8 @@ describe("initCommand", () => {
       mockHashFiles.mockResolvedValueOnce(expectedHashes);
 
       mockFetchTemplates.mockResolvedValue([
-        { action: "copied", path: ".mcp.json" },
-        { action: "copied", path: ".mise.toml" },
+        { action: "copied", path: repoRelPath(".mcp.json") },
+        { action: "copied", path: repoRelPath(".mise.toml") },
       ]);
 
       await (initCommand.run as any)({
@@ -832,7 +832,7 @@ describe("initCommand", () => {
 
       // テンプレートには devcontainer.env.example が無い（init が組み立てて書く）。
       mockHashFiles.mockResolvedValueOnce(hashMap({ ".mcp.json": "abc123hash" }));
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: true },
@@ -858,7 +858,7 @@ describe("initCommand", () => {
       // テンプレに ziku.jsonc が存在する状況（hashFiles が ziku.jsonc を返す）
       mockHashFiles.mockResolvedValueOnce(hashMap({ ".ziku/ziku.jsonc": "template-config-hash" }));
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: true },
@@ -888,7 +888,7 @@ describe("initCommand", () => {
       // テンプレに ziku.jsonc が無い状況（hashFiles が ziku.jsonc を返さない）
       mockHashFiles.mockResolvedValueOnce({});
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: true },
@@ -1124,7 +1124,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: true, dryRun: true },
@@ -1143,7 +1143,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: true, dryRun: true },
@@ -1162,7 +1162,7 @@ describe("initCommand", () => {
     it("存在しないターゲットディレクトリを作成しない", async () => {
       vol.fromJSON({});
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/nonexistent-target", force: false, yes: true, dryRun: true },
@@ -1190,7 +1190,7 @@ describe("initCommand", () => {
           },
         };
       });
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/nonexistent-remote-target", force: false, yes: true, dryRun: true },
@@ -1215,7 +1215,7 @@ describe("initCommand", () => {
           },
         };
       });
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: {
@@ -1271,7 +1271,7 @@ describe("initCommand", () => {
           },
         };
       });
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/existing-target", force: false, yes: true, dryRun: true },
@@ -1288,7 +1288,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: true, dryRun: true },
@@ -1304,7 +1304,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: true, dryRun: true },

@@ -294,7 +294,9 @@ export function planLockBaseHashes(params: {
   readonly generatedContents: ReadonlyMap<RepoRelPath, string>;
   readonly results: readonly FileOperationResult[];
 }): HashMap {
-  const actions = new Map<string, FileAction>(params.results.map((r) => [r.path, r.action]));
+  // 鍵は brand 付きのまま持つ。素の string で引くと、表現のずれた 1 件が「触っていない」と
+  // 読まれ、init が書いたファイルのベースが lock から落ちる。
+  const actions = new Map<RepoRelPath, FileAction>(params.results.map((r) => [r.path, r.action]));
 
   // init が書き込んだ場合にベースへ載る内容。生成物はその本文から、それ以外はテンプレートの
   // 走査結果から取る。テンプレートに無いパスもここで揃うので、以降は出所を意識せず扱える。
@@ -306,7 +308,7 @@ export function planLockBaseHashes(params: {
   const written: HashMap = {};
   for (const [rawPath, hash] of Object.entries(ifWritten)) {
     const path = repoRelPath(rawPath);
-    match(baseHashOrigin(actions.get(rawPath)))
+    match(baseHashOrigin(actions.get(path)))
       .with({ _tag: "Written" }, () => {
         written[path] = hash;
       })

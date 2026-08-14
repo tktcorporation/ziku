@@ -7,7 +7,9 @@ import type {
   BlobSha,
   BranchRef,
   CommitSha,
+  DeletablePath,
   PrResult,
+  PushContent,
   RepoRelPath,
   TemplateRef,
 } from "../modules/schemas";
@@ -22,10 +24,19 @@ export interface PushOptions {
    * PR に載せるファイル。`content` はテキストなら utf-8、バイナリならバイト列を保つ
    * エンコードで載っている（`src/utils/file-content.ts`）。GitHub API へ渡す前に
    * 元のバイト列へ戻す。
+   *
+   * 内容を `PushContent` に限るのは、コンフリクトマーカー入りのテキストが PR に載る経路を
+   * 型で塞ぐため。素の `string` を受けると、送信を組み立てる層の検査を通らない消費者が
+   * ここへ直接マーカー入りの内容を渡せる。
    */
-  files: readonly { readonly path: RepoRelPath; readonly content: string }[];
-  /** テンプレートから削除するファイル（PR にファイル削除コミットを含める） */
-  deletions?: readonly { readonly path: RepoRelPath }[];
+  files: readonly { readonly path: RepoRelPath; readonly content: PushContent }[];
+  /**
+   * テンプレートから削除するファイル（PR にファイル削除コミットを含める）。
+   *
+   * パスを `DeletablePath` に限ることで、ziku 自身の設定ファイルの削除がどの経路からも
+   * 載らない（理由は `DeletablePath` の説明を参照）。
+   */
+  deletions?: readonly { readonly path: DeletablePath }[];
   title: string;
   body?: string;
   /**
@@ -82,8 +93,26 @@ interface PreparedDeletion {
   readonly sha: BlobSha;
 }
 
-/** fork の状態。作成という副作用が要るかどうかだけを表す。 */
-type ForkState = { readonly _tag: "Existing"; readonly name: string } | { readonly _tag: "Absent" };
+/**
+ * PR の head を置く場所。
+ *
+ * 条件は head が base と共通の履歴を持つことで、それを満たす形は 3 つある。
+ * 「fork かどうか」という 1 つの述語に縮めると、認証ユーザーが対象リポジトリの
+ * 所有者である構成（fork が要らない）が正当な状態として表せなくなる。
+ */
+type PushHead =
+  /** 対象リポジトリ本体。認証ユーザーが所有者なので fork を挟まない。 */
+  | { readonly _tag: "SameRepo" }
+  /** 対象リポジトリの既存 fork。 */
+  | { readonly _tag: "Fork"; readonly name: string }
+  /** fork がまだ無い。applyPush が作る。 */
+  | { readonly _tag: "Absent" };
+
+/** ブランチとコミットを置くリポジトリ。{@link ensurePushHead} が決める。 */
+interface HeadRepo {
+  readonly owner: string;
+  readonly repo: string;
+}
 
 /**
  * 読み取りと検証を終えた送信内容。{@link applyPush} はこの型しか受け取らない。
@@ -95,9 +124,10 @@ type ForkState = { readonly _tag: "Existing"; readonly name: string } | { readon
  */
 interface PreparedPush {
   readonly meta: PullRequestMeta;
-  /** PR の head を置く側（認証ユーザー）。 */
-  readonly forkOwner: string;
-  readonly fork: ForkState;
+  /** PR の head をどこに置くか。 */
+  readonly head: PushHead;
+  /** 認証ユーザーのログイン名。fork を head に使う場合の所有者になる。 */
+  readonly authenticatedUser: string;
   /** 同期ブランチを生やす、宛先ブランチの先端コミット。 */
   readonly baseSha: string;
   readonly files: readonly PreparedFile[];
@@ -117,7 +147,7 @@ async function preparePush(octokit: Octokit, options: PushOptions): Promise<Prep
   const { data: user } = await octokit.users.getAuthenticated();
   const forkOwner = user.login;
 
-  const fork = await lookupFork(octokit, { owner, repo, forkOwner });
+  const head = await lookupPushHead(octokit, { owner, repo, forkOwner });
 
   const { data: baseBranchRef } = await octokit.repos.getBranch({
     owner,
@@ -132,8 +162,8 @@ async function preparePush(octokit: Octokit, options: PushOptions): Promise<Prep
 
   return {
     meta: { owner, repo, title, body: body || generatePrBody(files), baseBranch },
-    forkOwner,
-    fork,
+    head,
+    authenticatedUser: forkOwner,
     baseSha,
     files: files.map((file) => ({
       path: file.path,
@@ -150,24 +180,25 @@ async function preparePush(octokit: Octokit, options: PushOptions): Promise<Prep
  * 送信内容を GitHub 上へ反映する。ここから先はすべて副作用で、検証は行わない。
  */
 async function applyPush(octokit: Octokit, prepared: PreparedPush): Promise<PrResult> {
-  const { meta, forkOwner } = prepared;
-  const forkRepo = await ensureFork(octokit, prepared.fork, {
+  const { meta } = prepared;
+  const headRepo = await ensurePushHead(octokit, prepared.head, {
     owner: meta.owner,
     repo: meta.repo,
+    forkOwner: prepared.authenticatedUser,
   });
 
   const branchName = `ziku-sync-${Date.now()}`;
   await octokit.git.createRef({
-    owner: forkOwner,
-    repo: forkRepo,
+    owner: headRepo.owner,
+    repo: headRepo.repo,
     ref: `refs/heads/${branchName}`,
     sha: prepared.baseSha,
   });
 
   for (const file of prepared.files) {
     await octokit.repos.createOrUpdateFileContents({
-      owner: forkOwner,
-      repo: forkRepo,
+      owner: headRepo.owner,
+      repo: headRepo.repo,
       path: file.path,
       message: `Update ${file.path}`,
       content: file.bytes.toString("base64"),
@@ -178,8 +209,8 @@ async function applyPush(octokit: Octokit, prepared: PreparedPush): Promise<PrRe
 
   for (const deletion of prepared.deletions) {
     await octokit.repos.deleteFile({
-      owner: forkOwner,
-      repo: forkRepo,
+      owner: headRepo.owner,
+      repo: headRepo.repo,
       path: deletion.path,
       message: `Delete ${deletion.path}`,
       sha: deletion.sha,
@@ -192,7 +223,8 @@ async function applyPush(octokit: Octokit, prepared: PreparedPush): Promise<PrRe
     repo: meta.repo,
     title: meta.title,
     body: meta.body,
-    head: `${forkOwner}:${branchName}`,
+    // 同一リポジトリを head にする場合も `owner:branch` 形式で通る。
+    head: `${headRepo.owner}:${branchName}`,
     base: meta.baseBranch,
   });
 
@@ -292,7 +324,12 @@ function resolveDeletions(
 const FORK_PROPAGATION_WAIT_MS = 3000;
 
 /**
- * PR の head に使える fork が既にあるかを問い合わせる。作成はしない（{@link ensureFork}）。
+ * PR の head を置ける場所が既にあるかを問い合わせる。作成はしない（{@link ensurePushHead}）。
+ *
+ * 認証ユーザーが対象リポジトリの所有者なら、対象リポジトリ本体がそのまま head になる。
+ * 比較で大文字小文字を畳むのは GitHub のログイン名が case-insensitive なため。畳まずに
+ * 比べると、表記だけが違う所有者が同名リポジトリの fork を探しに行き、対象リポジトリ自身を
+ * 「fork ではない同名リポジトリ」として弾いてしまう。
  *
  * 既存 fork の問い合わせが失敗したときは「無い」に倒す。未 fork なら 404 が返るが、それ以外の
  * 理由（トークンの失効等）でも作成が同じ理由で失敗し、そちらの例外が呼び出し側へ届く。
@@ -301,10 +338,12 @@ const FORK_PROPAGATION_WAIT_MS = 3000;
  * 無関係なリポジトリへ同期ブランチを作ると、GitHub のエラーがそのまま出て原因が分からない。
  * この判定は読み取りだけで済むので、副作用の前に済ませる。
  */
-async function lookupFork(
+async function lookupPushHead(
   octokit: Octokit,
   target: { owner: string; repo: string; forkOwner: string },
-): Promise<ForkState> {
+): Promise<PushHead> {
+  if (target.forkOwner.toLowerCase() === target.owner.toLowerCase()) return { _tag: "SameRepo" };
+
   const existing = await octokit.repos
     .get({ owner: target.forkOwner, repo: target.repo })
     .then(({ data }) => data)
@@ -319,28 +358,35 @@ async function lookupFork(
       existing: `${target.forkOwner}/${target.repo}`,
     });
   }
-  return { _tag: "Existing", name: existing.name };
+  return { _tag: "Fork", name: existing.name };
 }
 
 /**
- * PR の head に使う fork のリポジトリ名を返す。まだ無ければ fork を作る。
+ * ブランチとコミットを置くリポジトリを返す。fork がまだ無ければここで作る。
  *
  * 作成の失敗は包み直さずそのまま投げる。Octokit の例外は HTTP ステータスを持っており、
  * 呼び出し側はそれを見て「権限が足りない」「レート制限」をユーザー向けの案内へ分類する
  * （{@link classifyGitHubApiFailure}）。`Effect.runPromise` で包むと失敗が FiberFailure に
  * 埋もれ、ステータスごと分類の材料が失われる。
  */
-function ensureFork(
+function ensurePushHead(
   octokit: Octokit,
-  fork: ForkState,
-  target: { owner: string; repo: string },
-): Promise<string> {
-  return match(fork)
-    .with({ _tag: "Existing" }, ({ name }) => Promise.resolve(name))
-    .with({ _tag: "Absent" }, async () => {
+  head: PushHead,
+  target: { owner: string; repo: string; forkOwner: string },
+): Promise<HeadRepo> {
+  return match(head)
+    .with(
+      { _tag: "SameRepo" },
+      (): Promise<HeadRepo> => Promise.resolve({ owner: target.owner, repo: target.repo }),
+    )
+    .with(
+      { _tag: "Fork" },
+      ({ name }): Promise<HeadRepo> => Promise.resolve({ owner: target.forkOwner, repo: name }),
+    )
+    .with({ _tag: "Absent" }, async (): Promise<HeadRepo> => {
       const { data } = await octokit.repos.createFork({ owner: target.owner, repo: target.repo });
       await sleep(FORK_PROPAGATION_WAIT_MS);
-      return data.name;
+      return { owner: target.forkOwner, repo: data.name };
     })
     .exhaustive();
 }

@@ -8,8 +8,13 @@ import {
   pendingConflict,
   repoRelPath,
 } from "../../__tests__/brands";
-import type { FileDiff, LockState, SyncPoint } from "../schemas";
+import { classifyMergeOutcome } from "../../utils/merge/types";
+import { classifySyncPath } from "../../utils/ziku-config";
+import type { FileDiff, LockState, PushContent, SyncPoint } from "../schemas";
 import {
+  asDeletablePath,
+  asPushContent,
+  mergedAsPushContent,
   diffResultSchema,
   diffTypeSchema,
   fileActionSchema,
@@ -595,5 +600,39 @@ describe("brand: 同じ形の文字列を取り違えない", () => {
     const hashes = hashMap({ ".claude/rules/a.md": "h" });
     // @ts-expect-error 写像の鍵は相対パスであってパターンではない
     expect(hashes[globPattern(".claude/rules/*.md")]).toBeUndefined();
+  });
+});
+
+describe("PushContent", () => {
+  it("型: マーカー入りと確定した内容は送信対象へ変換できない", () => {
+    const outcome = classifyMergeOutcome(
+      "<<<<<<< LOCAL\nmine\n=======\ntheirs\n>>>>>>> TEMPLATE\n",
+    );
+    if (outcome._tag !== "Conflicted") throw new Error("fixture must conflict");
+
+    // マーカー入りの内容がテンプレートへ配られると、そのテンプレートを使う全プロジェクトへ
+    // 壊れたファイルが届く。これを「コンパイルできない」ことで防ぐのが PushContent の役目
+    // なので、@ts-expect-error が外れたら（= 変換できるようになったら）typecheck が失敗する。
+    // @ts-expect-error マージ由来の内容は asPushContent を通れない
+    const converted: PushContent = asPushContent(outcome.content);
+
+    expect(converted).toBe(outcome.content);
+  });
+
+  it("クリーンと判定された内容は専用の経路で送信対象になる", () => {
+    const outcome = classifyMergeOutcome("merged content");
+    if (outcome._tag !== "Clean") throw new Error("fixture must merge cleanly");
+
+    expect(mergedAsPushContent(outcome.content)).toBe("merged content");
+  });
+});
+
+describe("asDeletablePath", () => {
+  it("通常の同期ファイルは削除として送れる", () => {
+    expect(asDeletablePath(classifySyncPath(repoRelPath("a.txt")))).toBe("a.txt");
+  });
+
+  it("ziku 自身の設定ファイルは削除として送れない", () => {
+    expect(asDeletablePath(classifySyncPath(repoRelPath(".ziku/ziku.jsonc")))).toBeUndefined();
   });
 });

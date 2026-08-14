@@ -21,6 +21,7 @@ import type {
   FileOperationResult,
   GitHubSource,
   OverwriteStrategy,
+  RepoRelPath,
 } from "../modules/schemas";
 import { templateRefToString } from "../modules/schemas";
 import { log } from "../ui/renderer";
@@ -226,11 +227,18 @@ export interface DownloadOptions {
   dryRun?: boolean; // true の場合、ファイルへの書き込みを行わずプレビューのみ行う
 }
 
+/**
+ * 書き込み先の指定。
+ *
+ * `destPath`（書き込む実体の場所）と `relativePath`（結果に載る同期の鍵）を別の brand に
+ * するのは、どちらも `string` だと入れ違えてもコンパイルが通り、プロジェクトルート直下に
+ * 絶対パスの見た目のファイルを作る・結果に絶対パスが載って照合が外れる、という形で失敗するため。
+ */
 export interface WriteFileOptions {
-  destPath: string;
+  destPath: AbsPath;
   content: string;
   strategy: OverwriteStrategy;
-  relativePath: string;
+  relativePath: RepoRelPath;
   dryRun?: boolean; // true の場合、判定結果は返すがディスクへは書き込まない
 }
 
@@ -388,10 +396,10 @@ export function fetchTemplates(options: DownloadOptions): Promise<FileOperationR
  * （confirm() を呼ばず `initialValue: false` 相当の「上書きしない」を既定値にする）。
  */
 export async function copyFile(
-  srcPath: string,
-  destPath: string,
+  srcPath: AbsPath,
+  destPath: AbsPath,
   strategy: OverwriteStrategy,
-  relativePath: string,
+  relativePath: RepoRelPath,
   dryRun = false,
 ): Promise<CopyResult> {
   const destExists = existsSync(destPath);

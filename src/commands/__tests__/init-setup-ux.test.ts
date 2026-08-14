@@ -15,7 +15,7 @@ import { vol } from "memfs";
 import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TemplateNotConfiguredError } from "../../errors";
-import { absPath, globPatterns } from "../../__tests__/brands";
+import { absPath, globPatterns, repoRelPath } from "../../__tests__/brands";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -221,14 +221,14 @@ describe("init: セットアップ UX", () => {
       templateDir: absPath("/tmp/template"),
       cleanup: vi.fn(),
     });
-    mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+    mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
     mockWriteFileWithStrategy.mockResolvedValue({
       action: "created",
-      path: ".ziku/lock.json",
+      path: repoRelPath(".ziku/lock.json"),
     });
     mockCopyFile.mockResolvedValue({
       action: "skipped",
-      path: ".ziku/ziku.jsonc",
+      path: repoRelPath(".ziku/ziku.jsonc"),
     });
     mockHashFiles.mockResolvedValue({});
     mockDetectGitHubOwner.mockReturnValue("detected-org");

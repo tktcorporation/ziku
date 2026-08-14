@@ -315,7 +315,10 @@ describe("E2E: multi-scenario tests", () => {
       cleanup: vi.fn(),
     });
     mockFetchTemplates.mockResolvedValue([]);
-    mockWriteFileWithStrategy.mockResolvedValue({ action: "created", path: ".ziku/ziku.jsonc" });
+    mockWriteFileWithStrategy.mockResolvedValue({
+      action: "created",
+      path: repoRelPath(".ziku/ziku.jsonc"),
+    });
     mockHashFiles.mockResolvedValue({});
     mockCheckRepoExists.mockResolvedValue({ _tag: "Exists" });
     mockLoadTemplateConfig.mockReturnValue(
@@ -699,7 +702,7 @@ describe("E2E: multi-scenario tests", () => {
         "/project": null,
       });
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/project", force: false, yes: true },

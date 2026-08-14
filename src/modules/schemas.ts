@@ -1,5 +1,7 @@
 import { match } from "ts-pattern";
 import { z } from "zod";
+import type { ConflictedContent, MergedContent } from "../utils/merge";
+import type { SyncPath } from "../utils/ziku-config";
 
 // ────────────────────────────────────────────────────────────────
 // Branded Types — 同じ string に載る別種の値を型で分ける
@@ -103,10 +105,17 @@ export const fileActionSchema = z.enum([
 ]);
 export type FileAction = z.infer<typeof fileActionSchema>;
 
-// ファイル操作結果
+/**
+ * ファイル操作結果。
+ *
+ * `path` を brand 付きにするのは、この値が「何を書いたか」の照合鍵として使われるため
+ * （`src/commands/init-plan.ts` の `planLockBaseHashes` はテンプレートの走査結果と突き合わせる）。
+ * 素の `string` だと表現のずれた 1 件が「書いていない」と読まれ、init が書いたファイルの
+ * 同期ベースが lock に載らないまま、次の pull でそのファイルがコンフリクトになる。
+ */
 export const fileOperationResultSchema = z.object({
   action: fileActionSchema,
-  path: z.string(),
+  path: repoRelPathSchema,
 });
 export type FileOperationResult = z.infer<typeof fileOperationResultSchema>;
 
@@ -652,3 +661,77 @@ export const prResultSchema = z.object({
   branch: z.string(),
 });
 export type PrResult = z.infer<typeof prResultSchema>;
+
+// ────────────────────────────────────────────────────────────────
+// テンプレートへ送る内容 — 送信ペイロードが受け取れる値を型で絞る
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * テンプレートへ送るファイル内容。PR の本文にも、ローカルテンプレートへの書き込みにも
+ * この型しか渡らない。
+ *
+ * 送るものは 2 系統ある。ユーザーがローカルに書いた内容（および ziku が組み立てた
+ * `ziku.jsonc` の和集合）と、3-way マージの結果。前者はユーザー自身のテキストなので
+ * ziku が中身を選り分ける立場にない。後者は ziku が生成したものなので、コンフリクト
+ * マーカーを含んだままテンプレートへ配ってしまう事故が起こりうる。
+ *
+ * そこでマージ結果の入口を {@link mergedAsPushContent} だけに絞り、その引数を
+ * `MergedContent`（マーカー非混入が検証済み）に限定する。マーカー入りと確定した
+ * `ConflictedContent` は、この型へ変換する手段が無いので送信対象へ入れられない。
+ */
+const pushContentSchema = z.string().brand<"PushContent">();
+export type PushContent = z.infer<typeof pushContentSchema>;
+
+/**
+ * マージ結果のブランドを弾く。素の `string` と、マージと無関係なブランド付き文字列は通す。
+ *
+ * `MergedContent` / `ConflictedContent` はどちらも `string` の部分型なので、引数を
+ * `string` にすると 3-way マージの結果がそのまま {@link asPushContent} を通ってしまう。
+ * この条件型を交差させることで、マージ由来の内容を渡した呼び出しだけが型エラーになる。
+ */
+type NotMergeOutput<T> = T extends MergedContent | ConflictedContent ? never : T;
+
+/**
+ * ローカルに実在する内容（ユーザーが書いたファイル・ziku が組み立てた設定）を送る。
+ *
+ * 3-way マージの結果は受け取らない。クリーンと判定できた内容は
+ * {@link mergedAsPushContent} が、マーカー入りの内容はどこも受け付けない。
+ */
+export function asPushContent<T extends string>(content: T & NotMergeOutput<T>): PushContent {
+  return pushContentSchema.parse(content);
+}
+
+/** 3-way マージの結果を送る。クリーンと判定された内容だけがこの経路を通れる。 */
+export function mergedAsPushContent(content: MergedContent): PushContent {
+  return pushContentSchema.parse(content);
+}
+
+/**
+ * テンプレートから削除してよいパス。
+ *
+ * ziku 自身の設定ファイルはこの型を作れない。テンプレートの `ziku.jsonc` が消えると、その
+ * テンプレートを使う全プロジェクトが同期対象パターンを引けなくなり、`init` / `pull` が壊れる。
+ * テンプレートへ送る削除欄がこの型しか受け取らないので、削除を積む経路が増えても
+ * {@link asDeletablePath} を通らずに設定ファイルを載せることはできない。
+ *
+ * ローカルで設定ファイルが消えている状態は push の計画に届かない。ローカルの `ziku.jsonc` は
+ * コマンドの前提（`loadCommandContext` がパターンを読む）で、読めなければ push は分類より前に
+ * 「設定ファイルが無い」と報告して終わる。届いたとしても送るものは無い（`sync-plan.ts` の
+ * `zikuConfigActions`）ので、ここで落とす削除に利用者への通知は要らない。
+ */
+const deletablePathSchema = repoRelPathSchema.brand<"DeletablePath">();
+export type DeletablePath = z.infer<typeof deletablePathSchema>;
+
+/**
+ * 削除としてテンプレートへ送ってよいパスか判定する。設定ファイルなら `undefined`。
+ *
+ * 引数がパスではなく分類結果（`src/utils/ziku-config.ts` の `SyncPath`）なのは、判定を
+ * パスの見た目ではなく種別から導くため。種別が増えたときは網羅性検査がここを止めるので、
+ * 新しい特別扱いのファイルを削除対象に紛れ込ませない。
+ */
+export function asDeletablePath(path: SyncPath): DeletablePath | undefined {
+  return match(path)
+    .with({ kind: "syncedFile" }, (synced) => deletablePathSchema.parse(synced.path))
+    .with({ kind: "zikuConfig" }, () => undefined)
+    .exhaustive();
+}
