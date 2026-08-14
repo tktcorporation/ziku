@@ -44,6 +44,22 @@ export async function getAllFilesInDirs(
 }
 
 /**
+ * リポジトリ配下の全ファイルを取得する。
+ *
+ * 先頭セグメントが glob の記法を含む include パターンでは、届く範囲を静的に絞れないので
+ * ここを候補にする。同期の対象になりえない `.git` と `node_modules` は除く。
+ */
+async function getAllFilesInRepo(baseDir: AbsPath): Promise<RepoRelPath[]> {
+  const files = await glob(["**/*"], {
+    cwd: baseDir,
+    dot: true,
+    onlyFiles: true,
+    ignore: ["**/.git/**", "**/node_modules/**"],
+  });
+  return repoRelPaths(files.toSorted());
+}
+
+/**
  * ルート直下の隠しファイルを取得
  */
 export async function getRootDotFiles(baseDir: AbsPath): Promise<RepoRelPath[]> {
@@ -81,13 +97,23 @@ export async function detectUntrackedFiles(options: {
   );
 
   // ベースディレクトリを抽出
-  const { dirs: allBaseDirs, hasRootPatterns } = getBaseDirsFromPatterns(declared.include);
+  const {
+    dirs: allBaseDirs,
+    hasRootPatterns,
+    reachesWholeRepo,
+  } = getBaseDirsFromPatterns(declared.include);
 
-  // 走査範囲の候補（ディレクトリ配下 + ルートパターンがある場合はルート直下）をマージ
-  const allFiles = new Set<RepoRelPath>([
-    ...(await getAllFilesInDirs(targetDir, allBaseDirs)),
-    ...(hasRootPatterns ? await getRootDotFiles(targetDir) : []),
-  ]);
+  // 走査範囲の候補をマージ。先頭セグメントが glob の記法を含むパターン（`**/*.md` など）は
+  // どのディレクトリへも届きうるので、リポジトリ全体を候補にする。ディレクトリ名として
+  // 読もうとすると、その名前は実在せず候補が 1 件も出ない。
+  const allFiles = new Set<RepoRelPath>(
+    reachesWholeRepo
+      ? await getAllFilesInRepo(targetDir)
+      : [
+          ...(await getAllFilesInDirs(targetDir, allBaseDirs)),
+          ...(hasRootPatterns ? await getRootDotFiles(targetDir) : []),
+        ],
+  );
 
   // フォルダごとにグループ化
   const filesByFolder = new Map<string, UntrackedFile[]>();
@@ -98,7 +124,10 @@ export async function detectUntrackedFiles(options: {
 
     const displayFolder = getDisplayFolderFromPath(filePath);
 
+    // 候補の絞り込みは走査の起点と同じ規則で行う。起点をリポジトリ全体に広げたのに
+    // ここで先頭ディレクトリの一致を求めると、拾ったファイルを全部落とすことになる。
     const isInScope =
+      reachesWholeRepo ||
       allBaseDirs.some((dir) => filePath.startsWith(`${dir}/`)) ||
       (hasRootPatterns && !filePath.includes("/"));
     if (!isInScope) continue;

@@ -310,6 +310,31 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
     expect(paths).not.toContain(ZIKU_CONFIG_FILE);
     expect(getTotalUntrackedCount(untracked)).toBe(0);
   });
+
+  it("先頭が glob のパターンでも、走査範囲の外にならない", async () => {
+    // `**` をディレクトリ名として読むと、その名前のディレクトリは実在しないので
+    // 候補が 1 件も出ず、追跡すべきファイルを一切勧められなくなる。
+    const dir = await createTempDir("untracked-glob-first-segment");
+    await writeFiles(dir, {
+      ".ziku/ziku.jsonc": JSON.stringify({ include: ["**/*.md"] }, null, 2),
+      "docs/guide.md": "guide",
+      "docs/notes.txt": "not a match",
+    });
+
+    const { scope } = await resolveSyncScope({
+      targetDir: dir,
+      templateDir: dir,
+      include: globPatterns(["**/*.md"]),
+      exclude: [],
+    });
+    const untracked = await detectUntrackedFiles({ targetDir: dir, scope });
+
+    const paths = untracked.flatMap((g) => g.files.map((f) => f.path));
+    // include に一致する `docs/guide.md` は追跡済みなので候補ではない。
+    expect(paths).not.toContain("docs/guide.md");
+    // 一致しない `docs/notes.txt` は追跡候補として出る。
+    expect(paths).toContain("docs/notes.txt");
+  });
 });
 
 /** パターン集合から、init / pull が書くのと同じ `ziku.jsonc` の本文を作る。 */
