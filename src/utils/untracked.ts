@@ -2,7 +2,8 @@ import { glob } from "tinyglobby";
 import type { AbsPath, RepoRelPath } from "../modules/schemas";
 import { repoRelPaths } from "./paths";
 import { getBaseDirsFromPatterns, resolvePatterns } from "./patterns";
-import { isExcludedFromScope, type SyncScope } from "./sync-scope";
+import { UNSCANNED_GLOBS } from "./scan-exclusions";
+import { isExcludedFromScope, type DeclaredPatterns, type SyncScope } from "./sync-scope";
 
 export interface UntrackedFile {
   path: RepoRelPath;
@@ -39,24 +40,41 @@ export async function getAllFilesInDirs(
     cwd: baseDir,
     dot: true,
     onlyFiles: true,
+    // 同期の対象になりえないディレクトリは歩かない。モノレポでは起点の配下にも
+    // `node_modules` が現れるので、起点を絞っただけでは避けられない。
+    ignore: [...UNSCANNED_GLOBS],
   });
   return repoRelPaths(files.toSorted());
 }
 
 /**
- * リポジトリ配下の全ファイルを取得する。
+ * 追跡候補を探すディレクトリを決める。
  *
- * 先頭セグメントが glob の記法を含む include パターンでは、届く範囲を静的に絞れないので
- * ここを候補にする。同期の対象になりえない `.git` と `node_modules` は除く。
+ * 「利用者が既に同期しているディレクトリの中で、まだ追跡していないファイル」を勧めるのが
+ * 目的なので、起点は**実際に追跡されているファイルの位置**から採る。無視規則の探索
+ * （{@link import("./gitignore").loadMergedGitignore}）が使う `reachesWholeRepo` を
+ * ここでも使うと、`**\/*.md` のようなパターンでリポジトリ全体が候補になり、同期と無関係な
+ * ファイルまで追跡候補として並ぶ。あちらは広く歩いても判定結果が変わらないが、こちらは
+ * 利用者に見えるリストがそのまま変わる。許容誤差が逆向きなので、同じ値を共有しない。
+ *
+ * 宣言にリテラルの先頭ディレクトリがあれば、そこにまだ追跡対象のファイルが無くても起点に
+ * 含める。`.claude/**` を宣言した直後の空のディレクトリでも候補を出せるようにするため。
  */
-async function getAllFilesInRepo(baseDir: AbsPath): Promise<RepoRelPath[]> {
-  const files = await glob(["**/*"], {
-    cwd: baseDir,
-    dot: true,
-    onlyFiles: true,
-    ignore: ["**/.git/**", "**/node_modules/**"],
-  });
-  return repoRelPaths(files.toSorted());
+function candidateRoots(
+  declared: DeclaredPatterns,
+  trackedFiles: readonly RepoRelPath[],
+): { dirs: string[]; hasRootPatterns: boolean } {
+  const { dirs: literalDirs, hasRootPatterns } = getBaseDirsFromPatterns(declared.include);
+  const dirs = new Set<string>(literalDirs);
+  let tracksRootFile = false;
+
+  for (const file of trackedFiles) {
+    const slashIndex = file.indexOf("/");
+    if (slashIndex === -1) tracksRootFile = true;
+    else dirs.add(file.slice(0, slashIndex));
+  }
+
+  return { dirs: [...dirs], hasRootPatterns: hasRootPatterns || tracksRootFile };
 }
 
 /**
@@ -79,10 +97,10 @@ export async function getRootDotFiles(baseDir: AbsPath): Promise<RepoRelPath[]> 
  * 判定が分かれると、ハッシュ計算や差分検出が範囲外として落としたファイルを追跡候補として
  * 勧めることになり、追跡しても同期されないパターンが `ziku.jsonc` に残る。
  *
- * 探索の基点は {@link SyncScope.declared} から採る。基点はパターンの先頭セグメントで
- * 決まるので（{@link getBaseDirsFromPatterns}）、走査用パターンを使うと ziku が走査のために
- * 足す `.ziku/ziku.jsonc` が基点 `.ziku` を生み、同期対象ではない `.ziku/lock.json` が
- * 追跡候補として提示される。追跡すると、そのマシン固有の取得元とベースがテンプレートへ送られる。
+ * 探索の基点は {@link SyncScope.declared} と、そのパターンが実際に拾ったファイルから採る
+ * （{@link candidateRoots}）。走査用パターンを使うと、ziku が走査のために足す
+ * `.ziku/ziku.jsonc` が基点 `.ziku` を生み、同期対象ではない `.ziku/lock.json` が追跡候補
+ * として提示される。追跡すると、そのマシン固有の取得元とベースがテンプレートへ送られる。
  */
 export async function detectUntrackedFiles(options: {
   targetDir: AbsPath;
@@ -92,28 +110,16 @@ export async function detectUntrackedFiles(options: {
   const { declared } = scope;
 
   // フラットパターンで tracked files を算出
-  const allTrackedFiles = new Set<string>(
-    resolvePatterns(targetDir, declared.include, declared.exclude),
-  );
+  const trackedFiles = resolvePatterns(targetDir, declared.include, declared.exclude);
+  const allTrackedFiles = new Set<string>(trackedFiles);
 
-  // ベースディレクトリを抽出
-  const {
-    dirs: allBaseDirs,
-    hasRootPatterns,
-    reachesWholeRepo,
-  } = getBaseDirsFromPatterns(declared.include);
+  const { dirs: allBaseDirs, hasRootPatterns } = candidateRoots(declared, trackedFiles);
 
-  // 走査範囲の候補をマージ。先頭セグメントが glob の記法を含むパターン（`**/*.md` など）は
-  // どのディレクトリへも届きうるので、リポジトリ全体を候補にする。ディレクトリ名として
-  // 読もうとすると、その名前は実在せず候補が 1 件も出ない。
-  const allFiles = new Set<RepoRelPath>(
-    reachesWholeRepo
-      ? await getAllFilesInRepo(targetDir)
-      : [
-          ...(await getAllFilesInDirs(targetDir, allBaseDirs)),
-          ...(hasRootPatterns ? await getRootDotFiles(targetDir) : []),
-        ],
-  );
+  // 走査範囲の候補（ディレクトリ配下 + ルート直下のファイルを追跡しているならルート直下）
+  const allFiles = new Set<RepoRelPath>([
+    ...(await getAllFilesInDirs(targetDir, allBaseDirs)),
+    ...(hasRootPatterns ? await getRootDotFiles(targetDir) : []),
+  ]);
 
   // フォルダごとにグループ化
   const filesByFolder = new Map<string, UntrackedFile[]>();
@@ -124,10 +130,9 @@ export async function detectUntrackedFiles(options: {
 
     const displayFolder = getDisplayFolderFromPath(filePath);
 
-    // 候補の絞り込みは走査の起点と同じ規則で行う。起点をリポジトリ全体に広げたのに
-    // ここで先頭ディレクトリの一致を求めると、拾ったファイルを全部落とすことになる。
+    // 絞り込みは走査の起点と同じ集合で行う。片方だけを広げると、拾ったものを全部落とすか、
+    // 起点の外にあるファイルを勧めるかのどちらかになる。
     const isInScope =
-      reachesWholeRepo ||
       allBaseDirs.some((dir) => filePath.startsWith(`${dir}/`)) ||
       (hasRootPatterns && !filePath.includes("/"));
     if (!isInScope) continue;

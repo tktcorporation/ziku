@@ -4,6 +4,7 @@ import ignore, { type Ignore } from "ignore";
 import type { AbsPath, GlobPattern, RepoRelPath } from "../modules/schemas";
 import { joinAbs } from "./paths";
 import { getBaseDirsFromPatterns } from "./patterns";
+import { UNSCANNED_DIRS } from "./scan-exclusions";
 
 /** git が無視規則を読むファイル名。 */
 const GITIGNORE_FILE = ".gitignore";
@@ -84,15 +85,6 @@ function gitignoreScanRoots(include: readonly GlobPattern[]): readonly string[] 
 
 /** 走査の起点としてのリポジトリルート。ルートからの相対で表すので空文字列になる。 */
 const REPO_ROOT = "";
-
-/**
- * 走査に入らないディレクトリ名。
- *
- * 依存パッケージと git のオブジェクトデータベースは同期の対象にならないので、その中に
- * `.gitignore` があっても判定には要らない。除かないと、数万ファイルを持つ `node_modules`
- * を `.gitignore` 1 本を探すためだけに全走査することになる。
- */
-const UNSCANNED_DIRS: ReadonlySet<string> = new Set([".git", "node_modules"]);
 
 /**
  * `.gitignore` を持つディレクトリを、走査対象のサブツリーから浅い順に集める。
