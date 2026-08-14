@@ -68,7 +68,8 @@ vi.mock("../../utils/github", async (importOriginal) => {
 });
 
 vi.mock("../../utils/readme", () => ({
-  detectAndUpdateReadme: vi.fn(() => Promise.resolve(null)),
+  renderTemplateReadme: vi.fn(() => Promise.resolve(null)),
+  detectReadmeUpdate: vi.fn(() => Promise.resolve(null)),
 }));
 
 vi.mock("../../ui/prompts", () => ({

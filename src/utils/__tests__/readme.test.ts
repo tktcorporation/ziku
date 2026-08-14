@@ -13,7 +13,7 @@ vi.mock("node:fs/promises", async () => {
 });
 
 // モック後にインポート
-const { generateReadme, updateReadmeFile, detectAndUpdateReadme, detectReadmeUpdate } =
+const { generateReadme, updateReadmeFile, detectReadmeUpdate, renderTemplateReadme } =
   await import("../readme");
 
 const CONFIG_PATH = "/project/.ziku/ziku.jsonc";
@@ -282,57 +282,6 @@ describe("updateReadmeFile", () => {
   });
 });
 
-describe("detectAndUpdateReadme", () => {
-  beforeEach(() => {
-    vol.reset();
-  });
-
-  it("README が存在しない場合は null を返す", async () => {
-    vol.fromJSON({});
-
-    const result = await detectAndUpdateReadme("/project", "/template");
-
-    expect(result).toBeNull();
-  });
-
-  it("マーカーがない README の場合は null を返す", async () => {
-    vol.fromJSON({
-      "/project/README.md": "# My Project\n\nNo markers",
-    });
-
-    const result = await detectAndUpdateReadme("/project", "/template");
-
-    expect(result).toBeNull();
-  });
-
-  it("FEATURES マーカーを ziku.jsonc の include で更新する", async () => {
-    vol.fromJSON({
-      "/project/README.md": "# My Project\n\n<!-- FEATURES:START -->\n<!-- FEATURES:END -->",
-      "/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"] }),
-    });
-
-    const result = await detectAndUpdateReadme("/project", "/template");
-
-    expect(result?.updated).toBe(true);
-    expect(result?.content).toContain(".mcp.json");
-  });
-
-  it("FILES マーカーを ziku.jsonc の include で更新する", async () => {
-    vol.fromJSON({
-      "/project/README.md": "# My Project\n\n<!-- FILES:START -->\n<!-- FILES:END -->",
-      "/template/.ziku/ziku.jsonc": JSON.stringify({
-        include: [".claude/rules/*.md", ".mcp.json"],
-      }),
-    });
-
-    const result = await detectAndUpdateReadme("/project", "/template");
-
-    expect(result?.updated).toBe(true);
-    expect(result?.content).toContain(".claude/rules/*.md");
-    expect(result?.content).toContain(".mcp.json");
-  });
-});
-
 describe("detectReadmeUpdate", () => {
   beforeEach(() => {
     vol.reset();
@@ -359,5 +308,90 @@ describe("detectReadmeUpdate", () => {
     expect(result?.updated).toBe(true);
     expect(result?.content).toContain(".mcp.json");
     expect(vol.readFileSync("/project/README.md", "utf8")).toBe(original);
+  });
+});
+
+/**
+ * 配る内容から README を組み直す経路のテスト。
+ *
+ * README も `ziku.jsonc` も同じ変更で書き換わるので、ディスク上の内容から組むと配る
+ * README が導出元と食い違う。渡した内容が優先されることを確かめる。
+ */
+describe("renderTemplateReadme", () => {
+  const TEMPLATE_README = "# Template\n\n<!-- FILES:START -->\n<!-- FILES:END -->\n";
+
+  beforeEach(() => {
+    vol.reset();
+  });
+
+  it("渡した ziku.jsonc のパターンを反映する（ディスク上の内容は見ない）", async () => {
+    vol.fromJSON({
+      "/template/README.md": TEMPLATE_README,
+      "/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"] }),
+    });
+
+    const result = await renderTemplateReadme({
+      templateDir: "/template",
+      readme: undefined,
+      config: JSON.stringify({ include: [".mcp.json", "docs/new.md"] }),
+    });
+
+    expect(result?.updated).toBe(true);
+    expect(result?.content).toContain("docs/new.md");
+  });
+
+  it("渡した README を土台にして、マーカー間だけを組み直す", async () => {
+    vol.fromJSON({
+      "/template/README.md": TEMPLATE_README,
+      "/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"] }),
+    });
+
+    const result = await renderTemplateReadme({
+      templateDir: "/template",
+      readme: `# Rewritten by the user\n\n<!-- FILES:START -->\n<!-- FILES:END -->\n`,
+      config: undefined,
+    });
+
+    // マーカー外はユーザーの文章のまま残り、マーカー間だけが ziku.jsonc から入る
+    expect(result?.content).toContain("# Rewritten by the user");
+    expect(result?.content).toContain(".mcp.json");
+  });
+
+  it("マーカーが無い README には触れない", async () => {
+    vol.fromJSON({
+      "/template/README.md": "# Template\n\nNo markers\n",
+      "/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"] }),
+    });
+
+    expect(
+      await renderTemplateReadme({
+        templateDir: "/template",
+        readme: undefined,
+        config: undefined,
+      }),
+    ).toBeNull();
+  });
+
+  it("テンプレートに README が無く、配る内容にも無ければ null", async () => {
+    vol.fromJSON({ "/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"] }) });
+
+    expect(
+      await renderTemplateReadme({
+        templateDir: "/template",
+        readme: undefined,
+        config: undefined,
+      }),
+    ).toBeNull();
+  });
+
+  it("ディスクへは書き込まない", async () => {
+    vol.fromJSON({
+      "/template/README.md": TEMPLATE_README,
+      "/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"] }),
+    });
+
+    await renderTemplateReadme({ templateDir: "/template", readme: undefined, config: undefined });
+
+    expect(vol.readFileSync("/template/README.md", "utf8")).toBe(TEMPLATE_README);
   });
 });

@@ -26,22 +26,26 @@ const MARKERS = {
 } as const;
 
 /**
- * ziku.jsonc の include パターンを読み込む。
+ * ziku.jsonc の内容から include パターンを取り出す。
  *
  * 同期対象パターンの SSOT は ziku.jsonc なので、README の機能一覧と
  * ファイル一覧はここから導出する。
  *
  * README の更新は同期処理の付随作業であり、これを理由に同期そのものを
- * 止めたくない。設定が無い・読めない場合はパターン無しとして扱い、
+ * 止めたくない。読めない場合はパターン無しとして扱い、
  * マーカー間を書き換えずに現状の README を残す。
  */
+function parseIncludePatterns(config: string): string[] {
+  const parsed = zikuConfigSchema.safeParse(parse(config));
+  return parsed.success ? parsed.data.include : [];
+}
+
+/** ディスク上の ziku.jsonc から include パターンを読む。無ければパターン無し。 */
 async function loadIncludePatterns(configPath: string): Promise<string[]> {
   if (!existsSync(configPath)) {
     return [];
   }
-  const content = await readFile(configPath, "utf-8");
-  const parsed = zikuConfigSchema.safeParse(parse(content));
-  return parsed.success ? parsed.data.include : [];
+  return parseIncludePatterns(await readFile(configPath, "utf-8"));
 }
 
 /**
@@ -131,6 +135,48 @@ export interface GenerateReadmeResult {
   readmePath: string;
 }
 
+/** マーカー間を組み直した README。ディスク上の場所は持たない。 */
+export interface RenderedReadme {
+  readonly content: string;
+  readonly updated: boolean;
+}
+
+/**
+ * README のマーカー間を、渡した include パターンから組み直す。ディスクには触れない。
+ *
+ * @param commands コマンドセクションの内容。生成元を持たない呼び出しでは undefined。
+ */
+function applyGeneratedSections(params: {
+  readme: string;
+  include: readonly string[];
+  commands: string | undefined;
+}): RenderedReadme {
+  const sections: { start: string; end: string; body: string }[] = [];
+
+  if (params.include.length > 0) {
+    sections.push({
+      ...MARKERS.features,
+      body: generateFeaturesSection([...params.include]),
+    });
+  }
+  if (params.commands !== undefined) {
+    sections.push({ ...MARKERS.commands, body: params.commands });
+  }
+  if (params.include.length > 0) {
+    sections.push({ ...MARKERS.files, body: generateFilesSection([...params.include]) });
+  }
+
+  let content = params.readme;
+  let updated = false;
+  for (const section of sections) {
+    const result = updateSection(content, section.start, section.end, section.body);
+    content = result.content;
+    updated = updated || result.updated;
+  }
+
+  return { content, updated };
+}
+
 /**
  * README を生成
  */
@@ -144,46 +190,13 @@ export async function generateReadme(
     return { updated: false, content: "", readmePath };
   }
 
-  const include = await loadIncludePatterns(configPath);
+  const rendered = applyGeneratedSections({
+    readme: await readFile(readmePath, "utf-8"),
+    include: await loadIncludePatterns(configPath),
+    commands: generateCommandsSection === undefined ? undefined : await generateCommandsSection(),
+  });
 
-  let readme = await readFile(readmePath, "utf-8");
-  let anyUpdated = false;
-
-  // 機能セクション
-  if (include.length > 0) {
-    const featuresSection = generateFeaturesSection(include);
-    const result = updateSection(
-      readme,
-      MARKERS.features.start,
-      MARKERS.features.end,
-      featuresSection,
-    );
-    readme = result.content;
-    anyUpdated = anyUpdated || result.updated;
-  }
-
-  // コマンドセクション（オプション）
-  if (generateCommandsSection) {
-    const commandsSection = await generateCommandsSection();
-    const result = updateSection(
-      readme,
-      MARKERS.commands.start,
-      MARKERS.commands.end,
-      commandsSection,
-    );
-    readme = result.content;
-    anyUpdated = anyUpdated || result.updated;
-  }
-
-  // ファイルセクション
-  if (include.length > 0) {
-    const filesSection = generateFilesSection(include);
-    const result = updateSection(readme, MARKERS.files.start, MARKERS.files.end, filesSection);
-    readme = result.content;
-    anyUpdated = anyUpdated || result.updated;
-  }
-
-  return { updated: anyUpdated, content: readme, readmePath };
+  return { updated: rendered.updated, content: rendered.content, readmePath };
 }
 
 /**
@@ -199,6 +212,44 @@ export async function updateReadmeFile(
   }
 
   return result;
+}
+
+/**
+ * テンプレートの README を、これから配る内容から組み直す。ディスクへは書かない。
+ *
+ * 生成元をディスクではなく引数で受け取れるようにしている理由: マーカー間は `ziku.jsonc` の
+ * include から導出される派生物なので、導出元と派生物が同じ変更（同じ PR）に載るときは、
+ * 生成もその変更に載る内容から行わないと配る README が導出元と食い違う。ディスク上の
+ * `ziku.jsonc` から作ると、`ziku track` で足したばかりのパターンを反映しない README を
+ * 配ることになる。
+ *
+ * @param params.templateDir README / ziku.jsonc をディスクから読む既定の出所。
+ * @param params.readme これから配る README の内容。配る内容に含まれないなら undefined。
+ * @param params.config これから配る ziku.jsonc の内容。配る内容に含まれないなら undefined。
+ * @returns README が無い / マーカーが無い場合は null。
+ */
+export async function renderTemplateReadme(params: {
+  readonly templateDir: string;
+  readonly readme: string | undefined;
+  readonly config: string | undefined;
+}): Promise<RenderedReadme | null> {
+  const readmePath = join(params.templateDir, "README.md");
+  if (params.readme === undefined && !existsSync(readmePath)) return null;
+
+  const readme = params.readme ?? (await readFile(readmePath, "utf-8"));
+  if (!hasGeneratedSections(readme)) return null;
+
+  const include =
+    params.config === undefined
+      ? await loadIncludePatterns(join(params.templateDir, ZIKU_CONFIG_FILE))
+      : parseIncludePatterns(params.config);
+
+  return applyGeneratedSections({ readme, include, commands: undefined });
+}
+
+/** マーカー間を ziku が組み直す README か。マーカーが無い README には触れない。 */
+function hasGeneratedSections(readme: string): boolean {
+  return readme.includes(MARKERS.features.start) || readme.includes(MARKERS.files.start);
 }
 
 /**
@@ -224,31 +275,9 @@ export async function detectReadmeUpdate(
     return null;
   }
 
-  const readmeContent = await readFile(readmePath, "utf-8");
-  const hasMarkers =
-    readmeContent.includes(MARKERS.features.start) || readmeContent.includes(MARKERS.files.start);
-
-  if (!hasMarkers) {
+  if (!hasGeneratedSections(await readFile(readmePath, "utf-8"))) {
     return null;
   }
 
   return generateReadme({ readmePath, configPath });
-}
-
-/**
- * プロジェクトディレクトリ内の README を検出して更新
- * @param targetDir 更新対象の README.md があるディレクトリ
- * @param templateDir 同期パターンを定義する ziku.jsonc があるディレクトリ
- */
-export async function detectAndUpdateReadme(
-  targetDir: string,
-  templateDir: string,
-): Promise<GenerateReadmeResult | null> {
-  const result = await detectReadmeUpdate(targetDir, templateDir);
-
-  if (result?.updated) {
-    await writeFile(result.readmePath, result.content);
-  }
-
-  return result;
 }

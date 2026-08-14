@@ -684,6 +684,15 @@ describe("classifyGitHubApiFailure", () => {
     });
   });
 
+  it("404 は宛先が見つからない失敗として分類する", () => {
+    // 宛先にした参照が上流から消えた状態。ユーザーが lock の参照を直せるので、
+    // 分類せずに defect へ落とすと「ziku のバグ」として案内されてしまう。
+    expect(classifyGitHubApiFailure(apiError(404, "Branch not found"))).toEqual({
+      _tag: "NotFound",
+      detail: "Branch not found",
+    });
+  });
+
   it("429 はヘッダが無くてもレート制限として扱う", () => {
     expect(classifyGitHubApiFailure(apiError(429, "Too Many Requests"))).toEqual({
       _tag: "RateLimited",
@@ -739,6 +748,22 @@ describe("githubApiFailure", () => {
 
     expect(denied.message).toContain("create a pull request");
     expect(unreachable.message).toContain("create a pull request");
+  });
+
+  it("宛先が見つからない失敗は、参照の直し方を案内する", () => {
+    const failure = githubApiFailure(
+      { _tag: "NotFound", detail: "Branch not found" },
+      { operation: "create a pull request", authenticated: true, cause },
+    );
+
+    expect(failure.reason).toEqual({
+      kind: "GitHubTargetNotFound",
+      operation: "create a pull request",
+      detail: "Branch not found",
+    });
+    expect(failure.hint).toContain("source.defaultBranch");
+    expect(failure.hint).toContain("source.ref");
+    expect(failure.cause).toBe(cause);
   });
 });
 

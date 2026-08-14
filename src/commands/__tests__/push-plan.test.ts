@@ -6,6 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { FileClassification } from "../../utils/merge";
+import { classifyFiles } from "../../utils/merge";
 import { classifyMergeOutcome } from "../../utils/merge/types";
 import type { SyncPlan, ZikuConfigState } from "../../utils/merge/sync-plan";
 import type { ConfigDrift } from "../../utils/config-merge";
@@ -40,15 +41,32 @@ import {
   withNewlyTrackedPatterns,
   zikuConfigWriteBack,
 } from "../push-plan";
-import type {
-  ChangedFileDiff,
-  DeletablePath,
-  PushContent,
-  ZikuConfigWriteBack,
-} from "../push-plan";
+import type { ChangedFileDiff, DeletablePath, PushContent, PushFile } from "../push-plan";
 
-/** 送った内容がローカルにも残るケース。ベースの前進に例外が要らない既定の入力。 */
-const WRITE_BACK: ZikuConfigWriteBack = { _tag: "WriteBack" };
+/** 送った内容をローカルへ書き戻していないケース。ベース前進の例外が要らない既定の入力。 */
+const NOTHING_WRITTEN_BACK: ReadonlySet<RepoRelPath> = new Set();
+
+/**
+ * ローカルの内容をそのまま送るファイル。ベースをテンプレート側へ進めてよい。
+ */
+function localFile(path: string, content: string): PushFile {
+  return {
+    path: repoRelPath(path),
+    content: asPushContent(content),
+    origin: { _tag: "LocalContent" },
+  };
+}
+
+/**
+ * ziku が組み立てた内容を送るファイル。ローカルへ書き戻さない限りベースを進められない。
+ */
+function synthesizedFile(path: string, content: string): PushFile {
+  return {
+    path: repoRelPath(path),
+    content: asPushContent(content),
+    origin: { _tag: "Synthesized" },
+  };
+}
 
 /**
  * 削除として送れるパスを組み立てる。
@@ -452,8 +470,8 @@ describe("buildPushPayload", () => {
     );
 
     expect(payload.files).toEqual([
-      { path: "a.txt", content: "local a" },
-      { path: "b.txt", content: "merged content" },
+      { path: "a.txt", content: "local a", origin: { _tag: "LocalContent" } },
+      { path: "b.txt", content: "merged content", origin: { _tag: "Synthesized" } },
     ]);
     expect(payload.deletions).toEqual([{ path: "gone.txt" }]);
   });
@@ -461,7 +479,23 @@ describe("buildPushPayload", () => {
   it("マージ結果が無いファイルはローカルの内容をそのまま送る", () => {
     const payload = buildPushPayload([added("a.txt", "local a")], new Map());
 
-    expect(payload.files).toEqual([{ path: "a.txt", content: "local a" }]);
+    expect(payload.files).toEqual([
+      { path: "a.txt", content: "local a", origin: { _tag: "LocalContent" } },
+    ]);
+  });
+
+  it("マージ結果と同じ内容がローカルにあっても、出所はマージ結果のままにする", () => {
+    // 出所は内容の一致ではなく経路で決まる。自動同梱する ziku.jsonc の差分は組み立てた
+    // 内容を localContent に載せて流れてくるため、内容比較では「ローカルにある」と誤読する。
+    const mergedContents = new Map<RepoRelPath, PushContent>([
+      [repoRelPath("a.txt"), asPushContent("local a")],
+    ]);
+
+    const payload = buildPushPayload([added("a.txt", "local a")], mergedContents);
+
+    expect(payload.files).toEqual([
+      { path: "a.txt", content: "local a", origin: { _tag: "Synthesized" } },
+    ]);
   });
 
   it("ziku.jsonc の削除は送らない（通常ファイルの削除は送る）", () => {
@@ -524,12 +558,9 @@ describe("baseAfterPush", () => {
     const base = baseAfterPush({
       templateHashes,
       previousBase,
-      pushed: {
-        files: [{ path: repoRelPath("sent.txt"), content: asPushContent("x") }],
-        deletions: [],
-      },
+      pushed: { files: [localFile("sent.txt", "x")], deletions: [] },
       alreadySynced: new Set(repoRelPaths(["same.txt"])),
-      configWriteBack: WRITE_BACK,
+      writtenBackToLocal: NOTHING_WRITTEN_BACK,
     });
 
     expect(base).toEqual({
@@ -547,7 +578,7 @@ describe("baseAfterPush", () => {
       previousBase: hashMap({ "gone.txt": "old", "same.txt": "same" }),
       pushed: { files: [], deletions: [{ path: deletablePath("gone.txt") }] },
       alreadySynced: new Set(repoRelPaths(["same.txt"])),
-      configWriteBack: WRITE_BACK,
+      writtenBackToLocal: NOTHING_WRITTEN_BACK,
     });
 
     expect(base).toEqual({ "same.txt": "same" });
@@ -561,7 +592,7 @@ describe("baseAfterPush", () => {
       previousBase: hashMap({ "gone-everywhere.txt": "old" }),
       pushed: { files: [], deletions: [] },
       alreadySynced: new Set(repoRelPaths(["gone-everywhere.txt"])),
-      configWriteBack: WRITE_BACK,
+      writtenBackToLocal: NOTHING_WRITTEN_BACK,
     });
 
     expect(base).toEqual({});
@@ -571,12 +602,9 @@ describe("baseAfterPush", () => {
     const base = baseAfterPush({
       templateHashes: hashMap({ "new.txt": "new-hash", "untouched.txt": "template-only" }),
       previousBase: hashMap({}),
-      pushed: {
-        files: [{ path: repoRelPath("new.txt"), content: asPushContent("x") }],
-        deletions: [],
-      },
+      pushed: { files: [localFile("new.txt", "x")], deletions: [] },
       alreadySynced: new Set(),
-      configWriteBack: WRITE_BACK,
+      writtenBackToLocal: NOTHING_WRITTEN_BACK,
     });
 
     expect(base).toEqual({ "new.txt": "new-hash" });
@@ -589,14 +617,11 @@ describe("baseAfterPush", () => {
       templateHashes: hashMap({ ".ziku/ziku.jsonc": "scoped", "sent.txt": "sent-new" }),
       previousBase: hashMap({ ".ziku/ziku.jsonc": "local", "sent.txt": "sent-old" }),
       pushed: {
-        files: [
-          { path: CONFIG_PATH, content: asPushContent("scoped") },
-          { path: repoRelPath("sent.txt"), content: asPushContent("x") },
-        ],
+        files: [synthesizedFile(".ziku/ziku.jsonc", "scoped"), localFile("sent.txt", "x")],
         deletions: [],
       },
       alreadySynced: new Set(),
-      configWriteBack: { _tag: "Withhold" },
+      writtenBackToLocal: NOTHING_WRITTEN_BACK,
     });
 
     expect(base).toEqual({ ".ziku/ziku.jsonc": "local", "sent.txt": "sent-new" });
@@ -606,9 +631,9 @@ describe("baseAfterPush", () => {
     const base = baseAfterPush({
       templateHashes: hashMap({ ".ziku/ziku.jsonc": "scoped" }),
       previousBase: hashMap({ ".ziku/ziku.jsonc": "local" }),
-      pushed: { files: [{ path: CONFIG_PATH, content: asPushContent("scoped") }], deletions: [] },
+      pushed: { files: [synthesizedFile(".ziku/ziku.jsonc", "scoped")], deletions: [] },
       alreadySynced: new Set([CONFIG_PATH]),
-      configWriteBack: { _tag: "Withhold" },
+      writtenBackToLocal: NOTHING_WRITTEN_BACK,
     });
 
     expect(base).toEqual({ ".ziku/ziku.jsonc": "local" });
@@ -618,12 +643,50 @@ describe("baseAfterPush", () => {
     const base = baseAfterPush({
       templateHashes: hashMap({ ".ziku/ziku.jsonc": "merged" }),
       previousBase: hashMap({ ".ziku/ziku.jsonc": "local" }),
-      pushed: { files: [{ path: CONFIG_PATH, content: asPushContent("merged") }], deletions: [] },
+      pushed: { files: [synthesizedFile(".ziku/ziku.jsonc", "merged")], deletions: [] },
       alreadySynced: new Set(),
-      configWriteBack: WRITE_BACK,
+      writtenBackToLocal: new Set([CONFIG_PATH]),
     });
 
     expect(base).toEqual({ ".ziku/ziku.jsonc": "merged" });
+  });
+
+  it("自動マージ結果だけを送ったファイルのベースは前進させない", () => {
+    // 規則は `ziku.jsonc` 固有ではなく、ziku が組み立てた内容すべてに掛かる。
+    const base = baseAfterPush({
+      templateHashes: hashMap({ "doc.md": "merged" }),
+      previousBase: hashMap({ "doc.md": "old" }),
+      pushed: { files: [synthesizedFile("doc.md", "merged")], deletions: [] },
+      alreadySynced: new Set(),
+      writtenBackToLocal: NOTHING_WRITTEN_BACK,
+    });
+
+    expect(base).toEqual({ "doc.md": "old" });
+  });
+
+  it("自動マージ結果を送った次の分類は、そのファイルを localOnly と読まない", () => {
+    // ベースがテンプレート側へ進むと local != base == template になり、次の分類は
+    // ローカルだけが変えたと読む。すると `push --yes` の既定選択に古いローカル内容が入り、
+    // 送った直後のテンプレート側の変更を上書きで巻き戻す。
+    const localHash = "local";
+    const mergedHash = "merged";
+
+    const base = baseAfterPush({
+      templateHashes: hashMap({ "doc.md": mergedHash }),
+      previousBase: hashMap({ "doc.md": "old" }),
+      pushed: { files: [synthesizedFile("doc.md", "merged content")], deletions: [] },
+      alreadySynced: new Set(),
+      writtenBackToLocal: NOTHING_WRITTEN_BACK,
+    });
+
+    const next = classifyFiles({
+      baseHashes: base,
+      localHashes: hashMap({ "doc.md": localHash }),
+      templateHashes: hashMap({ "doc.md": mergedHash }),
+    });
+
+    expect(next.localOnly).toEqual([]);
+    expect(next.conflicts).toEqual(["doc.md"]);
   });
 });
 

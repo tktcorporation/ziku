@@ -80,6 +80,15 @@ describe("describeFailure", () => {
       hint: /network connection/,
     },
     {
+      reason: {
+        kind: "GitHubTargetNotFound",
+        operation: "create a pull request",
+        detail: "Branch not found",
+      },
+      message: "GitHub has no such repository or branch to create a pull request: Branch not found",
+      hint: /source\.ref/,
+    },
+    {
       reason: { kind: "RepoTreeTooLarge", repo: "me/my-template" },
       message:
         "GitHub could not list every file in me/my-template: the repository tree is too large",

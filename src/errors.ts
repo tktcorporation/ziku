@@ -72,6 +72,16 @@ export type FailureReason =
    */
   | { readonly kind: "GitHubUnreachable"; readonly operation: string; readonly detail: string }
   /**
+   * GitHub が宛先を「無い」と答えた (404)。
+   *
+   * 取る行動は宛先を今あるものへ直すこと。ref を明示していないテンプレートでは、lock に
+   * 控えた既定ブランチ名 (`source.defaultBranch`) が宛先になるので、上流でブランチが
+   * 改名・削除されるとこの失敗になる。`DefaultBranchUnresolved` と違い宛先の名前は
+   * 決まっていて、その名前が指す先が無い。`GitHubPermissionDenied` と違いトークンの権限を
+   * 広げても変わらない（ただし対象が private なら、見えないトークンには 404 として届く）。
+   */
+  | { readonly kind: "GitHubTargetNotFound"; readonly operation: string; readonly detail: string }
+  /**
    * リポジトリのファイル数が多すぎて、GitHub がツリーを最後まで返さなかった。
    *
    * 取る行動はリポジトリのファイル数を減らすこと。ziku は既存ファイルを更新するために全件の
@@ -231,6 +241,10 @@ export function describeFailure(reason: FailureReason): FailureDisplay {
     .with({ kind: "GitHubUnreachable" }, (r) => ({
       message: `Cannot reach GitHub to ${r.operation}: ${r.detail}`,
       hint: "Check your network connection and any proxy settings, then run the same command again.",
+    }))
+    .with({ kind: "GitHubTargetNotFound" }, (r) => ({
+      message: `GitHub has no such repository or branch to ${r.operation}: ${r.detail}`,
+      hint: `Point ziku at something that exists now. Without source.ref, ziku targets the branch recorded in .ziku/lock.json as source.defaultBranch, which stops existing when the branch is renamed or deleted upstream — name the branch that exists now in source.ref (for example { "kind": "branch", "name": "main" }), or delete .ziku/lock.json and run \`ziku init\` to record the template again. If the repository itself moved or is private, check source.owner / source.repo and that GITHUB_TOKEN / GH_TOKEN can see it.`,
     }))
     .with({ kind: "RepoTreeTooLarge" }, (r) => ({
       message: `GitHub could not list every file in ${r.repo}: the repository tree is too large`,

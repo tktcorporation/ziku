@@ -65,12 +65,13 @@ import {
   githubApiFailure,
 } from "../utils/github";
 import { hashFiles } from "../utils/hash";
-import { detectAndUpdateReadme, detectReadmeUpdate } from "../utils/readme";
+import { detectReadmeUpdate, renderTemplateReadme } from "../utils/readme";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked";
 import type {
   ChangedFileDiff,
   PushCandidatePlan,
   PushContent,
+  PushFile,
   PushFileSelection,
   PushPayload,
   ZikuConfigWriteBack,
@@ -168,6 +169,7 @@ interface PushTarget extends PushPayload {
  * | トークンを拒否された (401)                 | トークンを更新する               |
  * | レート制限 (429 / 403 + rate limit ヘッダ) | 待つ、またはトークンを設定する   |
  * | 操作を拒否された (403)                     | 権限と fork の可否を見直す       |
+ * | 宛先が見つからない (404)                   | lock の参照を今あるものへ直す    |
  * | GitHub へ届かない                          | 接続を確かめて実行し直す         |
  * | ローカルへの書き込みが権限・容量で失敗     | 権限を直す / 空きを作る          |
  *
@@ -190,7 +192,15 @@ function pushFailure(operation: string): (cause: unknown) => Effect.Effect<never
 
     return match(classifyGitHubApiFailure(cause))
       .with(
-        { _tag: P.union("AuthRejected", "RateLimited", "PermissionDenied", "Unreachable") },
+        {
+          _tag: P.union(
+            "AuthRejected",
+            "RateLimited",
+            "PermissionDenied",
+            "NotFound",
+            "Unreachable",
+          ),
+        },
         (failure) =>
           // push が GitHub API を呼ぶのはトークンを用意できた後だけなので、レート制限は
           // 常に認証済みクォータのもの。
@@ -340,7 +350,7 @@ function pushToGitHub(
           }))
           .otherwise(() => ({ title: suggestedTitle, body: suggestedBody }));
 
-        const files = [...target.files, ...(await readmeAutoUpdate(ctx.templateDir))];
+        const files = await withTemplateReadme(target.files, ctx.templateDir);
 
         // サマリー表示
         const baseSha = baseCommitSha(ctx.lock);
@@ -467,28 +477,16 @@ function pushToLocal(input: PushToLocalInput): Effect.Effect<boolean, ZikuFailur
         }
       }
 
-      // ziku.jsonc が衝突解決で union マージされた場合、push される内容はローカルの生
-      // 内容ではなく union 結果になる。ローカルを更新しないと、テンプレ・ローカルが
-      // 乖離したまま baseHashes をテンプレ（union）へ進めてしまい、次回 push で
-      // ローカルが localOnly 判定 → テンプレ側の追加分を上書きで落とす。
-      // ローカルにも merged 内容を書き戻して local==template==base を保つ。
-      // スコープ限定 union を送った場合に書き戻さない理由は `ZikuConfigWriteBack` を参照。
-      const mergedConfig = target.files.find((f) => isZikuConfigPath(f.path));
-      if (mergedConfig !== undefined) {
-        await match(input.configWriteBack)
-          .with({ _tag: "WriteBack" }, async () => {
-            const localConfigPath = joinAbs(projectDir, ZIKU_CONFIG_FILE);
-            await mkdir(dirname(localConfigPath), { recursive: true });
-            await writeFile(localConfigPath, mergedConfig.content, "utf-8");
-          })
-          .with({ _tag: "Withhold" }, () => Promise.resolve())
-          .exhaustive();
-      }
+      const writtenBackToLocal = await writeBackZikuConfig({
+        files: target.files,
+        projectDir,
+        writeBack: input.configWriteBack,
+      });
 
       // ベースは push 後のテンプレートを走査して組み立てる。走査結果をそのまま採用せず、
-      // 送ったパスと元から一致していたパスだけを前進させる（`baseAfterPush`）。書き戻さ
-      // なかった ziku.jsonc を前進の対象から外すのも同じ規則の一部なので、判定に使った値を
-      // そのまま渡す。
+      // 送ったパスと元から一致していたパスだけを前進させる（`baseAfterPush`）。ziku が
+      // 組み立てた内容はローカルへ書いたものだけが前進の対象になるので、実際に書いた
+      // パスの集合をそのまま渡す。
       const templateHashes = await hashFiles(localSource.path, patterns.include, patterns.exclude);
       await saveLock(
         projectDir,
@@ -498,7 +496,7 @@ function pushToLocal(input: PushToLocalInput): Effect.Effect<boolean, ZikuFailur
             previousBase: baseHashesOf(ctx.lock),
             pushed: target,
             alreadySynced: input.alreadySynced,
-            configWriteBack: input.configWriteBack,
+            writtenBackToLocal,
           }),
         }),
       );
@@ -509,6 +507,37 @@ function pushToLocal(input: PushToLocalInput): Effect.Effect<boolean, ZikuFailur
       return true;
     },
   }).pipe(Effect.catchAll(pushFailure("push to the local template")));
+}
+
+/**
+ * 送った `ziku.jsonc` をローカルにも残し、残したパスを返す。
+ *
+ * 送る内容はローカルの生の内容ではなく union 結果になる。書き戻さないままベースを
+ * テンプレート側へ進めると、次の分類がローカルを `localOnly` と読み、次の push が
+ * テンプレート側の追加分を上書きで落とす。書き戻して local == template == base を保つか、
+ * 書き戻さずにベースも据え置くかのどちらかにする。
+ *
+ * スコープ限定 union を書き戻さない理由は {@link ZikuConfigWriteBack} を参照。戻り値を
+ * `baseAfterPush` の `writtenBackToLocal` へ渡すことで、書き戻しとベース前進を同じ事実から
+ * 導く。
+ */
+function writeBackZikuConfig(params: {
+  readonly files: readonly PushFile[];
+  readonly projectDir: AbsPath;
+  readonly writeBack: ZikuConfigWriteBack;
+}): Promise<ReadonlySet<RepoRelPath>> {
+  const config = params.files.find((f) => isZikuConfigPath(f.path));
+  if (config === undefined) return Promise.resolve(new Set<RepoRelPath>());
+
+  return match(params.writeBack)
+    .with({ _tag: "WriteBack" }, async () => {
+      const localConfigPath = joinAbs(params.projectDir, ZIKU_CONFIG_FILE);
+      await mkdir(dirname(localConfigPath), { recursive: true });
+      await writeFile(localConfigPath, config.content, "utf-8");
+      return new Set<RepoRelPath>([config.path]);
+    })
+    .with({ _tag: "Withhold" }, () => Promise.resolve(new Set<RepoRelPath>()))
+    .exhaustive();
 }
 
 // ─── サマリー表示 ───
@@ -1097,25 +1126,55 @@ function announceConfigAutoInclude(localOnlyPatterns: readonly GlobPattern[]): v
 // ─── テンプレート README の自動更新 ───
 
 /**
- * テンプレートの README を同期対象一覧に合わせて更新し、送信対象へ足す分を返す。
+ * テンプレートの README のマーカー間を組み直し、送信ファイル一覧へ反映する。
  *
  * README を選択単位にしない理由: マーカー間の内容はユーザーが書いたテキストではなく、
  * `ziku.jsonc` の include から機械的に導出される派生物で、SSOT は `ziku.jsonc` にある。
  * 追跡ファイルと同じ選択単位にすると「同期対象一覧だけ古い README」を選べることになり、
  * 選ばなかった側が正しいのか判断する材料がユーザーにも ziku にも無い。派生物は導出元に
- * 従わせ、選択ではなく確認（`Create PR?`）で降りられるようにする。そのため送信対象へ
- * 常に足したうえで、同梱する事実を送信前に伝える（{@link announceReadmeAutoUpdate}）。
+ * 従わせ、選択ではなく確認（`Create PR?`）で降りられるようにする。そのため組み直しは
+ * 選択によらず行い、送信対象に手を入れた事実を送信前に伝える
+ * （{@link announceReadmeAutoUpdate} / {@link announceReadmeRebuild}）。
  *
- * @returns 更新が生じたときだけ 1 件、それ以外は空。
+ * 生成元は同じ PR に載る内容に採る。README も `ziku.jsonc` もこの PR で書き換わるので、
+ * テンプレートのディスク上の内容から作ると、この PR が追加するパターン（`ziku track` した
+ * 直後など）を反映しない README を配ることになる。
+ *
+ * README が追跡ファイルとして既に送信対象に入っているときは、そのエントリを **置き換える**。
+ * 足すと同じパスを 2 回送ることになり、GitHub への 2 回目の書き込みが 1 回目で変わった
+ * blob SHA と食い違って弾かれる。組み直しの土台に採るのは自動生成の内容ではなく、追跡
+ * ファイルとして送ろうとしているローカルの内容のほう。マーカー外はユーザーが書いた文章で、
+ * ziku が選り分ける立場にない。ziku が従わせてよいのはマーカー間だけなので、土台は
+ * ユーザーの内容にして、その中のマーカー間だけを `ziku.jsonc` から組み直す。
  */
-async function readmeAutoUpdate(
+async function withTemplateReadme(
+  files: readonly PushFile[],
   templateDir: AbsPath,
-): Promise<{ path: RepoRelPath; content: PushContent }[]> {
-  const result = await detectAndUpdateReadme(templateDir, templateDir);
-  if (!result?.updated) return [];
+): Promise<readonly PushFile[]> {
+  const tracked = files.find((f) => f.path === TEMPLATE_README);
+  const config = files.find((f) => isZikuConfigPath(f.path));
 
-  announceReadmeAutoUpdate();
-  return [{ path: TEMPLATE_README, content: asPushContent(result.content) }];
+  const rendered = await renderTemplateReadme({
+    templateDir,
+    readme: tracked?.content,
+    config: config?.content,
+  });
+  if (rendered === null || !rendered.updated) return files;
+
+  const rebuilt: PushFile = {
+    path: TEMPLATE_README,
+    content: asPushContent(rendered.content),
+    // マーカー間は `ziku.jsonc` から導出した内容で、ローカルの README には残らない。
+    origin: { _tag: "Synthesized" },
+  };
+
+  if (tracked === undefined) {
+    announceReadmeAutoUpdate();
+    return [...files, rebuilt];
+  }
+
+  announceReadmeRebuild();
+  return files.map((f) => (f.path === TEMPLATE_README ? rebuilt : f));
 }
 
 /**
@@ -1128,6 +1187,18 @@ async function readmeAutoUpdate(
 function announceReadmeAutoUpdate(): void {
   log.info(
     `Also pushing ${TEMPLATE_README} — its generated sections are rebuilt from ${ZIKU_CONFIG_FILE}.`,
+  );
+}
+
+/**
+ * 選ばれた README の中身に手を入れた事実を伝える。
+ *
+ * 追跡ファイルとして選んだ内容がそのまま送られると読めるので、マーカー間だけ差し替えたことを
+ * 確認プロンプトの前に知らせる。
+ */
+function announceReadmeRebuild(): void {
+  log.info(
+    `Rebuilding the generated sections of ${TEMPLATE_README} from ${ZIKU_CONFIG_FILE} before pushing it.`,
   );
 }
 

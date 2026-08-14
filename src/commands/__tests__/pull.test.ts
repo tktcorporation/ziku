@@ -1150,17 +1150,19 @@ describe("pullCommand", () => {
       expect(mockWriteFileEnsureDir).not.toHaveBeenCalled();
     });
 
-    it("resolveBaseRef が None のとき既存のベース SHA を引き継ぐ", async () => {
+    it("resolveBaseRef が None のとき、ハッシュだけ前進させて古いベース SHA を落とす", async () => {
       vol.fromJSON({
         "/test": null,
         "/tmp/template/.mcp.json": "updated",
       });
 
+      const newTemplateHashes = { ".mcp.json": "new-template-hash" };
       const { effect } = mockContext({
         lock: lockWithBase({ ".mcp.json": "abc123" }, "existing-sha"),
         resolveBaseRef: Effect.succeed(Option.none<CommitSha>()),
       });
       mockLoadCommandContext.mockReturnValue(effect);
+      mockScannedHashes({ template: newTemplateHashes, local: newTemplateHashes });
 
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: repoRelPaths([".mcp.json"]),
@@ -1179,9 +1181,12 @@ describe("pullCommand", () => {
         cmd: pullCommand,
       });
 
-      const lockArg = mockSaveLock.mock.calls[0][1];
+      // ハッシュが取り込んだツリーへ進んだのに SHA が前回のツリーを指したままだと、後の
+      // コンフリクトで共通祖先が前回のツリーになり、取り込み済みの変更が再びマージに載る。
+      const lockArg = lastSavedLock();
       expect(lockArg.sync).toBe("synced");
-      expect(baseCommitSha(lockArg)).toBe("existing-sha");
+      expect(baseHashesOf(lockArg)).toEqual(newTemplateHashes);
+      expect(baseCommitSha(lockArg)).toBeUndefined();
     });
 
     it("cleanup が必ず呼ばれる", async () => {

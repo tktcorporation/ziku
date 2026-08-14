@@ -58,7 +58,7 @@ vi.mock("../../utils/untracked", () => ({
 }));
 
 vi.mock("../../utils/readme", () => ({
-  detectAndUpdateReadme: vi.fn(() => Promise.resolve(null)),
+  renderTemplateReadme: vi.fn(() => Promise.resolve(null)),
   detectReadmeUpdate: vi.fn(() => Promise.resolve(null)),
 }));
 

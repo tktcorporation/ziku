@@ -231,7 +231,6 @@ describe("baseAfterDeletions", () => {
 
 describe("nextSyncBase", () => {
   const common = {
-    advancedBase: hashMap({ "a.txt": "hash-t" }),
     previousBase: hashMap({ "a.txt": "hash-base" }),
     localHashes: hashMap({ "a.txt": "hash-t" }),
     deletions: { candidates: [], applied: pathSet() },
@@ -240,36 +239,28 @@ describe("nextSyncBase", () => {
   it("解決できたコミット SHA をベースに載せる", () => {
     const point = nextSyncBase({
       ...common,
-      resolvedRef: commitSha("latest123"),
-      recordedRef: commitSha("old123"),
+      advance: { hashes: hashMap({ "a.txt": "hash-t" }), commitSha: commitSha("latest123") },
     });
 
     expect(point).toEqual({ hashes: { "a.txt": "hash-t" }, commitSha: "latest123" });
   });
 
-  it("SHA を解決できなければ記録済みのベース SHA を引き継ぐ", () => {
+  it("SHA を解決できなければ、ハッシュだけ前進させて SHA を持たないベースになる", () => {
     const point = nextSyncBase({
       ...common,
-      resolvedRef: undefined,
-      recordedRef: commitSha("old123"),
+      advance: { hashes: hashMap({ "a.txt": "hash-t" }), commitSha: undefined },
     });
 
-    expect(point.commitSha).toBe("old123");
-  });
-
-  it("どちらの SHA も無ければ SHA を持たないベースになる", () => {
-    const point = nextSyncBase({ ...common, resolvedRef: undefined, recordedRef: undefined });
-
-    expect(point.commitSha).toBeUndefined();
+    // ハッシュは取り込んだツリーへ進む。SHA は空のままで、前回記録した SHA を引き継がない。
+    // 引き継ぐと共通祖先が前回のツリーになり、取り込み済みの変更が再びマージに載る。
+    expect(point).toEqual({ hashes: { "a.txt": "hash-t" }, commitSha: undefined });
   });
 
   it("中断（削除は 1 件も適用しない）と確定は、適用した削除の分だけ違うベースになる", () => {
     const withDeletion = {
-      advancedBase: hashMap({ "a.txt": "hash-t" }),
+      advance: { hashes: hashMap({ "a.txt": "hash-t" }), commitSha: commitSha("latest123") },
       previousBase: hashMap({ "a.txt": "hash-base", "old.txt": "hash-old" }),
       localHashes: hashMap({ "a.txt": "hash-t", "old.txt": "hash-old" }),
-      resolvedRef: commitSha("latest123"),
-      recordedRef: undefined,
     };
     const candidates = repoRelPaths(["old.txt"]);
 

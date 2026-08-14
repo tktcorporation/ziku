@@ -327,9 +327,33 @@ export function selectedUnresolvedConflicts(
 
 // ─── 送信ペイロード ───
 
+/**
+ * 送る内容の出所。同期ベースを前進させてよい範囲を決める（{@link baseAfterPush}）。
+ *
+ * push はローカルの変更をテンプレートへ送るコマンドで、送るためにローカルのファイルを
+ * 書き換えることはしない。そのため ziku が組み立てた内容を送ると、テンプレートだけが
+ * その内容になり、ローカルは送る前のまま残る。両者を区別せずに扱うと「テンプレートと
+ * 一致していないのにベースだけテンプレート側へ進む」状態を作れてしまう。
+ */
+export type PushedContentOrigin =
+  /** ローカルのファイル内容そのもの。送った後は local == template になる。 */
+  | { readonly _tag: "LocalContent" }
+  /**
+   * ziku が組み立てた内容（3-way マージの結果・`ziku.jsonc` の和集合）。
+   * ローカルへ書き戻さない限り local != template のまま残る。
+   */
+  | { readonly _tag: "Synthesized" };
+
+/** テンプレートへ送る 1 ファイル。 */
+export interface PushFile {
+  readonly path: RepoRelPath;
+  readonly content: PushContent;
+  readonly origin: PushedContentOrigin;
+}
+
 /** テンプレートへ実際に送る内容。GitHub / ローカルテンプレートのどちらの経路も同じ形を受け取る。 */
 export interface PushPayload {
-  readonly files: readonly { readonly path: RepoRelPath; readonly content: PushContent }[];
+  readonly files: readonly PushFile[];
   readonly deletions: readonly { readonly path: DeletablePath }[];
 }
 
@@ -339,6 +363,11 @@ export interface PushPayload {
  * 内容は自動マージ済みならその結果を、それ以外はローカルの内容をそのまま採用する。
  * `mergedContents` に載っているのはクリーンにマージできた内容と ziku が組み立てた
  * `ziku.jsonc` だけなので、未解決の衝突内容がここから送信対象へ入ることはない。
+ *
+ * 出所は内容の比較ではなく、どちらの経路から採ったかで決める（`mergedContents` に
+ * あれば `Synthesized`）。比較で決められないのは、自動同梱する `ziku.jsonc` の差分が
+ * ディスク上の内容ではなく組み立てた内容を `localContent` に載せて流れてくるため。
+ * 経路で決めれば、内容がたまたま一致してもローカルに無い内容を「ある」と読み違えない。
  *
  * 削除は {@link asDeletablePath} を通ったパスだけが載る。設定ファイルの削除がここへ来ても
  * 落とす理由は {@link DeletablePath} を参照。
@@ -350,10 +379,16 @@ export function buildPushPayload(
   return {
     files: selected
       .filter((f) => f.type !== "deleted")
-      .map((f) => ({
-        path: f.path,
-        content: mergedContents.get(f.path) ?? asPushContent(f.localContent),
-      })),
+      .map((f): PushFile => {
+        const synthesized = mergedContents.get(f.path);
+        return synthesized === undefined
+          ? {
+              path: f.path,
+              content: asPushContent(f.localContent),
+              origin: { _tag: "LocalContent" },
+            }
+          : { path: f.path, content: synthesized, origin: { _tag: "Synthesized" } };
+      }),
     deletions: selected
       .filter((f) => f.type === "deleted")
       .flatMap((f) => {
@@ -425,10 +460,13 @@ export function baseAfterPush(params: {
   readonly pushed: PushPayload;
   /** push 前からローカルとテンプレートが一致していたパス。 */
   readonly alreadySynced: ReadonlySet<RepoRelPath>;
-  /** 送った `ziku.jsonc` の内容をローカルにも残したか。 */
-  readonly configWriteBack: ZikuConfigWriteBack;
+  /**
+   * 送った内容をローカルのファイルにも書いたパス。書いた側だけが local == template に
+   * なるので、`Synthesized` な内容のベースを前進させてよいかはこの集合で決まる。
+   */
+  readonly writtenBackToLocal: ReadonlySet<RepoRelPath>;
 }): HashMap {
-  const withheld = withheldFromLocal(params.configWriteBack, params.pushed);
+  const withheld = withheldFromLocal(params.pushed, params.writtenBackToLocal);
   const advanced = new Set<RepoRelPath>(
     [
       ...params.alreadySynced,
@@ -455,27 +493,38 @@ export function baseAfterPush(params: {
 /**
  * テンプレートへ送ったが、同じ内容がローカルには残らなかったパス。
  *
- * スコープ限定の和集合を送った `ziku.jsonc` がこれに当たる（{@link ZikuConfigWriteBack}）。
- * 送ったのはローカルの内容ではないので、ベースをテンプレート側へ進めると
- * local != base == template になり、次の分類はローカルを `localOnly`（ローカルだけが変えた）
- * と読む。すると次の `push` はローカル全体の和集合を送り、スコープ限定で送らずに残した
- * ローカル限定パターンがテンプレートへ漏れる。ベースを据え置けばテンプレート側の追加は
- * `autoUpdate` として残り、取り込むのは `pull` の役目になる。
+ * ziku が組み立てた内容（{@link PushedContentOrigin} の `Synthesized`）のうち、ローカルへ
+ * 書き戻さなかったものが該当する。3-way マージの結果とスコープ限定の `ziku.jsonc` の
+ * 和集合が同じ形になる。
+ *
+ * ベースをテンプレート側へ進めると local != base == template になり、次の分類はローカルを
+ * `localOnly`（ローカルだけが変えた）と読む。すると次の `push --yes` は既定選択に入った
+ * 古いローカル内容をテンプレートへ書き戻し、テンプレート側の変更が黙って巻き戻る。
+ * `ziku.jsonc` では加えて、スコープ限定で送らずに残したローカル限定パターンが漏れる。
+ *
+ * **ここで「ベースを進めない」を選び、「マージ結果をローカルへ書く」を選ばない理由**:
+ * ローカルへ書くことはテンプレート側の変更をローカルへ取り込むことで、それは `pull` の
+ * 役割になる。push にやらせると、送るだけのつもりのコマンドがローカルのファイルを
+ * 書き換えることになり、`--yes` を付けた非対話実行では利用者が気づく機会も無い。加えて
+ * GitHub ソースでは送った内容は PR に載るだけでテンプレートにはまだ入らないので、
+ * その時点でローカルへ書けば「まだマージされていないテンプレートの変更」を先取りして
+ * 抱えることになる。ベースを据え置けば、テンプレート側の変更は次の分類でも差分として
+ * 残り、取り込むのは `pull` の役目のままになる。
  */
 function withheldFromLocal(
-  writeBack: ZikuConfigWriteBack,
   pushed: PushPayload,
+  writtenBackToLocal: ReadonlySet<RepoRelPath>,
 ): ReadonlySet<RepoRelPath> {
-  return match(writeBack)
-    .with({ _tag: "WriteBack" }, () => new Set<RepoRelPath>())
-    .with(
-      { _tag: "Withhold" },
-      () =>
-        new Set<RepoRelPath>(
-          pushed.files.filter((file) => isZikuConfigPath(file.path)).map((file) => file.path),
-        ),
-    )
-    .exhaustive();
+  return new Set<RepoRelPath>(
+    pushed.files
+      .filter((file) =>
+        match(file.origin)
+          .with({ _tag: "LocalContent" }, () => false)
+          .with({ _tag: "Synthesized" }, () => !writtenBackToLocal.has(file.path))
+          .exhaustive(),
+      )
+      .map((file) => file.path),
+  );
 }
 
 // ─── `ziku.jsonc` の伝播 ───
@@ -549,9 +598,9 @@ export function planConfigPropagation(params: {
  * ローカルへ書き戻すと、無関係なローカル限定パターンを消してしまう（和集合は削除しないと
  * いう原則に反する）。
  *
- * 書き戻しの有無は同期ベースの前進範囲も決める（{@link baseAfterPush}）。両者を 1 つの値から
- * 導くことで、「ローカルへ書き戻していないのにベースだけテンプレート側へ進む」組み合わせを
- * 作れなくする。
+ * 書き戻しの有無は同期ベースの前進範囲も決める。書き戻したパスを {@link baseAfterPush} の
+ * `writtenBackToLocal` として渡すことで、「ローカルへ書き戻していないのにベースだけ
+ * テンプレート側へ進む」組み合わせを作れなくする。
  */
 export type ZikuConfigWriteBack =
   /** 送った内容をローカルの `ziku.jsonc` へも書き、local == template を保つ。 */

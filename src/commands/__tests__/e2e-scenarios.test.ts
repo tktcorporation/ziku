@@ -191,7 +191,8 @@ vi.mock("../../ui/diff-view", () => ({
 }));
 
 vi.mock("../../utils/readme", () => ({
-  detectAndUpdateReadme: vi.fn(() => Promise.resolve({ updated: false, path: null })),
+  renderTemplateReadme: vi.fn(() => Promise.resolve(null)),
+  detectReadmeUpdate: vi.fn(() => Promise.resolve(null)),
 }));
 
 vi.mock("giget", () => ({

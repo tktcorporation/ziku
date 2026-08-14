@@ -200,6 +200,36 @@ export function baseAfterDeletions(params: {
 }
 
 /**
+ * ベースを前進させる先のテンプレートツリーと、そのツリーを取り直すためのコミット SHA。
+ *
+ * 2 つを 1 つの値として受け取るのは、別々の引数にすると「ハッシュは今回取り込んだツリー・
+ * SHA は前回記録した値」という、両者が別のツリーを指す組み合わせを呼び出し側が組めてしまう
+ * ため。その lock が書かれると、後でコンフリクトが起きたときに `downloadBaseForMerge` が
+ * SHA 側の古いツリーを共通祖先として取り寄せ、既に取り込み済みのテンプレート変更が
+ * 「テンプレート側の新しい変更」として再びマージに載る。ユーザーには一度受け入れたはずの
+ * 差分が二度現れる。
+ *
+ * TypeScript は「この SHA がこのハッシュ写像を生んだツリーを指す」ことまでは検査できない
+ * （SHA は文字列で、ハッシュ写像との対応はリモートのリポジトリだけが知っている）。型で
+ * 担保できるのは「片方だけを別の出所から差し込めない」ところまでで、残りは構築点を 1 つに
+ * 絞ることで守る。
+ */
+export interface BaseAdvance {
+  /** 取り込んだテンプレートへ前進させたハッシュ（`ziku.jsonc` の補正込み）。 */
+  readonly hashes: HashMap;
+  /**
+   * `hashes` を取ったツリーのコミット SHA。解決できなかったなら undefined。
+   *
+   * 解決できないときに lock の記録済み SHA を引き継がないのは、それが `hashes` とは別の
+   * （前回同期時点の）ツリーを指すため。SHA を落とすと 3-way マージは共通祖先無しの 2-way へ
+   * 縮退し、コンフリクトの解決はユーザーがどちらの版を残すか選ぶ形になる（`FileMergeOutcome`
+   * の `NoBase`）。選ばせるほうが、誤ったツリーを共通祖先に据えて解決済みの差分を蒸し返す
+   * より失うものが小さい。SHA は次に解決できた pull で再び載る。
+   */
+  readonly commitSha: CommitSha | undefined;
+}
+
+/**
  * lock に書き込む同期ベースを組み立てる。
  *
  * lock を書く経路は 3 つある（通常フローの確定・解決待ちでの中断・`pull --continue` の確定）。
@@ -207,27 +237,24 @@ export function baseAfterDeletions(params: {
  * させる（{@link finalizeMergedBase}）ので、ベースの決め方はこの 1 箇所に閉じる。中断と確定で
  * 違うのは適用済みの削除だけなので、そこだけを引数で受ける。
  *
- * @param resolvedRef 今回解決できたテンプレートのコミット SHA。
- * @param recordedRef lock に記録済みのベース SHA。一時的な失敗で `resolvedRef` を解決できな
- *   かった場合はこちらを引き継ぐ。ハッシュだけ前進させて SHA を落とすと、次回のマージが
- *   ベースツリーを取り直せなくなる。
+ * 据え置いた削除のエントリ（{@link baseAfterDeletions}）だけは `advance.commitSha` のツリーに
+ * 存在しない。ただしそれらはテンプレートから消えたファイルで、共通祖先として読み出す対象
+ * （コンフリクトと分類されたファイル）には入らないので、ベースツリーの取り寄せには影響しない。
  */
 export function nextSyncBase(params: {
-  readonly advancedBase: HashMap;
+  readonly advance: BaseAdvance;
   readonly previousBase: HashMap;
   readonly localHashes: HashMap;
   readonly deletions: DeletionOutcome;
-  readonly resolvedRef: CommitSha | undefined;
-  readonly recordedRef: CommitSha | undefined;
 }): SyncPoint {
   return {
     hashes: baseAfterDeletions({
-      advancedBase: params.advancedBase,
+      advancedBase: params.advance.hashes,
       previousBase: params.previousBase,
       localHashes: params.localHashes,
       deletions: params.deletions,
     }),
-    commitSha: params.resolvedRef ?? params.recordedRef,
+    commitSha: params.advance.commitSha,
   };
 }
 
@@ -354,6 +381,10 @@ export function hasReadableText(conflict: PendingConflict): boolean {
  * ローカルの変更として送り返す。
  *
  * 置き換えたファイルが無ければ到達点は `nextBase` そのものなので、`resolveMerge` で確定する。
+ *
+ * ハッシュを差し替えても SHA との対応は崩れない。`nextBase.ref` があるなら書き込む内容はその
+ * コミットのツリーから取るので同じツリーを指したままで、無いなら SHA も記録されない
+ * （{@link BaseAdvance}）。
  *
  * @param takenFromTemplate テンプレートの内容で置き換えたファイルと、書き込んだ内容のハッシュ。
  */

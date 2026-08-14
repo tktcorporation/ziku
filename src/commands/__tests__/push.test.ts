@@ -73,7 +73,7 @@ vi.mock("../../utils/github", async (importOriginal) => {
 
 // utils/readme をモック
 vi.mock("../../utils/readme", () => ({
-  detectAndUpdateReadme: vi.fn(() => Promise.resolve(null)),
+  renderTemplateReadme: vi.fn(() => Promise.resolve(null)),
   detectReadmeUpdate: vi.fn(() => Promise.resolve(null)),
 }));
 
@@ -218,7 +218,7 @@ const {
   logUntrackedFilesNotice,
 } = await import("../../ui/prompts");
 const { detectUntrackedFiles } = await import("../../utils/untracked");
-const { detectAndUpdateReadme, detectReadmeUpdate } = await import("../../utils/readme");
+const { renderTemplateReadme, detectReadmeUpdate } = await import("../../utils/readme");
 const { log, logDiffSummary } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
 const { classifyFiles, mergeOneFile, downloadBaseForMerge } = await import("../../utils/merge");
@@ -241,7 +241,7 @@ const mockSelectPushFiles = vi.mocked(selectPushFiles);
 const mockSelectUntrackedToTrack = vi.mocked(selectUntrackedToTrack);
 const mockLogUntrackedFilesNotice = vi.mocked(logUntrackedFilesNotice);
 const mockDetectUntrackedFiles = vi.mocked(detectUntrackedFiles);
-const mockDetectAndUpdateReadme = vi.mocked(detectAndUpdateReadme);
+const mockRenderTemplateReadme = vi.mocked(renderTemplateReadme);
 const mockDetectReadmeUpdate = vi.mocked(detectReadmeUpdate);
 const mockLog = vi.mocked(log);
 const mockLogDiffSummary = vi.mocked(logDiffSummary);
@@ -385,8 +385,8 @@ function resetPushMocks(): void {
   mockDownloadBaseForMerge.mockReturnValue(Effect.succeed(null));
   mockHashFiles.mockReset();
   mockHashFiles.mockResolvedValue({});
-  mockDetectAndUpdateReadme.mockReset();
-  mockDetectAndUpdateReadme.mockResolvedValue(null);
+  mockRenderTemplateReadme.mockReset();
+  mockRenderTemplateReadme.mockResolvedValue(null);
   mockDetectReadmeUpdate.mockReset();
   mockDetectReadmeUpdate.mockResolvedValue(null);
   mockFetchDefaultBranch.mockReset();
@@ -559,11 +559,11 @@ describe("pushCommand", () => {
     });
 
     describe("テンプレート README の自動更新", () => {
-      const updatedReadme = {
+      const rebuiltReadme = {
         updated: true,
         content: "# Template\n\n<!-- FILES:START -->\n- `.github/**`\n<!-- FILES:END -->\n",
-        readmePath: "/tmp/template/README.md",
       };
+      const updatedReadme = { ...rebuiltReadme, readmePath: "/tmp/template/README.md" };
 
       /** README 以外に 1 件だけ送るものがある状態を作る。 */
       function setupSinglePushableFile(): void {
@@ -580,7 +580,7 @@ describe("pushCommand", () => {
 
       it("マーカーがあると README の更新を同梱し、サマリと案内に出す", async () => {
         setupSinglePushableFile();
-        mockDetectAndUpdateReadme.mockResolvedValueOnce(updatedReadme);
+        mockRenderTemplateReadme.mockResolvedValueOnce(rebuiltReadme);
 
         await (pushCommand.run as any)({
           args: { dir: "/test", dryRun: false, yes: true, edit: false },
@@ -600,6 +600,43 @@ describe("pushCommand", () => {
           .map((call) => call[0])
           .find((text) => text.includes("README.md"));
         expect(summary).toContain("(auto-updated)");
+      });
+
+      it("README が追跡ファイルとして送信対象に入っていても、同じパスは 1 度しか送らない", async () => {
+        // 同じパスを 2 回送ると、2 回目の書き込みが 1 回目で変わった blob SHA と食い違って
+        // 弾かれる。組み直した内容で既存のエントリを置き換える。
+        setupPushableFiles([
+          {
+            path: repoRelPath("README.md"),
+            type: "modified",
+            localContent: "# Written by the user\n",
+            templateContent: "# Template\n",
+          },
+        ]);
+        mockGetGitHubToken.mockReturnValue("ghp_token");
+        mockCreatePullRequest.mockResolvedValueOnce({
+          url: "https://github.com/owner/repo/pull/1",
+          branch: "update-template-123",
+          number: 1,
+        });
+        mockRenderTemplateReadme.mockResolvedValueOnce(rebuiltReadme);
+
+        await (pushCommand.run as any)({
+          args: { dir: "/test", dryRun: false, yes: true, edit: false },
+          rawArgs: [],
+          cmd: pushCommand,
+        });
+
+        const prArg = mockCreatePullRequest.mock.calls[0]?.[1] as {
+          files: readonly { path: string; content: string }[];
+        };
+        const readmeEntries = prArg.files.filter((f) => f.path === "README.md");
+        expect(readmeEntries).toHaveLength(1);
+        expect(readmeEntries[0]?.content).toBe(rebuiltReadme.content);
+        // 組み直しの土台は、追跡ファイルとして送ろうとしているローカルの内容
+        expect(mockRenderTemplateReadme).toHaveBeenCalledWith(
+          expect.objectContaining({ readme: "# Written by the user\n" }),
+        );
       });
 
       it("マーカーが無ければ同梱も案内もしない", async () => {
@@ -634,7 +671,7 @@ describe("pushCommand", () => {
           "README.md would also be pushed — its generated sections are rebuilt from .ziku/ziku.jsonc.",
         );
         // プレビューは何も書き換えない
-        expect(mockDetectAndUpdateReadme).not.toHaveBeenCalled();
+        expect(mockRenderTemplateReadme).not.toHaveBeenCalled();
       });
 
       it("ローカルテンプレートへの --dry-run では README の更新を予告しない", async () => {
@@ -1644,7 +1681,7 @@ describe("pushCommand", () => {
       });
 
       const prArg = mockCreatePullRequest.mock.calls[0]?.[1] as {
-        files: { path: string; content: string }[];
+        files: readonly { path: string; content: string }[];
       };
       const configFile = prArg.files.find((f) => f.path === ".ziku/ziku.jsonc");
       expect(configFile).toBeDefined();
@@ -2213,7 +2250,7 @@ describe("pushCommand", () => {
       });
 
       const prArg = mockCreatePullRequest.mock.calls[0]?.[1] as {
-        files: { path: string; content: string }[];
+        files: readonly { path: string; content: string }[];
       };
       expect(prArg.files.map((f) => f.path)).toEqual(["clean.txt"]);
       for (const file of prArg.files) {
@@ -2280,7 +2317,7 @@ describe("pushCommand", () => {
       expect(mockMergeOneFile).not.toHaveBeenCalled();
       // 中断せず PR が作られ、要素マージ（和集合）結果が含まれる
       const prArg = mockCreatePullRequest.mock.calls[0]?.[1] as {
-        files: { path: string; content: string }[];
+        files: readonly { path: string; content: string }[];
       };
       const configFile = prArg.files.find((f) => f.path === ".ziku/ziku.jsonc");
       expect(configFile).toBeDefined();
@@ -2642,6 +2679,24 @@ describe("push の失敗の報告", () => {
     expect((failure as ZikuFailure).hint).toContain("Reduce the number of files");
   });
 
+  it("控えたブランチが上流に無ければ、バグ報告ではなく宛先の直し方を案内する", async () => {
+    // ref を明示していないテンプレートでは lock の source.defaultBranch が宛先になるので、
+    // 上流で改名されると repos.getBranch が 404 を返す。分類しないと defect として
+    // 「ziku のバグを報告してください」と出る。
+    const cause = githubApiError(404, "Branch not found");
+    mockCreatePullRequest.mockRejectedValueOnce(cause);
+
+    const failure = await failingGitHubPush();
+
+    expect(failure).toBeInstanceOf(ZikuFailure);
+    expect(failure).toMatchObject({
+      reason: { kind: "GitHubTargetNotFound", operation: "create a pull request" },
+      cause,
+    });
+    expect((failure as ZikuFailure).hint).toContain("source.ref");
+    expect((failure as ZikuFailure).hint).toContain("ziku init");
+  });
+
   it("分類していない失敗は、文言に潰さず原因のまま投げる", async () => {
     const bug = new TypeError("Cannot read properties of undefined (reading 'sha')");
     mockCreatePullRequest.mockRejectedValueOnce(bug);
@@ -2837,7 +2892,7 @@ describe("未追跡ファイルの追跡フロー", () => {
     });
 
     const prArg = mockCreatePullRequest.mock.calls[0]?.[1] as {
-      files: { path: string; content: string }[];
+      files: readonly { path: string; content: string }[];
     };
     // ファイル本体だけでなく ziku.jsonc も push される
     const configFile = prArg.files.find((f) => f.path === ".ziku/ziku.jsonc");
@@ -2846,6 +2901,41 @@ describe("未追跡ファイルの追跡フロー", () => {
     // 新規追跡パターンと既存パターンの両方が含まれる（union）
     expect(pushed.include).toContain("docs/new.md");
     expect(pushed.include).toContain(".github/**");
+  });
+
+  it("ziku track の直後の push でも、README は同じ PR に載る ziku.jsonc から組み直す", async () => {
+    // テンプレートのディスク上の ziku.jsonc から組むと、この push が追加するパターンを
+    // 反映しない README を配ることになる。
+    seedZikuConfig([".github/**"]);
+    vol.fromJSON({
+      "/tmp/template/.ziku/ziku.jsonc": `${JSON.stringify({ include: [".github/**"] }, null, 2)}\n`,
+    });
+    mockDetectUntrackedFiles.mockReturnValueOnce(untrackedDocsFile as never);
+    mockSelectUntrackedToTrack.mockResolvedValueOnce(repoRelPaths(["docs/new.md"]));
+
+    setupPushableFiles([
+      { path: repoRelPath("docs/new.md"), type: "added", localContent: "# New doc" },
+    ]);
+    mockSelectPushFiles.mockResolvedValueOnce([
+      { path: repoRelPath("docs/new.md"), type: "added", localContent: "# New doc" },
+    ]);
+    mockGetGitHubToken.mockReturnValue("ghp_token");
+    mockConfirmAction.mockResolvedValueOnce(true);
+    mockCreatePullRequest.mockResolvedValueOnce({
+      url: "https://github.com/owner/repo/pull/1",
+      branch: "update-template-123",
+      number: 1,
+    });
+
+    await (pushCommand.run as any)({
+      args: { dir: "/test", dryRun: false, yes: false, edit: false },
+      rawArgs: [],
+      cmd: pushCommand,
+    });
+
+    expect(mockRenderTemplateReadme).toHaveBeenCalledWith(
+      expect.objectContaining({ config: expect.stringContaining("docs/new.md") }),
+    );
   });
 
   it("未追跡を1件も選択しなければ include は変化しない", async () => {
@@ -3081,7 +3171,7 @@ describe("--files でファイル本体だけを指定した場合の ziku.jsonc
     });
 
     const prArg = mockCreatePullRequest.mock.calls[0]?.[1] as {
-      files: { path: string; content: string }[];
+      files: readonly { path: string; content: string }[];
     };
     expect(prArg.files.some((f) => f.path === ".claude/skills/new-skill/SKILL.md")).toBe(true);
 
@@ -3149,7 +3239,7 @@ describe("--files でファイル本体だけを指定した場合の ziku.jsonc
     });
 
     const prArg = mockCreatePullRequest.mock.calls[0]?.[1] as {
-      files: { path: string; content: string }[];
+      files: readonly { path: string; content: string }[];
     };
     const configFile = prArg.files.find((f) => f.path === ".ziku/ziku.jsonc");
     expect(configFile).toBeDefined();
@@ -3200,7 +3290,7 @@ describe("--files でファイル本体だけを指定した場合の ziku.jsonc
     });
 
     const prArg = mockCreatePullRequest.mock.calls[0]?.[1] as {
-      files: { path: string; content: string }[];
+      files: readonly { path: string; content: string }[];
     };
     const configFile = prArg.files.find((f) => f.path === ".ziku/ziku.jsonc");
     const pushed = JSON.parse(configFile?.content as string);

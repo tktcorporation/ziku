@@ -17,7 +17,7 @@ import type {
   SyncPoint,
   UnmergedConflict,
 } from "../modules/schemas";
-import { baseCommitSha, baseHashesOf, markMerging, markSynced } from "../modules/schemas";
+import { baseHashesOf, markMerging, markSynced } from "../modules/schemas";
 import type { UnmergedResolution } from "../ui/prompts";
 import {
   selectDeletedFiles,
@@ -50,7 +50,7 @@ import { zikuConfigPullAction } from "../utils/merge/sync-plan";
 import { analyzeSync } from "../utils/sync-analysis";
 import { mergeTemplatePatterns } from "../utils/template-patterns";
 import { computeMergedZikuConfig } from "../utils/config-merge";
-import type { PullApprovalFlags, ZikuConfigMergeResult } from "./pull-plan";
+import type { BaseAdvance, PullApprovalFlags, ZikuConfigMergeResult } from "./pull-plan";
 import {
   configContentToWrite,
   finalizeMergedBase,
@@ -261,17 +261,23 @@ export const pullCommand = defineCommand({
           // 解決待ちの記録を残したまま lock だけ書けずに終わる。
           const latestRefOption = await runCommandEffect(resolveBaseRef);
 
+          // ハッシュと SHA は、この 1 箇所で今回のテンプレートから対にして作る。SHA を解決
+          // できなかったときに lock の記録済み SHA へ倒さないのは、それが前回同期時点の
+          // ツリーを指すため（{@link BaseAdvance}）。
+          const advance: BaseAdvance = {
+            hashes: changes.advancedBase,
+            commitSha: Option.getOrUndefined(latestRefOption),
+          };
+
           // 中断経路（markMerging）と確定経路（markSynced）が書くベースは、削除を適用した
           // かどうか以外すべて同じ。両方をこの 1 つの計算へ通すことで、片方だけ直して
           // ベースがずれる事故（{@link baseAfterDeletions} が最も避けたい失敗）を作れなくする。
           const syncBaseAfter = (appliedDeletions: ReadonlySet<RepoRelPath>): SyncPoint =>
             nextSyncBase({
-              advancedBase: changes.advancedBase,
+              advance,
               previousBase: hashes.baseHashes,
               localHashes: hashes.localHashes,
               deletions: { candidates: changes.deletionCandidates, applied: appliedDeletions },
-              resolvedRef: Option.getOrUndefined(latestRefOption),
-              recordedRef: baseCommitSha(lock),
             });
 
           // 自動更新・新規追加・ziku.jsonc union 同期をまとめて適用

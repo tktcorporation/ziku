@@ -265,10 +265,16 @@ export type PendingConflicts = z.infer<typeof pendingConflictsSchema>;
 /**
  * GitHub ソースの同期ベース。
  *
- * `ref` は「ベースツリーを再取得できるコミット SHA」。ブランチ名やタグではなく、
+ * `ref` は「`hashes` を取ったツリーを再取得できるコミット SHA」。ブランチ名やタグではなく、
  * `downloadBaseForMerge` がその時点のツリーを取り直すために使う。
+ *
+ * `hashes` と `ref` は同じツリーから導かなければならない。別のツリーの SHA を載せると、
+ * コンフリクト時に取り寄せる共通祖先が `hashes` の指す内容とずれ、既に取り込み済みの
+ * テンプレート変更が「テンプレート側の新しい変更」として再びマージに載る。
+ *
  * GitHub API に到達できず SHA を確定できないまま同期が進むことがあるため optional で、
- * その場合 3-way マージはベース無しの 2-way へ縮退する。
+ * その場合 3-way マージはベース無しの 2-way へ縮退する。ずれた SHA を載せるくらいなら
+ * 落とすのが正しい（縮退なら解決の選択がユーザーへ渡るだけで済む）。
  */
 const gitHubSyncBaseSchema = z.object({
   hashes: hashMapSchema,
@@ -390,7 +396,12 @@ export type MergingLockState = Extract<LockState, { sync: "merging" }>;
  */
 export interface SyncPoint {
   readonly hashes: HashMap;
-  /** GitHub ソースのときだけ lock に載る。 */
+  /**
+   * `hashes` を取ったツリーのコミット SHA。GitHub ソースのときだけ lock に載る。
+   *
+   * 別のツリーの SHA を載せてはならない理由は `gitHubSyncBaseSchema` の `ref` を参照。
+   * 確定できないなら省く（3-way が 2-way へ縮退する）。
+   */
   readonly commitSha?: CommitSha | undefined;
 }
 

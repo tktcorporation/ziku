@@ -22,9 +22,9 @@ export interface PushOptions {
    * エンコードで載っている（`src/utils/file-content.ts`）。GitHub API へ渡す前に
    * 元のバイト列へ戻す。
    */
-  files: Array<{ path: RepoRelPath; content: string }>;
+  files: readonly { readonly path: RepoRelPath; readonly content: string }[];
   /** テンプレートから削除するファイル（PR にファイル削除コミットを含める） */
-  deletions?: Array<{ path: RepoRelPath }>;
+  deletions?: readonly { readonly path: RepoRelPath }[];
   title: string;
   body?: string;
   /**
@@ -173,7 +173,7 @@ async function resolveForkRepo(
 /**
  * PR の本文を生成
  */
-function generatePrBody(files: Array<{ path: RepoRelPath; content: string }>): string {
+function generatePrBody(files: readonly { readonly path: RepoRelPath }[]): string {
   const fileList = files.map((f) => `- \`${f.path}\``).join("\n");
 
   return `## Summary
@@ -616,6 +616,8 @@ export type GitHubApiFailure =
   | { readonly _tag: "RateLimited"; readonly resetAt: Date | undefined }
   /** トークンは通ったが操作を拒否された (403)。権限か fork の可否が足りない。 */
   | { readonly _tag: "PermissionDenied"; readonly detail: string }
+  /** 宛先にした参照を GitHub が見つけられなかった (404)。指した先が上流に無い。 */
+  | { readonly _tag: "NotFound"; readonly detail: string }
   /** GitHub へ届かなかった (名前解決失敗・接続断・タイムアウト)。 */
   | { readonly _tag: "Unreachable"; readonly detail: string }
   /** 上のどれでもない。行動を書けないので、文言に潰さず原因ごと見せる側へ回す。 */
@@ -630,12 +632,17 @@ export type GitHubApiFailure =
  *
  * GitHub が返した 5xx を分類しないのは、一時障害と ziku が送った不正なリクエストが同じ形で
  * 届き、「待てば直る」と言い切れないため。原因を見せる側（defect）に残す。
+ *
+ * 404 を分類するのは、宛先が上流から消えている状態をユーザーが直せるため。lock に控えた
+ * 既定ブランチ名は引き直せないときの宛先になるので、上流でブランチが改名・削除されると
+ * この形で届く。分類しないと「ziku のバグを報告してください」と案内することになる。
  */
 export function classifyGitHubApiFailure(cause: unknown): GitHubApiFailure {
   const detail = cause instanceof Error ? cause.message : String(cause);
 
   return match(httpStatusOf(cause))
     .with(401, (): GitHubApiFailure => ({ _tag: "AuthRejected", detail }))
+    .with(404, (): GitHubApiFailure => ({ _tag: "NotFound", detail }))
     .with(429, (): GitHubApiFailure => ({ _tag: "RateLimited", resetAt: rateLimitResetOf(cause) }))
     .with(
       403,
@@ -681,6 +688,12 @@ export function githubApiFailure(
     .with({ _tag: "PermissionDenied" }, (f) =>
       zikuFailure(
         { kind: "GitHubPermissionDenied", operation: context.operation, detail: f.detail },
+        options,
+      ),
+    )
+    .with({ _tag: "NotFound" }, (f) =>
+      zikuFailure(
+        { kind: "GitHubTargetNotFound", operation: context.operation, detail: f.detail },
         options,
       ),
     )
