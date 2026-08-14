@@ -958,7 +958,7 @@ function acquireResolutionTemplate(
       const fetchSource: Effect.Effect<string, ZikuFailure> =
         ref === undefined
           ? resolveGitHubFetchSource(l.source).pipe(
-              Effect.map(buildTemplateSource),
+              Effect.map((target) => buildTemplateSource(target.pinned)),
               Effect.mapError(toZikuFailure),
             )
           : Effect.succeed(buildCommitPinnedSource(l.source, ref));

@@ -5,8 +5,7 @@ import { Effect } from "effect";
 import { dirname } from "pathe";
 import { P, match } from "ts-pattern";
 import { withCleanup } from "../effect-helpers";
-import type { ZikuFailure } from "../errors";
-import { zikuFailure } from "../errors";
+import { ZikuFailure, zikuFailure } from "../errors";
 import type {
   AbsPath,
   FileDiff,
@@ -61,9 +60,9 @@ import { detectDiff } from "../utils/diff";
 import {
   classifyGitHubApiFailure,
   createPullRequest,
+  fetchDefaultBranch,
   getGitHubToken,
   githubApiFailure,
-  resolveDefaultBranch,
 } from "../utils/github";
 import { hashFiles } from "../utils/hash";
 import { detectAndUpdateReadme, detectReadmeUpdate } from "../utils/readme";
@@ -172,6 +171,10 @@ interface PushTarget extends PushPayload {
  * | GitHub へ届かない                          | 接続を確かめて実行し直す         |
  * | ローカルへの書き込みが権限・容量で失敗     | 権限を直す / 空きを作る          |
  *
+ * 呼び出し先が既に `ZikuFailure` として分類した失敗（同期対象が多すぎてツリーを取り切れない等）
+ * は、そのまま通す。GitHub API の例外として分類し直すと `Unclassified` に落ちて defect になり、
+ * 呼び出し先が用意した案内が消える。
+ *
  * これ以外は defect のまま運び、トップレベルが原因とスタックトレースごと見せる。プロンプトの
  * 中断・想定外のレスポンス形・GitHub の 5xx がここに入る。文言に潰すと、ziku の不具合が
  * 「ユーザー側の問題」として案内され、原因を追う材料も消える。
@@ -182,8 +185,10 @@ interface PushTarget extends PushPayload {
  * @param operation 何をしようとして失敗したか（文中に埋め込むので動詞から始める）。
  */
 function pushFailure(operation: string): (cause: unknown) => Effect.Effect<never, ZikuFailure> {
-  return (cause) =>
-    match(classifyGitHubApiFailure(cause))
+  return (cause) => {
+    if (cause instanceof ZikuFailure) return Effect.fail(cause);
+
+    return match(classifyGitHubApiFailure(cause))
       .with(
         { _tag: P.union("AuthRejected", "RateLimited", "PermissionDenied", "Unreachable") },
         (failure) =>
@@ -193,6 +198,7 @@ function pushFailure(operation: string): (cause: unknown) => Effect.Effect<never
       )
       .with({ _tag: "Unclassified" }, () => localWriteFailure(cause))
       .exhaustive();
+  };
 }
 
 /**
@@ -246,24 +252,33 @@ function errnoStringOf(cause: unknown, key: "code" | "path"): string | undefined
 /**
  * PR の宛先ブランチを決め、ブランチへ向けられないソースは失敗として返す。
  *
- * 宛先が定まらない 2 通りは、ユーザーが取る行動が違うので別の失敗にする。タグ・コミットへ
- * 固定されたテンプレートは lock を直せば解決し、既定ブランチを引けなかった場合は
- * 到達性（ネットワーク・トークン）を疑うか宛先を明示することになる。
+ * 宛先が定まらない 3 通りは、ユーザーが取る行動が違うので別の失敗にする。タグ・コミットへ
+ * 固定されたテンプレートは lock を直せば解決し、トークンを拒否された場合はトークンを入れ直す
+ * ことになり、既定ブランチを引けず控えも無い場合は到達性（ネットワーク）を疑うか宛先を
+ * 明示することになる。
+ *
+ * 問い合わせ結果を潰さずに渡すのは、引けなかった理由で宛先の決まり方が変わるため
+ * （{@link resolvePrBaseBranch}）。レート制限のように待てば直る失敗では lock に控えた既定
+ * ブランチ名が宛先になり、テンプレートの取得が控えへ倒れて続行できる実行で PR だけが
+ * 作れない状態を作らない。
  *
  * 既定ブランチの問い合わせは ref を持たないソースだけに要る。ブランチ指定済み・タグ /
  * コミット固定のソースでは結果を使わないので、API を呼ばない。
  */
 function prBaseBranch(source: GitHubSource): Effect.Effect<string, ZikuFailure> {
   return Effect.gen(function* () {
-    const defaultBranch =
+    const defaultBranchLookup =
       source.ref === undefined
-        ? yield* Effect.promise(() => resolveDefaultBranch(source.owner, source.repo))
+        ? yield* Effect.promise(() => fetchDefaultBranch(source.owner, source.repo))
         : undefined;
 
-    return yield* match(resolvePrBaseBranch(source, defaultBranch))
+    return yield* match(resolvePrBaseBranch(source, defaultBranchLookup))
       .with({ _tag: "Branch" }, ({ name }) => Effect.succeed(name))
       .with({ _tag: "UnsupportedRef" }, ({ kind }) =>
         Effect.fail(zikuFailure({ kind: "TemplateRefNotBranch", refKind: kind })),
+      )
+      .with({ _tag: "AuthRejected" }, ({ detail }) =>
+        Effect.fail(zikuFailure({ kind: "GitHubAuthRejected", detail })),
       )
       .with({ _tag: "DefaultBranchUnresolved" }, () =>
         Effect.fail(

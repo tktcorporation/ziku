@@ -80,6 +80,12 @@ describe("describeFailure", () => {
       hint: /network connection/,
     },
     {
+      reason: { kind: "RepoTreeTooLarge", repo: "me/my-template" },
+      message:
+        "GitHub could not list every file in me/my-template: the repository tree is too large",
+      hint: /Reduce the number of files in me\/my-template/,
+    },
+    {
       reason: { kind: "InvalidArgument", argument: "--dirs", value: "nope", expected: "one of a" },
       message: 'Invalid --dirs: "nope"',
       hint: /Expected: one of a/,

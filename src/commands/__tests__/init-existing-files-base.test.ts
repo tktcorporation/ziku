@@ -61,20 +61,26 @@ vi.mock("../../utils/git-remote", () => ({
   DEFAULT_TEMPLATE_REPO: ".ziku",
 }));
 
-vi.mock("../../utils/github", () => ({
-  resolveLatestCommitSha: vi.fn(),
-  resolveDefaultBranch: vi.fn(),
-  resolveSourceCommitSha: vi.fn(),
-  resolveSourceCommit: vi.fn(),
-  checkRepoExists: vi.fn(),
-  checkRepoSetup: vi.fn(),
-  getAuthenticatedUserLogin: vi.fn(),
-  scaffoldTemplateRepo: vi.fn(),
-  getGitHubToken: vi.fn(() => ""),
-  createPullRequest: vi.fn(),
-  rateLimitedError: vi.fn(),
-  unauthorizedError: vi.fn(),
-}));
+vi.mock("../../utils/github", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../utils/github")>();
+  return {
+    resolveLatestCommitSha: vi.fn(),
+    resolveDefaultBranch: vi.fn(),
+    fetchDefaultBranch: vi.fn(),
+    resolveSourceCommitSha: vi.fn(),
+    resolveSourceCommit: vi.fn(),
+    checkRepoExists: vi.fn(),
+    checkRepoSetup: vi.fn(),
+    getAuthenticatedUserLogin: vi.fn(),
+    scaffoldTemplateRepo: vi.fn(),
+    getGitHubToken: vi.fn(() => ""),
+    createPullRequest: vi.fn(),
+    rateLimitedError: vi.fn(),
+    unauthorizedError: vi.fn(),
+    // 既定ブランチの控えへ倒す規則は実装を通す（コマンドの挙動そのものなのでモックしない）
+    decideDefaultBranch: actual.decideDefaultBranch,
+  };
+});
 
 vi.mock("../../utils/readme", () => ({
   detectAndUpdateReadme: vi.fn(() => Promise.resolve(null)),

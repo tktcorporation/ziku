@@ -14,6 +14,8 @@ import { z } from "zod/v4";
 import type { FileDiff, GitHubSource, GlobPattern, HashMap, RepoRelPath } from "../modules/schemas";
 import { repoRelPathSchema } from "../modules/schemas";
 import type { ConfigDrift } from "../utils/config-merge";
+import type { DefaultBranchResolution } from "../utils/github";
+import { decideDefaultBranch } from "../utils/github";
 import type { ConflictedContent, MergedContent } from "../utils/merge";
 import type { SyncPlan } from "../utils/merge/sync-plan";
 import { zikuConfigPushOutcome } from "../utils/merge/sync-plan";
@@ -663,7 +665,9 @@ export function patternsToPersist(
 export type PrBaseBranch =
   | { readonly _tag: "Branch"; readonly name: string }
   | { readonly _tag: "UnsupportedRef"; readonly kind: "tag" | "commit" }
-  /** ref を持たないソースで、リポジトリの既定ブランチも分からなかった。 */
+  /** トークンを拒否された。控えたブランチ名があっても宛先には使わない。 */
+  | { readonly _tag: "AuthRejected"; readonly detail: string }
+  /** ref を持たないソースで、リポジトリの既定ブランチも控えも分からなかった。 */
   | { readonly _tag: "DefaultBranchUnresolved" };
 
 /**
@@ -674,28 +678,58 @@ export type PrBaseBranch =
  * ブランチで、タグ・コミットへ固定されたソースは宛先が定まらないので `UnsupportedRef`
  * を返す。
  *
- * @param defaultBranch リポジトリの既定ブランチ名。解決できなかったときは undefined を渡す。
- *   既定ブランチは `main` とは限らず（`master` / `trunk` 等）、名前を仮定すると存在しない
- *   ブランチを宛先にした PR 作成が 404 になり、原因の分からない失敗として出る。分からない
- *   ことを `DefaultBranchUnresolved` として返し、呼び出し側が失敗として報告する。
+ * 既定ブランチを引けなかったときに控え（`source.defaultBranch`）へ倒すかは
+ * {@link decideDefaultBranch} が決める。宛先だけが別の規則で決まると、レート制限下で
+ * テンプレートは控えたブランチから取得できるのに PR だけが作れない、という食い違いが出る。
+ * 既定ブランチは `main` とは限らず（`master` / `trunk` 等）、控えも無いまま名前を仮定すると
+ * 存在しないブランチを宛先にした PR 作成が 404 になり、原因の分からない失敗として出る。
+ * 分からないことを `DefaultBranchUnresolved` として返し、呼び出し側が失敗として報告する。
+ *
+ * @param defaultBranchLookup 既定ブランチの問い合わせ結果。ref を持つソースでは結果を使わない
+ *   ので、呼び出し側は問い合わせを省いて undefined を渡してよい。ref を持たないソースで
+ *   undefined が渡れば、名前を知る手立てが無いので `DefaultBranchUnresolved` になる。
  */
 export function resolvePrBaseBranch(
   source: GitHubSource,
-  defaultBranch: string | undefined,
+  defaultBranchLookup: DefaultBranchResolution | undefined,
 ): PrBaseBranch {
   return match(source.ref)
     .with(
       undefined,
       (): PrBaseBranch =>
-        defaultBranch === undefined
+        defaultBranchLookup === undefined
           ? { _tag: "DefaultBranchUnresolved" }
-          : { _tag: "Branch", name: defaultBranch },
+          : prBaseFromDefaultBranch(defaultBranchLookup, source.defaultBranch),
     )
     .with({ kind: "branch" }, (branch): PrBaseBranch => ({ _tag: "Branch", name: branch.name }))
     .with(
       { kind: P.union("tag", "commit") },
       (ref): PrBaseBranch => ({ _tag: "UnsupportedRef", kind: ref.kind }),
     )
+    .exhaustive();
+}
+
+/**
+ * 既定ブランチ名の決着を PR の宛先へ写す。
+ *
+ * 引けた名前と控えた名前を同じ `Branch` にするのは、宛先としての意味が変わらないため。
+ * 控えを使ったことは、同じ実行のテンプレート取得（`src/utils/template-resolve.ts` の
+ * `resolveGitHubFetchSource`）が既に警告している。宛先の決定でも出すと警告が二重になる。
+ */
+function prBaseFromDefaultBranch(
+  lookup: DefaultBranchResolution,
+  recorded: string | undefined,
+): PrBaseBranch {
+  return match(decideDefaultBranch(lookup, recorded))
+    .with(
+      { _tag: P.union("Fetched", "Recorded") },
+      (d): PrBaseBranch => ({ _tag: "Branch", name: d.name }),
+    )
+    .with(
+      { _tag: "AuthRejected" },
+      (f): PrBaseBranch => ({ _tag: "AuthRejected", detail: f.detail }),
+    )
+    .with({ _tag: "Unresolved" }, (): PrBaseBranch => ({ _tag: "DefaultBranchUnresolved" }))
     .exhaustive();
 }
 

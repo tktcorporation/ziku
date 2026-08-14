@@ -6,12 +6,12 @@
  */
 import { Cause, Effect, Exit, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { DefaultBranchUnresolvedError, ZikuFailure } from "../../errors";
-import type { LockState, TemplateSource } from "../../modules/schemas";
+import { DefaultBranchUnresolvedError, GitHubAuthRejectedError, ZikuFailure } from "../../errors";
+import type { GitHubSource, LockState, TemplateSource } from "../../modules/schemas";
 import { createPendingLock, markSynced } from "../../modules/schemas";
 import { absPath, commitSha, hashMap } from "../../__tests__/brands";
 
-const githubSource: TemplateSource = {
+const githubSource: GitHubSource = {
   kind: "github",
   owner: "tktcorporation",
   repo: ".github",
@@ -48,8 +48,17 @@ vi.mock("../../utils/template-resolve", async () => {
   const effectMod = await import("effect");
   const brands = await import("../../__tests__/brands");
   return {
-    resolveTemplateDirScoped: vi.fn(() =>
-      effectMod.Effect.succeed(brands.absPath("/tmp/template")),
+    resolveTemplateDirScoped: vi.fn((source: TemplateSource) =>
+      effectMod.Effect.succeed(
+        source.kind === "github"
+          ? {
+              kind: "github",
+              dir: brands.absPath("/tmp/template"),
+              pinned: { ...source, ref: { kind: "branch", name: "main" } },
+              defaultBranch: "main",
+            }
+          : { kind: "local", dir: brands.absPath("/tmp/template") },
+      ),
     ),
   };
 });
@@ -63,10 +72,15 @@ const { resolveSourceCommit } = await import("../../utils/github");
 const mockLoadLock = vi.mocked(loadLock);
 const mockResolveSourceCommit = vi.mocked(resolveSourceCommit);
 
+/** 指定のソースを持つ lock でコンテキストを組み立てる。 */
+async function loadContextWith(source: TemplateSource) {
+  mockLoadLock.mockReturnValue(Effect.succeed(lockWith(source)));
+  return Effect.runPromise(loadCommandContext(absPath("/test")));
+}
+
 /** 指定のソースを持つ lock でコンテキストを組み立て、resolveBaseRef を走らせる。 */
 async function runResolveBaseRef(source: TemplateSource) {
-  mockLoadLock.mockReturnValue(Effect.succeed(lockWith(source)));
-  const ctx = await Effect.runPromise(loadCommandContext(absPath("/test")));
+  const ctx = await loadContextWith(source);
   return Effect.runPromiseExit(ctx.resolveBaseRef);
 }
 
@@ -86,6 +100,17 @@ describe("resolveBaseRef", () => {
     const exit = await runResolveBaseRef(githubSource);
 
     expect(exit).toStrictEqual(Exit.succeed(Option.some("sha-latest")));
+  });
+
+  it("SHA は取得に使った ref で引く（既定ブランチを二度解決しない）", async () => {
+    mockResolveSourceCommit.mockResolvedValue({ _tag: "Resolved", sha: commitSha("sha-latest") });
+
+    await runResolveBaseRef(githubSource);
+
+    expect(mockResolveSourceCommit).toHaveBeenCalledWith("tktcorporation", ".github", {
+      kind: "branch",
+      name: "main",
+    });
   });
 
   it("認証が拒否されたら失敗として返し、記録済みのベースへ黙って倒さない", async () => {
@@ -113,15 +138,52 @@ describe("resolveBaseRef", () => {
   });
 });
 
+describe("lock への既定ブランチの控え", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockResolveSourceCommit.mockResolvedValue({ _tag: "Resolved", sha: commitSha("sha-latest") });
+  });
+
+  it("引けた既定ブランチ名を lock の source へ載せる（書き出すコマンドが控えを更新できる）", async () => {
+    const ctx = await loadContextWith(githubSource);
+
+    expect(ctx.lock.source).toEqual({ ...githubSource, defaultBranch: "main" });
+    expect(ctx.source).toBe(ctx.lock.source);
+  });
+
+  it("控えの更新でも source.ref は埋めない（既定ブランチの改名に追随し続ける）", async () => {
+    const ctx = await loadContextWith({ ...githubSource, defaultBranch: "master" });
+
+    expect(ctx.lock.source).toEqual({ ...githubSource, defaultBranch: "main" });
+    expect(ctx.source).not.toHaveProperty("ref");
+  });
+
+  it("ローカルソースには控えを足さない", async () => {
+    const ctx = await loadContextWith(localSource);
+
+    expect(ctx.lock.source).toEqual(localSource);
+  });
+});
+
 describe("toZikuFailure", () => {
   it("取得先の既定ブランチが決まらない失敗は、到達性を直すか ref を明示する案内へ分類する", () => {
     const failure = toZikuFailure(
-      new DefaultBranchUnresolvedError({ owner: "tktcorporation", repo: ".github" }),
+      new DefaultBranchUnresolvedError({
+        owner: "tktcorporation",
+        repo: ".github",
+        detail: "rate limit exceeded",
+      }),
     );
 
     expect(failure.reason).toEqual({
       kind: "DefaultBranchUnresolved",
       repo: "tktcorporation/.github",
     });
+  });
+
+  it("トークン拒否は認証の失敗として分類し、既定ブランチの案内へ混ぜない", () => {
+    const failure = toZikuFailure(new GitHubAuthRejectedError({ detail: "Bad credentials" }));
+
+    expect(failure.reason).toEqual({ kind: "GitHubAuthRejected", detail: "Bad credentials" });
   });
 });

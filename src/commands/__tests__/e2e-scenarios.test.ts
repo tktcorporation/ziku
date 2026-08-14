@@ -79,6 +79,7 @@ vi.mock("../../utils/github", async () => {
   return {
     resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123")),
     resolveDefaultBranch: vi.fn(() => Promise.resolve("main")),
+    fetchDefaultBranch: vi.fn(() => Promise.resolve({ _tag: "Resolved" as const, name: "main" })),
     resolveSourceCommitSha: vi.fn(() => Promise.resolve("abc123")),
     resolveSourceCommit: vi.fn(() => Promise.resolve({ _tag: "Resolved" as const, sha: "abc123" })),
     checkRepoExists: vi.fn(() => Promise.resolve({ _tag: "Exists" as const })),
@@ -89,6 +90,8 @@ vi.mock("../../utils/github", async () => {
     createPullRequest: vi.fn(() =>
       Promise.resolve({ url: "https://github.com/test/repo/pull/2", number: 2, branch: "sync" }),
     ),
+    // 既定ブランチの控えへ倒す規則は実装を通す（コマンドの挙動そのものなのでモックしない）
+    decideDefaultBranch: actual.decideDefaultBranch,
     rateLimitedError: actual.rateLimitedError,
   };
 });

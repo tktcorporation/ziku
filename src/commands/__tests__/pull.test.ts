@@ -142,10 +142,16 @@ vi.mock("../../utils/merge", async () => {
   };
 });
 
-vi.mock("../../utils/github", () => ({
-  resolveLatestCommitSha: vi.fn(() => Promise.resolve("latest123")),
-  resolveDefaultBranch: vi.fn(() => Promise.resolve<string | undefined>("main")),
-}));
+vi.mock("../../utils/github", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../utils/github")>();
+  return {
+    resolveLatestCommitSha: vi.fn(() => Promise.resolve("latest123")),
+    resolveDefaultBranch: vi.fn(() => Promise.resolve<string | undefined>("main")),
+    fetchDefaultBranch: vi.fn(() => Promise.resolve({ _tag: "Resolved" as const, name: "main" })),
+    // 既定ブランチの控えへ倒す規則は実装を通す（コマンドの挙動そのものなのでモックしない）
+    decideDefaultBranch: actual.decideDefaultBranch,
+  };
+});
 
 vi.mock("../../utils/template-config", async () => {
   const effectMod = await import("effect");
@@ -197,8 +203,8 @@ const mockSelectDeletedFiles = vi.mocked(selectDeletedFiles);
 const mockSelectDeletedFilesWithLocalEdits = vi.mocked(selectDeletedFilesWithLocalEdits);
 const mockSelectUnmergedResolution = vi.mocked(selectUnmergedResolution);
 const { downloadTemplateToTemp, buildCommitPinnedSource } = await import("../../utils/template");
-const { resolveDefaultBranch } = await import("../../utils/github");
-const mockResolveDefaultBranch = vi.mocked(resolveDefaultBranch);
+const { fetchDefaultBranch } = await import("../../utils/github");
+const mockFetchDefaultBranch = vi.mocked(fetchDefaultBranch);
 const { zikuConfigExists } = await import("../../utils/ziku-config");
 const { loadLock, saveLock } = await import("../../utils/lock");
 const { loadTemplateConfig } = await import("../../utils/template-config");
@@ -1598,7 +1604,7 @@ describe("pullCommand", () => {
         ),
       );
       mockSelectUnmergedResolution.mockResolvedValueOnce("takeTemplate");
-      mockResolveDefaultBranch.mockResolvedValueOnce("master");
+      mockFetchDefaultBranch.mockResolvedValueOnce({ _tag: "Resolved", name: "master" });
       mockDownloadTemplateToTemp.mockResolvedValueOnce({
         templateDir: absPath("/tmp/paused-template"),
         cleanup: vi.fn(),
@@ -1619,7 +1625,7 @@ describe("pullCommand", () => {
       expect(written?.[1]?.toString()).toBe("template content");
     });
 
-    it("--continue: 既定ブランチを引けなければ、取得せずに中断してベースを前進させない", async () => {
+    it("--continue: 既定ブランチを引けず控えも無ければ、取得せずに中断してベースを前進させない", async () => {
       vol.fromJSON({ "/test/.mcp.json": "local content" });
 
       mockLoadLock.mockReturnValueOnce(
@@ -1630,7 +1636,10 @@ describe("pullCommand", () => {
         ),
       );
       mockSelectUnmergedResolution.mockResolvedValueOnce("takeTemplate");
-      mockResolveDefaultBranch.mockResolvedValueOnce(undefined);
+      mockFetchDefaultBranch.mockResolvedValueOnce({
+        _tag: "Unresolved",
+        reason: "rate limit exceeded",
+      });
 
       const failure = await captureFailure(() =>
         (pullCommand.run as any)({
@@ -1646,6 +1655,45 @@ describe("pullCommand", () => {
       });
       expect(mockDownloadTemplateToTemp).not.toHaveBeenCalled();
       expect(mockSaveLock).not.toHaveBeenCalled();
+    });
+
+    it("--continue: レート制限でも、控えた既定ブランチから取り寄せて解決を進める", async () => {
+      vol.fromJSON({
+        "/test/.mcp.json": "local content",
+        "/tmp/paused-template/.mcp.json": "template content",
+      });
+
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(
+          markMerging(
+            { ...baseLock, source: { ...baseSource, kind: "github", defaultBranch: "master" } },
+            { hashes: hashMap({ ".mcp.json": "newhash" }) },
+            [pendingConflict(".mcp.json", "noBase")],
+          ),
+        ),
+      );
+      mockSelectUnmergedResolution.mockResolvedValueOnce("takeTemplate");
+      mockFetchDefaultBranch.mockResolvedValueOnce({
+        _tag: "Unresolved",
+        reason: "rate limit exceeded",
+      });
+      mockDownloadTemplateToTemp.mockResolvedValueOnce({
+        templateDir: absPath("/tmp/paused-template"),
+        cleanup: vi.fn(),
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false, continue: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
+        expect.any(String),
+        "gh:tktcorporation/.github#master",
+        "continue",
+      );
+      expect(mockSaveLock).toHaveBeenCalled();
     });
 
     it("--continue: テンプレートを取り寄せられなければベースを前進させない", async () => {

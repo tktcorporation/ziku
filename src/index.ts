@@ -54,11 +54,17 @@ const COMMAND_HINTS: Record<SubCommandName, string> = {
   pull: "Pull latest template updates",
   diff: "Show differences from template",
   status: "Show pending pull/push and recommend next action",
-  track: "Add file patterns to the sync whitelist (needs patterns: ziku track <pattern>)",
+  track: "Add file patterns to the sync whitelist",
 };
 
 /**
- * 選択されたサブコマンドを引数なしで実行する。
+ * メニューで選ばれたサブコマンドを実行する。
+ *
+ * init / setup / push / pull / diff / status は位置引数がプロジェクトディレクトリだけで、
+ * 既定値のカレントディレクトリを対象に動く。メニューはそのまま引数なしで起動してよい。
+ * track だけは位置引数が「include に足すパターン」で、既定値を置きようがない（足すものが
+ * 決まらなければコマンドが成り立たない）。引数なしで起動すると必ず `MissingArgument` に
+ * なるので、起動する前にパターンを尋ねる。
  *
  * 名前からコマンド定義への対応を `Record` に畳まない理由: コマンドごとに args スキーマ
  * （`ArgsDef`）が違うため、1 つの `Record` に入れると全コマンドが 1 つの型へ潰れ、
@@ -73,8 +79,37 @@ function runSelectedCommand(name: SubCommandName): Promise<void> {
     .with("pull", () => runCli(pullCommand, []))
     .with("diff", () => runCli(diffCommand, []))
     .with("status", () => runCli(statusCommand, []))
-    .with("track", () => runCli(trackCommand, []))
+    .with("track", async () => runCli(trackCommand, await promptTrackPatterns()))
     .exhaustive();
+}
+
+/**
+ * `track` に渡すパターンを尋ねる。
+ *
+ * 空白区切りだけを受け付ける。glob の brace 展開（`.claude/rules/*.{md,json}`）はコンマを
+ * 含むため、コンマも区切りにすると 1 つのパターンが 2 つに割れる。
+ */
+async function promptTrackPatterns(): Promise<string[]> {
+  const answer = await p.text({
+    message: "Which files should ziku track?",
+    placeholder: ".claude/rules/*.md .mcp.json",
+    validate: (value) =>
+      splitPatterns(value).length === 0
+        ? "Enter one or more paths or glob patterns, separated by spaces."
+        : undefined,
+  });
+
+  if (p.isCancel(answer)) {
+    p.cancel("Cancelled.");
+    process.exit(0);
+  }
+
+  return splitPatterns(answer);
+}
+
+/** 空白区切りの入力をパターン列にする。 */
+function splitPatterns(value: string | undefined): string[] {
+  return (value ?? "").split(/\s+/).filter((pattern) => pattern.length > 0);
 }
 
 /**

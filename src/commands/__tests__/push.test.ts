@@ -1,7 +1,7 @@
 import { vol } from "memfs";
 import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { FileNotFoundError, ZikuFailure } from "../../errors";
+import { FileNotFoundError, ZikuFailure, zikuFailure } from "../../errors";
 import type {
   AbsPath,
   CommitSha,
@@ -62,7 +62,12 @@ vi.mock("../../utils/github", async (importOriginal) => {
     ...actual,
     getGitHubToken: vi.fn(),
     createPullRequest: vi.fn(),
-    resolveDefaultBranch: vi.fn(() => Promise.resolve("main")),
+    fetchDefaultBranch: vi.fn(() =>
+      Promise.resolve<import("../../utils/github").DefaultBranchResolution>({
+        _tag: "Resolved",
+        name: "main",
+      }),
+    ),
   };
 });
 
@@ -201,7 +206,7 @@ const { pushCommand } = await import("../push");
 const { writeFile } = await import("node:fs/promises");
 const { loadCommandContext } = await import("../../services/command-context");
 const { detectDiff } = await import("../../utils/diff");
-const { getGitHubToken, createPullRequest, resolveDefaultBranch } =
+const { getGitHubToken, createPullRequest, fetchDefaultBranch } =
   await import("../../utils/github");
 const {
   confirmAction,
@@ -227,7 +232,7 @@ const mockLoadCommandContext = vi.mocked(loadCommandContext);
 const mockDetectDiff = vi.mocked(detectDiff);
 const mockGetGitHubToken = vi.mocked(getGitHubToken);
 const mockCreatePullRequest = vi.mocked(createPullRequest);
-const mockResolveDefaultBranch = vi.mocked(resolveDefaultBranch);
+const mockFetchDefaultBranch = vi.mocked(fetchDefaultBranch);
 const mockConfirmAction = vi.mocked(confirmAction);
 const mockInputGitHubToken = vi.mocked(inputGitHubToken);
 const mockInputPrTitle = vi.mocked(inputPrTitle);
@@ -384,6 +389,8 @@ function resetPushMocks(): void {
   mockDetectAndUpdateReadme.mockResolvedValue(null);
   mockDetectReadmeUpdate.mockReset();
   mockDetectReadmeUpdate.mockResolvedValue(null);
+  mockFetchDefaultBranch.mockReset();
+  mockFetchDefaultBranch.mockResolvedValue({ _tag: "Resolved", name: "main" });
 }
 
 describe("pushCommand", () => {
@@ -962,7 +969,7 @@ describe("pushCommand", () => {
         { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
       ]);
       mockGetGitHubToken.mockReturnValue("ghp_token");
-      mockResolveDefaultBranch.mockResolvedValueOnce("master");
+      mockFetchDefaultBranch.mockResolvedValueOnce({ _tag: "Resolved", name: "master" });
       mockCreatePullRequest.mockResolvedValueOnce({
         url: "https://github.com/owner/repo/pull/1",
         branch: "update-template-123",
@@ -978,12 +985,76 @@ describe("pushCommand", () => {
       expect(mockCreatePullRequest.mock.calls[0]?.[1]).toMatchObject({ baseBranch: "master" });
     });
 
-    it("既定ブランチを引けなければ PR を作らず、宛先の決め方を案内する", async () => {
+    it("レート制限では、控えた既定ブランチ宛の PR を出して実行を続ける", async () => {
+      const recordedSource: TemplateSource = { ...githubSource, defaultBranch: "master" };
+      const { effect } = mockContext({
+        source: recordedSource,
+        lock: lockWith({ source: recordedSource }),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
       setupPushableFiles([
         { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
       ]);
       mockGetGitHubToken.mockReturnValue("ghp_token");
-      mockResolveDefaultBranch.mockResolvedValueOnce(undefined);
+      mockFetchDefaultBranch.mockResolvedValueOnce({
+        _tag: "Unresolved",
+        reason: "API rate limit exceeded",
+      });
+      mockCreatePullRequest.mockResolvedValueOnce({
+        url: "https://github.com/owner/repo/pull/1",
+        branch: "update-template-123",
+        number: 1,
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: true, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      expect(mockCreatePullRequest.mock.calls[0]?.[1]).toMatchObject({ baseBranch: "master" });
+    });
+
+    it("トークンを拒否されたら、控えがあっても PR を作らずトークンの直し方を案内する", async () => {
+      const recordedSource: TemplateSource = { ...githubSource, defaultBranch: "master" };
+      const { effect } = mockContext({
+        source: recordedSource,
+        lock: lockWith({ source: recordedSource }),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      setupPushableFiles([
+        { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
+      ]);
+      mockGetGitHubToken.mockReturnValue("ghp_token");
+      mockFetchDefaultBranch.mockResolvedValueOnce({
+        _tag: "AuthRejected",
+        detail: "Bad credentials",
+      });
+
+      await expect(
+        (pushCommand.run as any)({
+          args: { dir: "/test", dryRun: false, yes: true, edit: false },
+          rawArgs: [],
+          cmd: pushCommand,
+        }),
+      ).rejects.toMatchObject({
+        reason: { kind: "GitHubAuthRejected", detail: "Bad credentials" },
+      });
+
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
+    it("既定ブランチを引けず控えも無ければ PR を作らず、宛先の決め方を案内する", async () => {
+      setupPushableFiles([
+        { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
+      ]);
+      mockGetGitHubToken.mockReturnValue("ghp_token");
+      mockFetchDefaultBranch.mockResolvedValueOnce({
+        _tag: "Unresolved",
+        reason: "API rate limit exceeded",
+      });
 
       await expect(
         (pushCommand.run as any)({
@@ -1028,7 +1099,7 @@ describe("pushCommand", () => {
         cmd: pushCommand,
       });
 
-      expect(mockResolveDefaultBranch).not.toHaveBeenCalled();
+      expect(mockFetchDefaultBranch).not.toHaveBeenCalled();
       expect(mockCreatePullRequest.mock.calls[0]?.[1]).toMatchObject({ baseBranch: "develop" });
     });
 
@@ -2554,6 +2625,21 @@ describe("push の失敗の報告", () => {
       reason: { kind: "GitHubUnreachable", operation: "create a pull request" },
     });
     expect((failure as ZikuFailure).hint).toContain("network");
+  });
+
+  it("ツリーを取り切れなかった失敗は、分類済みの案内のまま届く", async () => {
+    // createPullRequest が分類済みの ZikuFailure を投げる。GitHub API の例外として
+    // 分類し直すと Unclassified → defect になり、ファイル数を減らす案内が消える。
+    const tooLarge = zikuFailure({ kind: "RepoTreeTooLarge", repo: "me/my-template" });
+    mockCreatePullRequest.mockRejectedValueOnce(tooLarge);
+
+    const failure = await failingGitHubPush();
+
+    expect(failure).toBe(tooLarge);
+    expect(failure).toMatchObject({
+      reason: { kind: "RepoTreeTooLarge", repo: "me/my-template" },
+    });
+    expect((failure as ZikuFailure).hint).toContain("Reduce the number of files");
   });
 
   it("分類していない失敗は、文言に潰さず原因のまま投げる", async () => {

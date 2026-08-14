@@ -50,11 +50,14 @@ vi.mock("../../utils/github", async () => {
     resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
     resolveSourceCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
     resolveDefaultBranch: vi.fn(() => Promise.resolve<string | undefined>("main")),
+    fetchDefaultBranch: vi.fn(() => Promise.resolve({ _tag: "Resolved" as const, name: "main" })),
     checkRepoExists: vi.fn(() => Promise.resolve({ _tag: "Exists" as const })),
     checkRepoSetup: vi.fn(() => Promise.resolve(true)),
     getGitHubToken: vi.fn(() => {}),
     getAuthenticatedUserLogin: vi.fn(() => Promise.resolve()),
     scaffoldTemplateRepo: vi.fn(() => Promise.resolve({ url: "https://github.com/test/repo" })),
+    // 既定ブランチの控えへ倒す規則は実装を通す（コマンドの挙動そのものなのでモックしない）
+    decideDefaultBranch: actual.decideDefaultBranch,
     rateLimitedError: actual.rateLimitedError,
   };
 });
@@ -135,7 +138,7 @@ const { selectDirectories, selectOverwriteStrategy, selectTemplateCandidate } =
 const { log, outro } = await import("../../ui/renderer");
 const { hashFiles, hashContent } = await import("../../utils/hash");
 const { loadTemplateConfig } = await import("../../utils/template-config");
-const { checkRepoExists, checkRepoSetup, resolveDefaultBranch, resolveSourceCommitSha } =
+const { checkRepoExists, checkRepoSetup, fetchDefaultBranch, resolveSourceCommitSha } =
   await import("../../utils/github");
 
 const mockDownloadTemplateToTemp = vi.mocked(downloadTemplateToTemp);
@@ -152,7 +155,7 @@ const mockHashFiles = vi.mocked(hashFiles);
 const _mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
 const mockCheckRepoExists = vi.mocked(checkRepoExists);
 const mockCheckRepoSetup = vi.mocked(checkRepoSetup);
-const mockResolveDefaultBranch = vi.mocked(resolveDefaultBranch);
+const mockFetchDefaultBranch = vi.mocked(fetchDefaultBranch);
 const mockResolveSourceCommitSha = vi.mocked(resolveSourceCommitSha);
 
 describe("initCommand", () => {
@@ -872,7 +875,7 @@ describe("initCommand", () => {
   describe("配置したファイルの由来と lock に記録する SHA は同じブランチを指す", () => {
     it("既定ブランチが master のリポジトリでも、取得先とベースの問い合わせ先が揃う", async () => {
       vol.fromJSON({ "/test": null });
-      mockResolveDefaultBranch.mockResolvedValueOnce("master");
+      mockFetchDefaultBranch.mockResolvedValueOnce({ _tag: "Resolved", name: "master" });
       mockFetchTemplates.mockResolvedValue([]);
 
       await (initCommand.run as any)({
@@ -891,9 +894,34 @@ describe("initCommand", () => {
       });
     });
 
+    it("既定ブランチは lock へ控えるが source.ref には固定しない", async () => {
+      vol.fromJSON({ "/test": null });
+      mockFetchDefaultBranch.mockResolvedValueOnce({ _tag: "Resolved", name: "master" });
+      mockFetchTemplates.mockResolvedValue([]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      const lockContent = lockSchema.parse(
+        JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string),
+      );
+      expect(lockContent.source).toEqual({
+        kind: "github",
+        owner: "test-org",
+        repo: ".ziku",
+        defaultBranch: "master",
+      });
+    });
+
     it("既定ブランチを引けなければ、テンプレートを取得せずに中断する", async () => {
       vol.fromJSON({ "/test": null });
-      mockResolveDefaultBranch.mockResolvedValueOnce(undefined);
+      mockFetchDefaultBranch.mockResolvedValueOnce({
+        _tag: "Unresolved",
+        reason: "rate limit exceeded",
+      });
 
       await expect(
         (initCommand.run as any)({
@@ -920,7 +948,7 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
-      expect(mockResolveDefaultBranch).not.toHaveBeenCalled();
+      expect(mockFetchDefaultBranch).not.toHaveBeenCalled();
       expect(mockDownloadTemplateToTemp).not.toHaveBeenCalled();
     });
   });

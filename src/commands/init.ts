@@ -154,8 +154,10 @@ interface AcquiredTemplate {
   readonly templateDir: AbsPath;
   /**
    * lock の `source` に記録する取得元。GitHub ソースで ref を指定しなかった場合は、解決した
-   * ブランチ名を書き戻さず未指定のまま残す。未指定は「そのリポジトリの既定ブランチを追う」と
-   * いう指定であり、解決結果で固定すると既定ブランチが改名されたときに追随できなくなる。
+   * ブランチ名を `ref` へ書き戻さず未指定のまま残す。未指定は「そのリポジトリの既定ブランチを
+   * 追う」という指定であり、解決結果で固定すると既定ブランチが改名されたときに追随できなくなる。
+   * 解決したブランチ名は `defaultBranch` の控えとしてだけ載せる（追随はやめず、GitHub へ
+   * 問い合わせられないときの取得先だけを決める）。
    */
   readonly source: TemplateSource;
   /**
@@ -327,7 +329,7 @@ async function acquireTemplate(
   const resolved = await resolveTemplateSourceWithCheck(args.from, args.yes, args.dryRun);
   log.info(`Template: ${pc.cyan(`${resolved.sourceOwner}/${resolved.sourceRepo}`)}`);
 
-  const source: GitHubSource = {
+  const repo: GitHubSource = {
     kind: "github",
     owner: resolved.sourceOwner,
     repo: resolved.sourceRepo,
@@ -335,8 +337,13 @@ async function acquireTemplate(
   // 取得先の決め方と、決まらないときに止める理由は resolveGitHubFetchSource を参照。
   // ここで止まってもディスクには何も足されていない（giget を呼ぶのはこの後）。
   const fetched = await runCommandEffect(
-    resolveGitHubFetchSource(source).pipe(Effect.mapError(toZikuFailure)),
+    resolveGitHubFetchSource(repo).pipe(Effect.mapError(toZikuFailure)),
   );
+
+  // 引けた既定ブランチ名を lock へ控える。init が控えを残さないと、以降の実行はレート制限に
+  // かかった時点で取得先を決められなくなる（gitHubSourceSchema の defaultBranch）。
+  const source: GitHubSource =
+    fetched.defaultBranch === undefined ? repo : { ...repo, defaultBranch: fetched.defaultBranch };
 
   log.step("Fetching template...");
   // giget は tempDir (targetDir/.ziku-temp) の親ディレクトリも再帰的に作成するため、
@@ -346,7 +353,7 @@ async function acquireTemplate(
   // ここでも失敗経路を捕まえて同じ後始末を行う（try/catch は ast-grep で禁止のため
   // Promise.then(onFulfilled, onRejected) を使う）。
   const downloaded = await withSpinner("Downloading template from GitHub...", () =>
-    downloadTemplateToTemp(targetDir, buildTemplateSource(fetched)),
+    downloadTemplateToTemp(targetDir, buildTemplateSource(fetched.pinned)),
   ).then(
     (result) => result,
     (error: unknown) => {
@@ -358,7 +365,7 @@ async function acquireTemplate(
   return {
     templateDir: downloaded.templateDir,
     source,
-    fetchedRef: fetched.ref,
+    fetchedRef: fetched.pinned.ref,
     cleanup: downloaded.cleanup,
   };
 }

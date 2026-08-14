@@ -71,6 +71,14 @@ export type FailureReason =
    * ziku 側の状態は変わっていないので、再実行の前に片付けるものは無い。
    */
   | { readonly kind: "GitHubUnreachable"; readonly operation: string; readonly detail: string }
+  /**
+   * リポジトリのファイル数が多すぎて、GitHub がツリーを最後まで返さなかった。
+   *
+   * 取る行動はリポジトリのファイル数を減らすこと。ziku は既存ファイルを更新するために全件の
+   * 一覧を要るので、欠けた一覧で続けると更新すべきファイルを新規作成として送ることになる。
+   * `GitHubPermissionDenied` 等と違いトークンや接続では変わらず、リポジトリの中身の話。
+   */
+  | { readonly kind: "RepoTreeTooLarge"; readonly repo: string }
   /** CLI 引数の値が受け付けられない。 */
   | {
       readonly kind: "InvalidArgument";
@@ -118,10 +126,10 @@ export type FailureReason =
    */
   | { readonly kind: "TemplateFileMissing"; readonly path: string }
   /**
-   * PR の宛先にするリポジトリの既定ブランチを引けなかった。
+   * リポジトリの既定ブランチを引けず、PR の宛先もテンプレートの取得先も決められない。
    *
-   * 取る行動は 2 つ。GitHub へ到達できているか（ネットワーク・トークン）を確かめるか、
-   * lock の `source.ref` で宛先ブランチを明示する。`TemplateRefNotBranch` と違い、
+   * 取る行動は 2 つ。GitHub へ到達できているか（ネットワーク・トークン・クォータ）を確かめるか、
+   * lock の `source.ref` でブランチを明示する。`TemplateRefNotBranch` と違い、
    * lock の記述自体は正しい。
    */
   | { readonly kind: "DefaultBranchUnresolved"; readonly repo: string }
@@ -224,6 +232,10 @@ export function describeFailure(reason: FailureReason): FailureDisplay {
       message: `Cannot reach GitHub to ${r.operation}: ${r.detail}`,
       hint: "Check your network connection and any proxy settings, then run the same command again.",
     }))
+    .with({ kind: "RepoTreeTooLarge" }, (r) => ({
+      message: `GitHub could not list every file in ${r.repo}: the repository tree is too large`,
+      hint: `ziku needs the full listing to tell which files it must update. Reduce the number of files in ${r.repo} — narrowing the include patterns in \`.ziku/ziku.jsonc\` keeps fewer files in sync — then run the command again.`,
+    }))
     .with({ kind: "InvalidArgument" }, (r) => ({
       message: `Invalid ${r.argument}: "${r.value}"`,
       hint: `Expected: ${r.expected}`,
@@ -258,7 +270,7 @@ export function describeFailure(reason: FailureReason): FailureDisplay {
     }))
     .with({ kind: "DefaultBranchUnresolved" }, (r) => ({
       message: `Cannot determine the default branch of ${r.repo}`,
-      hint: `Check that GitHub is reachable (network, GITHUB_TOKEN / GH_TOKEN), or name the target branch in .ziku/lock.json's source.ref (for example { "kind": "branch", "name": "main" }).`,
+      hint: `Check that GitHub is reachable (network, GITHUB_TOKEN / GH_TOKEN). Without a token GitHub allows 60 requests per hour, so waiting for the quota to reset or setting a token also fixes this. You can also name the branch in .ziku/lock.json's source.ref (for example { "kind": "branch", "name": "main" }) to stop asking GitHub for it.`,
     }))
     .with({ kind: "PushBlockedByConflicts" }, (r) => ({
       message: `${r.files.length} selected file(s) have conflicts that couldn't be auto-merged`,
@@ -383,10 +395,28 @@ export class TemplateError extends Data.TaggedError("TemplateError")<{
  * `TemplateError` と分けるのは、取れる行動が違うため。ダウンロードそのものの失敗と違い、
  * ここでは「どのブランチを取ればよいか」が決まっていない。ユーザーは GitHub への到達性を
  * 直すか、lock の `source.ref` で取得先を明示することで解決できる。
+ *
+ * 待てば直る失敗（レート制限・5xx・接続断）でこれを返すのは、lock に既定ブランチの控えが
+ * 無い場合だけ。控えがあるときは取得先が決まるので、失敗にはしない（`gitHubSourceSchema`
+ * の `defaultBranch`）。
  */
 export class DefaultBranchUnresolvedError extends Data.TaggedError("DefaultBranchUnresolvedError")<{
   readonly owner: string;
   readonly repo: string;
+  /** 引けなかった事情。HTTP ステータス文か例外のメッセージ。 */
+  readonly detail: string;
+}> {}
+
+/**
+ * 付与したトークンを GitHub が拒否した（401）。
+ *
+ * `DefaultBranchUnresolvedError` と分けるのは、待っても再実行しても結果が変わらないため。
+ * 控えのブランチ名へ倒す対象にせず、そのまま中断してユーザーにトークンを直してもらう。
+ * プライベートリポジトリでは「見えるはずのものが見えない」状態でもあるので、ツールが代わりに
+ * 続行を決めてよい失敗ではない。
+ */
+export class GitHubAuthRejectedError extends Data.TaggedError("GitHubAuthRejectedError")<{
+  readonly detail: string;
 }> {}
 
 /**

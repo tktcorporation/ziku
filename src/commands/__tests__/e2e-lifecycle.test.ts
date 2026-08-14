@@ -52,6 +52,7 @@ vi.mock("../../utils/github", async () => {
   return {
     resolveLatestCommitSha: vi.fn(() => Promise.resolve("sha-001")),
     resolveDefaultBranch: vi.fn(() => Promise.resolve("main")),
+    fetchDefaultBranch: vi.fn(() => Promise.resolve({ _tag: "Resolved" as const, name: "main" })),
     resolveSourceCommitSha: vi.fn(() => Promise.resolve("sha-001")),
     resolveSourceCommit: vi.fn(() =>
       Promise.resolve({ _tag: "Resolved" as const, sha: "sha-001" }),
@@ -69,6 +70,8 @@ vi.mock("../../utils/github", async () => {
       }),
     ),
     // rateLimitedError は実装を使う（モックすると型に合わない）
+    // 既定ブランチの控えへ倒す規則は実装を通す（コマンドの挙動そのものなのでモックしない）
+    decideDefaultBranch: actual.decideDefaultBranch,
     rateLimitedError: actual.rateLimitedError,
   };
 });

@@ -78,11 +78,10 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
     tree_sha: branchName,
     recursive: "true",
   });
+  // 欠けた一覧のまま進むと、既存ファイルの blob SHA を引けず更新が新規作成として送られる。
+  // ユーザーが取れる行動（リポジトリのファイル数を減らす）があるので、分類済みの失敗にする。
   if (treeData.truncated) {
-    throw new Error(
-      `Repository tree is too large to fetch entirely. ` +
-        `Consider reducing the number of files in ${forkOwner}/${forkRepo}.`,
-    );
+    throw zikuFailure({ kind: "RepoTreeTooLarge", repo: `${forkOwner}/${forkRepo}` });
   }
   // GitHub が採番した blob SHA の写像。ziku が計算する内容ハッシュと形が同じなので、
   // API レスポンスから取り出すここで blob SHA として brand しておく。
@@ -507,9 +506,64 @@ export type CommitShaResolution =
   | GitHubLookupFailure;
 
 /** リポジトリの既定ブランチ名の解決結果。失敗の分け方は {@link GitHubLookupFailure} と同じ。 */
-type DefaultBranchResolution =
+export type DefaultBranchResolution =
   | { readonly _tag: "Resolved"; readonly name: string }
   | GitHubLookupFailure;
+
+/**
+ * 既定ブランチ名を使ってよいかの決着。{@link decideDefaultBranch} が出す。
+ *
+ * 名前が得られた 2 ケースを分けるのは、控えへ倒したかで呼び出し側の振る舞いが変わるため。
+ * lock へ控え直してよいのは GitHub から引き直した `Fetched` だけで、`Recorded` は「最後に
+ * 引けた名前」で進んでいることを利用者へ知らせる対象になる。
+ */
+export type DefaultBranchDecision =
+  /** GitHub から引けた名前。 */
+  | { readonly _tag: "Fetched"; readonly name: string }
+  /** 引けなかったので控えた名前を使う。`reason` は引けなかった事情。 */
+  | { readonly _tag: "Recorded"; readonly name: string; readonly reason: string }
+  /** トークンを拒否された。控えがあっても使わない。 */
+  | { readonly _tag: "AuthRejected"; readonly detail: string }
+  /** 引けず、控えも無い。名前が決まらない。 */
+  | { readonly _tag: "Unresolved"; readonly reason: string };
+
+/**
+ * 既定ブランチの問い合わせ結果と lock の控えから、使ってよい名前を決める。
+ *
+ * 引けなかったときの扱いは、人が直すまで結果が変わるかで分ける。
+ *
+ * - 401（トークン拒否）: 控えがあっても倒さない。同じトークンで何度問い合わせても結果は
+ *   変わらず、プライベートリポジトリでは「見えるはずのものが見えない」状態でもある。控えへ
+ *   倒すと、権限の切れたトークンのまま同期が進み続ける。
+ * - レート制限・5xx・接続断・対象が見つからない: 控えがあればその名前で続行する。待てば直る
+ *   失敗で中断すると、テンプレートの取得も PR の作成も揃って動かなくなる。控えが無ければ
+ *   名前が決まらないので中断する。
+ *
+ * 既定ブランチ名は 1 回の実行の中で複数の場所が要る（テンプレートの取得先・lock へ記録する
+ * コミット SHA・push が PR を向ける宛先）。規則をこの関数へ閉じることで、片方だけが控えへ
+ * 倒れて別のブランチを指す状態を作れなくする。
+ *
+ * @param recorded lock に控えた既定ブランチ名。控えが無ければ undefined。
+ */
+export function decideDefaultBranch(
+  resolution: DefaultBranchResolution,
+  recorded: string | undefined,
+): DefaultBranchDecision {
+  return match(resolution)
+    .with({ _tag: "Resolved" }, (r): DefaultBranchDecision => ({ _tag: "Fetched", name: r.name }))
+    .with(
+      { _tag: "AuthRejected" },
+      (f): DefaultBranchDecision => ({ _tag: "AuthRejected", detail: f.detail }),
+    )
+    .with(
+      { _tag: "Unresolved" },
+      (f): DefaultBranchDecision =>
+        recorded === undefined
+          ? { _tag: "Unresolved", reason: f.reason }
+          : { _tag: "Recorded", name: recorded, reason: f.reason },
+    )
+    .exhaustive();
+}
 
 /**
  * 値を返さなかった HTTP レスポンスを、呼び出し側の行動が変わる 2 つの理由へ分類する。
@@ -729,8 +783,11 @@ function isNetworkFailure(cause: unknown): boolean {
  * 既定ブランチは `main` とは限らない（`master` / `trunk` 等）。ブランチが指定されていない
  * ときに `main` を仮定すると、存在しないブランチを見に行くか、別ブランチのコミットを掴む。
  * どちらも 3-way マージのベースを取り違える原因になる。
+ *
+ * 引けなかった理由で行動を変える呼び出し（トークン拒否なら中断、待てば直る失敗なら控えの
+ * ブランチ名へ倒す）は、undefined へ潰す {@link resolveDefaultBranch} ではなくこちらを使う。
  */
-function fetchDefaultBranch(owner: string, repo: string): Promise<DefaultBranchResolution> {
+export function fetchDefaultBranch(owner: string, repo: string): Promise<DefaultBranchResolution> {
   const octokit = new Octokit({ auth: getGitHubToken() });
 
   return Effect.runPromise(
@@ -752,7 +809,7 @@ function fetchDefaultBranch(owner: string, repo: string): Promise<DefaultBranchR
  *
  * 取得できない場合（リポジトリ不在・認証失敗・ネットワーク断・レート制限）は undefined を
  * 返す。誤ったブランチ名で解決を続けるより、未解決として呼び出し側のフォールバックへ倒す
- * ほうが安全なため。失敗の理由で行動を変える呼び出しは {@link resolveSourceCommit} と同じく
+ * ほうが安全なため。失敗の理由で行動を変える呼び出しは {@link fetchDefaultBranch} を使い、
  * 分類済みの結果を扱うこと。
  */
 export async function resolveDefaultBranch(

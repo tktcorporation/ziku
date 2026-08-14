@@ -10,10 +10,12 @@
 import { Cause, Context, Effect, Exit, Layer, Option, Scope } from "effect";
 import { match } from "ts-pattern";
 import type { AbsPath, CommitSha, ZikuConfig, LockState, TemplateSource } from "../modules/schemas";
+import { withRecordedDefaultBranch } from "../modules/schemas";
 import { zikuFailure } from "../errors";
 import type {
   DefaultBranchUnresolvedError,
   FileNotFoundError,
+  GitHubAuthRejectedError,
   ParseError,
   TemplateError,
   ValidationError,
@@ -30,7 +32,13 @@ import { resolveSourceCommit } from "../utils/github";
 export interface CommandContextShape {
   /** ziku.jsonc のパターン定義 */
   readonly config: ZikuConfig;
-  /** lock.json の同期状態（source 含む） */
+  /**
+   * lock.json の同期状態（source 含む）。
+   *
+   * ディスク上の lock と 1 箇所だけ違う場合がある。既定ブランチを GitHub から引けたときは
+   * その名前を `source.defaultBranch` へ控え直した状態で渡す（{@link loadCommandContext}）。
+   * lock を書き出すコマンドはこれを起点に次の状態を作ること。
+   */
   readonly lock: LockState;
   /** テンプレートの取得元（lock.source のエイリアス） */
   readonly source: TemplateSource;
@@ -69,7 +77,8 @@ export type ContextLoadError =
   | ParseError
   | ValidationError
   | TemplateError
-  | DefaultBranchUnresolvedError;
+  | DefaultBranchUnresolvedError
+  | GitHubAuthRejectedError;
 
 // ─── Effect ヘルパー ───
 
@@ -110,9 +119,7 @@ export function loadCommandContext(
   return Effect.gen(function* () {
     const { config } = yield* loadZikuConfig(targetDir);
 
-    const lock = yield* loadLock(targetDir);
-
-    const source = lock.source;
+    const loadedLock = yield* loadLock(targetDir);
 
     // テンプレート取得を Scope に紐づける。
     //
@@ -129,7 +136,7 @@ export function loadCommandContext(
     // cleanup を呼び忘れた場合でも、登録された tempDir は temp-tracker の
     // process.on('exit') で同期削除される (二重防衛)。
     const scope = yield* Scope.make();
-    const templateDir = yield* resolveTemplateDirScoped(source, targetDir).pipe(
+    const template = yield* resolveTemplateDirScoped(loadedLock.source, targetDir).pipe(
       Scope.extend(scope),
       Effect.onError(() => Scope.close(scope, Exit.void)),
     );
@@ -137,21 +144,38 @@ export function loadCommandContext(
 
     // resolveBaseRef: ソース種別の分岐を吸収する。
     //
-    // source.ref を渡す理由: テンプレートを取得した ref とベースの SHA が食い違うと、
-    // 3-way マージのベースが別ブランチのツリーになる。
+    // 取得に使った ref をそのまま渡す理由: テンプレートを取得した ref とベースの SHA が
+    // 食い違うと、3-way マージのベースが別ブランチのツリーになる。lock の source.ref から
+    // 引き直すと、未指定のときに既定ブランチの解決が二度走り、取得側だけが控えのブランチ名へ
+    // 倒れた場合に両者が別のブランチを指す。
     //
     // Effect.promise を使うのは、resolveSourceCommit が失敗を戻り値で表すため。
     // reject するのは実装の不具合なので、defect として運ぶ。
-    const resolveBaseRef = match(source)
-      .with({ kind: "github" }, (gh) =>
-        Effect.promise(() => resolveSourceCommit(gh.owner, gh.repo, gh.ref)).pipe(
+    const resolveBaseRef = match(template)
+      .with({ kind: "github" }, (t) =>
+        Effect.promise(() => resolveSourceCommit(t.pinned.owner, t.pinned.repo, t.pinned.ref)).pipe(
           Effect.flatMap(toBaseRef),
         ),
       )
       .with({ kind: "local" }, () => Effect.succeed(Option.none<CommitSha>()))
       .exhaustive();
 
-    return { config, lock, source, templateDir, cleanup, resolveBaseRef };
+    // 引けた既定ブランチ名を lock へ控え直す。lock を書き出すコマンド（pull / push）は
+    // ctx.lock を起点に次の状態を作るので、ここで載せておけば控えが GitHub 側の改名に
+    // 追随する。読むだけのコマンド（diff / status）では書き出されないまま捨てられる。
+    const lock = match(template)
+      .with({ kind: "github" }, (t) => withRecordedDefaultBranch(loadedLock, t.defaultBranch))
+      .with({ kind: "local" }, () => loadedLock)
+      .exhaustive();
+
+    return {
+      config,
+      lock,
+      source: lock.source,
+      templateDir: template.dir,
+      cleanup,
+      resolveBaseRef,
+    };
   });
 }
 
@@ -214,7 +238,10 @@ export function toZikuFailure(err: ContextLoadError): ZikuFailure {
       zikuFailure({ kind: "TemplateUnavailable", detail: e.message }, { cause: e.cause }),
     )
     .with({ _tag: "DefaultBranchUnresolvedError" }, (e) =>
-      zikuFailure({ kind: "DefaultBranchUnresolved", repo: `${e.owner}/${e.repo}` }),
+      zikuFailure({ kind: "DefaultBranchUnresolved", repo: `${e.owner}/${e.repo}` }, { cause: e }),
+    )
+    .with({ _tag: "GitHubAuthRejectedError" }, (e) =>
+      zikuFailure({ kind: "GitHubAuthRejected", detail: e.detail }),
     )
     .exhaustive();
 }

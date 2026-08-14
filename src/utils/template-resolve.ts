@@ -10,51 +10,124 @@
 import { Effect } from "effect";
 import type { Scope } from "effect";
 import { match } from "ts-pattern";
-import type { AbsPath, GitHubSource, TemplateSource } from "../modules/schemas";
+import type { AbsPath, GitHubSource, TemplateRef, TemplateSource } from "../modules/schemas";
 import type { TemplateError } from "../errors";
-import { DefaultBranchUnresolvedError } from "../errors";
-import { resolveDefaultBranch } from "./github";
+import { DefaultBranchUnresolvedError, GitHubAuthRejectedError } from "../errors";
+import { log } from "../ui/renderer";
+import { decideDefaultBranch, fetchDefaultBranch } from "./github";
 import { absPath } from "./paths";
 import { acquireTempTemplate, buildTemplateSource } from "./template";
 
 /**
+ * 取得先が確定した GitHub ソース。
+ *
+ * `ref` を必須にすることで、giget の既定（`main`）へ落ちる取得先が型として作れなくなる。
+ * 取得先を決めた側と、その取得先のコミット SHA を lock へ記録する側は、同じ値を受け取ること。
+ */
+export type PinnedGitHubSource = GitHubSource & { readonly ref: TemplateRef };
+
+/**
+ * 取得先の解決結果。
+ *
+ * `defaultBranch` を `pinned.ref` と別に持つのは、両者の意味が違うため。`pinned.ref` は
+ * 「今回どこから取ったか」で、ユーザーが `source.ref` を書いていればそれがそのまま入る。
+ * `defaultBranch` は「GitHub から引けた既定ブランチ名」で、lock へ控えるのはこちらだけ。
+ * 一緒にすると、ユーザーがタグやトピックブランチを指定しただけで、それが既定ブランチの
+ * 控えとして記録されてしまう。
+ */
+export interface GitHubFetchTarget {
+  /** giget の取得先と、ベースの SHA 問い合わせの両方に渡す。 */
+  readonly pinned: PinnedGitHubSource;
+  /** 今回 GitHub から引けた既定ブランチ名。引いていない・引けなかったときは undefined。 */
+  readonly defaultBranch: string | undefined;
+}
+
+/**
  * GitHub ソースの取得先を確定させる。ref 未指定なら既定ブランチを解決して埋める。
  *
- * 返す値をそのまま取得にも SHA の問い合わせにも使うこと。取得先を決めた側とベースを記録する側が
- * 別々に ref を解決すると、同じ規則を通していても解決が二重になり、片方だけが失敗したときの
- * 扱いが分かれる。
+ * 返す `pinned` をそのまま取得にも SHA の問い合わせにも使うこと。取得先を決めた側とベースを
+ * 記録する側が別々に ref を解決すると、同じ規則を通していても解決が二重になり、片方だけが
+ * 失敗したときの扱いが分かれる。
  *
  * 埋める理由: テンプレートの取得先は、同じ実行の中で決まる他の 2 つと同じブランチでなければ
  * 意味を持たない。lock の `base.ref` に記録するコミット SHA（`resolveSourceCommit`）と、
- * push が PR を向ける宛先ブランチ（`resolveDefaultBranch`）は、どちらも「リポジトリの既定
+ * push が PR を向ける宛先ブランチ（`resolvePrBaseBranch`）は、どちらも「リポジトリの既定
  * ブランチ」を見る。ref を落として giget に任せると giget の既定である `main` から取得され、
  * 既定ブランチが `master` のリポジトリでは差分比較のツリーだけが別のブランチを指す。
  *
- * 解決できなければ取得を止める理由: 既定ブランチが分からないまま `main` へ倒すと、上の食い違い
- * が黙って起きる。差分もマージ結果も「テンプレートと比べた結果」として表示されるので、
- * 別ブランチのツリーと比べたことは出力のどこにも現れない。既定ブランチを引けない状況
- * （リポジトリ不在・トークン拒否・ネットワーク断・レート制限）は、そもそもテンプレート本体の
- * 取得も失敗するか、記録済みのベースと関係のないツリーしか得られない状況でもある。止めて
- * 到達性を直すか `source.ref` で取得先を明示してもらうほうが、行動が決まる。push が PR の
- * 宛先を決められないときに中断するのと同じ扱いにすることで、到達できないリポジトリはどの
- * コマンドでも同じ形で失敗する。
+ * 引けなかったときにどこまで進むかは {@link decideDefaultBranch} が決める。取得先の決定と
+ * PR の宛先の決定が同じ規則で動くので、片方だけが控えへ倒れることはない。取得を止める失敗は
+ * 種別ごとに別のエラーへ写す（トークン拒否は人がトークンを直すまで、控えの不在は宛先を明示
+ * するまで解消しない）。
+ *
+ * 控えへ倒しても取得したツリーと記録する参照は食い違わない。`pinned.ref` は控えのブランチ名で
+ * 埋まり、ベースの SHA も呼び出し側が同じ `pinned` で引く。SHA まで引けなければ lock の
+ * `base.ref` は空のまま残り、次回のマージがベース無しへ縮退するだけで、別ブランチの SHA が
+ * 記録されることはない。控えの名前が改名で古くなっていた場合は giget の取得が 404 で失敗する。
  */
 export function resolveGitHubFetchSource(
   gh: GitHubSource,
-): Effect.Effect<GitHubSource, DefaultBranchUnresolvedError> {
+): Effect.Effect<GitHubFetchTarget, DefaultBranchUnresolvedError | GitHubAuthRejectedError> {
   return Effect.gen(function* () {
-    if (gh.ref !== undefined) return gh;
-
-    const defaultBranch = yield* Effect.promise(() => resolveDefaultBranch(gh.owner, gh.repo));
-    if (defaultBranch === undefined) {
-      return yield* Effect.fail(
-        new DefaultBranchUnresolvedError({ owner: gh.owner, repo: gh.repo }),
-      );
+    const pinnedByUser = gh.ref;
+    if (pinnedByUser !== undefined) {
+      return { pinned: { ...gh, ref: pinnedByUser }, defaultBranch: undefined };
     }
 
-    return { ...gh, ref: { kind: "branch", name: defaultBranch } };
+    const resolution = yield* Effect.promise(() => fetchDefaultBranch(gh.owner, gh.repo));
+
+    return yield* match(decideDefaultBranch(resolution, gh.defaultBranch))
+      .with({ _tag: "Fetched" }, (d) =>
+        Effect.succeed<GitHubFetchTarget>({
+          pinned: pinnedToBranch(gh, d.name),
+          defaultBranch: d.name,
+        }),
+      )
+      // 控えを使ったことは警告として出す。取得先が「今の既定ブランチ」ではなく「最後に引けた
+      // 既定ブランチ」に変わっており、その間に改名や切り替えがあれば結果が変わるため、黙って
+      // 進めてよい代替ではない。
+      .with({ _tag: "Recorded" }, (d) =>
+        Effect.sync<GitHubFetchTarget>(() => {
+          log.warn(
+            `Could not ask GitHub for the default branch of ${gh.owner}/${gh.repo} (${d.reason}). Using the recorded default branch ${d.name}.`,
+          );
+          return { pinned: pinnedToBranch(gh, d.name), defaultBranch: undefined };
+        }),
+      )
+      .with({ _tag: "AuthRejected" }, (f) =>
+        Effect.fail(new GitHubAuthRejectedError({ detail: f.detail })),
+      )
+      .with({ _tag: "Unresolved" }, (f) =>
+        Effect.fail(
+          new DefaultBranchUnresolvedError({ owner: gh.owner, repo: gh.repo, detail: f.reason }),
+        ),
+      )
+      .exhaustive();
   });
 }
+
+/** 決まったブランチ名で取得先を固定する。 */
+function pinnedToBranch(gh: GitHubSource, name: string): PinnedGitHubSource {
+  return { ...gh, ref: { kind: "branch", name } };
+}
+
+/**
+ * 解決済みのテンプレート。ソース種別ごとに、後段が要る情報が違う。
+ *
+ * GitHub ソースだけが `pinned` と `defaultBranch` を持つ。ローカルソースには取得先の ref も
+ * 既定ブランチも無く、共通の形にすると「ローカルソースなのに ref がある」状態を呼び出し側が
+ * 場当たりに潰すことになる。
+ */
+export type ResolvedTemplate =
+  | { readonly kind: "local"; readonly dir: AbsPath }
+  | {
+      readonly kind: "github";
+      readonly dir: AbsPath;
+      /** 取得に使った取得元。ベースの SHA も同じ ref で引くこと。 */
+      readonly pinned: PinnedGitHubSource;
+      /** 今回 GitHub から引けた既定ブランチ名。lock へ控える値（{@link GitHubFetchTarget}）。 */
+      readonly defaultBranch: string | undefined;
+    };
 
 /**
  * TemplateSource からテンプレートディレクトリを解決する Scoped Effect。
@@ -75,16 +148,36 @@ export function resolveTemplateDirScoped(
   source: TemplateSource,
   targetDir: AbsPath,
   label?: string,
-): Effect.Effect<AbsPath, TemplateError | DefaultBranchUnresolvedError, Scope.Scope> {
+): Effect.Effect<
+  ResolvedTemplate,
+  TemplateError | DefaultBranchUnresolvedError | GitHubAuthRejectedError,
+  Scope.Scope
+> {
   return (
     match(source)
+      .returnType<
+        Effect.Effect<
+          ResolvedTemplate,
+          TemplateError | DefaultBranchUnresolvedError | GitHubAuthRejectedError,
+          Scope.Scope
+        >
+      >()
       // lock.json は手で書き換えられるので、載っているパスが絶対とは限らない。読んだ値を
       // そのまま基点にすると、カレントディレクトリ次第で別の場所をテンプレートとして扱う。
-      .with({ kind: "local" }, (local) => Effect.succeed(absPath(local.path)))
+      .with({ kind: "local" }, (local) =>
+        Effect.succeed({ kind: "local", dir: absPath(local.path) }),
+      )
       .with({ kind: "github" }, (gh) =>
         resolveGitHubFetchSource(gh).pipe(
-          Effect.flatMap((fetched) =>
-            acquireTempTemplate(targetDir, buildTemplateSource(fetched), label),
+          Effect.flatMap((target) =>
+            acquireTempTemplate(targetDir, buildTemplateSource(target.pinned), label).pipe(
+              Effect.map((dir) => ({
+                kind: "github" as const,
+                dir,
+                pinned: target.pinned,
+                defaultBranch: target.defaultBranch,
+              })),
+            ),
           ),
         ),
       )

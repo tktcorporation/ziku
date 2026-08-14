@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockRunCommand = vi.fn();
 const mockSelect = vi.fn();
+const mockText = vi.fn();
 const mockCancel = vi.fn();
 
 vi.mock("citty", () => ({
@@ -16,6 +17,7 @@ vi.mock("citty", () => ({
 
 vi.mock("@clack/prompts", () => ({
   select: mockSelect,
+  text: mockText,
   isCancel: (value: unknown) => value === CANCEL,
   cancel: mockCancel,
   log: { message: vi.fn() },
@@ -86,6 +88,19 @@ async function runWithArgv(argv: string[]): Promise<void> {
   await new Promise((done) => {
     setTimeout(done, 0);
   });
+}
+
+/**
+ * 位置引数のうち、既定値を持たないものの名前。
+ *
+ * 既定値があれば引数なしでも解決するが、無ければ呼び出し側が値を渡さないと成り立たない。
+ * メニューがそれを用意しているかを、コマンド定義の側から確かめるのに使う。
+ */
+function positionalsNeedingValue(cmd: unknown): string[] {
+  const args = (cmd as { args?: Record<string, { type?: string; default?: unknown }> }).args ?? {};
+  return Object.entries(args)
+    .filter(([, def]) => def.type === "positional" && def.default === undefined)
+    .map(([name]) => name);
 }
 
 /** runCommand に渡されたコマンド定義と rawArgs を取り出す。 */
@@ -308,9 +323,10 @@ describe("引数の振り分け", () => {
     });
 
     it.each(["init", "setup", "push", "pull", "diff", "status", "track"])(
-      "%s を選ぶとそのコマンドを引数なしで実行する",
+      "%s を選ぶとそのコマンドを実行し、値の要る位置引数を空のまま渡さない",
       async (name) => {
         mockSelect.mockResolvedValue(name);
+        mockText.mockResolvedValue(".claude/rules/*.md");
 
         await runWithArgv([]);
 
@@ -325,9 +341,59 @@ describe("引数の振り分け", () => {
         };
         const { cmd, rawArgs } = dispatchedCommand();
         expect(cmd).toBe(commands[name as keyof typeof commands]);
-        expect(rawArgs).toEqual([]);
+        // 既定値の無い位置引数はメニュー側が値を用意しないと、起動直後に引数不足で落ちる。
+        expect(rawArgs.length).toBeGreaterThanOrEqual(positionalsNeedingValue(cmd).length);
       },
     );
+
+    it.each(["init", "setup", "push", "pull", "diff", "status"])(
+      "%s はカレントディレクトリが対象になるので引数なしで実行する",
+      async (name) => {
+        mockSelect.mockResolvedValue(name);
+
+        await runWithArgv([]);
+
+        expect(dispatchedCommand().rawArgs).toEqual([]);
+        expect(mockText).not.toHaveBeenCalled();
+      },
+    );
+
+    it("track は入力されたパターンを位置引数として渡す", async () => {
+      mockSelect.mockResolvedValue("track");
+      mockText.mockResolvedValue("  .claude/rules/*.md   .mcp.json ");
+
+      await runWithArgv([]);
+
+      const { cmd, rawArgs } = dispatchedCommand();
+      const { trackCommand } = await import("../commands/track");
+      expect(cmd).toBe(trackCommand);
+      expect(rawArgs).toEqual([".claude/rules/*.md", ".mcp.json"]);
+    });
+
+    it("track のパターン入力は空を受け付けず、brace 展開のコンマでは分割しない", async () => {
+      mockSelect.mockResolvedValue("track");
+      mockText.mockResolvedValue(".claude/rules/*.{md,json}");
+
+      await runWithArgv([]);
+
+      const [{ validate }] = mockText.mock.calls[0] as [
+        { validate: (value: string | undefined) => string | undefined },
+      ];
+      expect(validate("   ")).toBeTypeOf("string");
+      expect(validate(".mcp.json")).toBeUndefined();
+      // コンマは brace 展開の一部なので、1 つのパターンとして渡す
+      expect(dispatchedCommand().rawArgs).toEqual([".claude/rules/*.{md,json}"]);
+    });
+
+    it("track のパターン入力をキャンセルするとコマンドを実行しない", async () => {
+      mockSelect.mockResolvedValue("track");
+      mockText.mockResolvedValue(CANCEL);
+
+      await runWithArgv([]);
+
+      expect(mockRunCommand).not.toHaveBeenCalled();
+      expect(mockCancel).toHaveBeenCalledWith("Cancelled.");
+    });
 
     it("キャンセルするとコマンドを実行しない", async () => {
       mockSelect.mockResolvedValue(CANCEL);

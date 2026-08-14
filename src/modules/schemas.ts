@@ -174,6 +174,23 @@ export const gitHubSourceSchema = z.object({
   repo: z.string(),
   /** 省略時はリポジトリの既定ブランチを取得する。 */
   ref: templateRefSchema.optional(),
+  /**
+   * `ref` 省略時の取得先を、GitHub へ問い合わせられないときに決めるための既定ブランチ名。
+   *
+   * `ref` と役割が違う。`ref` は「このテンプレートはこの ref を追う」というユーザーの指定で、
+   * ここは「問い合わせた結果こうだった」という控え。`ref` を埋めてしまうと既定ブランチの
+   * 改名に追随できなくなるので、取得先の決定は毎回 GitHub への問い合わせを先に試し、
+   * 引けたときはその結果でここを更新する。控えを使うのは引けなかったときだけ。
+   *
+   * 控えが要る理由: GitHub REST は未認証で 60 リクエスト/時しかなく、既定ブランチを引く
+   * 呼び出しだけでクォータを使い切ることがある。テンプレート本体の取得（tarball）は
+   * クォータを消費しないので、控えがあれば取得も差分も成立する。控え無しで止めると、
+   * 待てば直る失敗で pull / push / diff / status の全部が使えなくなる。
+   *
+   * 控えの名前が改名で古くなっていた場合は取得が 404 で失敗する。誤ったブランチのツリーを
+   * 掴んで差分を出すより、取得できなかったことを見せるほうが行動が決まる。
+   */
+  defaultBranch: z.string().optional(),
 });
 
 export const localSourceSchema = z.object({
@@ -426,6 +443,33 @@ export function createPendingLock(params: {
       source,
       sync: "pending" as const,
     }))
+    .exhaustive();
+}
+
+/**
+ * GitHub から引けた既定ブランチ名を lock の取得元へ控える。
+ *
+ * 控えの用途と、`source.ref` を埋めない理由は `gitHubSourceSchema.defaultBranch` を参照。
+ * 更新の起点をここ 1 箇所にすることで、控えが「最後に GitHub から引けた名前」以外の値に
+ * なる経路を作らない。引けなかったとき（`undefined`）は控えを残したまま素通しする。控えは
+ * まさにその場面で取得先を決めるための値なので、引けないことを理由に消してはならない。
+ *
+ * lock を書き出すコマンド（pull / push）はこの戻り値を持ち回るので、既定ブランチが改名された
+ * 場合も一度 GitHub へ到達できた時点で控えが追随する。ローカルソースは既定ブランチを持たない
+ * ので素通しする。
+ */
+export function withRecordedDefaultBranch(
+  lock: LockState,
+  defaultBranch: string | undefined,
+): LockState {
+  if (defaultBranch === undefined) return lock;
+
+  return match(lock)
+    .with({ source: { kind: "local" } }, (l): LockState => l)
+    .with(
+      { source: { kind: "github" } },
+      (l): LockState => ({ ...l, source: { ...l.source, defaultBranch } }),
+    )
     .exhaustive();
 }
 

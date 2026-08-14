@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { commitSha, repoRelPath } from "../../__tests__/brands";
+import { ZikuFailure } from "../../errors";
 import {
   checkRepoExists,
   checkRepoSetup,
@@ -55,6 +56,7 @@ vi.mock("@octokit/rest", () => ({
 // モック後にインポート
 const {
   createPullRequest,
+  decideDefaultBranch,
   scaffoldTemplateRepo,
   resolveDefaultBranch,
   resolveLatestCommitSha,
@@ -376,20 +378,27 @@ describe("createPullRequest", () => {
     );
   });
 
-  it("truncated な tree の場合はエラーを throw する", async () => {
+  it("truncated な tree は、バグ報告ではなくファイル数を減らす案内として失敗する", async () => {
     mockGitGetTree.mockResolvedValue({
       data: { tree: [], truncated: true },
     });
 
-    await expect(
-      createPullRequest("token", {
-        owner: "owner",
-        repo: "repo",
-        files: [{ path: repoRelPath("file.txt"), content: "content" }],
-        title: "Test PR",
-        baseBranch: "main",
-      }),
-    ).rejects.toThrow("Repository tree is too large");
+    const thrown = await createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      title: "Test PR",
+      baseBranch: "main",
+    }).then(
+      () => expect.unreachable("PR が作成されてしまった"),
+      (error: unknown) => error,
+    );
+
+    expect(thrown).toBeInstanceOf(ZikuFailure);
+    expect(thrown).toMatchObject({
+      reason: { kind: "RepoTreeTooLarge", repo: "testuser/test-repo" },
+    });
+    expect((thrown as ZikuFailure).hint).toContain("Reduce the number of files");
   });
 
   it("削除対象ファイルを deleteFile API で削除する", async () => {
@@ -867,6 +876,38 @@ describe("resolveDefaultBranch", () => {
     mockReposGet.mockRejectedValue(new Error("Not Found"));
 
     expect(await resolveDefaultBranch("owner", "repo")).toBeUndefined();
+  });
+});
+
+/**
+ * 既定ブランチ名を要る場所（テンプレートの取得先・PR の宛先）が同じ規則で動くための判断。
+ * 引けなかった理由ごとに、控えへ倒すか止めるかが変わる。
+ */
+describe("decideDefaultBranch", () => {
+  it("引けた名前をそのまま使う", () => {
+    expect(decideDefaultBranch({ _tag: "Resolved", name: "master" }, "trunk")).toEqual({
+      _tag: "Fetched",
+      name: "master",
+    });
+  });
+
+  it("待てば直る失敗では控えた名前へ倒し、倒した事情を残す", () => {
+    expect(
+      decideDefaultBranch({ _tag: "Unresolved", reason: "API rate limit exceeded" }, "master"),
+    ).toEqual({ _tag: "Recorded", name: "master", reason: "API rate limit exceeded" });
+  });
+
+  it("控えが無ければ名前を決めない", () => {
+    expect(decideDefaultBranch({ _tag: "Unresolved", reason: "Not Found" }, undefined)).toEqual({
+      _tag: "Unresolved",
+      reason: "Not Found",
+    });
+  });
+
+  it("トークンを拒否されたら、控えがあっても倒さない", () => {
+    expect(
+      decideDefaultBranch({ _tag: "AuthRejected", detail: "Bad credentials" }, "master"),
+    ).toEqual({ _tag: "AuthRejected", detail: "Bad credentials" });
   });
 });
 

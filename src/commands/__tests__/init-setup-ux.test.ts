@@ -59,6 +59,7 @@ vi.mock("../../utils/github", async () => {
     checkRepoExists: vi.fn(() => Promise.resolve({ _tag: "Exists" as const })),
     checkRepoSetup: vi.fn(() => Promise.resolve(true)),
     resolveDefaultBranch: vi.fn(() => Promise.resolve<string | undefined>("main")),
+    fetchDefaultBranch: vi.fn(() => Promise.resolve({ _tag: "Resolved" as const, name: "main" })),
     getGitHubToken: vi.fn(() => {}),
     getAuthenticatedUserLogin: vi.fn(() => Promise.resolve()),
     scaffoldTemplateRepo: vi.fn(() =>
@@ -71,6 +72,8 @@ vi.mock("../../utils/github", async () => {
         branch: "ziku/setup",
       }),
     ),
+    // 既定ブランチの控えへ倒す規則は実装を通す（コマンドの挙動そのものなのでモックしない）
+    decideDefaultBranch: actual.decideDefaultBranch,
     rateLimitedError: actual.rateLimitedError,
     unauthorizedError: actual.unauthorizedError,
   };
