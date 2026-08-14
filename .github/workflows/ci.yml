@@ -93,6 +93,10 @@ jobs:
         run: node dist/index.mjs --help
 
       - name: Test CLI dry run
+        # init はテンプレートの既定ブランチを GitHub API へ問い合わせる。未認証だと
+        # 60 req/h をランナーの共有 IP で使い切り、コードと無関係に落ちる。
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p /tmp/test-project
           node dist/index.mjs /tmp/test-project --yes
