@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmdirSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { defineCommand } from "citty";
 import { Effect } from "effect";
 import { dirname } from "pathe";
@@ -13,6 +14,7 @@ import type {
   FileOperationResult,
   HashMap,
   OverwriteStrategy,
+  RepoRelPath,
   TemplateSource,
   ZikuConfig,
 } from "../modules/schemas";
@@ -43,8 +45,8 @@ import {
   unauthorizedError,
 } from "../utils/github";
 import type { RepoExistence } from "../utils/github";
-import { hashFiles } from "../utils/hash";
-import { absPath, joinAbs } from "../utils/paths";
+import { hashBytes, hashFiles } from "../utils/hash";
+import { absPath, joinAbs, repoRelPath } from "../utils/paths";
 import { LOCK_FILE, saveLock } from "../utils/lock";
 import {
   ZIKU_CONFIG_FILE,
@@ -73,12 +75,17 @@ import {
   planOverwriteStrategy,
   preferReadyCandidate,
   requiresDevcontainerEnvExample,
-  resolveConfigBaseContent,
   selectedFlatPatterns,
   splitOwnerRepo,
   withReadyFlags,
 } from "./init-plan";
-import type { BlockingExistence, InitOutcome, ProbeGate, UnverifiedExistence } from "./init-plan";
+import type {
+  BlockingExistence,
+  InitOutcome,
+  LockBaseHashPlan,
+  ProbeGate,
+  UnverifiedExistence,
+} from "./init-plan";
 
 // ビルド時に置換される定数
 declare const __VERSION__: string;
@@ -351,7 +358,8 @@ async function applyTemplate(
     })),
   ];
 
-  if (requiresDevcontainerEnvExample(flatPatterns.include)) {
+  const writesEnvExample = requiresDevcontainerEnvExample(flatPatterns.include);
+  if (writesEnvExample) {
     allResults.push(await createEnvExample(targetDir, strategy, args.dryRun));
   }
 
@@ -369,27 +377,31 @@ async function applyTemplate(
 
   // .ziku/ziku.jsonc を書き出し（パターン定義のみ、source なし）。
   // lock のベースには書き込み後の中身が要るので、lock より先に書く。
-  const configPath = joinAbs(targetDir, ZIKU_CONFIG_FILE);
-  const existingConfigContent = existsSync(configPath)
-    ? readFileSync(configPath, "utf-8")
-    : undefined;
-  const configResult = await writeFileWithStrategy({
-    destPath: configPath,
-    content: generatedConfigContent,
-    strategy,
-    relativePath: ZIKU_CONFIG_FILE,
-    dryRun: args.dryRun,
-  });
-  allResults.push(configResult);
-
-  const baseHashes = planLockBaseHashes({
-    templateHashes,
-    persistedConfigContent: resolveConfigBaseContent({
-      action: configResult.action,
-      generatedContent: generatedConfigContent,
-      existingContent: existingConfigContent,
+  allResults.push(
+    await writeFileWithStrategy({
+      destPath: joinAbs(targetDir, ZIKU_CONFIG_FILE),
+      content: generatedConfigContent,
+      strategy,
+      relativePath: ZIKU_CONFIG_FILE,
+      dryRun: args.dryRun,
     }),
-  });
+  );
+
+  // init が自分で組み立てて書くファイルの本文。テンプレートに同じパスがあっても、書き込みが
+  // 起きた後のディスクにはこちらの本文が載る。
+  const generatedContents = new Map<RepoRelPath, string>([
+    [ZIKU_CONFIG_FILE, generatedConfigContent],
+    ...(writesEnvExample ? [[ENV_EXAMPLE_PATH, ENV_EXAMPLE_CONTENT] as const] : []),
+  ]);
+
+  const baseHashes = await resolveLockBaseHashes(
+    targetDir,
+    planLockBaseHashes({
+      templateHashes,
+      generatedContents,
+      results: allResults,
+    }),
+  );
 
   // ベースのコミット SHA: GitHub ソースの場合のみ取得。
   // テンプレートを取得した ref とベースの SHA が食い違うと、3-way マージのベースが
@@ -410,6 +422,24 @@ async function applyTemplate(
   );
 
   reportOutcome(planInitOutcome({ summary: logFileResults(allResults), dryRun: args.dryRun }));
+}
+
+/**
+ * lock の同期ベースに載せるハッシュ表を確定させる。
+ *
+ * {@link planLockBaseHashes} がディスクを読むと決めたファイルだけを読む。書き込みが起き
+ * なかったのにディスクにも無いファイルは、ベースに載せられる内容がどこにも無いので落とす。
+ * 代わりにテンプレートのハッシュを書くと、次回の比較が「ローカルが消した」と読んでテンプレート
+ * 側の削除へ進む。ベースが無ければ次回の pull がテンプレートから取り直すだけで済む。
+ */
+async function resolveLockBaseHashes(targetDir: AbsPath, plan: LockBaseHashPlan): Promise<HashMap> {
+  const hashes: HashMap = { ...plan.written };
+  for (const path of plan.fromLocalFile) {
+    const localPath = joinAbs(targetDir, path);
+    if (!existsSync(localPath)) continue;
+    hashes[path] = hashBytes(await readFile(localPath));
+  }
+  return hashes;
 }
 
 /**
@@ -532,6 +562,9 @@ function reportOutcome(outcome: InitOutcome): void {
     .exhaustive();
 }
 
+/** devcontainer の環境変数サンプルの置き場所。lock のベースを決めるときも同じ定数を使う。 */
+const ENV_EXAMPLE_PATH: RepoRelPath = repoRelPath(".devcontainer/devcontainer.env.example");
+
 const ENV_EXAMPLE_CONTENT = `# 環境変数サンプル
 # このファイルを devcontainer.env にコピーして値を設定してください
 
@@ -592,10 +625,10 @@ function createEnvExample(
   dryRun = false,
 ): Promise<FileOperationResult> {
   return writeFileWithStrategy({
-    destPath: joinAbs(targetDir, ".devcontainer/devcontainer.env.example"),
+    destPath: joinAbs(targetDir, ENV_EXAMPLE_PATH),
     content: ENV_EXAMPLE_CONTENT,
     strategy,
-    relativePath: ".devcontainer/devcontainer.env.example",
+    relativePath: ENV_EXAMPLE_PATH,
     dryRun,
   });
 }

@@ -52,6 +52,25 @@ export type FailureReason =
       readonly authenticated: boolean;
       readonly resetAt: Date | undefined;
     }
+  /**
+   * トークンは受け付けられたが、GitHub がその操作を拒否した (403)。
+   *
+   * 取る行動はトークンの権限とリポジトリ側の設定を見直すこと。`GitHubAuthRejected` と違い
+   * トークンの差し替えでは解決せず、足りないのは書き込みスコープ・SSO の認可・fork の可否
+   * といった権限の側。`operation` は「何をしようとして拒否されたか」。
+   */
+  | {
+      readonly kind: "GitHubPermissionDenied";
+      readonly operation: string;
+      readonly detail: string;
+    }
+  /**
+   * GitHub へ届かなかった (名前解決失敗・接続断・タイムアウト)。
+   *
+   * 取る行動は接続（ネットワーク・プロキシ）を確かめて同じコマンドを実行し直すこと。
+   * ziku 側の状態は変わっていないので、再実行の前に片付けるものは無い。
+   */
+  | { readonly kind: "GitHubUnreachable"; readonly operation: string; readonly detail: string }
   /** CLI 引数の値が受け付けられない。 */
   | {
       readonly kind: "InvalidArgument";
@@ -121,7 +140,7 @@ export type FailureReason =
    * 成功しているので、取得元を選び直す `TemplateUnavailable` 系とは行動が違う。
    */
   | { readonly kind: "TemplateRefNotBranch"; readonly refKind: "tag" | "commit" }
-  /** ローカルへの書き込みに失敗した。権限や書き込み先の状態を疑う。 */
+  /** ローカルへの書き込みに失敗した。書き込み先の権限か空き容量を直せば通る。 */
   | {
       readonly kind: "FileWriteFailed";
       readonly path: string;
@@ -197,6 +216,14 @@ export function describeFailure(reason: FailureReason): FailureDisplay {
       message: "GitHub API rate limit exceeded",
       hint: `${describeQuota(r.authenticated)}${describeQuotaReset(r.resetAt)}`,
     }))
+    .with({ kind: "GitHubPermissionDenied" }, (r) => ({
+      message: `GitHub refused to ${r.operation}: ${r.detail}`,
+      hint: "Check that the token has write access to the repository (repo scope, and SSO authorization for org-owned repositories), and that the repository allows forking.",
+    }))
+    .with({ kind: "GitHubUnreachable" }, (r) => ({
+      message: `Cannot reach GitHub to ${r.operation}: ${r.detail}`,
+      hint: "Check your network connection and any proxy settings, then run the same command again.",
+    }))
     .with({ kind: "InvalidArgument" }, (r) => ({
       message: `Invalid ${r.argument}: "${r.value}"`,
       hint: `Expected: ${r.expected}`,
@@ -245,7 +272,7 @@ export function describeFailure(reason: FailureReason): FailureDisplay {
     }))
     .with({ kind: "FileWriteFailed" }, (r) => ({
       message: `Failed to write ${r.path}: ${r.detail}`,
-      hint: `Check write permissions for ${r.directory}`,
+      hint: `Check write permissions and free space for ${r.directory}`,
     }))
     .with({ kind: "DryRunBlocked" }, (r) => ({
       message: `${r.operation}, but --dryRun prevents remote changes`,
@@ -271,10 +298,15 @@ export function describeConflictLines(lines: readonly number[]): string {
   return `(${lines.length === 1 ? "line" : "lines"} ${lines.join(", ")})`;
 }
 
-/** レート制限の hint 前半。トークンを足すべきか、待つしかないかを分ける。 */
+/**
+ * レート制限の hint 前半。トークンを足すべきか、待つしかないかを分ける。
+ *
+ * 認証済みで「1 時間あたりのクォータ」と「連投を弾く secondary rate limit」を書き分けない
+ * のは、どちらでも取る行動が「待ってから実行し直す」で同じため。
+ */
 function describeQuota(authenticated: boolean): string {
   return authenticated
-    ? "Authenticated quota (5000/hr) exhausted"
+    ? "Authenticated quota (5000/hr) exhausted, or a secondary rate limit was hit"
     : "Unauthenticated quota (60/hr) exhausted — set GITHUB_TOKEN or run `gh auth login` to raise it to 5000/hr";
 }
 

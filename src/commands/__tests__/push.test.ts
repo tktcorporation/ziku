@@ -1,7 +1,7 @@
 import { vol } from "memfs";
 import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { FileNotFoundError } from "../../errors";
+import { FileNotFoundError, ZikuFailure } from "../../errors";
 import type {
   AbsPath,
   CommitSha,
@@ -25,9 +25,17 @@ vi.mock("node:fs", async () => {
   return memfs.fs;
 });
 
+// writeFile だけ差し替え可能にして、書き込み失敗の分類を検証できるようにする。
+// 既定の挙動は memfs のまま。
 vi.mock("node:fs/promises", async () => {
   const memfs = await import("memfs");
-  return memfs.fs.promises;
+  const promises = memfs.fs.promises;
+  return {
+    ...promises,
+    writeFile: vi.fn((...args: Parameters<typeof promises.writeFile>) =>
+      promises.writeFile(...args),
+    ),
+  };
 });
 
 // loadCommandContext をモック（DI の恩恵: 低レベルモック不要）
@@ -46,12 +54,17 @@ vi.mock("../../utils/diff", () => ({
   generateUnifiedDiff: vi.fn(() => ""),
 }));
 
-// utils/github をモック
-vi.mock("../../utils/github", () => ({
-  getGitHubToken: vi.fn(),
-  createPullRequest: vi.fn(),
-  resolveDefaultBranch: vi.fn(() => Promise.resolve("main")),
-}));
+// utils/github をモック。失敗の分類（classifyGitHubApiFailure / githubApiFailure）は
+// 検証対象そのものなので実装を通す。
+vi.mock("../../utils/github", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../utils/github")>();
+  return {
+    ...actual,
+    getGitHubToken: vi.fn(),
+    createPullRequest: vi.fn(),
+    resolveDefaultBranch: vi.fn(() => Promise.resolve("main")),
+  };
+});
 
 // utils/readme をモック
 vi.mock("../../utils/readme", () => ({
@@ -185,6 +198,7 @@ vi.mock("../../ui/renderer", () => ({
 
 // モック後にインポート
 const { pushCommand } = await import("../push");
+const { writeFile } = await import("node:fs/promises");
 const { loadCommandContext } = await import("../../services/command-context");
 const { detectDiff } = await import("../../utils/diff");
 const { getGitHubToken, createPullRequest, resolveDefaultBranch } =
@@ -208,6 +222,7 @@ const { classifyFiles, mergeOneFile, downloadBaseForMerge } = await import("../.
 const { classifyMergeOutcome } = await import("../../utils/merge/types");
 const { absPath, commitSha, globPatterns, hashMap, pendingConflict, repoRelPath, repoRelPaths } =
   await import("../../__tests__/brands");
+const mockWriteFile = vi.mocked(writeFile);
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
 const mockDetectDiff = vi.mocked(detectDiff);
 const mockGetGitHubToken = vi.mocked(getGitHubToken);
@@ -2373,6 +2388,188 @@ describe("pushCommand", () => {
       // "No changes to push" に到達
       expect(mockLog.info).toHaveBeenCalledWith("No changes to push");
     });
+  });
+});
+
+/** Octokit の RequestError を模した例外。ステータスとレスポンスヘッダを載せる。 */
+function githubApiError(
+  status: number,
+  message: string,
+  headers: Record<string, string> = {},
+): Error {
+  return Object.assign(new Error(message), { status, response: { status, headers } });
+}
+
+/**
+ * push が失敗したとき、ユーザーが取れる行動があるものは文言で案内し、それ以外だけを
+ * ziku の不具合として原因ごと見せる — その振り分けを症状の側から確かめる。
+ */
+describe("push の失敗の報告", () => {
+  beforeEach(() => {
+    vol.reset();
+    resetPushMocks();
+    const { effect } = mockContext();
+    mockLoadCommandContext.mockReturnValue(effect);
+  });
+
+  /** GitHub へ push し、投げられた値をそのまま返す。成功した場合はテストを落とす。 */
+  async function failingGitHubPush(): Promise<unknown> {
+    setupPushableFiles([{ path: repoRelPath("file.txt"), type: "added", localContent: "content" }]);
+    mockGetGitHubToken.mockReturnValue("ghp_token");
+
+    return (pushCommand.run as any)({
+      args: { dir: "/test", dryRun: false, yes: true, edit: false },
+      rawArgs: [],
+      cmd: pushCommand,
+    }).then(
+      () => expect.unreachable("push が成功してしまった"),
+      (thrown: unknown) => thrown,
+    );
+  }
+
+  it("トークンが失効していたら、バグ報告ではなくトークンの更新を促す", async () => {
+    const cause = githubApiError(401, "Bad credentials");
+    mockCreatePullRequest.mockRejectedValueOnce(cause);
+
+    const failure = await failingGitHubPush();
+
+    expect(failure).toBeInstanceOf(ZikuFailure);
+    expect(failure).toMatchObject({
+      reason: { kind: "GitHubAuthRejected", detail: "Bad credentials" },
+      // 原因を捨てない
+      cause,
+    });
+    expect((failure as ZikuFailure).hint).toContain("gh auth login");
+  });
+
+  it("レート制限は、待つか認証するかを案内する", async () => {
+    mockCreatePullRequest.mockRejectedValueOnce(
+      githubApiError(403, "API rate limit exceeded", {
+        "x-ratelimit-remaining": "0",
+        "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 300),
+      }),
+    );
+
+    const failure = await failingGitHubPush();
+
+    expect(failure).toMatchObject({
+      reason: { kind: "GitHubRateLimited", authenticated: true },
+    });
+    expect((failure as ZikuFailure).hint).toMatch(/resets in ~\d+ min/);
+  });
+
+  it("連投を弾く secondary rate limit も、待てば解ける失敗として案内する", async () => {
+    // 1 時間あたりのクォータとは別の制限で、`retry-after` だけが返る。
+    mockCreatePullRequest.mockRejectedValueOnce(
+      githubApiError(403, "You have exceeded a secondary rate limit", { "retry-after": "60" }),
+    );
+
+    const failure = await failingGitHubPush();
+
+    expect(failure).toMatchObject({ reason: { kind: "GitHubRateLimited" } });
+    expect((failure as ZikuFailure).hint).toMatch(/resets in ~\d+ min/);
+  });
+
+  it("権限が足りない 403 は、権限と fork の設定を見直すよう案内する", async () => {
+    // レート制限のヘッダを持たない 403 は、待っても解けない権限の問題。
+    mockCreatePullRequest.mockRejectedValueOnce(
+      githubApiError(403, "Resource not accessible by personal access token"),
+    );
+
+    const failure = await failingGitHubPush();
+
+    expect(failure).toMatchObject({
+      reason: { kind: "GitHubPermissionDenied", operation: "create a pull request" },
+    });
+    expect((failure as ZikuFailure).hint).toContain("forking");
+  });
+
+  it("GitHub へ届かなければ、再実行を案内する", async () => {
+    // Octokit は fetch の失敗を status 500 の RequestError に包み直すので、届かなかった
+    // 事実は例外チェーンの奥の errno にしか残らない。
+    const wrapped = Object.assign(new Error("request to https://api.github.com/user failed"), {
+      status: 500,
+      cause: Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("getaddrinfo ENOTFOUND api.github.com"), {
+          code: "ENOTFOUND",
+        }),
+      }),
+    });
+    mockCreatePullRequest.mockRejectedValueOnce(wrapped);
+
+    const failure = await failingGitHubPush();
+
+    expect(failure).toMatchObject({
+      reason: { kind: "GitHubUnreachable", operation: "create a pull request" },
+    });
+    expect((failure as ZikuFailure).hint).toContain("network");
+  });
+
+  it("分類していない失敗は、文言に潰さず原因のまま投げる", async () => {
+    const bug = new TypeError("Cannot read properties of undefined (reading 'sha')");
+    mockCreatePullRequest.mockRejectedValueOnce(bug);
+
+    const failure = await failingGitHubPush();
+
+    // 文言へ潰すと、ziku の不具合が「ユーザー側の問題」として案内され、原因も消える
+    expect(failure).toBe(bug);
+    expect(failure).not.toBeInstanceOf(ZikuFailure);
+    expect((failure as Error).stack).toBeDefined();
+  });
+
+  /** ローカルテンプレートへ push し、書き込みを `error` で失敗させる。 */
+  async function failingLocalPush(error: unknown): Promise<unknown> {
+    const { effect } = mockContext({
+      source: localTemplateSource,
+      templateDir: absPath("/local/template"),
+      lock: lockWith({ source: localTemplateSource }),
+    });
+    mockLoadCommandContext.mockReturnValue(effect);
+    setupPushableFiles([{ path: repoRelPath("file.txt"), type: "added", localContent: "content" }]);
+    mockWriteFile.mockImplementationOnce(() => Promise.reject(error));
+
+    return (pushCommand.run as any)({
+      args: { dir: "/test", dryRun: false, yes: true, edit: false },
+      rawArgs: [],
+      cmd: pushCommand,
+    }).then(
+      () => expect.unreachable("push が成功してしまった"),
+      (thrown: unknown) => thrown,
+    );
+  }
+
+  it("ローカルテンプレートへ書き込めなければ、直す場所を示す", async () => {
+    const denied = Object.assign(
+      new Error("EACCES: permission denied, open '/local/template/file.txt'"),
+      { code: "EACCES", path: "/local/template/file.txt" },
+    );
+
+    const failure = await failingLocalPush(denied);
+
+    expect(failure).toBeInstanceOf(ZikuFailure);
+    expect(failure).toMatchObject({
+      reason: {
+        kind: "FileWriteFailed",
+        path: "/local/template/file.txt",
+        directory: "/local/template",
+      },
+      cause: denied,
+    });
+    expect((failure as ZikuFailure).hint).toContain("/local/template");
+  });
+
+  it("書き込み先を直しても通らない失敗は、分類せず原因のまま投げる", async () => {
+    // ディレクトリへファイルを書こうとした（EISDIR）のは書き込み先の問題ではなく、
+    // ziku が組み立てたパスの問題。権限や空き容量を案内しても行動につながらない。
+    const wrongPath = Object.assign(new Error("EISDIR: illegal operation on a directory, open"), {
+      code: "EISDIR",
+      path: "/local/template/file.txt",
+    });
+
+    const failure = await failingLocalPush(wrongPath);
+
+    expect(failure).toBe(wrongPath);
+    expect(failure).not.toBeInstanceOf(ZikuFailure);
   });
 });
 

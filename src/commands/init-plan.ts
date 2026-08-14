@@ -12,20 +12,21 @@
 import { P, match } from "ts-pattern";
 import type {
   CommitSha,
-  ContentHash,
   FileAction,
+  FileOperationResult,
   GlobPattern,
   HashMap,
   LockState,
   OverwriteStrategy,
+  RepoRelPath,
   TemplateSource,
 } from "../modules/schemas";
 import { createPendingLock, markSynced } from "../modules/schemas";
 import type { TemplateCandidate } from "../ui/prompts";
 import type { RepoExistence } from "../utils/github";
 import { hashContent } from "../utils/hash";
+import { repoRelPath } from "../utils/paths";
 import type { FlatPatterns } from "../utils/patterns";
-import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
 
 // ─── 空でない候補列 ───
 
@@ -214,106 +215,89 @@ export function planOverwriteStrategy(opts: {
 
 // ─── lock の初期状態 ───
 
+/** lock の同期ベースに載せる 1 ファイル分のハッシュを、どちらの内容から取るか。 */
+export type BaseHashOrigin =
+  /** init が書き込んだので、ディスクの内容は書いた内容（テンプレート / 生成物）と一致する。 */
+  | { readonly _tag: "Written" }
+  /** 書き込みが起きなかったので、ディスクにある実内容から取る。 */
+  | { readonly _tag: "LocalFile" };
+
 /**
- * 書き込みを終えた時点で `.ziku/ziku.jsonc` の中身になっている本文を選ぶ。
+ * ファイル 1 つの扱いから、ベースに載せるハッシュの出どころを決める。
  *
- * init が組み立てた本文が必ずディスクへ載るとは限らない。上書き戦略が `skip` なら既存の
- * `ziku.jsonc` はそのまま残り（`--yes` はプロンプトを省くだけで既存ファイルを失う承認を
- * 含まないので、戦略は `skip` に解決される — {@link planOverwriteStrategy}）、書き出した
- * つもりの本文はどこにも存在しない。lock のベースに載せる本文をここで選び直すことで、
- * {@link resolveConfigBaseHash} は実在する本文だけを受け取る。
- *
- * ファイルを読むのは呼び出し側の役目で、この関数はどちらの本文を採るかだけを決める。
- *
- * @param params.action           `ziku.jsonc` への書き込み結果のアクション
- * @param params.generatedContent init が組み立てた `ziku.jsonc` の本文
- * @param params.existingContent  書き込み前にディスクにあった本文（無ければ undefined）
+ * `undefined`（そのファイルについて操作結果が無い）を書き込み側へ倒さないのは、init が
+ * 触っていないファイルはディスクに在るとも無いとも言えないため。ディスクを見にいけば、
+ * 在れば実内容が、無ければ「ベース無し」が得られ、どちらも実態と一致する。
  */
-export function resolveConfigBaseContent(params: {
-  readonly action: FileAction;
-  readonly generatedContent: string;
-  readonly existingContent: string | undefined;
-}): string {
-  return (
-    match(params.action)
-      .with("created", "overwritten", () => params.generatedContent)
-      // 既存ファイルが残った場合、ディスクの中身は書き込み前の本文のまま。`copied` は
-      // テンプレートからのコピーを表すアクションで、生成した本文を書く経路からは返らない
-      // が、生成した本文がディスクに載っていないのは同じなので同じ側へ倒す。
-      // 既存の本文が無ければ書き込みは必ず起きるため、`??` は到達しない既定値。
-      .with(
-        "copied",
-        "skipped",
-        "skipped_ignored",
-        () => params.existingContent ?? params.generatedContent,
-      )
-      .exhaustive()
-  );
+export function baseHashOrigin(action: FileAction | undefined): BaseHashOrigin {
+  return match(action)
+    .with("copied", "created", "overwritten", (): BaseHashOrigin => ({ _tag: "Written" }))
+    .with("skipped", "skipped_ignored", undefined, (): BaseHashOrigin => ({ _tag: "LocalFile" }))
+    .exhaustive();
+}
+
+/** lock の同期ベースに載せるハッシュ表を、確定分とディスク参照分に分けたもの。 */
+export interface LockBaseHashPlan {
+  /** init が書いた内容から確定したハッシュ。そのままベースへ載る。 */
+  readonly written: HashMap;
+  /** ディスク上の実内容を読んでハッシュを取るファイル。 */
+  readonly fromLocalFile: readonly RepoRelPath[];
 }
 
 /**
- * init 時に lock の同期ベースへ `.ziku/ziku.jsonc` のハッシュとして記録する値を決める。
+ * テンプレート側のハッシュ表とファイル操作の結果から、lock の同期ベースの作り方を決める。
  *
- * ## なぜ専用ロジックが必要か
- * `ziku.jsonc` を「他の追跡ファイルと同じ 3-way マージ対象」にしたことで、共通祖先
- * （base）を何にするかが初回 push/pull の挙動を左右する。init はテンプレートのパターンの
- * **部分集合**だけを選んで導入できる（ユーザーが dir を選択）ため、ローカル `ziku.jsonc`
- * はテンプレより少ないことがある。
+ * ## なぜ操作結果を見る必要があるか
+ * lock のベースは「次回の pull / push が差分を測る基準」なので、ディスクに実在しない内容を
+ * 記録すると、誰も編集していないのに次回の比較が差分を報告する。テンプレートを走査した
+ * ハッシュをそのままベースにすると、上書き戦略が `skip` で残った既存ファイルについて
+ * 「ローカルがテンプレートの内容から書き換えられた」という嘘のベースになり、status は
+ * push を勧め、push はユーザーの無関係な既存ファイルでテンプレートを上書きし、pull は
+ * ベースとテンプレートが一致するので何も降ろさない。`--yes` はプロンプトを省くだけで
+ * 既存ファイルを失う承認を含まない（戦略は `skip` に解決される —
+ * {@link planOverwriteStrategy}）ので、この食い違いは非対話実行のたびに起きる。
  *
- * ## トレードオフ（2 つの妥当なポリシー）
- * - base = テンプレートの ziku.jsonc ハッシュ:
- *     local(部分集合) != base(full) == template → push が「local がパターンを削除した」と
- *     解釈し、**テンプレートからパターンを削ってしまう**（全下流プロジェクトに波及する事故）。
- * - base = ローカル(部分集合) の ziku.jsonc ハッシュ:
- *     local == base → push 対象外（テンプレート安全）。
- *     pull 時は template != base==local → autoUpdate でテンプレの full 設定が降りてくる。
+ * ## 判断とディスク読み取りの分離
+ * ここはどのファイルをどちらの内容から取るかだけを決め、ディスクは読まない。`fromLocalFile`
+ * のファイルを読んでハッシュを取るのは呼び出し側の役目。
  *
- * ## 渡す本文はディスクに実在するものに限る
- * lock のベースは「次回の pull / push が差分を測る基準」なので、ディスクにもテンプレートにも
- * 無い本文をベースにすると、誰も編集していないのに 3-way 比較が「ローカルもテンプレートも
- * ベースから変わった」と読み、`.ziku/ziku.jsonc` を conflicts に入れる。init が組み立てた
- * 本文と実際に書かれた本文は上書き戦略しだいで食い違うので、呼び出し側は
- * {@link resolveConfigBaseContent} で解決した本文を渡す。
- *
- * @param opts.persistedConfigContent  書き込み後にディスク上の ziku.jsonc が持つ本文
- * @param opts.templateConfigHash  テンプレートの ziku.jsonc のハッシュ（無い場合 undefined）
- * @returns 同期ベースの `.ziku/ziku.jsonc` に入れるハッシュ値
- */
-export function resolveConfigBaseHash(opts: {
-  persistedConfigContent: string;
-  templateConfigHash: ContentHash | undefined;
-}): ContentHash {
-  // テンプレート保護のため base はローカル（部分集合）側に置く。
-  // これにより local == base となり、初回 push でテンプレのパターンを削らない。
-  return hashContent(opts.persistedConfigContent);
-}
-
-/**
- * テンプレート側のハッシュ表から、lock の同期ベースに載せるハッシュ表を作る。
- *
- * `.ziku/ziku.jsonc` だけは、テンプレートにそのファイルが在るときに限り
- * {@link resolveConfigBaseHash} の値へ差し替える。テンプレートに無いのに base を記録すると、
- * 次回 pull が {base 有・local 有・template 無} を削除と判定し、ローカルの制御ファイルを
+ * テンプレートのハッシュ表に無いパスはベースにも載らない。テンプレートに無いのに載せると、
+ * 次回 pull が {base 有・local 有・template 無} を削除と判定してローカルのファイルを
  * 消してしまう。
  *
- * `persistedConfigContent` には、init が組み立てた本文ではなく **書き込み後にディスクへ
- * 載っている本文** を渡す（選び方は {@link resolveConfigBaseContent}）。実在しない本文を
- * ベースに記録すると次回の差分が嘘になる理由は {@link resolveConfigBaseHash} を参照。
+ * @param params.templateHashes    テンプレートを走査して得たハッシュ表
+ * @param params.generatedContents init が自分で組み立てて書く本文（パス → 本文）。テンプレートに
+ *   同じパスがあっても、書き込みが起きた後のディスクにはこちらが載る。`.ziku/ziku.jsonc` が
+ *   代表例で、init はテンプレートのパターンの **部分集合** だけを選んで導入できる（ユーザーが
+ *   dir を選択する）ため、ローカルの本文はテンプレートより少ないことがある。テンプレートの
+ *   本文をベースにすると local(部分集合) != base(full) == template となり、push が「local が
+ *   パターンを削除した」と解釈して **テンプレートからパターンを削る**（そのテンプレートを使う
+ *   全プロジェクトへ波及する）。init が書いた本文をベースにすれば local == base で push
+ *   対象外になり、pull では template != base == local としてテンプレートの全体設定が降りてくる。
+ * @param params.results           init が行ったファイル操作の結果
  */
 export function planLockBaseHashes(params: {
   readonly templateHashes: HashMap;
-  readonly persistedConfigContent: string;
-}): HashMap {
-  const templateConfigHash = params.templateHashes[ZIKU_CONFIG_FILE];
-  if (templateConfigHash === undefined) return { ...params.templateHashes };
+  readonly generatedContents: ReadonlyMap<RepoRelPath, string>;
+  readonly results: readonly FileOperationResult[];
+}): LockBaseHashPlan {
+  const actions = new Map<string, FileAction>(params.results.map((r) => [r.path, r.action]));
 
-  return {
-    ...params.templateHashes,
-    [ZIKU_CONFIG_FILE]: resolveConfigBaseHash({
-      persistedConfigContent: params.persistedConfigContent,
-      templateConfigHash,
-    }),
-  };
+  const written: HashMap = {};
+  const fromLocalFile: RepoRelPath[] = [];
+  for (const [rawPath, templateHash] of Object.entries(params.templateHashes)) {
+    const path = repoRelPath(rawPath);
+    const generated = params.generatedContents.get(path);
+    match(baseHashOrigin(actions.get(rawPath)))
+      .with({ _tag: "Written" }, () => {
+        written[path] = generated === undefined ? templateHash : hashContent(generated);
+      })
+      .with({ _tag: "LocalFile" }, () => {
+        fromLocalFile.push(path);
+      })
+      .exhaustive();
+  }
+  return { written, fromLocalFile };
 }
 
 /**

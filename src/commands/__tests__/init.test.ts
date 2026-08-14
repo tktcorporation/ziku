@@ -161,10 +161,12 @@ describe("initCommand", () => {
       cleanup: vi.fn(),
     });
     mockFetchTemplates.mockResolvedValue([]);
-    mockWriteFileWithStrategy.mockResolvedValue({
-      action: "created",
-      path: ".ziku/lock.json",
-    });
+    // 操作結果のパスは実装と同じく書き込み対象のパスを返す。lock のベースは
+    // 「どのファイルをどう扱ったか」をパスで引くので、別のパスを返すモックだと
+    // 実装では起こらない「操作結果の無いファイル」の経路をテストが通ってしまう。
+    mockWriteFileWithStrategy.mockImplementation(({ relativePath }) =>
+      Promise.resolve({ action: "created" as const, path: relativePath }),
+    );
     mockCopyFile.mockResolvedValue({
       action: "skipped",
       path: ".ziku/ziku.jsonc",
@@ -782,7 +784,10 @@ describe("initCommand", () => {
       };
       mockHashFiles.mockResolvedValueOnce(expectedHashes);
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([
+        { action: "copied", path: ".mcp.json" },
+        { action: "copied", path: ".mise.toml" },
+      ]);
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: true },

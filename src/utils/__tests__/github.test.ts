@@ -3,8 +3,10 @@ import { commitSha, repoRelPath } from "../../__tests__/brands";
 import {
   checkRepoExists,
   checkRepoSetup,
+  classifyGitHubApiFailure,
   getGhCliToken,
   getGitHubToken,
+  githubApiFailure,
   rateLimitedError,
   unauthorizedError,
 } from "../github";
@@ -228,6 +230,24 @@ describe("createPullRequest", () => {
       owner: "owner",
       repo: "repo",
     });
+  });
+
+  it("fork を作れなかったときは、ステータスを持つ元の例外をそのまま投げる", async () => {
+    mockReposGet.mockRejectedValue(new Error("Not Found"));
+    const denied = apiError(403, "Resource not accessible by personal access token");
+    mockReposCreateFork.mockRejectedValue(denied);
+
+    const thrown = await createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      title: "Test PR",
+      baseBranch: "main",
+    }).catch((e: unknown) => e);
+
+    // Effect の FiberFailure に埋もれると、呼び出し側は 403 を権限の問題として案内できない
+    expect(thrown).toBe(denied);
+    expect(classifyGitHubApiFailure(thrown)).toMatchObject({ _tag: "PermissionDenied" });
   });
 
   it("複数のファイルをコミットする", async () => {
@@ -609,6 +629,107 @@ describe("rateLimitedError", () => {
     expect(err.hint).toContain("Authenticated quota (5000/hr) exhausted");
     // resetAt が無ければ "resets in" 部分を付けない
     expect(err.hint).not.toContain("resets in");
+  });
+});
+
+/** Octokit の RequestError を模した例外。 */
+function apiError(status: number, message: string, headers: Record<string, string> = {}): Error {
+  return Object.assign(new Error(message), { status, response: { status, headers } });
+}
+
+describe("classifyGitHubApiFailure", () => {
+  it("401 は認証拒否として、GitHub のメッセージごと分類する", () => {
+    expect(classifyGitHubApiFailure(apiError(401, "Bad credentials"))).toEqual({
+      _tag: "AuthRejected",
+      detail: "Bad credentials",
+    });
+  });
+
+  it("クォータ超過の 403 はレート制限として、リセット時刻付きで分類する", () => {
+    const resetEpoch = Math.floor(Date.now() / 1000) + 600;
+    const failure = classifyGitHubApiFailure(
+      apiError(403, "API rate limit exceeded", {
+        "x-ratelimit-remaining": "0",
+        "x-ratelimit-reset": String(resetEpoch),
+      }),
+    );
+
+    expect(failure).toEqual({ _tag: "RateLimited", resetAt: new Date(resetEpoch * 1000) });
+  });
+
+  it("secondary rate limit は retry-after の秒数を時刻に直す", () => {
+    const failure = classifyGitHubApiFailure(
+      apiError(403, "You have exceeded a secondary rate limit", { "retry-after": "60" }),
+    );
+
+    // 「あと何秒」を時刻へ直すので、リセット時刻は今より後になる
+    expect(failure).toMatchObject({ _tag: "RateLimited" });
+    const { resetAt } = failure as { resetAt: Date | undefined };
+    expect(resetAt?.getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it("レート制限のヘッダを持たない 403 は権限不足として分ける", () => {
+    expect(classifyGitHubApiFailure(apiError(403, "Must have admin rights"))).toEqual({
+      _tag: "PermissionDenied",
+      detail: "Must have admin rights",
+    });
+  });
+
+  it("429 はヘッダが無くてもレート制限として扱う", () => {
+    expect(classifyGitHubApiFailure(apiError(429, "Too Many Requests"))).toEqual({
+      _tag: "RateLimited",
+      resetAt: undefined,
+    });
+  });
+
+  it("接続断は、例外チェーンの奥の errno から見分ける", () => {
+    // Octokit は fetch の失敗を status 500 に包み直すので、ステータスでは判別できない。
+    const wrapped = Object.assign(new Error("request to https://api.github.com failed"), {
+      status: 500,
+      cause: Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+      }),
+    });
+
+    expect(classifyGitHubApiFailure(wrapped)).toMatchObject({ _tag: "Unreachable" });
+  });
+
+  it("GitHub の 5xx と素の例外は分類しない", () => {
+    expect(classifyGitHubApiFailure(apiError(500, "Internal Server Error"))).toEqual({
+      _tag: "Unclassified",
+    });
+    expect(classifyGitHubApiFailure(new TypeError("x is not a function"))).toEqual({
+      _tag: "Unclassified",
+    });
+  });
+});
+
+describe("githubApiFailure", () => {
+  const cause = new Error("boom");
+
+  it("認証拒否はトークンの更新を促し、原因を捨てない", () => {
+    const failure = githubApiFailure(
+      { _tag: "AuthRejected", detail: "Bad credentials" },
+      { operation: "create a pull request", authenticated: true, cause },
+    );
+
+    expect(failure.reason).toEqual({ kind: "GitHubAuthRejected", detail: "Bad credentials" });
+    expect(failure.hint).toContain("gh auth login");
+    expect(failure.cause).toBe(cause);
+  });
+
+  it("権限不足と到達不能は、何をしようとして失敗したかを文面に残す", () => {
+    const denied = githubApiFailure(
+      { _tag: "PermissionDenied", detail: "Must have admin rights" },
+      { operation: "create a pull request", authenticated: true, cause },
+    );
+    const unreachable = githubApiFailure(
+      { _tag: "Unreachable", detail: "getaddrinfo ENOTFOUND api.github.com" },
+      { operation: "create a pull request", authenticated: true, cause },
+    );
+
+    expect(denied.message).toContain("create a pull request");
+    expect(unreachable.message).toContain("create a pull request");
   });
 });
 

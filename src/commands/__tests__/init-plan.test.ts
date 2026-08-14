@@ -8,12 +8,13 @@ import { describe, expect, it } from "vitest";
 import type { RepoExistence } from "../../utils/github";
 import { hashContent } from "../../utils/hash";
 import { generateZikuJsonc } from "../../utils/ziku-config";
-import type { GlobPattern, HashMap, TemplateSource } from "../../modules/schemas";
+import type { FileAction, GlobPattern, HashMap, TemplateSource } from "../../modules/schemas";
 import { baseCommitSha, baseHashesOf } from "../../modules/schemas";
 import { absPath, commitSha, globPatterns, hashMap, repoRelPath } from "../../__tests__/brands";
 import type { TemplateCandidate } from "../../ui/prompts";
 import {
   asNonEmpty,
+  baseHashOrigin,
   buildInitialLock,
   buildOwnerCandidates,
   decideRepoProbe,
@@ -30,13 +31,11 @@ import {
   planOverwriteStrategy,
   preferReadyCandidate,
   requiresDevcontainerEnvExample,
-  resolveConfigBaseContent,
-  resolveConfigBaseHash,
   selectedFlatPatterns,
   splitOwnerRepo,
   withReadyFlags,
 } from "../init-plan";
-import type { ProbedItem } from "../init-plan";
+import type { LockBaseHashPlan, ProbedItem } from "../init-plan";
 
 const CONFIG_PATH = repoRelPath(".ziku/ziku.jsonc");
 
@@ -228,102 +227,110 @@ describe("planOverwriteStrategy", () => {
   });
 });
 
-describe("resolveConfigBaseContent（ディスクに実在する本文を選ぶ）", () => {
-  const generatedContent = generateZikuJsonc({
-    include: globPatterns([".claude/**", ".mcp.json"]),
-    exclude: [],
-  });
-  const existingContent = generateZikuJsonc({
-    include: globPatterns([".mcp.json"]),
-    exclude: [],
+describe("baseHashOrigin（ベースをどちらの内容から取るか）", () => {
+  it.each(["copied", "created", "overwritten"] as const)("%s は書いた内容から取る", (action) => {
+    expect(baseHashOrigin(action)).toEqual({ _tag: "Written" });
   });
 
-  it("新規作成なら生成した本文を採る", () => {
-    expect(
-      resolveConfigBaseContent({ action: "created", generatedContent, existingContent: undefined }),
-    ).toBe(generatedContent);
-  });
+  it.each(["skipped", "skipped_ignored"] as const)(
+    "%s はディスクの実内容から取る（書いた内容はディスクに無い）",
+    (action) => {
+      expect(baseHashOrigin(action)).toEqual({ _tag: "LocalFile" });
+    },
+  );
 
-  it("上書きなら生成した本文を採る", () => {
-    expect(
-      resolveConfigBaseContent({ action: "overwritten", generatedContent, existingContent }),
-    ).toBe(generatedContent);
-  });
-
-  it("スキップなら既存ファイルの本文を採る（生成した本文はディスクに無い）", () => {
-    expect(resolveConfigBaseContent({ action: "skipped", generatedContent, existingContent })).toBe(
-      existingContent,
-    );
-  });
-
-  it("gitignore 由来のスキップでも既存ファイルの本文を採る", () => {
-    expect(
-      resolveConfigBaseContent({ action: "skipped_ignored", generatedContent, existingContent }),
-    ).toBe(existingContent);
-  });
-});
-
-describe("resolveConfigBaseHash（テンプレ保護の安全装置）", () => {
-  it("ローカル(部分集合) の内容ハッシュを base にする（テンプレを削らないため）", () => {
-    const localContent = generateZikuJsonc({ include: globPatterns([".claude/**"]), exclude: [] });
-    const result = resolveConfigBaseHash({
-      persistedConfigContent: localContent,
-      templateConfigHash: hashContent("different-template-content"),
-    });
-    // base = ローカル内容のハッシュ（テンプレ側のハッシュではない）
-    expect(result).toBe(hashContent(localContent));
-  });
-
-  it("テンプレ側ハッシュが undefined でもローカル内容から base を決められる", () => {
-    const localContent = generateZikuJsonc({ include: globPatterns([".mcp.json"]), exclude: [] });
-    const result = resolveConfigBaseHash({
-      persistedConfigContent: localContent,
-      templateConfigHash: undefined,
-    });
-    expect(result).toBe(hashContent(localContent));
-  });
-
-  it("ローカルが完全集合（テンプレと同一）なら base はテンプレと一致する", () => {
-    const content = generateZikuJsonc({
-      include: globPatterns([".claude/**", ".mcp.json"]),
-      exclude: [],
-    });
-    const templateHash = hashContent(content);
-    const result = resolveConfigBaseHash({
-      persistedConfigContent: content,
-      templateConfigHash: templateHash,
-    });
-    // local == template のときは base も一致 → push/pull とも no-op
-    expect(result).toBe(templateHash);
+  it("操作結果が無いファイルもディスクの実内容から取る", () => {
+    expect(baseHashOrigin(undefined)).toEqual({ _tag: "LocalFile" });
   });
 });
 
 describe("planLockBaseHashes", () => {
-  const persistedConfigContent = generateZikuJsonc({
+  const generatedConfigContent = generateZikuJsonc({
     include: globPatterns([".mcp.json"]),
     exclude: [],
   });
+  const generatedContents = new Map([[CONFIG_PATH, generatedConfigContent]]);
 
-  it("テンプレに ziku.jsonc があれば base をディスク上の本文のハッシュへ差し替える", () => {
+  function plan(
+    templateHashes: HashMap,
+    results: readonly { action: FileAction; path: string }[],
+  ): LockBaseHashPlan {
+    return planLockBaseHashes({ templateHashes, generatedContents, results });
+  }
+
+  it("コピーされたファイルはテンプレートの内容のハッシュをベースにする", () => {
+    const result = plan(hashMap({ ".mcp.json": "template-hash" }), [
+      { action: "copied", path: ".mcp.json" },
+    ]);
+    expect(result.written[repoRelPath(".mcp.json")]).toBe("template-hash");
+    expect(result.fromLocalFile).toEqual([]);
+  });
+
+  it("上書きされたファイルもテンプレートの内容のハッシュをベースにする", () => {
+    const result = plan(hashMap({ ".mcp.json": "template-hash" }), [
+      { action: "overwritten", path: ".mcp.json" },
+    ]);
+    expect(result.written[repoRelPath(".mcp.json")]).toBe("template-hash");
+  });
+
+  it("スキップされたファイルはディスクの実内容を読む対象にする", () => {
+    const result = plan(hashMap({ ".mcp.json": "template-hash" }), [
+      { action: "skipped", path: ".mcp.json" },
+    ]);
+    // テンプレートの内容はディスクに載っていないので、ベースとして確定させない
+    expect(result.written).toEqual({});
+    expect(result.fromLocalFile).toEqual([repoRelPath(".mcp.json")]);
+  });
+
+  it("gitignore 由来のスキップもディスクの実内容を読む対象にする", () => {
+    const result = plan(hashMap({ ".mcp.json": "template-hash" }), [
+      { action: "skipped_ignored", path: ".mcp.json" },
+    ]);
+    expect(result.fromLocalFile).toEqual([repoRelPath(".mcp.json")]);
+  });
+
+  it("操作結果に現れないファイルもディスクの実内容を読む対象にする", () => {
+    const result = plan(hashMap({ ".mcp.json": "template-hash" }), []);
+    expect(result.written).toEqual({});
+    expect(result.fromLocalFile).toEqual([repoRelPath(".mcp.json")]);
+  });
+
+  it("書き込まれた ziku.jsonc のベースは生成した本文のハッシュ（テンプレ側ではない）", () => {
+    const result = plan(hashMap({ ".ziku/ziku.jsonc": "template-hash" }), [
+      { action: "created", path: ".ziku/ziku.jsonc" },
+    ]);
+    // テンプレートのハッシュを載せると、初回 push が「local がパターンを削除した」と
+    // 解釈してテンプレートからパターンを削る
+    expect(result.written[CONFIG_PATH]).toBe(hashContent(generatedConfigContent));
+  });
+
+  it("init が書く本文を持つファイルは、テンプレートに同じパスがあっても本文側のハッシュを載せる", () => {
+    const envExample = repoRelPath(".devcontainer/devcontainer.env.example");
     const result = planLockBaseHashes({
-      templateHashes: hashMap({ ".mcp.json": "a", ".ziku/ziku.jsonc": "template-hash" }),
-      persistedConfigContent,
+      templateHashes: hashMap({ ".devcontainer/devcontainer.env.example": "template-hash" }),
+      generatedContents: new Map([[envExample, "GH_TOKEN=\n"]]),
+      results: [{ action: "overwritten", path: envExample }],
     });
-    expect(result[CONFIG_PATH]).toBe(hashContent(persistedConfigContent));
-    expect(result[repoRelPath(".mcp.json")]).toBe("a");
+    expect(result.written[envExample]).toBe(hashContent("GH_TOKEN=\n"));
+  });
+
+  it("スキップされた ziku.jsonc はディスクの実内容を読む対象にする", () => {
+    const result = plan(hashMap({ ".ziku/ziku.jsonc": "template-hash" }), [
+      { action: "skipped", path: ".ziku/ziku.jsonc" },
+    ]);
+    expect(result.written).toEqual({});
+    expect(result.fromLocalFile).toEqual([CONFIG_PATH]);
   });
 
   it("テンプレに ziku.jsonc が無ければ base を記録しない（次回 pull の誤削除を防ぐ）", () => {
-    const result = planLockBaseHashes({
-      templateHashes: hashMap({ ".mcp.json": "a" }),
-      persistedConfigContent,
-    });
-    expect(result[CONFIG_PATH]).toBeUndefined();
+    const result = plan(hashMap({ ".mcp.json": "a" }), [{ action: "copied", path: ".mcp.json" }]);
+    expect(result.written[CONFIG_PATH]).toBeUndefined();
+    expect(result.fromLocalFile).not.toContain(CONFIG_PATH);
   });
 
   it("渡されたハッシュ表を書き換えない", () => {
     const templateHashes = hashMap({ ".ziku/ziku.jsonc": "template-hash" });
-    planLockBaseHashes({ templateHashes, persistedConfigContent });
+    plan(templateHashes, [{ action: "created", path: ".ziku/ziku.jsonc" }]);
     expect(templateHashes[CONFIG_PATH]).toBe("template-hash");
   });
 });

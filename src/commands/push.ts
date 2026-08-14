@@ -57,7 +57,13 @@ import { calculateDiffStats, formatStats } from "../ui/diff-view";
 import { padToWidth } from "../ui/text-width";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
 import { detectDiff } from "../utils/diff";
-import { createPullRequest, getGitHubToken, resolveDefaultBranch } from "../utils/github";
+import {
+  classifyGitHubApiFailure,
+  createPullRequest,
+  getGitHubToken,
+  githubApiFailure,
+  resolveDefaultBranch,
+} from "../utils/github";
 import { hashFiles } from "../utils/hash";
 import { detectAndUpdateReadme, detectReadmeUpdate } from "../utils/readme";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked";
@@ -149,6 +155,92 @@ interface PushTarget extends PushPayload {
   readonly restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
 }
 
+// ─── push 中の失敗の分類 ───
+
+/**
+ * push 中に飛んだ例外を、ユーザーが取れる行動がある失敗と、そうでない defect に振り分ける。
+ *
+ * `ZikuFailure` として文言で報告するのは、ユーザーが次の一手を選べるものだけ:
+ *
+ * | 失敗                                       | ユーザーが取る行動               |
+ * | ------------------------------------------ | -------------------------------- |
+ * | トークンを拒否された (401)                 | トークンを更新する               |
+ * | レート制限 (429 / 403 + rate limit ヘッダ) | 待つ、またはトークンを設定する   |
+ * | 操作を拒否された (403)                     | 権限と fork の可否を見直す       |
+ * | GitHub へ届かない                          | 接続を確かめて実行し直す         |
+ * | ローカルへの書き込みが権限・容量で失敗     | 権限を直す / 空きを作る          |
+ *
+ * これ以外は defect のまま運び、トップレベルが原因とスタックトレースごと見せる。プロンプトの
+ * 中断・想定外のレスポンス形・GitHub の 5xx がここに入る。文言に潰すと、ziku の不具合が
+ * 「ユーザー側の問題」として案内され、原因を追う材料も消える。
+ *
+ * ケースを足すときの基準: **ユーザーが次に取る行動を 1 文で書けるか**。書けないなら足さない。
+ * 分類されない失敗が defect として出るのは取りこぼしではなく、この設計の正しい出力。
+ *
+ * @param operation 何をしようとして失敗したか（文中に埋め込むので動詞から始める）。
+ */
+function pushFailure(operation: string): (cause: unknown) => Effect.Effect<never, ZikuFailure> {
+  return (cause) =>
+    match(classifyGitHubApiFailure(cause))
+      .with(
+        { _tag: P.union("AuthRejected", "RateLimited", "PermissionDenied", "Unreachable") },
+        (failure) =>
+          // push が GitHub API を呼ぶのはトークンを用意できた後だけなので、レート制限は
+          // 常に認証済みクォータのもの。
+          Effect.fail(githubApiFailure(failure, { operation, authenticated: true, cause })),
+      )
+      .with({ _tag: "Unclassified" }, () => localWriteFailure(cause))
+      .exhaustive();
+}
+
+/**
+ * ユーザーが直せる書き込み失敗の errno。
+ *
+ * 権限 (`EACCES` / `EPERM` / `EROFS`) と空き容量 (`ENOSPC` / `EDQUOT`) だけを挙げる。どちらも
+ * 書き込み先を直せば同じコマンドが通る。それ以外の errno は書き込み先ではなく ziku の組み立て方
+ * （存在しない親ディレクトリ・ディレクトリへの上書き等）を疑う話なので分類しない。
+ */
+const FIXABLE_WRITE_ERROR_CODES: ReadonlySet<string> = new Set([
+  "EACCES",
+  "EDQUOT",
+  "ENOSPC",
+  "EPERM",
+  "EROFS",
+]);
+
+/**
+ * ローカルへの書き込み失敗のうち、ユーザーが直せるものを失敗として返す。
+ *
+ * 対象のパスが分からなければ分類しない。権限も空き容量も「どこを直すか」が言えて初めて
+ * 行動になるため、パスを落とした案内は defect と同じだけ役に立たない。
+ */
+function localWriteFailure(cause: unknown): Effect.Effect<never, ZikuFailure> {
+  const code = errnoStringOf(cause, "code");
+  const path = errnoStringOf(cause, "path");
+  if (code === undefined || path === undefined || !FIXABLE_WRITE_ERROR_CODES.has(code)) {
+    return Effect.die(cause);
+  }
+
+  return Effect.fail(
+    zikuFailure(
+      {
+        kind: "FileWriteFailed",
+        path,
+        directory: dirname(path),
+        detail: cause instanceof Error ? cause.message : String(cause),
+      },
+      { cause },
+    ),
+  );
+}
+
+/** Node の fs エラーに載る文字列プロパティ（`code` / `path`）。持たない例外では undefined。 */
+function errnoStringOf(cause: unknown, key: "code" | "path"): string | undefined {
+  if (typeof cause !== "object" || cause === null) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(cause, key);
+  return typeof descriptor?.value === "string" ? descriptor.value : undefined;
+}
+
 /**
  * PR の宛先ブランチを決め、ブランチへ向けられないソースは失敗として返す。
  *
@@ -210,73 +302,75 @@ function pushToGitHub(
       return yield* zikuFailure({ kind: "GitHubTokenMissing", operation: "create a pull request" });
     }
 
-    // 本体を Effect.promise で包む理由: GitHub API 呼び出しやプロンプトの失敗は
-    // ユーザーが対処を選べる失敗ではない。文言に潰さず defect として運び、
-    // トップレベルが原因ごと見せる。
-    return yield* Effect.promise(async () => {
-      const token = presetToken || (await inputGitHubToken());
+    // 本体の失敗は `pushFailure` が振り分ける。分類できるものだけ文言にし、残りは defect の
+    // まま運ぶ。catch で分類しないのは、defect へ戻す判断まで一箇所に置くため。
+    return yield* Effect.tryPromise({
+      catch: (cause) => cause,
+      try: async () => {
+        const token = presetToken || (await inputGitHubToken());
 
-      const suggestedTitle = generatePrTitle([...target.pushableFiles]);
-      const suggestedBody = generatePrBody([...target.pushableFiles]);
+        const suggestedTitle = generatePrTitle([...target.pushableFiles]);
+        const suggestedBody = generatePrBody([...target.pushableFiles]);
 
-      const { title, body } = await match(args)
-        .with({ message: P.string }, ({ message }) => ({
-          title: message,
-          body: suggestedBody,
-        }))
-        .with({ edit: true }, async () => ({
-          title: await inputPrTitle(suggestedTitle),
-          body: await inputPrBody(suggestedBody),
-        }))
-        .otherwise(() => ({ title: suggestedTitle, body: suggestedBody }));
+        const { title, body } = await match(args)
+          .with({ message: P.string }, ({ message }) => ({
+            title: message,
+            body: suggestedBody,
+          }))
+          .with({ edit: true }, async () => ({
+            title: await inputPrTitle(suggestedTitle),
+            body: await inputPrBody(suggestedBody),
+          }))
+          .otherwise(() => ({ title: suggestedTitle, body: suggestedBody }));
 
-      const files = [...target.files, ...(await readmeAutoUpdate(ctx.templateDir))];
+        const files = [...target.files, ...(await readmeAutoUpdate(ctx.templateDir))];
 
-      // サマリー表示
-      const baseSha = baseCommitSha(ctx.lock);
-      const baseHashStr = baseSha ? `  ${pc.dim(`since ${baseSha.slice(0, 7)}`)}` : "";
-      logPushSummary(
-        `${ghSource.owner}/${ghSource.repo}`,
-        `→ ${baseBranch}`,
-        baseHashStr,
-        title,
-        target,
-        files,
-      );
-
-      if (!args.yes) {
-        const confirmed = await confirmAction("Create PR?", { initialValue: true });
-        if (!confirmed) {
-          log.info("Cancelled.");
-          return false;
-        }
-      }
-
-      log.step("Creating pull request...");
-      const result = await withSpinner("Creating PR on GitHub...", () =>
-        createPullRequest(token, {
-          owner: ghSource.owner,
-          repo: ghSource.repo,
-          files,
-          deletions: [...target.deletions],
+        // サマリー表示
+        const baseSha = baseCommitSha(ctx.lock);
+        const baseHashStr = baseSha ? `  ${pc.dim(`since ${baseSha.slice(0, 7)}`)}` : "";
+        logPushSummary(
+          `${ghSource.owner}/${ghSource.repo}`,
+          `→ ${baseBranch}`,
+          baseHashStr,
           title,
-          body,
-          baseBranch,
-        }),
-      );
+          target,
+          files,
+        );
 
-      log.success("Pull request created!");
-      log.message(
-        [
-          `${pc.dim("To")} ${pc.bold(`${ghSource.owner}/${ghSource.repo}`)}`,
-          `  ${baseSha ? `${pc.dim(baseSha.slice(0, 7))}..` : ""}${pc.green(result.branch)}  ${pc.dim(`(${files.length + target.deletions.length} file${files.length + target.deletions.length === 1 ? "" : "s"} changed)`)}`,
-          "",
-          `  ${pc.bold(`PR #${result.number}`)}  ${pc.cyan(result.url)}`,
-        ].join("\n"),
-      );
-      outro(`Review and merge at ${pc.cyan(result.url)}`);
-      return true;
-    });
+        if (!args.yes) {
+          const confirmed = await confirmAction("Create PR?", { initialValue: true });
+          if (!confirmed) {
+            log.info("Cancelled.");
+            return false;
+          }
+        }
+
+        log.step("Creating pull request...");
+        const result = await withSpinner("Creating PR on GitHub...", () =>
+          createPullRequest(token, {
+            owner: ghSource.owner,
+            repo: ghSource.repo,
+            files,
+            deletions: [...target.deletions],
+            title,
+            body,
+            baseBranch,
+          }),
+        );
+
+        log.success("Pull request created!");
+        log.message(
+          [
+            `${pc.dim("To")} ${pc.bold(`${ghSource.owner}/${ghSource.repo}`)}`,
+            `  ${baseSha ? `${pc.dim(baseSha.slice(0, 7))}..` : ""}${pc.green(result.branch)}  ${pc.dim(`(${files.length + target.deletions.length} file${files.length + target.deletions.length === 1 ? "" : "s"} changed)`)}`,
+            "",
+            `  ${pc.bold(`PR #${result.number}`)}  ${pc.cyan(result.url)}`,
+          ].join("\n"),
+        );
+        outro(`Review and merge at ${pc.cyan(result.url)}`);
+        return true;
+      },
+    }).pipe(Effect.catchAll(pushFailure("create a pull request")));
   });
 }
 
@@ -309,84 +403,87 @@ interface PushToLocalInput {
  *
  * @returns push したら true、確認でキャンセルされたら false。
  */
-function pushToLocal(input: PushToLocalInput): Effect.Effect<boolean> {
+function pushToLocal(input: PushToLocalInput): Effect.Effect<boolean, ZikuFailure> {
   const { localSource, target, ctx, projectDir, args, patterns } = input;
-  // ファイルコピーや lock 更新の失敗はユーザーが対処を選べる失敗ではないので、
-  // 文言に潰さず defect として運ぶ（`pushToGitHub` と同じ扱い）。
-  return Effect.promise(async () => {
-    logPushSummary(
-      localSource.path,
-      "(local)",
-      "",
-      `push ${target.files.length + target.deletions.length} file(s)`,
-      target,
-      target.files,
-    );
+  // 失敗の振り分けは `pushToGitHub` と同じ `pushFailure` に委ねる。ファイルコピーと lock の
+  // 更新は、書き込み先の権限か空き容量で失敗したときだけユーザーが直せる。
+  return Effect.tryPromise({
+    catch: (cause) => cause,
+    try: async () => {
+      logPushSummary(
+        localSource.path,
+        "(local)",
+        "",
+        `push ${target.files.length + target.deletions.length} file(s)`,
+        target,
+        target.files,
+      );
 
-    if (!args.yes) {
-      const confirmed = await confirmAction("Push to local template?", { initialValue: true });
-      if (!confirmed) {
-        log.info("Cancelled.");
-        return false;
+      if (!args.yes) {
+        const confirmed = await confirmAction("Push to local template?", { initialValue: true });
+        if (!confirmed) {
+          log.info("Cancelled.");
+          return false;
+        }
       }
-    }
 
-    log.step("Pushing to local template...");
+      log.step("Pushing to local template...");
 
-    for (const file of target.files) {
-      const destPath = joinAbs(localSource.path, file.path);
-      const destDir = dirname(destPath);
-      if (!existsSync(destDir)) {
-        await mkdir(destDir, { recursive: true });
+      for (const file of target.files) {
+        const destPath = joinAbs(localSource.path, file.path);
+        const destDir = dirname(destPath);
+        if (!existsSync(destDir)) {
+          await mkdir(destDir, { recursive: true });
+        }
+        // 内容はバイト列へ戻してから書く。バイナリは latin1 の文字列として運ばれており、
+        // utf-8 として書くと 1 文字が 2 バイトへ膨らんで別のファイルになる。
+        await writeFile(destPath, transportTextToBytes(file.content));
+        log.message(`  ${pc.green("+")} ${file.path}`);
       }
-      // 内容はバイト列へ戻してから書く。バイナリは latin1 の文字列として運ばれており、
-      // utf-8 として書くと 1 文字が 2 バイトへ膨らんで別のファイルになる。
-      await writeFile(destPath, transportTextToBytes(file.content));
-      log.message(`  ${pc.green("+")} ${file.path}`);
-    }
 
-    // 削除対象ファイルを処理
-    for (const file of target.deletions) {
-      const destPath = joinAbs(localSource.path, file.path);
-      if (existsSync(destPath)) {
-        await rm(destPath, { force: true });
-        log.message(`  ${pc.red("-")} ${file.path}`);
+      // 削除対象ファイルを処理
+      for (const file of target.deletions) {
+        const destPath = joinAbs(localSource.path, file.path);
+        if (existsSync(destPath)) {
+          await rm(destPath, { force: true });
+          log.message(`  ${pc.red("-")} ${file.path}`);
+        }
       }
-    }
 
-    // ziku.jsonc が衝突解決で union マージされた場合、push される内容はローカルの生
-    // 内容ではなく union 結果になる。ローカルを更新しないと、テンプレ・ローカルが
-    // 乖離したまま baseHashes をテンプレ（union）へ進めてしまい、次回 push で
-    // ローカルが localOnly 判定 → テンプレ側の追加分を上書きで落とす。
-    // ローカルにも merged 内容を書き戻して local==template==base を保つ。
-    // スコープ限定 union を送った場合に書き戻せない理由は `configWriteBackSafe` を参照。
-    const mergedConfig = target.files.find((f) => isZikuConfigPath(f.path));
-    if (mergedConfig && input.configWriteBack) {
-      const localConfigPath = joinAbs(projectDir, ZIKU_CONFIG_FILE);
-      await mkdir(dirname(localConfigPath), { recursive: true });
-      await writeFile(localConfigPath, mergedConfig.content, "utf-8");
-    }
+      // ziku.jsonc が衝突解決で union マージされた場合、push される内容はローカルの生
+      // 内容ではなく union 結果になる。ローカルを更新しないと、テンプレ・ローカルが
+      // 乖離したまま baseHashes をテンプレ（union）へ進めてしまい、次回 push で
+      // ローカルが localOnly 判定 → テンプレ側の追加分を上書きで落とす。
+      // ローカルにも merged 内容を書き戻して local==template==base を保つ。
+      // スコープ限定 union を送った場合に書き戻せない理由は `configWriteBackSafe` を参照。
+      const mergedConfig = target.files.find((f) => isZikuConfigPath(f.path));
+      if (mergedConfig && input.configWriteBack) {
+        const localConfigPath = joinAbs(projectDir, ZIKU_CONFIG_FILE);
+        await mkdir(dirname(localConfigPath), { recursive: true });
+        await writeFile(localConfigPath, mergedConfig.content, "utf-8");
+      }
 
-    // ベースは push 後のテンプレートを走査して組み立てる。走査結果をそのまま採用せず、
-    // 送ったパスと元から一致していたパスだけを前進させる（`baseAfterPush`）。
-    const templateHashes = await hashFiles(localSource.path, patterns.include, patterns.exclude);
-    await saveLock(
-      projectDir,
-      markSynced(ctx.lock, {
-        hashes: baseAfterPush({
-          templateHashes,
-          previousBase: baseHashesOf(ctx.lock),
-          pushed: target,
-          alreadySynced: input.alreadySynced,
+      // ベースは push 後のテンプレートを走査して組み立てる。走査結果をそのまま採用せず、
+      // 送ったパスと元から一致していたパスだけを前進させる（`baseAfterPush`）。
+      const templateHashes = await hashFiles(localSource.path, patterns.include, patterns.exclude);
+      await saveLock(
+        projectDir,
+        markSynced(ctx.lock, {
+          hashes: baseAfterPush({
+            templateHashes,
+            previousBase: baseHashesOf(ctx.lock),
+            pushed: target,
+            alreadySynced: input.alreadySynced,
+          }),
         }),
-      }),
-    );
+      );
 
-    const totalCount = target.files.length + target.deletions.length;
-    log.success(`Pushed ${totalCount} file(s) to ${pc.cyan(localSource.path)}`);
-    outro("Push complete");
-    return true;
-  });
+      const totalCount = target.files.length + target.deletions.length;
+      log.success(`Pushed ${totalCount} file(s) to ${pc.cyan(localSource.path)}`);
+      outro("Push complete");
+      return true;
+    },
+  }).pipe(Effect.catchAll(pushFailure("push to the local template")));
 }
 
 // ─── サマリー表示 ───

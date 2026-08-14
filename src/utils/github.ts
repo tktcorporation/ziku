@@ -47,17 +47,7 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
   const forkOwner = user.login;
 
   // 2. fork を確認・作成
-  const forkRepo = await Effect.runPromise(
-    Effect.tryPromise(() => octokit.repos.get({ owner: forkOwner, repo })).pipe(
-      Effect.map(({ data }) => data.name),
-      Effect.orElse(() =>
-        Effect.tryPromise(() => octokit.repos.createFork({ owner, repo })).pipe(
-          Effect.tap(() => Effect.promise(() => sleep(3000))),
-          Effect.map(({ data }) => data.name),
-        ),
-      ),
-    ),
-  );
+  const forkRepo = await resolveForkRepo(octokit, { owner, repo, forkOwner });
 
   // 3. ベースブランチの最新コミット SHA を取得
   const { data: baseBranchRef } = await octokit.repos.getBranch({
@@ -150,6 +140,35 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
     number: pr.number,
     branch: branchName,
   };
+}
+
+/** fork の作成が API から見えるようになるまで待つ時間。直後に問い合わせると 404 が返る。 */
+const FORK_PROPAGATION_WAIT_MS = 3000;
+
+/**
+ * PR の head に使う fork のリポジトリ名を返す。まだ無ければ fork を作る。
+ *
+ * 作成の失敗は包み直さずそのまま投げる。Octokit の例外は HTTP ステータスを持っており、
+ * 呼び出し側はそれを見て「権限が足りない」「レート制限」をユーザー向けの案内へ分類する
+ * （{@link classifyGitHubApiFailure}）。`Effect.runPromise` で包むと失敗が FiberFailure に
+ * 埋もれ、ステータスごと分類の材料が失われる。
+ *
+ * 既存 fork の問い合わせが失敗したときだけ作成へ倒す。未 fork なら 404 が返るが、それ以外の
+ * 理由（トークンの失効等）でも作成が同じ理由で失敗し、そちらの例外が呼び出し側へ届く。
+ */
+async function resolveForkRepo(
+  octokit: Octokit,
+  target: { owner: string; repo: string; forkOwner: string },
+): Promise<string> {
+  const existing = await octokit.repos
+    .get({ owner: target.forkOwner, repo: target.repo })
+    .then(({ data }) => data.name)
+    .catch(() => undefined);
+  if (existing !== undefined) return existing;
+
+  const { data } = await octokit.repos.createFork({ owner: target.owner, repo: target.repo });
+  await sleep(FORK_PROPAGATION_WAIT_MS);
+  return data.name;
 }
 
 /**
@@ -524,6 +543,184 @@ function httpStatusOf(cause: unknown): number | undefined {
   if (typeof cause !== "object" || cause === null || !("status" in cause)) return undefined;
   const { status } = cause;
   return typeof status === "number" ? status : undefined;
+}
+
+/**
+ * GitHub API の呼び出しが失敗した理由のうち、ユーザーが次に取る行動が変わるもの。
+ *
+ * {@link RepoExistence} と同じく、行動の単位でケースを分ける。`Unclassified` は「ユーザーに
+ * 書ける行動が無い」ことを表す明示的なケースで、呼び出し側はこれを文言へ潰さず defect の
+ * まま運ぶ（{@link githubApiFailure} が受け取れないシグネチャになっている）。
+ *
+ * ライフサイクル: {@link classifyGitHubApiFailure} が例外から作り、コマンド層が
+ * {@link githubApiFailure} で `ZikuFailure` へ変換する。
+ */
+export type GitHubApiFailure =
+  /** 付与したトークンを拒否された (401)。人がトークンを直すまで結果は変わらない。 */
+  | { readonly _tag: "AuthRejected"; readonly detail: string }
+  /** クォータを使い切った、または連投を弾かれた。待てば解ける。 */
+  | { readonly _tag: "RateLimited"; readonly resetAt: Date | undefined }
+  /** トークンは通ったが操作を拒否された (403)。権限か fork の可否が足りない。 */
+  | { readonly _tag: "PermissionDenied"; readonly detail: string }
+  /** GitHub へ届かなかった (名前解決失敗・接続断・タイムアウト)。 */
+  | { readonly _tag: "Unreachable"; readonly detail: string }
+  /** 上のどれでもない。行動を書けないので、文言に潰さず原因ごと見せる側へ回す。 */
+  | { readonly _tag: "Unclassified" };
+
+/**
+ * GitHub API 呼び出しが投げた例外を {@link GitHubApiFailure} へ分類する。
+ *
+ * 接続断をステータスで見分けない理由: Octokit は fetch の失敗も `RequestError` の status 500
+ * に包み直すため、ステータスだけでは GitHub が返した 5xx と区別できない。接続断は例外チェーンに
+ * 残る errno（`ENOTFOUND` 等）で判定する。
+ *
+ * GitHub が返した 5xx を分類しないのは、一時障害と ziku が送った不正なリクエストが同じ形で
+ * 届き、「待てば直る」と言い切れないため。原因を見せる側（defect）に残す。
+ */
+export function classifyGitHubApiFailure(cause: unknown): GitHubApiFailure {
+  const detail = cause instanceof Error ? cause.message : String(cause);
+
+  return match(httpStatusOf(cause))
+    .with(401, (): GitHubApiFailure => ({ _tag: "AuthRejected", detail }))
+    .with(429, (): GitHubApiFailure => ({ _tag: "RateLimited", resetAt: rateLimitResetOf(cause) }))
+    .with(
+      403,
+      (): GitHubApiFailure =>
+        isRateLimitResponse(cause)
+          ? { _tag: "RateLimited", resetAt: rateLimitResetOf(cause) }
+          : { _tag: "PermissionDenied", detail },
+    )
+    .otherwise(
+      (): GitHubApiFailure =>
+        isNetworkFailure(cause) ? { _tag: "Unreachable", detail } : { _tag: "Unclassified" },
+    );
+}
+
+/**
+ * 分類済みの GitHub API 失敗を、ユーザー向けの失敗へ変換する。
+ *
+ * @param context.operation 何をしようとして失敗したか（"create a pull request" 等）。
+ *   文中に埋め込むので動詞から始める。
+ * @param context.authenticated トークンを付けて呼んだか。レート制限の案内が変わる。
+ * @param context.cause 元の例外。原因を捨てないため必ず渡す。
+ */
+export function githubApiFailure(
+  failure: Exclude<GitHubApiFailure, { readonly _tag: "Unclassified" }>,
+  context: { readonly operation: string; readonly authenticated: boolean; readonly cause: unknown },
+): ZikuFailure {
+  const options = { cause: context.cause };
+
+  return match(failure)
+    .with({ _tag: "AuthRejected" }, (f) =>
+      zikuFailure({ kind: "GitHubAuthRejected", detail: f.detail }, options),
+    )
+    .with({ _tag: "RateLimited" }, (f) =>
+      zikuFailure(
+        {
+          kind: "GitHubRateLimited",
+          authenticated: context.authenticated,
+          resetAt: f.resetAt,
+        },
+        options,
+      ),
+    )
+    .with({ _tag: "PermissionDenied" }, (f) =>
+      zikuFailure(
+        { kind: "GitHubPermissionDenied", operation: context.operation, detail: f.detail },
+        options,
+      ),
+    )
+    .with({ _tag: "Unreachable" }, (f) =>
+      zikuFailure(
+        { kind: "GitHubUnreachable", operation: context.operation, detail: f.detail },
+        options,
+      ),
+    )
+    .exhaustive();
+}
+
+/**
+ * 403 がレート制限かを判定する。
+ *
+ * GitHub は 1 時間あたりのクォータ超過を「`x-ratelimit-remaining: 0`」で、短時間の連投を弾く
+ * secondary rate limit を「`retry-after`」で知らせる。権限不足の 403 はどちらのヘッダも
+ * 持たないので、ヘッダの有無で分けられる。
+ */
+function isRateLimitResponse(cause: unknown): boolean {
+  return (
+    responseHeaderOf(cause, "x-ratelimit-remaining") === "0" ||
+    responseHeaderOf(cause, "retry-after") !== undefined
+  );
+}
+
+/**
+ * レート制限が解ける時刻。読めるヘッダが無ければ undefined（残り時間を出さない）。
+ *
+ * `retry-after` は「あと何秒」、`x-ratelimit-reset` は「いつ（epoch 秒）」で意味が違うため、
+ * 同じ時刻へ直してから返す。
+ */
+function rateLimitResetOf(cause: unknown): Date | undefined {
+  const retryAfterSeconds = Number(responseHeaderOf(cause, "retry-after"));
+  if (Number.isFinite(retryAfterSeconds)) {
+    return new Date(Date.now() + retryAfterSeconds * 1000);
+  }
+
+  const resetEpoch = Number(responseHeaderOf(cause, "x-ratelimit-reset"));
+  return Number.isFinite(resetEpoch) ? new Date(resetEpoch * 1000) : undefined;
+}
+
+/** 例外に載っているレスポンスヘッダ。Octokit の `RequestError` は小文字の名前で持つ。 */
+function responseHeaderOf(cause: unknown, name: string): string | undefined {
+  const headers = propertyOf(propertyOf(cause, "response"), "headers");
+  const value = propertyOf(headers, name);
+  return typeof value === "string" ? value : undefined;
+}
+
+/** 任意のオブジェクトから自身のプロパティを取り出す。オブジェクトでなければ undefined。 */
+function propertyOf(value: unknown, key: string): unknown {
+  if (typeof value !== "object" || value === null) return undefined;
+  return Object.getOwnPropertyDescriptor(value, key)?.value;
+}
+
+/**
+ * GitHub へ届かなかったことを示す errno。
+ *
+ * 名前解決・接続・タイムアウトの失敗だけを挙げる。いずれも「接続を確かめて実行し直す」で
+ * 同じ行動になるので、原因ごとに分けない。
+ */
+const NETWORK_ERROR_CODES: ReadonlySet<string> = new Set([
+  "EAI_AGAIN",
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EPIPE",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+/** 例外チェーンを何段まで辿るか。fetch の失敗は Octokit と undici で 2 段包まれる。 */
+const MAX_CAUSE_DEPTH = 5;
+
+/**
+ * 例外チェーンのどこかに接続失敗の errno があるか調べる。
+ *
+ * チェーンを辿るのは、届かなかった事実が最も外側の例外には残らないため。Octokit は
+ * `RequestError` で、undici は `TypeError: fetch failed` でそれぞれ包み、errno は最も内側に
+ * だけ載る。
+ */
+function isNetworkFailure(cause: unknown): boolean {
+  let current = cause;
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH; depth++) {
+    const code = propertyOf(current, "code");
+    if (typeof code === "string" && NETWORK_ERROR_CODES.has(code)) return true;
+    current = propertyOf(current, "cause");
+  }
+  return false;
 }
 
 /**

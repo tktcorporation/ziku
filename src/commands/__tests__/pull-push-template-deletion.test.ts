@@ -53,13 +53,19 @@ vi.mock("../../utils/untracked", () => ({
   getTotalUntrackedCount: vi.fn(() => 0),
 }));
 
-vi.mock("../../utils/github", () => ({
-  resolveLatestCommitSha: vi.fn(),
-  resolveDefaultBranch: vi.fn(),
-  resolveSourceCommitSha: vi.fn(),
-  getGitHubToken: vi.fn(() => ""),
-  createPullRequest: vi.fn(),
-}));
+// 失敗の分類（classifyGitHubApiFailure / githubApiFailure）は実装を通す。push はこれを
+// 使って例外を振り分けるので、差し替えると分類そのものが消える。
+vi.mock("../../utils/github", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../utils/github")>();
+  return {
+    ...actual,
+    resolveLatestCommitSha: vi.fn(),
+    resolveDefaultBranch: vi.fn(),
+    resolveSourceCommitSha: vi.fn(),
+    getGitHubToken: vi.fn(() => ""),
+    createPullRequest: vi.fn(),
+  };
+});
 
 vi.mock("../../utils/readme", () => ({
   detectAndUpdateReadme: vi.fn(() => Promise.resolve(null)),

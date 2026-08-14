@@ -59,7 +59,25 @@ describe("describeFailure", () => {
     {
       reason: { kind: "GitHubRateLimited", authenticated: true, resetAt: undefined },
       message: "GitHub API rate limit exceeded",
-      hint: /Authenticated quota \(5000\/hr\) exhausted$/,
+      hint: /Authenticated quota \(5000\/hr\) exhausted, or a secondary rate limit was hit$/,
+    },
+    {
+      reason: {
+        kind: "GitHubPermissionDenied",
+        operation: "create a pull request",
+        detail: "Must have admin rights",
+      },
+      message: "GitHub refused to create a pull request: Must have admin rights",
+      hint: /write access[\s\S]*forking/,
+    },
+    {
+      reason: {
+        kind: "GitHubUnreachable",
+        operation: "create a pull request",
+        detail: "getaddrinfo ENOTFOUND api.github.com",
+      },
+      message: "Cannot reach GitHub to create a pull request: getaddrinfo ENOTFOUND api.github.com",
+      hint: /network connection/,
     },
     {
       reason: { kind: "InvalidArgument", argument: "--dirs", value: "nope", expected: "one of a" },
@@ -122,7 +140,7 @@ describe("describeFailure", () => {
         detail: "EACCES",
       },
       message: "Failed to write .ziku/ziku.jsonc: EACCES",
-      hint: /write permissions for \/project/,
+      hint: /write permissions and free space for \/project/,
     },
     {
       reason: { kind: "DryRunBlocked", operation: "Would create template repository a/b" },
