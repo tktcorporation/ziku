@@ -27,13 +27,13 @@ import {
 import type { PullApprovalFlags, ZikuConfigMergeResult } from "../pull-plan";
 import {
   baseAfterDeletions,
+  configBaseHash,
   configContentToWrite,
   finalizeMergedBase,
   hasReadableText,
   isNonInteractive,
   isUnmergedConflict,
   lockNeedsRewrite,
-  mergedConfigBaseHash,
   nextSyncBase,
   planPullChanges,
   resolveDeletionPolicy,
@@ -280,17 +280,43 @@ describe("nextSyncBase", () => {
 });
 
 describe("ZikuConfigMergeResult", () => {
-  it("union マージの対象外なら、base も書き込みも動かさない", () => {
-    const result: ZikuConfigMergeResult = { _tag: "Skip" };
+  /** 「テンプレートが ziku.jsonc を削除し、ローカルには残っている」ハッシュの並び。 */
+  const templateDeletedConfig = syncHashes({
+    baseHashes: hashMap({ ".ziku/ziku.jsonc": "hash-base-config" }),
+    localHashes: hashMap({ ".ziku/ziku.jsonc": "hash-base-config" }),
+  });
 
-    expect(mergedConfigBaseHash(result)).toBeUndefined();
+  it("union マージの対象外なら、書き込まず base はテンプレート側の走査結果に従う", () => {
+    const result: ZikuConfigMergeResult = { _tag: "FollowTemplate" };
+
+    expect(
+      configBaseHash(
+        result,
+        syncHashes({ templateHashes: hashMap({ ".ziku/ziku.jsonc": "hash-template-config" }) }),
+      ),
+    ).toBe("hash-template-config");
     expect(configContentToWrite(result)).toBeUndefined();
+  });
+
+  it("テンプレートが削除しローカルに残るなら、書き込まず base を据え置く", () => {
+    const result: ZikuConfigMergeResult = { _tag: "RetainBase" };
+
+    expect(configBaseHash(result, templateDeletedConfig)).toBe("hash-base-config");
+    expect(configContentToWrite(result)).toBeUndefined();
+  });
+
+  it("両側から消えているなら、据え置く相手がいないので base から落とす", () => {
+    const bothGone = syncHashes({
+      baseHashes: hashMap({ ".ziku/ziku.jsonc": "hash-base-config" }),
+    });
+
+    expect(configBaseHash({ _tag: "RetainBase" }, bothGone)).toBeUndefined();
   });
 
   it("union が現在のローカルと一致するなら、書かずに base だけ揃える", () => {
     const result: ZikuConfigMergeResult = { _tag: "BaseOnly", baseHash: contentHash("hash-union") };
 
-    expect(mergedConfigBaseHash(result)).toBe("hash-union");
+    expect(configBaseHash(result, templateDeletedConfig)).toBe("hash-union");
     expect(configContentToWrite(result)).toBeUndefined();
   });
 
@@ -301,7 +327,7 @@ describe("ZikuConfigMergeResult", () => {
       content: "{}",
     };
 
-    expect(mergedConfigBaseHash(result)).toBe("hash-union");
+    expect(configBaseHash(result, templateDeletedConfig)).toBe("hash-union");
     expect(configContentToWrite(result)).toBe("{}");
   });
 
@@ -338,11 +364,21 @@ describe("lockNeedsRewrite", () => {
     ).toBe(false);
   });
 
-  it("union マージを行っていないなら、記録済みの base とは比べない", () => {
+  it("ziku.jsonc の base を落とすなら、記録済みのエントリを消すために書き直す", () => {
     expect(
       lockNeedsRewrite({
         configBaseHash: undefined,
         recordedConfigBaseHash: contentHash("hash-old"),
+        hasStaleBaseEntries: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("ziku.jsonc が base に載らない状態のままなら書き直さない", () => {
+    expect(
+      lockNeedsRewrite({
+        configBaseHash: undefined,
+        recordedConfigBaseHash: undefined,
         hasStaleBaseEntries: false,
       }),
     ).toBe(false);
@@ -370,7 +406,7 @@ describe("planPullChanges", () => {
         deletedWithLocalEdits: repoRelPaths(["e.txt"]),
       }),
       hashes: syncHashes({ localHashes: hashMap({ "d.txt": "hash-d", "e.txt": "hash-e" }) }),
-      configSync: { _tag: "Skip" },
+      configSync: { _tag: "FollowTemplate" },
     });
 
     expect(plan.totalChanges).toBe(5);
@@ -380,7 +416,7 @@ describe("planPullChanges", () => {
     const plan = planPullChanges({
       files: classification({ deletedFiles: repoRelPaths(["gone.txt"]) }),
       hashes: syncHashes({}),
-      configSync: { _tag: "Skip" },
+      configSync: { _tag: "FollowTemplate" },
     });
 
     expect(plan.totalChanges).toBe(0);
@@ -416,7 +452,7 @@ describe("planPullChanges", () => {
       hashes: syncHashes({
         localHashes: hashMap({ "kept.txt": "hash-k", "edited.txt": "hash-e" }),
       }),
-      configSync: { _tag: "Skip" },
+      configSync: { _tag: "FollowTemplate" },
     });
 
     expect(plan.deletionCandidates).toEqual(["gone.txt", "kept.txt", "edited.txt"]);
@@ -444,10 +480,60 @@ describe("planPullChanges", () => {
     const plan = planPullChanges({
       files: classification({}),
       hashes: syncHashes({ templateHashes }),
-      configSync: { _tag: "Skip" },
+      configSync: { _tag: "FollowTemplate" },
     });
 
     expect(plan.advancedBase).toEqual(templateHashes);
+  });
+
+  it("テンプレートが消した ziku.jsonc は、ローカルに残る限りベースを据え置く", () => {
+    // 据え置かないと次の分類が localOnly になり、`push --yes` が確認なしにテンプレートへ
+    // 設定ファイルを復活させる（テンプレートを使う全プロジェクトへ配られる）。
+    const plan = planPullChanges({
+      files: classification({ autoUpdate: repoRelPaths(["a.txt"]) }),
+      hashes: syncHashes({
+        baseHashes: hashMap({ "a.txt": "hash-a", ".ziku/ziku.jsonc": "hash-base-config" }),
+        localHashes: hashMap({ "a.txt": "hash-a", ".ziku/ziku.jsonc": "hash-base-config" }),
+        templateHashes: hashMap({ "a.txt": "hash-t" }),
+      }),
+      configSync: { _tag: "RetainBase" },
+    });
+
+    expect(plan.advancedBase).toEqual({
+      "a.txt": "hash-t",
+      ".ziku/ziku.jsonc": "hash-base-config",
+    });
+  });
+
+  it("ローカルからも消えた ziku.jsonc は、ベースからも落とす", () => {
+    const plan = planPullChanges({
+      files: classification({ autoUpdate: repoRelPaths(["a.txt"]) }),
+      hashes: syncHashes({
+        baseHashes: hashMap({ "a.txt": "hash-a", ".ziku/ziku.jsonc": "hash-base-config" }),
+        localHashes: hashMap({ "a.txt": "hash-a" }),
+        templateHashes: hashMap({ "a.txt": "hash-t" }),
+      }),
+      configSync: { _tag: "RetainBase" },
+    });
+
+    expect(plan.advancedBase).toEqual({ "a.txt": "hash-t" });
+    expect(plan.rewriteLock).toBe(true);
+  });
+
+  it("テンプレートが消した ziku.jsonc を据え置くだけなら、lock を書き直さない", () => {
+    // 据え置いた結果が記録済みの base と同じなら、書き直す理由が無い。他に変更が無ければ
+    // pull は lock に触れずに終わる。
+    const plan = planPullChanges({
+      files: classification({}),
+      hashes: syncHashes({
+        baseHashes: hashMap({ ".ziku/ziku.jsonc": "hash-base-config" }),
+        localHashes: hashMap({ ".ziku/ziku.jsonc": "hash-base-config" }),
+      }),
+      configSync: { _tag: "RetainBase" },
+    });
+
+    expect(plan.totalChanges).toBe(0);
+    expect(plan.rewriteLock).toBe(false);
   });
 
   it("見せる変更が無くても、ziku.jsonc の base が変わるなら lock を書き直す", () => {
@@ -465,7 +551,7 @@ describe("planPullChanges", () => {
     const plan = planPullChanges({
       files: classification({ deletedFiles: repoRelPaths(["gone.txt"]) }),
       hashes: syncHashes({ baseHashes: hashMap({ "gone.txt": "hash-gone" }) }),
-      configSync: { _tag: "Skip" },
+      configSync: { _tag: "FollowTemplate" },
     });
 
     expect(plan.totalChanges).toBe(0);
@@ -476,7 +562,7 @@ describe("planPullChanges", () => {
     const plan = planPullChanges({
       files: classification({}),
       hashes: syncHashes({ baseHashes: hashMap({ "a.txt": "hash-a" }) }),
-      configSync: { _tag: "Skip" },
+      configSync: { _tag: "FollowTemplate" },
     });
 
     expect(plan.totalChanges).toBe(0);

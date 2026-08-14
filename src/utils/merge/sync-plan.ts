@@ -16,7 +16,7 @@
  * 返すアクションからしか導かず、status の表示カテゴリ（{@link zikuConfigStatusCategory}）は
  * その push の結論からしか導かない。分岐が枝分かれしないので、片方だけが直った状態を作れない。
  */
-import { match } from "ts-pattern";
+import { P, match } from "ts-pattern";
 import type { RepoRelPath } from "../../modules/schemas";
 import type { ConfigDrift } from "../config-merge";
 import { ZIKU_CONFIG_FILE, classifySyncPath } from "../ziku-config";
@@ -93,10 +93,34 @@ export function partitionSyncPlan(classification: FileClassification): SyncPlan 
   };
 }
 
-/** pull における設定ファイルの扱い。 */
+/**
+ * pull における設定ファイルの扱い。
+ *
+ * ローカルの内容をどうするかと、lock の同期ベースをどうするかを 1 つの値で表す。「マージ
+ * しない」だけを表す値を置くと、ベースの扱いは表明されないまま残り、pull のベース計算
+ * （`commands/pull-plan.ts` の `configBaseHash`）が既定として持つ「テンプレートの走査結果に
+ * 従う」へ黙って落ちる。設定ファイルは仕分けの時点で通常の同期フロー（{@link SyncPlan} の
+ * `files`）から外れているため、その既定を打ち消す分岐がどこにも無い。
+ */
 export type ZikuConfigPullAction =
-  /** 触らない。テンプレート側の削除も、ローカルにしかないパターンも、pull では何もしない。 */
-  | { readonly _tag: "Skip" }
+  /**
+   * ローカルの内容は触らず、ベースはテンプレートの走査結果に従う。
+   *
+   * テンプレートに設定ファイルがあり、union を計算してもローカルの内容が変わらない状態。
+   */
+  | { readonly _tag: "FollowTemplate" }
+  /**
+   * ローカルの内容は触らず、ベースは前回の値を据え置く。
+   *
+   * テンプレートが設定ファイルを削除した状態。削除は伝播しないのでローカルには残るが、
+   * ベースをテンプレートの走査結果（エントリ無し）まで進めると、次の分類は
+   * 「ベース無・ローカル有・テンプレート無」＝ `localOnly` になる。`localOnly` は push の
+   * 既定送信集合で、`restoresTemplateDeletion`（テンプレートの削除を取り消す操作だと識別
+   * するための集合）にも入らないため、次の `ziku push --yes` が確認なしにテンプレートへ
+   * 設定ファイルを復活させる。ベースを据え置けば分類は `deletedWithLocalEdits` のまま残り、
+   * その識別が効き続ける。
+   */
+  | { readonly _tag: "RetainBase" }
   /** テンプレート側の追加を取り込むため、加法 union を計算してローカルへ反映する。 */
   | { readonly _tag: "UnionMerge" };
 
@@ -126,16 +150,18 @@ export interface ZikuConfigActions {
   readonly push: ZikuConfigPushAction;
 }
 
-const SKIP_BOTH: ZikuConfigActions = { pull: { _tag: "Skip" }, push: { _tag: "Skip" } };
+/** どちらの方向にも動かさず、ベースはテンプレートの走査結果に従う。 */
+const NO_SYNC: ZikuConfigActions = { pull: { _tag: "FollowTemplate" }, push: { _tag: "Skip" } };
 
 /**
  * 分類カテゴリごとに、pull と push が設定ファイルに対して行うことを決める。
  *
  * pull が取り込むのは、テンプレートだけが変えた（autoUpdate）か双方が変えた（conflicts）
  * 場合だけ。他のカテゴリでは union がローカルの内容と一致するので、読み書きせず何もしない。
- * テンプレート側の削除（deletedFiles / deletedWithLocalEdits）で pull が `Skip` を返すのが
+ * テンプレート側の削除（deletedFiles / deletedWithLocalEdits）でローカルの内容を触らないのが
  * 「削除は伝播しない」の実体で、ローカルの制御ファイルを消して以降のコマンドを未初期化に
- * しない。
+ * しない。そのうえで pull が `RetainBase` を返し、削除を伝播しないという決定が lock の
+ * ベースにも表れるようにする（{@link ZikuConfigPullAction}）。
  *
  * push が送るのはローカルの生の内容ではなく加法 union。生の内容を送ると、ローカルが
  * パターンを削除していた場合にテンプレート側のパターンまで消え、全下流のプロジェクトへ
@@ -149,7 +175,7 @@ const SKIP_BOTH: ZikuConfigActions = { pull: { _tag: "Skip" }, push: { _tag: "Sk
  */
 export function zikuConfigActions(state: ZikuConfigState): ZikuConfigActions {
   return match(state)
-    .with({ _tag: "Untracked" }, (): ZikuConfigActions => SKIP_BOTH)
+    .with({ _tag: "Untracked" }, (): ZikuConfigActions => NO_SYNC)
     .with(
       { _tag: "Tracked" },
       ({ category }): ZikuConfigActions =>
@@ -171,24 +197,22 @@ export function zikuConfigActions(state: ZikuConfigState): ZikuConfigActions {
           .with(
             "localOnly",
             (): ZikuConfigActions => ({
-              pull: { _tag: "Skip" },
+              pull: { _tag: "FollowTemplate" },
               push: { _tag: "SendUnion", restoresTemplateDeletion: false },
             }),
           )
           .with(
             "deletedWithLocalEdits",
             (): ZikuConfigActions => ({
-              pull: { _tag: "Skip" },
+              pull: { _tag: "RetainBase" },
               push: { _tag: "SendUnion", restoresTemplateDeletion: true },
             }),
           )
           .with(
-            "newFiles",
             "deletedFiles",
-            "deletedLocally",
-            "unchanged",
-            (): ZikuConfigActions => SKIP_BOTH,
+            (): ZikuConfigActions => ({ pull: { _tag: "RetainBase" }, push: { _tag: "Skip" } }),
           )
+          .with("newFiles", "deletedLocally", "unchanged", (): ZikuConfigActions => NO_SYNC)
           .exhaustive(),
     )
     .exhaustive();
@@ -306,7 +330,7 @@ export function zikuConfigStatusCategory(
  */
 function pullWritesLocal(action: ZikuConfigPullAction, drift: ConfigDrift): boolean {
   return match(action)
-    .with({ _tag: "Skip" }, () => false)
+    .with({ _tag: P.union("FollowTemplate", "RetainBase") }, () => false)
     .with({ _tag: "UnionMerge" }, () => drift.pullRelevant)
     .exhaustive();
 }

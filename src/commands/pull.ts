@@ -1,7 +1,7 @@
 import { readFile, rm } from "node:fs/promises";
 import { defineCommand } from "citty";
 import { Effect, Option } from "effect";
-import { match } from "ts-pattern";
+import { P, match } from "ts-pattern";
 import { withCleanup } from "../effect-helpers";
 import type { ZikuFailure } from "../errors";
 import { describeConflictLines, zikuFailure } from "../errors";
@@ -360,17 +360,24 @@ function resolveConfigMerge(
   templateDir: AbsPath,
   action: ZikuConfigPullAction,
 ): Promise<ZikuConfigMergeResult> {
-  return match(action)
-    .with({ _tag: "Skip" }, (): Promise<ZikuConfigMergeResult> => Promise.resolve({ _tag: "Skip" }))
-    .with({ _tag: "UnionMerge" }, async (): Promise<ZikuConfigMergeResult> => {
-      const merged = await computeMergedZikuConfig({ targetDir, templateDir });
-      const currentLocal = await readFile(joinAbs(targetDir, ZIKU_CONFIG_FILE), "utf-8");
-      const baseHash = hashContent(merged);
-      return merged === currentLocal
-        ? { _tag: "BaseOnly", baseHash }
-        : { _tag: "Write", baseHash, content: merged };
-    })
-    .exhaustive();
+  return (
+    match(action)
+      // 内容を読まない扱いは、そのまま結末になる。base の行き先はアクションが既に表明して
+      // いるので、ここで別の値へ翻訳する余地を作らない。
+      .with(
+        { _tag: P.union("FollowTemplate", "RetainBase") },
+        (passthrough): Promise<ZikuConfigMergeResult> => Promise.resolve(passthrough),
+      )
+      .with({ _tag: "UnionMerge" }, async (): Promise<ZikuConfigMergeResult> => {
+        const merged = await computeMergedZikuConfig({ targetDir, templateDir });
+        const currentLocal = await readFile(joinAbs(targetDir, ZIKU_CONFIG_FILE), "utf-8");
+        const baseHash = hashContent(merged);
+        return merged === currentLocal
+          ? { _tag: "BaseOnly", baseHash }
+          : { _tag: "Write", baseHash, content: merged };
+      })
+      .exhaustive()
+  );
 }
 
 /**

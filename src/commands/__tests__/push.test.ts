@@ -210,6 +210,7 @@ const { getGitHubToken, createPullRequest, fetchDefaultBranch } =
   await import("../../utils/github");
 const {
   confirmAction,
+  generatePrBody,
   inputGitHubToken,
   inputPrTitle,
   inputPrBody,
@@ -217,6 +218,8 @@ const {
   selectUntrackedToTrack,
   logUntrackedFilesNotice,
 } = await import("../../ui/prompts");
+// PR 本文の中身そのものを見るテストは、固定値を返すモックではなく素の実装へ差し替える。
+const actualPrompts = await vi.importActual<typeof import("../../ui/prompts")>("../../ui/prompts");
 const { detectUntrackedFiles } = await import("../../utils/untracked");
 const { renderTemplateReadme, detectReadmeUpdate } = await import("../../utils/readme");
 const { log, logDiffSummary } = await import("../../ui/renderer");
@@ -234,6 +237,7 @@ const mockGetGitHubToken = vi.mocked(getGitHubToken);
 const mockCreatePullRequest = vi.mocked(createPullRequest);
 const mockFetchDefaultBranch = vi.mocked(fetchDefaultBranch);
 const mockConfirmAction = vi.mocked(confirmAction);
+const mockGeneratePrBody = vi.mocked(generatePrBody);
 const mockInputGitHubToken = vi.mocked(inputGitHubToken);
 const mockInputPrTitle = vi.mocked(inputPrTitle);
 const mockInputPrBody = vi.mocked(inputPrBody);
@@ -602,6 +606,27 @@ describe("pushCommand", () => {
         expect(summary).toContain("(auto-updated)");
       });
 
+      it("自動更新した README は PR 本文にも並ぶ", async () => {
+        // 本文は送信対象から導く。選択そのものから作ると、送信直前に足した README が
+        // PR には載るのに本文のファイル一覧には出ない。
+        setupSinglePushableFile();
+        mockRenderTemplateReadme.mockResolvedValueOnce(rebuiltReadme);
+        mockGeneratePrBody.mockImplementationOnce(actualPrompts.generatePrBody);
+
+        await (pushCommand.run as any)({
+          args: { dir: "/test", dryRun: false, yes: true, edit: false },
+          rawArgs: [],
+          cmd: pushCommand,
+        });
+
+        const prArg = mockCreatePullRequest.mock.calls[0]?.[1];
+        expect(prArg?.body).toContain("**Auto-updated:**");
+        expect(prArg?.body).toContain("`README.md`");
+        // 利用者が選んだファイルは変更として並ぶ
+        expect(prArg?.body).toContain("**Added:**");
+        expect(prArg?.body).toContain("`file.txt`");
+      });
+
       it("README が追跡ファイルとして送信対象に入っていても、同じパスは 1 度しか送らない", async () => {
         // 同じパスを 2 回送ると、2 回目の書き込みが 1 回目で変わった blob SHA と食い違って
         // 弾かれる。組み直した内容で既存のエントリを置き換える。
@@ -717,7 +742,7 @@ describe("pushCommand", () => {
       });
     });
 
-    it("--dry-run + --files はプレビューを指定ファイルだけに絞る（#81）", async () => {
+    it("--dry-run + --files はプレビューを指定ファイルだけに絞る", async () => {
       // push 候補を複数用意し、--files で 1 つだけ指定する
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
@@ -748,7 +773,7 @@ describe("pushCommand", () => {
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
-    it("--dry-run + --files で存在しないファイルは not found を警告する（#81）", async () => {
+    it("--dry-run + --files で存在しないファイルは not found を警告する", async () => {
       setupPushableFiles([{ path: repoRelPath("a.txt"), type: "added", localContent: "a" }]);
 
       await (pushCommand.run as any)({
@@ -764,7 +789,7 @@ describe("pushCommand", () => {
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
-    it("--dry-run は未解決の衝突を既定でプレビューから除外する（#81）", async () => {
+    it("--dry-run は未解決の衝突を既定でプレビューから除外する", async () => {
       const { effect } = mockContext({
         lock: lockWith({ hashes: { "conflict.txt": "abc123" } }),
       });
@@ -810,7 +835,7 @@ describe("pushCommand", () => {
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
-    it("--dry-run + --files で衝突ファイルを指定すると push が中断する旨を警告する（#81）", async () => {
+    it("--dry-run + --files で衝突ファイルを指定すると push が中断する旨を警告する", async () => {
       const { effect } = mockContext({
         lock: lockWith({ hashes: { "conflict.txt": "abc123" } }),
       });
@@ -3271,7 +3296,7 @@ describe("未追跡ファイルの追跡フロー", () => {
   });
 });
 
-describe("--files でファイル本体だけを指定した場合の ziku.jsonc 自動同梱（#90）", () => {
+describe("--files でファイル本体だけを指定した場合の ziku.jsonc 自動同梱", () => {
   beforeEach(() => {
     vol.reset();
     resetPushMocks();
@@ -3324,7 +3349,7 @@ describe("--files でファイル本体だけを指定した場合の ziku.jsonc
       number: 1,
     });
 
-    // --files はスキル本体だけを指定し、ziku.jsonc は含めない（issue #90 の再現手順）。
+    // --files はスキル本体だけを指定し、ziku.jsonc は含めない。
     await (pushCommand.run as any)({
       args: {
         dir: "/test",
@@ -3342,7 +3367,7 @@ describe("--files でファイル本体だけを指定した場合の ziku.jsonc
     };
     expect(prArg.files.some((f) => f.path === ".claude/skills/new-skill/SKILL.md")).toBe(true);
 
-    // ファイル本体だけでなく ziku.jsonc も push される（#90 の修正）
+    // ファイル本体だけでなく ziku.jsonc も push される
     const configFile = prArg.files.find((f) => f.path === ".ziku/ziku.jsonc");
     expect(configFile).toBeDefined();
     const pushed = JSON.parse(configFile?.content as string);

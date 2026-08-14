@@ -342,9 +342,9 @@ describe("merge", () => {
     });
   });
 
-  describe("threeWayMerge - local/template の非対称性（#148 回帰テスト）", () => {
+  describe("threeWayMerge - local/template の非対称性（回帰テスト）", () => {
     it("コンフリクト時にコンフリクトマーカーを挿入する", () => {
-      // 背景: #148 で引数が逆転し、テンプレート側をベースにしたためローカルのコメントが消えた
+      // 背景: 引数が逆転してテンプレート側がベースになると、ローカルのコメントが消える
       // テキストマージではコメントは通常の行として扱われるため、コンフリクト時はマーカーで保護される
       const base = '{\n  "version": "1.0"\n}';
       const local = '{\n  "version": "2.0-user"\n}';
@@ -1036,9 +1036,9 @@ line2`;
     });
   });
 
-  describe("3-way merge #51 回帰テスト: サイレント上書き・内容二重化の防止", () => {
+  describe("3-way merge の回帰テスト: サイレント上書き・内容二重化の防止", () => {
     it("settings.json: ローカルの true がテンプレートの false で上書きされない", () => {
-      // #51 の再現: base/template で false、local で true に変更
+      // base/template で false、local で true に変更した状態
       const base = JSON.stringify(
         {
           enabledPlugins: {

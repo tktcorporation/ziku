@@ -14,7 +14,7 @@ import { findConflictRegions } from "./conflict-markers";
  * 3-way マージにおけるベース（共通祖先）のファイル内容。
  *
  * 背景: threeWayMerge の引数は全て string だが、base/local/template を
- * 入れ違えるとサイレントに誤った結果を返す（#148 で発生）。
+ * 入れ違えるとサイレントに誤った結果を返す。
  * Zod brand で型レベルで区別し、取り違えをコンパイルエラーにする。
  */
 const BaseContent = z.string().brand("BaseContent");

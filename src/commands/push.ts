@@ -333,8 +333,13 @@ function pushToGitHub(
       try: async () => {
         const token = presetToken || (await inputGitHubToken());
 
-        const suggestedTitle = generatePrTitle([...target.pushableFiles]);
-        const suggestedBody = generatePrBody([...target.pushableFiles]);
+        // README の自動更新も送信対象そのものへ載せる。サマリも PR も同じ集合から作られる。
+        // タイトルと本文はこの後で導く。送信対象へ足したファイルは PR に載るので、足す前の
+        // 集合から文面を作ると PR の中身と本文のファイル一覧が食い違う。
+        const sent = await withTemplateReadme(target, ctx.templateDir);
+
+        const suggestedTitle = generatePrTitle(sent);
+        const suggestedBody = generatePrBody(sent);
 
         const { title, body } = await match(args)
           .with({ message: P.string }, ({ message }) => ({
@@ -343,12 +348,11 @@ function pushToGitHub(
           }))
           .with({ edit: true }, async () => ({
             title: await inputPrTitle(suggestedTitle),
-            body: await inputPrBody(suggestedBody),
+            // 空入力は「本文を編集しない」の意味に採り、送る集合から導いた提案値を使う。
+            // 空のまま送ると、何を送った PR なのかが本文から読めなくなる。
+            body: (await inputPrBody(suggestedBody)) ?? suggestedBody,
           }))
           .otherwise(() => ({ title: suggestedTitle, body: suggestedBody }));
-
-        // README の自動更新も送信対象そのものへ載せる。サマリも PR も同じ集合から作られる。
-        const sent = await withTemplateReadme(target, ctx.templateDir);
 
         // サマリー表示
         const baseSha = baseCommitSha(ctx.lock);
@@ -1027,7 +1031,7 @@ async function warnIfConfigWouldBeAutoIncluded(params: {
   if (relevantPatterns.length === 0) return;
 
   log.warn(
-    `${ZIKU_CONFIG_FILE} would also be pushed — it registers ${relevantPatterns.length} pattern(s) needed by the file(s) above (#90):`,
+    `${ZIKU_CONFIG_FILE} would also be pushed — it registers ${relevantPatterns.length} pattern(s) needed by the file(s) above:`,
   );
   for (const p of relevantPatterns) log.message(`  ${pc.dim("+")} ${p}`);
 }
@@ -1212,7 +1216,7 @@ function renderPropagatedConfig(
 function announceConfigAutoInclude(localOnlyPatterns: readonly GlobPattern[]): void {
   if (localOnlyPatterns.length === 0) return;
   log.info(
-    `Also pushing ${ZIKU_CONFIG_FILE} — it registers ${localOnlyPatterns.length} pattern(s) needed by the file(s) in this push (#90):`,
+    `Also pushing ${ZIKU_CONFIG_FILE} — it registers ${localOnlyPatterns.length} pattern(s) needed by the file(s) in this push:`,
   );
   for (const p of localOnlyPatterns) log.message(`  ${pc.dim("+")} ${p}`);
 }

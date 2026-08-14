@@ -235,7 +235,7 @@ export async function computeMergedZikuConfig(opts: {
  * ローカルの `ziku.jsonc` にのみ存在する include パターンのうち、指定パスのいずれかに
  * 一致するものだけを返す。
  *
- * 背景（#90）: `ziku track <pattern>` は即座にディスクの `ziku.jsonc` にパターンを
+ * 背景: `ziku track <pattern>` は即座にディスクの `ziku.jsonc` にパターンを
  * 書き込む。その後 `ziku push --files=<path>` のようにファイル本体だけを指定すると、
  * `ziku.jsonc` 自体は `--files` に含まれず push 候補から漏れ、パターンがテンプレへ
  * 伝播しない（本体だけテンプレに存在し、他プロジェクトの `pull` が検出できない）。
@@ -290,10 +290,10 @@ export type ScopedZikuConfig =
  * `ziku.jsonc` 文字列を返す。ローカルの `ziku.jsonc` の他のパターンは一切参照しない。
  *
  * `computeMergedZikuConfig` はローカルの `ziku.jsonc` 全体をテンプレと和集合するため、
- * ユーザーが `--files` で明示していないのに ziku.jsonc を自動同梱する場面（#90）で使うと、
- * 今回の push と無関係なローカル限定パターンまで一緒にテンプレへ漏れてしまう
- * （issue #90 で懸念されていたリスク）。この関数はテンプレの内容 + 明示的に渡した
- * 追加分だけを union するため、無関係なパターンを一切巻き込まない。
+ * ユーザーが `--files` で明示していないのに ziku.jsonc を自動同梱する場面で使うと、
+ * 今回の push と無関係なローカル限定パターンまで一緒にテンプレへ漏れてしまう。
+ * この関数はテンプレの内容 + 明示的に渡した追加分だけを union するため、無関係な
+ * パターンを一切巻き込まない。
  *
  * 結果はテンプレートの `ziku.jsonc` を土台に組み立てる（{@link renderUnionInto}）。この
  * 内容はテンプレートへ送るだけでローカルへは書き戻さない（`push-plan.ts` の

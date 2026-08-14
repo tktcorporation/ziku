@@ -118,22 +118,26 @@ describe("zikuConfigPullAction", () => {
   });
 
   it.each(["deletedFiles", "deletedWithLocalEdits"] as const)(
-    "テンプレ側の削除（%s）は伝播しない",
+    "テンプレ側の削除（%s）は伝播せず、ベースも据え置く",
     (category) => {
       // ローカルの制御ファイルを消すと、以降のコマンドがプロジェクトを未初期化として扱う。
-      expect(zikuConfigPullAction({ _tag: "Tracked", category })).toEqual({ _tag: "Skip" });
+      // ベースをテンプレ側（エントリ無し）へ進めると、次の分類が localOnly に化けて
+      // push --yes が確認なしにテンプレートへ設定ファイルを復活させる。
+      expect(zikuConfigPullAction({ _tag: "Tracked", category })).toEqual({ _tag: "RetainBase" });
     },
   );
 
   it.each(["localOnly", "newFiles", "deletedLocally", "unchanged"] as const)(
-    "取り込むものが無い %s では何もしない",
+    "取り込むものが無い %s では内容を触らず、ベースはテンプレ側の走査結果に従う",
     (category) => {
-      expect(zikuConfigPullAction({ _tag: "Tracked", category })).toEqual({ _tag: "Skip" });
+      expect(zikuConfigPullAction({ _tag: "Tracked", category })).toEqual({
+        _tag: "FollowTemplate",
+      });
     },
   );
 
   it("分類に現れなければ何もしない", () => {
-    expect(zikuConfigPullAction({ _tag: "Untracked" })).toEqual({ _tag: "Skip" });
+    expect(zikuConfigPullAction({ _tag: "Untracked" })).toEqual({ _tag: "FollowTemplate" });
   });
 });
 

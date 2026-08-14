@@ -10,6 +10,8 @@ import { Effect } from "effect";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { match } from "ts-pattern";
+import type { PushSend } from "../commands/push-plan";
+import { pushSummaryRows } from "../commands/push-plan";
 import type {
   GlobPattern,
   FileDiff,
@@ -328,12 +330,60 @@ export async function inputPrTitle(defaultTitle?: string): Promise<string> {
 }
 
 /**
- * 変更ファイル一覧から PR タイトルを自動生成する。
+ * PR の文面が使うファイル一覧を、種別ごとに分けたもの。
  */
-export function generatePrTitle(files: FileDiff[]): string {
-  const added = files.filter((f) => f.type === "added");
-  const modified = files.filter((f) => f.type === "modified");
-  const deleted = files.filter((f) => f.type === "deleted");
+interface PrFileGroups {
+  readonly added: readonly RepoRelPath[];
+  readonly modified: readonly RepoRelPath[];
+  readonly deleted: readonly RepoRelPath[];
+  /** 選択によらず ziku が付け足したファイル。 */
+  readonly autoUpdated: readonly RepoRelPath[];
+}
+
+/**
+ * 送信対象を、PR の文面が使うグループへ振り分ける。
+ *
+ * 種別は選択時の差分ではなく、実際に送る内容から決め直したもの（{@link pushSummaryRows}）を
+ * 使う。端末のサマリと PR の文面が同じ行から作られるので、同じ push について両者が別の
+ * ファイル一覧を示すことがない。
+ */
+function groupPrFiles(send: PushSend): PrFileGroups {
+  const added: RepoRelPath[] = [];
+  const modified: RepoRelPath[] = [];
+  const deleted: RepoRelPath[] = [];
+  const autoUpdated: RepoRelPath[] = [];
+
+  for (const row of pushSummaryRows(send)) {
+    match(row)
+      .with({ _tag: "Change" }, ({ diff }) => {
+        match(diff.type)
+          .with("added", () => added.push(diff.path))
+          .with("modified", () => modified.push(diff.path))
+          .with("deleted", () => deleted.push(diff.path))
+          .exhaustive();
+      })
+      .with({ _tag: "AutoUpdated" }, ({ path }) => {
+        autoUpdated.push(path);
+      })
+      .exhaustive();
+  }
+
+  return { added, modified, deleted, autoUpdated };
+}
+
+/**
+ * 送信対象から PR タイトルを組み立てる。
+ *
+ * 引数を {@link PushSend} に限るのは、PR の文面を「実際に送る集合」以外から組み立てられ
+ * ないようにするため。選択そのものを受け取れると、送信直前に足したファイルが載らない・
+ * 送るのをやめたファイルが載る、という食い違いを型が止められない。
+ *
+ * 名前に採るのは ziku が付け足したファイルではなく、利用者が変えたファイルのモジュール名。
+ * 付け足す側は導出物（`ziku.jsonc` から組み直す README など）で、その push が何をする
+ * ものかを表さない。
+ */
+export function generatePrTitle(send: PushSend): string {
+  const { added, modified, deleted } = groupPrFiles(send);
 
   // 変更種別に応じた prefix
   const prefix =
@@ -341,8 +391,8 @@ export function generatePrTitle(files: FileDiff[]): string {
 
   // ファイルパスからモジュール名（トップディレクトリ）を抽出
   const moduleNames = new Set<string>();
-  for (const f of files) {
-    const firstSegment = f.path.split("/")[0];
+  for (const path of [...added, ...modified, ...deleted]) {
+    const firstSegment = path.split("/")[0];
     moduleNames.add(firstSegment);
   }
 
@@ -351,7 +401,7 @@ export function generatePrTitle(files: FileDiff[]): string {
     const action = added.length > 0 && modified.length === 0 ? "add" : "update";
     return `${prefix}: ${action} ${names[0]} config`;
   }
-  if (names.length <= 3) {
+  if (names.length > 0 && names.length <= 3) {
     return `${prefix}: update ${names.join(", ")} config`;
   }
   return `${prefix}: update template configuration`;
@@ -372,38 +422,24 @@ export async function inputPrBody(defaultBody?: string): Promise<string | undefi
 }
 
 /**
- * 変更ファイル一覧から PR 本文を自動生成する。
+ * 送信対象から PR 本文を組み立てる。
+ *
+ * 引数を {@link PushSend} に限る理由は {@link generatePrTitle} と同じ。本文は端末サマリと
+ * 同格の「送る内容の提示」なので、同じ集合からしか作れないようにする。
+ *
+ * 選択によらず ziku が付け足したファイルは `Auto-updated` として別に並べる。利用者が
+ * 選んだ変更と混ぜると、テンプレート側のレビュアーがどれを人が書いたものとして読むべきか
+ * 判断できない。
  */
-export function generatePrBody(files: FileDiff[]): string {
-  const added = files.filter((f) => f.type === "added");
-  const modified = files.filter((f) => f.type === "modified");
-  const deleted = files.filter((f) => f.type === "deleted");
+export function generatePrBody(send: PushSend): string {
+  const { added, modified, deleted, autoUpdated } = groupPrFiles(send);
 
   const sections: string[] = ["## Changes", ""];
 
-  if (added.length > 0) {
-    sections.push("**Added:**");
-    for (const f of added) {
-      sections.push(`- \`${f.path}\``);
-    }
-    sections.push("");
-  }
-
-  if (modified.length > 0) {
-    sections.push("**Modified:**");
-    for (const f of modified) {
-      sections.push(`- \`${f.path}\``);
-    }
-    sections.push("");
-  }
-
-  if (deleted.length > 0) {
-    sections.push("**Deleted:**");
-    for (const f of deleted) {
-      sections.push(`- \`${f.path}\``);
-    }
-    sections.push("");
-  }
+  appendFileList(sections, "**Added:**", added);
+  appendFileList(sections, "**Modified:**", modified);
+  appendFileList(sections, "**Deleted:**", deleted);
+  appendFileList(sections, "**Auto-updated:**", autoUpdated);
 
   sections.push("---");
   sections.push(
@@ -411,6 +447,14 @@ export function generatePrBody(files: FileDiff[]): string {
   );
 
   return sections.join("\n");
+}
+
+/** 見出しとファイル一覧を本文へ足す。空のグループは見出しごと出さない。 */
+function appendFileList(sections: string[], heading: string, paths: readonly RepoRelPath[]): void {
+  if (paths.length === 0) return;
+  sections.push(heading);
+  for (const path of paths) sections.push(`- \`${path}\``);
+  sections.push("");
 }
 
 /** GitHub トークン入力 */

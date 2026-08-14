@@ -31,7 +31,7 @@ import {
 import type { FileOperationResult } from "../../modules/schemas";
 import { repoRelPath } from "../../__tests__/brands";
 
-/** テスト中に process.stdout.isTTY を切り替えるヘルパー（#84 の分岐検証用） */
+/** テスト中に process.stdout.isTTY を切り替えるヘルパー（TTY 分岐の検証用） */
 function setIsTTY(value: boolean): void {
   Object.defineProperty(process.stdout, "isTTY", { value, configurable: true });
 }
@@ -83,7 +83,7 @@ describe("renderer", () => {
   });
 
   describe("withSpinner", () => {
-    // withSpinner は process.stdout.isTTY で挙動を分岐する（#84）。
+    // withSpinner は process.stdout.isTTY で挙動を分岐する。
     // TTY 経路（アニメーション）を検証するため、各テストで isTTY を明示的に切り替える。
     let originalIsTTY: boolean | undefined;
 
@@ -141,7 +141,7 @@ describe("renderer", () => {
       expect(mockSpinner.stop).toHaveBeenCalled();
     });
 
-    it("非 TTY ではスピナーを使わず単一行で開始メッセージを出す（#84）", async () => {
+    it("非 TTY ではスピナーを使わず単一行で開始メッセージを出す", async () => {
       setIsTTY(false);
 
       const result = await withSpinner("loading...", async () => 42);
@@ -154,7 +154,7 @@ describe("renderer", () => {
       expect(p.log.step).toHaveBeenCalledWith("loading...");
     });
 
-    it("非 TTY でタスク失敗時は失敗行を出しエラーを伝播する（#84）", async () => {
+    it("非 TTY でタスク失敗時は失敗行を出しエラーを伝播する", async () => {
       setIsTTY(false);
 
       await expect(

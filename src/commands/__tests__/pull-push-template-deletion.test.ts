@@ -125,6 +125,7 @@ const source: TemplateSource = { kind: "local", path: absPath(TEMPLATE_DIR) };
 
 const CONFIG = `${JSON.stringify({ include: ["*.md"] }, null, 2)}\n`;
 const KEPT_CONTENT = "# Keep\n";
+const UPDATED_KEPT_CONTENT = "# Keep, updated by the template\n";
 const REMOVED_CONTENT = "# Removed from the template\n";
 
 /**
@@ -171,6 +172,32 @@ function setupDeletionGoneLocally(): void {
     [`${TEMPLATE_DIR}/keep.md`]: KEPT_CONTENT,
     [`${PROJECT_DIR}/.ziku/ziku.jsonc`]: CONFIG,
     [`${PROJECT_DIR}/.ziku/lock.json`]: syncedLock(),
+    [`${PROJECT_DIR}/keep.md`]: KEPT_CONTENT,
+  });
+}
+
+/**
+ * 「テンプレートが `.ziku/ziku.jsonc` を削除し、同じ pull で取り込む更新も 1 件ある」状態を作る。
+ *
+ * 更新を 1 件添えるのは、取り込む変更が無い pull は lock を書かずに終わるため。設定ファイルは
+ * 仕分けの時点で通常の同期フローから外れ、削除候補としてベースを据え置く経路を通らないので、
+ * ベースが落ちるかどうかは lock を書く pull でしか現れない。
+ */
+function setupConfigDeletion(): void {
+  const lock = markSynced(
+    createPendingLock({ version: "1.0.0", installedAt: "2024-01-01T00:00:00.000Z", source }),
+    {
+      hashes: hashMap({
+        ".ziku/ziku.jsonc": hashContent(CONFIG),
+        "keep.md": hashContent(KEPT_CONTENT),
+      }),
+    },
+  );
+
+  vol.fromJSON({
+    [`${TEMPLATE_DIR}/keep.md`]: UPDATED_KEPT_CONTENT,
+    [`${PROJECT_DIR}/.ziku/ziku.jsonc`]: CONFIG,
+    [`${PROJECT_DIR}/.ziku/lock.json`]: JSON.stringify(lock, null, 2),
     [`${PROJECT_DIR}/keep.md`]: KEPT_CONTENT,
   });
 }
@@ -278,6 +305,21 @@ describe("テンプレートの削除は pull → push を往復しても復活�
       expect(logged).not.toHaveBeenCalledWith(expect.stringContaining("removed.md"));
     }
     expect(baseHashesOf(currentLock())).not.toHaveProperty("removed.md");
+  });
+
+  it("テンプレートが消した ziku.jsonc は、pull を挟んでも push が送り返さない", async () => {
+    setupConfigDeletion();
+
+    await runPull({ force: false, yes: true });
+
+    // ベースが落ちると次の分類は「ベース無・ローカル有・テンプレート無」＝ localOnly になり、
+    // テンプレートの削除を取り消す操作だという印が付かないまま push の既定選択に入る。
+    expect(baseHashesOf(currentLock())).toHaveProperty(".ziku/ziku.jsonc");
+
+    await runPush();
+
+    // 復活させると、そのプロジェクトの include パターンが加法 union で全プロジェクトへ配られる。
+    expect(vol.existsSync(`${TEMPLATE_DIR}/.ziku/ziku.jsonc`)).toBe(false);
   });
 
   it("削除を承認したファイルはベースから消え、次の pull に出てこない", async () => {

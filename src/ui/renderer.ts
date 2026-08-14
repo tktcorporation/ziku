@@ -55,7 +55,7 @@ export function withSpinner<T>(message: string, task: () => Promise<T>): Promise
   // アニメーションを使わない。@clack の spinner は `process.env.CI === "true"`
   // のときだけフレーム描画を抑制するため、CI 環境変数が無いままパイプに流すと
   // フレーム（◒◐◓◑ + CR）を 80ms 間隔で書き続け、数百行分の制御文字でログを
-  // 埋めてしまう（#84）。非 TTY では開始メッセージを 1 行だけ出し、失敗時のみ
+  // 埋めてしまう。非 TTY では開始メッセージを 1 行だけ出し、失敗時のみ
   // 失敗行を足す。
   if (!process.stdout.isTTY) {
     return runWithoutSpinner(message, task);

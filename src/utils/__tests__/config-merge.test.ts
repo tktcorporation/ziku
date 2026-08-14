@@ -339,7 +339,7 @@ describe("analyzeConfigDrift（union 観点の実差分判定）", () => {
   });
 });
 
-describe("findLocalOnlyPatternsForPaths（#90: 事前追跡パターンの関連性スコープ計算）", () => {
+describe("findLocalOnlyPatternsForPaths（事前追跡パターンの関連性スコープ計算）", () => {
   beforeEach(() => {
     vol.reset();
   });

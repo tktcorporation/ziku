@@ -167,6 +167,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     });
 
@@ -186,6 +187,7 @@ describe("createPullRequest", () => {
         { path: repoRelPath("assets/icon.png"), content: asPushContent(bytes.toString("latin1")) },
       ],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     });
 
@@ -201,6 +203,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("README.md"), content: asPushContent(content) }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     });
 
@@ -218,6 +221,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     });
 
@@ -239,6 +243,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     });
 
@@ -258,6 +263,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     }).catch((e: unknown) => e);
 
@@ -275,6 +281,7 @@ describe("createPullRequest", () => {
         { path: repoRelPath("file2.txt"), content: asPushContent("content2") },
       ],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     });
 
@@ -294,6 +301,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("existing.txt"), content: asPushContent("new content") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     });
 
@@ -310,6 +318,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "develop",
     });
 
@@ -343,28 +352,13 @@ describe("createPullRequest", () => {
     );
   });
 
-  it("body がない場合は自動生成する", async () => {
-    await createPullRequest("token", {
-      owner: "owner",
-      repo: "repo",
-      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
-      title: "Test PR",
-      baseBranch: "main",
-    });
-
-    expect(mockPullsCreate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        body: expect.stringContaining("file.txt"),
-      }),
-    );
-  });
-
   it("正しいヘッドブランチ形式で PR を作成する", async () => {
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     });
 
@@ -383,6 +377,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     });
 
@@ -404,6 +399,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     }).then(
       () => expect.unreachable("PR が作成されてしまった"),
@@ -434,6 +430,7 @@ describe("createPullRequest", () => {
       files: [],
       deletions: [{ path: deletablePath("to-delete.txt") }],
       title: "Test PR with deletion",
+      body: "Test body",
       baseBranch: "main",
     });
 
@@ -457,6 +454,7 @@ describe("createPullRequest", () => {
       files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       deletions: [{ path: deletablePath("nonexistent.txt") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     }).then(
       () => expect.unreachable("PR が作成されてしまった"),
@@ -491,6 +489,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath(".ziku/ziku.jsonc"), content: asPushContent("defaults") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
       onExistingFiles: "fail",
     }).then(
@@ -517,6 +516,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath(".ziku/ziku.jsonc"), content: asPushContent("defaults") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
       onExistingFiles: "fail",
     });
@@ -538,6 +538,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("existing.txt"), content: asPushContent("new content") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     });
 
@@ -555,6 +556,7 @@ describe("createPullRequest", () => {
       files: [],
       deletions: [{ path: deletablePath("gone.txt") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     }).catch(() => undefined);
 
@@ -576,6 +578,7 @@ describe("createPullRequest", () => {
       files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       deletions: [{ path: deletablePath("present.txt") }, { path: deletablePath("gone.txt") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     }).catch(() => undefined);
 
@@ -593,6 +596,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     }).then(
       () => expect.unreachable("PR が作成されてしまった"),
@@ -617,6 +621,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     }).catch((e: unknown) => e);
 
@@ -639,6 +644,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     });
 
@@ -656,6 +662,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     });
 
@@ -682,6 +689,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     });
 
@@ -707,6 +715,7 @@ describe("createPullRequest", () => {
       files: [],
       deletions: [{ path: deletablePath("to-delete.txt") }],
       title: "Test PR with deletion",
+      body: "Test body",
       baseBranch: "main",
     });
 
@@ -721,6 +730,7 @@ describe("createPullRequest", () => {
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: asPushContent("Hello, World!") }],
       title: "Test PR",
+      body: "Test body",
       baseBranch: "main",
     });
 

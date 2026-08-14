@@ -24,6 +24,7 @@ import type {
 } from "../modules/schemas";
 import { markSynced, resolveMerge } from "../modules/schemas";
 import type { FileClassification } from "../utils/merge";
+import { repoRelPaths } from "../utils/paths";
 import type { SyncHashes } from "../utils/sync-analysis";
 import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
 
@@ -79,20 +80,44 @@ export function isNonInteractive(flags: PullApprovalFlags): boolean {
  * ノイズになる。
  *
  * base と書き込みを別々の optional として持つと「書き込むが base を揃えない」という、どの
- * 経路も作らない組み合わせが表現できてしまうので、成立する 3 通りだけを持つ union にする。
+ * 経路も作らない組み合わせが表現できてしまうので、成立する組み合わせだけを持つ union にする。
+ *
+ * どのケースも base の行き先を必ず表明する。設定ファイルは仕分けの時点で通常の同期フロー
+ * （`SyncPlan.files`）から外れており、削除候補としてベースを据え置く経路
+ * （{@link baseAfterDeletions}）を通らない。「マージしない」としか言わない値を置くと、その
+ * ファイルの base を決める分岐がどこにも無くなり、テンプレートの走査結果がそのまま base に
+ * なる。テンプレートが削除した設定ファイルは走査結果に現れないので、エントリが黙って落ちる。
  */
 export type ZikuConfigMergeResult =
-  /** union マージの対象外。base も内容も動かさない。 */
-  | { readonly _tag: "Skip" }
+  /** union マージの対象外。base はテンプレートの走査結果に従う。 */
+  | { readonly _tag: "FollowTemplate" }
+  /** テンプレートが設定ファイルを削除した。内容は触らず、base は前回の値を据え置く。 */
+  | { readonly _tag: "RetainBase" }
   /** union が現在のローカルと一致する。書き込みは要らず、base だけを揃える。 */
   | { readonly _tag: "BaseOnly"; readonly baseHash: ContentHash }
   /** union をローカルへ書き込み、base をその内容へ揃える。 */
   | { readonly _tag: "Write"; readonly baseHash: ContentHash; readonly content: string };
 
-/** lock に記録すべき `ziku.jsonc` の base。union マージを行わなかったなら undefined。 */
-export function mergedConfigBaseHash(result: ZikuConfigMergeResult): ContentHash | undefined {
+/**
+ * lock に記録する `ziku.jsonc` の base。ベースからエントリを落とすなら undefined。
+ *
+ * `RetainBase` でローカルの実在を見るのは、据え置きが「テンプレートの削除がローカルの
+ * `localOnly` に化けるのを防ぐ」ためのものだから（`utils/merge/sync-plan.ts` の
+ * `ZikuConfigPullAction`）。両側から消えていれば化ける先が無く、据え置くと存在しないファイルの
+ * ベースだけが毎回残る。判定の規則は通常の同期ファイルの据え置き
+ * （{@link baseAfterDeletions}）と同じで、対象が設定ファイルかどうかで扱いを変えない。
+ */
+export function configBaseHash(
+  result: ZikuConfigMergeResult,
+  hashes: SyncHashes,
+): ContentHash | undefined {
   return match(result)
-    .with({ _tag: "Skip" }, () => undefined)
+    .with({ _tag: "FollowTemplate" }, () => hashes.templateHashes[ZIKU_CONFIG_FILE])
+    .with({ _tag: "RetainBase" }, () =>
+      hashes.localHashes[ZIKU_CONFIG_FILE] === undefined
+        ? undefined
+        : hashes.baseHashes[ZIKU_CONFIG_FILE],
+    )
     .with({ _tag: P.union("BaseOnly", "Write") }, ({ baseHash }) => baseHash)
     .exhaustive();
 }
@@ -101,7 +126,7 @@ export function mergedConfigBaseHash(result: ZikuConfigMergeResult): ContentHash
 export function configContentToWrite(result: ZikuConfigMergeResult): string | undefined {
   return match(result)
     .with({ _tag: "Write" }, ({ content }) => content)
-    .with({ _tag: P.union("Skip", "BaseOnly") }, () => undefined)
+    .with({ _tag: P.union("FollowTemplate", "RetainBase", "BaseOnly") }, () => undefined)
     .exhaustive();
 }
 
@@ -263,11 +288,11 @@ export function nextSyncBase(params: {
 /**
  * ユーザーへ見せる変更が 1 件も無くても、lock だけは書き直す必要があるか。
  *
- * 該当するのは 2 つ。ziku.jsonc の base を union の内容へ揃える必要がある場合（例: conflict
- * だが union==local で書き込みが要らない）と、ベースにだけ残ったエントリを落とす場合。
- * どちらも古い base を残すと `status` / `push` が誤判定し、同じ状態のまま毎回走ることになる。
+ * 該当するのは 2 つ。ziku.jsonc の base が記録済みの値から変わる場合（union の内容へ揃える／
+ * 両側から消えてエントリを落とす）と、ベースにだけ残ったエントリを落とす場合。どちらも古い
+ * base を残すと `status` / `push` が誤判定し、同じ状態のまま毎回走ることになる。
  *
- * @param configBaseHash union マージが決めた ziku.jsonc の base。揃える必要が無ければ undefined。
+ * @param configBaseHash 今回の pull が lock へ書く ziku.jsonc の base。落とすなら undefined。
  * @param recordedConfigBaseHash lock に記録されている ziku.jsonc の base。
  */
 export function lockNeedsRewrite(params: {
@@ -275,9 +300,7 @@ export function lockNeedsRewrite(params: {
   readonly recordedConfigBaseHash: ContentHash | undefined;
   readonly hasStaleBaseEntries: boolean;
 }): boolean {
-  const configBaseChanged =
-    params.configBaseHash !== undefined && params.configBaseHash !== params.recordedConfigBaseHash;
-  return configBaseChanged || params.hasStaleBaseEntries;
+  return params.configBaseHash !== params.recordedConfigBaseHash || params.hasStaleBaseEntries;
 }
 
 /** 分類結果とハッシュから導いた、この pull で取り込む変更。 */
@@ -294,9 +317,10 @@ export interface PullChangePlan {
   /**
    * テンプレート側へ前進させたベース（`ziku.jsonc` の補正込み）。
    *
-   * union マージを行ったときは `ziku.jsonc` だけローカル最終内容（union）のハッシュに揃える。
-   * templateHashes 側に寄せると、テンプレが削除したパターンを後続 push が localOnly として
-   * 再追加してしまう。
+   * `ziku.jsonc` のエントリだけは {@link configBaseHash} が決める。union マージを行ったなら
+   * ローカル最終内容（union）のハッシュ、テンプレートが削除しローカルに残るなら前回の値の
+   * 据え置き。templateHashes 側に寄せると、テンプレが削除したパターンを後続 push が
+   * localOnly として再追加してしまう。
    */
   readonly advancedBase: HashMap;
   /** ユーザーへ見せる変更の件数。0 なら適用するものが無い。 */
@@ -323,16 +347,13 @@ export function planPullChanges(params: {
     deletedFiles,
     params.hashes.localHashes,
   );
-  const configBaseHash = mergedConfigBaseHash(params.configSync);
+  const configBase = configBaseHash(params.configSync, params.hashes);
   const configWrite = configContentToWrite(params.configSync);
 
   return {
     deletableFiles: deletable,
     deletionCandidates: [...deletedFiles, ...deletedWithLocalEdits],
-    advancedBase:
-      configBaseHash !== undefined
-        ? { ...params.hashes.templateHashes, [ZIKU_CONFIG_FILE]: configBaseHash }
-        : params.hashes.templateHashes,
+    advancedBase: withConfigBase(params.hashes.templateHashes, configBase),
     totalChanges:
       autoUpdate.length +
       newFiles.length +
@@ -341,11 +362,30 @@ export function planPullChanges(params: {
       deletedWithLocalEdits.length +
       (configWrite !== undefined ? 1 : 0),
     rewriteLock: lockNeedsRewrite({
-      configBaseHash,
+      configBaseHash: configBase,
       recordedConfigBaseHash: params.hashes.baseHashes[ZIKU_CONFIG_FILE],
       hasStaleBaseEntries,
     }),
   };
+}
+
+/**
+ * テンプレート側へ前進させたベースへ、`ziku.jsonc` の base を載せる。
+ *
+ * 設定ファイルのエントリは必ずこの関数で決まり、テンプレートの走査結果をそのまま採用する
+ * 経路は残さない。{@link configBaseHash} が undefined を返したときにエントリを消すのは、
+ * 「ベースから落とす」がテンプレートの走査結果と一致するとは限らないため（ローカルにも
+ * テンプレートにも無いのに、走査結果の側にだけ残っている状況を作らない）。
+ */
+function withConfigBase(templateHashes: HashMap, configBase: ContentHash | undefined): HashMap {
+  const advanced: HashMap = {};
+  for (const path of repoRelPaths(Object.keys(templateHashes))) {
+    if (path === ZIKU_CONFIG_FILE) continue;
+    const hash = templateHashes[path];
+    if (hash !== undefined) advanced[path] = hash;
+  }
+  if (configBase !== undefined) advanced[ZIKU_CONFIG_FILE] = configBase;
+  return advanced;
 }
 
 // ─── `--continue` の解決 ───
