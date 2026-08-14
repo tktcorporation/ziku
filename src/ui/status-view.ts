@@ -140,7 +140,7 @@ export function renderStatusLong(model: StatusViewModel): string {
 
   // conflict section のアクションヒントは recommendation 種別で出し分ける。
   // 解決待ち中の場合は新規 merge ではなく `pull --continue` を案内する
-  // (codex review #71 P2 で指摘された矛盾を防ぐ)。
+  // (解決待ちなのに「3-way merge を始めろ」と促す矛盾したヒントを出さないため)。
   const conflictHint =
     recommendation.kind === "continueMerge"
       ? `(resolve and run "ziku pull --continue")`

@@ -91,7 +91,7 @@ describe("acquireTempTemplate (Scope ベースのリソース管理)", () => {
     //     Effect.onError(() => Scope.close(scope, Exit.void)),
     //   );
     // resolveTemplateDirScoped が失敗したとき、onError がない場合は
-    // scope が閉じられず tracker に残る (Codex review #74 の指摘)。
+    // scope が閉じられず tracker に残る。
     vi.mocked(giget.downloadTemplate).mockRejectedValueOnce(new Error("network"));
 
     const program = Effect.gen(function* () {
@@ -109,7 +109,7 @@ describe("acquireTempTemplate (Scope ベースのリソース管理)", () => {
     expect(_getTrackedCountForTest()).toBe(0);
   });
 
-  it("downloadTemplateToTemp: download 失敗時に tracker から登録解除される (codex review #74)", async () => {
+  it("downloadTemplateToTemp: download 失敗時に tracker から登録解除される", async () => {
     const { downloadTemplateToTemp } = await import("../template");
     vi.mocked(giget.downloadTemplate).mockRejectedValueOnce(new Error("network"));
 
@@ -118,7 +118,7 @@ describe("acquireTempTemplate (Scope ベースのリソース管理)", () => {
     expect(_getTrackedCountForTest()).toBe(0);
   });
 
-  it("fetchTemplates: download 失敗時に tracker から登録解除される (codex review #74)", async () => {
+  it("fetchTemplates: download 失敗時に tracker から登録解除される", async () => {
     const { fetchTemplates } = await import("../template");
     vi.mocked(giget.downloadTemplate).mockRejectedValueOnce(new Error("network"));
 

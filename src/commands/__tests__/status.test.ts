@@ -240,8 +240,8 @@ describe("statusCommand", () => {
   });
 
   describe("run", () => {
-    it("解決待ちがあれば fast-path で template fetch せずに案内する (codex P2 #6)", async () => {
-      // codex review #71 の最後の P2: 解決待ち中はネットワーク不通でも
+    it("解決待ちがあれば fast-path で template fetch せずに案内する", async () => {
+      // 解決待ち中はネットワーク不通でも
       // status が "pull --continue" を案内できるべき。lock を local だけで読んで
       // 早期 return することで、loadCommandContext (= template download) を回避する。
       mockZikuConfigExists.mockReturnValue(true);
@@ -275,8 +275,8 @@ describe("statusCommand", () => {
       expect(messageCalls).toContain(".mcp.json");
     });
 
-    it("ziku.jsonc が無い場合は fast-path をスキップして通常エラー経路に流す (codex P2 #7)", async () => {
-      // codex review #71 のさらなる P2: lock.json は残っているが ziku.jsonc が
+    it("ziku.jsonc が無い場合は fast-path をスキップして通常エラー経路に流す", async () => {
+      // lock.json は残っているが ziku.jsonc が
       // 削除/破損している半壊状態で fast-path に入ると、
       // "pull --continue を実行して" と案内するが pull --continue は zikuConfigExists で
       // "Not initialized" を出して失敗する。動かない命令を出さないために、

@@ -147,7 +147,7 @@ describe("status-view", () => {
     it("解決待ち中（continueMerge）はバケツが空でも in sync バナーを出さない", () => {
       // バグ再現: bucket/untracked が全部空でも解決待ちがあれば
       // outro で `pull --continue` を案内するため、"Tracked files are in sync"
-      // と矛盾するメッセージを同時に出してはいけない (codex review #71 より)
+      // と矛盾するメッセージを同時に出してはいけない
       const out = strip(
         renderStatusLong(
           model(
@@ -159,7 +159,7 @@ describe("status-view", () => {
       expect(out).not.toContain("Tracked files are in sync");
     });
 
-    it("conflict セクションのヒントは解決待ち中だと 'pull --continue' に切り替わる (codex P2)", () => {
+    it("conflict セクションのヒントは解決待ち中だと 'pull --continue' に切り替わる", () => {
       const conflictEntry = entry("c.txt", "conflict", "conflicts");
       const out = strip(
         renderStatusLong(

@@ -489,7 +489,7 @@ describe("pullCommand", () => {
       expect(mockSaveLock).toHaveBeenCalled();
     });
 
-    it("テンプレ側だけがパターンを削除しても（autoUpdate）ローカルからは消さない（codex P2）", async () => {
+    it("テンプレ側だけがパターンを削除しても（autoUpdate）ローカルからは消さない", async () => {
       // テンプレが .github/** を削除。ziku.jsonc は autoUpdate に分類されるが、
       // 丸ごとコピーではなく union マージなので、削除は伝播せずローカルに残る。
       vol.fromJSON({
@@ -526,7 +526,7 @@ describe("pullCommand", () => {
       expect(local.include).toContain(".root/**");
     });
 
-    it("テンプレ削除+追加の混在: lock の base[ziku.jsonc] は union 内容に揃う（push 再追加を防ぐ / codex P2）", async () => {
+    it("テンプレ削除+追加の混在: lock の base[ziku.jsonc] は union 内容に揃う（push 再追加を防ぐ）", async () => {
       // テンプレが .b/** を削除し .c/** を追加。union=[.a,.b,.c]。base はテンプレ([.a,.c])
       // ではなく union([.a,.b,.c]) のハッシュで記録され、後続 push が .b/** を再追加しない。
       vol.fromJSON({
@@ -561,7 +561,7 @@ describe("pullCommand", () => {
       expect(baseHashesOf(saveArg)[repoRelPath(".ziku/ziku.jsonc")]).toBe(hashContent(written));
     });
 
-    it("テンプレが ziku.jsonc ファイル自体を削除しても、ローカルの制御ファイルは消さない（codex P2）", async () => {
+    it("テンプレが ziku.jsonc ファイル自体を削除しても、ローカルの制御ファイルは消さない", async () => {
       vol.fromJSON({
         "/test/.ziku/ziku.jsonc": JSON.stringify({ include: [".root/**"] }, null, 2),
         "/test/.mcp.json": "x",
@@ -591,7 +591,7 @@ describe("pullCommand", () => {
       expect(vol.existsSync("/test/.ziku/ziku.jsonc")).toBe(true);
     });
 
-    it("ファイル書き込みが無くても config の base 更新が必要なら lock を保存する（codex P2）", async () => {
+    it("ファイル書き込みが無くても config の base 更新が必要なら lock を保存する", async () => {
       // union==local で write 不要だが、lock の base が古い場合は base を揃えるため
       // early-return せず saveLock を通す必要がある（さもないと status/push が誤判定）。
       const localConfig = JSON.stringify({ include: ["A"], exclude: [] });

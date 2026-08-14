@@ -194,7 +194,7 @@ export function downloadTemplateToTemp(
   ensureGigetCacheDir();
 
   // 失敗時の解放: downloadTemplate が reject すると返り値の cleanup が
-  // 作られないため、tracker に古いエントリが残る (codex review #74)。
+  // 作られないため、tracker に古いエントリが残る。
   // 後段で同名 .ziku-temp* が新規作成された場合に process exit で
   // 誤って削除されうるので、reject 経路でも unregister + rmSync する。
   // try/catch は ast-grep で禁止のため Promise.then(onFulfilled, onRejected) を使う。
@@ -312,7 +312,7 @@ export function fetchTemplates(options: DownloadOptions): Promise<FileOperationR
 
   // 実体を IIFE で包み、Promise.finally で cleanup を保証する。
   // download / コピー処理いずれが失敗しても tracker から外して物理削除する
-  // (codex review #74 — try/finally は ast-grep で禁止のため Promise.finally で対応)。
+  // (try/finally は ast-grep で禁止のため Promise.finally で対応)。
   const work = async (): Promise<FileOperationResult[]> => {
     const allResults: FileOperationResult[] = [];
 

@@ -50,7 +50,7 @@ function ensureExitHandler(): void {
  *   2. 自身を listener から外す + installedSignals からも外す
  *      → 後続の registerTempDir() で再インストールされる
  *        (long-lived プロセスで signal を delegate した後の 2 回目以降の
- *         registerTempDir も保護される — codex review #74)
+ *         registerTempDir も保護される)
  *   3. 他のリスナーが残っていればそれに任せる
  *   4. 他にいなければ process.kill で signal を再送し、default 動作
  *      (terminate with exit code 128 + signal number) に戻す

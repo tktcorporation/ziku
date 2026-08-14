@@ -75,10 +75,9 @@ export const statusCommand = defineCommand({
     // `merge.nextBase` をそのまま使うため、新たなテンプレ取得は不要。
     // ところが status が常に `loadCommandContext` 経由で template を fetch していると、
     // ネットワーク不通やテンプレリポジトリ移動時に status 自体が失敗し、
-    // ユーザーが「`pull --continue` を実行すれば回復できる」と知る術が無くなる
-    // (codex review #71)。
+    // ユーザーが「`pull --continue` を実行すれば回復できる」と知る術が無くなる。
     //
-    // 整合性条件 (codex review #71 follow-up):
+    // 整合性条件:
     //   `pull --continue` 自身は `zikuConfigExists` を前提に動く。fast-path で
     //   この前提を満たさない (config 削除済み等) のに `pull --continue` を案内すると、
     //   ユーザーが従っても "Not initialized" で失敗するので「動かない命令」を
