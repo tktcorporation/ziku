@@ -4,7 +4,7 @@ import { defineCommand } from "citty";
 import { Effect } from "effect";
 import { dirname } from "pathe";
 import { withCleanup } from "../effect-helpers";
-import { runCommandEffect } from "../services/command-context";
+import { runCommandEffect, toZikuFailure } from "../services/command-context";
 import { loadTemplateConfig, extractDirectoryEntries } from "../utils/template-config";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
@@ -12,9 +12,11 @@ import type {
   AbsPath,
   CommitSha,
   FileOperationResult,
+  GitHubSource,
   HashMap,
   OverwriteStrategy,
   RepoRelPath,
+  TemplateRef,
   TemplateSource,
   ZikuConfig,
 } from "../modules/schemas";
@@ -54,7 +56,13 @@ import {
   withConfigTracked,
   zikuConfigExists,
 } from "../utils/ziku-config";
-import { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy } from "../utils/template";
+import {
+  buildTemplateSource,
+  downloadTemplateToTemp,
+  fetchTemplates,
+  writeFileWithStrategy,
+} from "../utils/template";
+import { resolveGitHubFetchSource } from "../utils/template-resolve";
 import type { FlatPatterns } from "../utils/patterns";
 import { intro, log, logFileResults, outro, pc, withSpinner } from "../ui/renderer";
 import {
@@ -144,7 +152,18 @@ interface InitArgs {
 /** テンプレートの実体と、それをどこから得たか。 */
 interface AcquiredTemplate {
   readonly templateDir: AbsPath;
+  /**
+   * lock の `source` に記録する取得元。GitHub ソースで ref を指定しなかった場合は、解決した
+   * ブランチ名を書き戻さず未指定のまま残す。未指定は「そのリポジトリの既定ブランチを追う」と
+   * いう指定であり、解決結果で固定すると既定ブランチが改名されたときに追随できなくなる。
+   */
   readonly source: TemplateSource;
+  /**
+   * 配置したファイルが実際に由来する ref。GitHub ソースで ref を指定しなかった場合は、取得に
+   * 使った既定ブランチが入る。lock の `base.ref` に載せる SHA はここから引く（`source.ref` から
+   * 引き直すと、解決が二重になったうえ取得したツリーと別のブランチを指しうる）。
+   */
+  readonly fetchedRef: TemplateRef | undefined;
   /** 一時ディレクトリの後始末。ローカルソースでは何もしない。 */
   readonly cleanup: () => void;
 }
@@ -297,11 +316,27 @@ async function acquireTemplate(
   if (fromDir) {
     const templateDir = absPath(fromDir);
     log.info(`Template: ${pc.cyan(templateDir)} (local)`);
-    return { templateDir, source: { kind: "local", path: templateDir }, cleanup: () => {} };
+    return {
+      templateDir,
+      source: { kind: "local", path: templateDir },
+      fetchedRef: undefined,
+      cleanup: () => {},
+    };
   }
 
   const resolved = await resolveTemplateSourceWithCheck(args.from, args.yes, args.dryRun);
   log.info(`Template: ${pc.cyan(`${resolved.sourceOwner}/${resolved.sourceRepo}`)}`);
+
+  const source: GitHubSource = {
+    kind: "github",
+    owner: resolved.sourceOwner,
+    repo: resolved.sourceRepo,
+  };
+  // 取得先の決め方と、決まらないときに止める理由は resolveGitHubFetchSource を参照。
+  // ここで止まってもディスクには何も足されていない（giget を呼ぶのはこの後）。
+  const fetched = await runCommandEffect(
+    resolveGitHubFetchSource(source).pipe(Effect.mapError(toZikuFailure)),
+  );
 
   log.step("Fetching template...");
   // giget は tempDir (targetDir/.ziku-temp) の親ディレクトリも再帰的に作成するため、
@@ -311,7 +346,7 @@ async function acquireTemplate(
   // ここでも失敗経路を捕まえて同じ後始末を行う（try/catch は ast-grep で禁止のため
   // Promise.then(onFulfilled, onRejected) を使う）。
   const downloaded = await withSpinner("Downloading template from GitHub...", () =>
-    downloadTemplateToTemp(targetDir, `gh:${resolved.sourceOwner}/${resolved.sourceRepo}`),
+    downloadTemplateToTemp(targetDir, buildTemplateSource(fetched)),
   ).then(
     (result) => result,
     (error: unknown) => {
@@ -322,7 +357,8 @@ async function acquireTemplate(
 
   return {
     templateDir: downloaded.templateDir,
-    source: { kind: "github", owner: resolved.sourceOwner, repo: resolved.sourceRepo },
+    source,
+    fetchedRef: fetched.ref,
     cleanup: downloaded.cleanup,
   };
 }
@@ -405,9 +441,9 @@ async function applyTemplate(
 
   // ベースのコミット SHA: GitHub ソースの場合のみ取得。
   // テンプレートを取得した ref とベースの SHA が食い違うと、3-way マージのベースが
-  // 別ブランチのツリーになるため ref をそのまま渡す。
+  // 別ブランチのツリーになるため、取得に使った ref をそのまま渡す。
   const baseCommit = await match(template.source)
-    .with({ kind: "github" }, (s) => resolveSourceCommitSha(s.owner, s.repo, s.ref))
+    .with({ kind: "github" }, (s) => resolveSourceCommitSha(s.owner, s.repo, template.fetchedRef))
     .with({ kind: "local" }, () => Promise.resolve(undefined))
     .exhaustive();
 

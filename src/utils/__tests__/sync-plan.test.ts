@@ -8,7 +8,11 @@ import { describe, expect, it } from "vitest";
 import { repoRelPath, repoRelPaths } from "../../__tests__/brands";
 import type { RepoRelPath } from "../../modules/schemas";
 import type { FileCategory, FileClassification } from "../merge/types";
-import type { ZikuConfigState } from "../merge/sync-plan";
+import type {
+  ZikuConfigPushOutcome,
+  ZikuConfigState,
+  ZikuConfigStatusCategory,
+} from "../merge/sync-plan";
 import {
   partitionSyncPlan,
   withZikuConfigAt,
@@ -198,14 +202,39 @@ describe("zikuConfigPushOutcome", () => {
     ).toEqual({ _tag: "Skip" });
   });
 
-  it.each(ALL_DRIFTS)("送る判断は drift で変わらない（%o）", (drift) => {
-    expect(zikuConfigPushOutcome({ _tag: "Tracked", category: "localOnly" }, drift)).toEqual({
-      _tag: "SendUnion",
-      restoresTemplateDeletion: false,
-    });
+  it.each(["localOnly", "conflicts", "deletedWithLocalEdits"] as const)(
+    "テンプレートに無いパターンがあるときだけ %s の union を送る",
+    (category) => {
+      const restoresTemplateDeletion = category === "deletedWithLocalEdits";
+
+      expect(
+        zikuConfigPushOutcome(
+          { _tag: "Tracked", category },
+          { pullRelevant: false, pushRelevant: true },
+        ),
+      ).toEqual({ _tag: "SendUnion", restoresTemplateDeletion });
+
+      // 送ってもテンプレートのパターンが 1 つも増えない状態。送ると、中身の変わらない
+      // `ziku.jsonc` だけの PR が立つ。
+      expect(
+        zikuConfigPushOutcome(
+          { _tag: "Tracked", category },
+          { pullRelevant: false, pushRelevant: false },
+        ),
+      ).toEqual({ _tag: "Skip" });
+    },
+  );
+
+  it("送るものが無く、pull が取り込める追加があるなら pull を案内する", () => {
     expect(
-      zikuConfigPushOutcome({ _tag: "Tracked", category: "deletedWithLocalEdits" }, drift),
-    ).toEqual({ _tag: "SendUnion", restoresTemplateDeletion: true });
+      zikuConfigPushOutcome(
+        { _tag: "Tracked", category: "conflicts" },
+        { pullRelevant: true, pushRelevant: false },
+      ),
+    ).toEqual({ _tag: "PullToSync" });
+  });
+
+  it.each(ALL_DRIFTS)("分類に現れなければ drift によらず何もしない（%o）", (drift) => {
     expect(zikuConfigPushOutcome({ _tag: "Untracked" }, drift)).toEqual({ _tag: "Skip" });
   });
 });
@@ -262,6 +291,28 @@ describe("zikuConfigStatusCategory", () => {
     expect(
       zikuConfigStatusCategory({ _tag: "Untracked" }, { pullRelevant: true, pushRelevant: true }),
     ).toBe("unchanged");
+  });
+});
+
+describe("status が見せるカテゴリと、push が実際に取る結論", () => {
+  // status が pull だけを勧めた状態で push が PR を作る、のような食い違いは、片方の分岐だけを
+  // 直したときに生まれる。位置づけ × drift の全組み合わせで対応表どおりかを突き合わせる。
+  const categoriesOfOutcome: Record<
+    ZikuConfigPushOutcome["_tag"],
+    readonly ZikuConfigStatusCategory[]
+  > = {
+    // 送るなら、status も push 待ちとして見せる（pull にも取り込む余地があれば conflicts）。
+    SendUnion: ["localOnly", "conflicts"],
+    PullToSync: ["autoUpdate"],
+    Skip: ["unchanged"],
+  };
+
+  const combinations = ALL_STATES.flatMap((state) => ALL_DRIFTS.map((drift) => ({ state, drift })));
+
+  it.each(combinations)("%o は status と push が同じ判断をする", ({ state, drift }) => {
+    const outcome = zikuConfigPushOutcome(state, drift);
+
+    expect(categoriesOfOutcome[outcome._tag]).toContain(zikuConfigStatusCategory(state, drift));
   });
 });
 

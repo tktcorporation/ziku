@@ -27,7 +27,6 @@ import {
   buildPushSummaryRows,
   collectPushCandidates,
   configDiffToInject,
-  configWriteBackSafe,
   defaultPushSelection,
   filterByFilesArg,
   mergedAsPushContent,
@@ -38,8 +37,17 @@ import {
   resolvePrBaseBranch,
   selectedUnresolvedConflicts,
   withNewlyTrackedPatterns,
+  zikuConfigWriteBack,
 } from "../push-plan";
-import type { ChangedFileDiff, DeletablePath, PushContent } from "../push-plan";
+import type {
+  ChangedFileDiff,
+  DeletablePath,
+  PushContent,
+  ZikuConfigWriteBack,
+} from "../push-plan";
+
+/** 送った内容がローカルにも残るケース。ベースの前進に例外が要らない既定の入力。 */
+const WRITE_BACK: ZikuConfigWriteBack = { _tag: "WriteBack" };
 
 /**
  * 削除として送れるパスを組み立てる。
@@ -503,6 +511,7 @@ describe("baseAfterPush", () => {
         deletions: [],
       },
       alreadySynced: new Set(repoRelPaths(["same.txt"])),
+      configWriteBack: WRITE_BACK,
     });
 
     expect(base).toEqual({
@@ -520,6 +529,7 @@ describe("baseAfterPush", () => {
       previousBase: hashMap({ "gone.txt": "old", "same.txt": "same" }),
       pushed: { files: [], deletions: [{ path: deletablePath("gone.txt") }] },
       alreadySynced: new Set(repoRelPaths(["same.txt"])),
+      configWriteBack: WRITE_BACK,
     });
 
     expect(base).toEqual({ "same.txt": "same" });
@@ -533,6 +543,7 @@ describe("baseAfterPush", () => {
       previousBase: hashMap({ "gone-everywhere.txt": "old" }),
       pushed: { files: [], deletions: [] },
       alreadySynced: new Set(repoRelPaths(["gone-everywhere.txt"])),
+      configWriteBack: WRITE_BACK,
     });
 
     expect(base).toEqual({});
@@ -547,9 +558,54 @@ describe("baseAfterPush", () => {
         deletions: [],
       },
       alreadySynced: new Set(),
+      configWriteBack: WRITE_BACK,
     });
 
     expect(base).toEqual({ "new.txt": "new-hash" });
+  });
+
+  it("ローカルへ書き戻さなかった ziku.jsonc のベースは前進させない", () => {
+    // スコープ限定の和集合はローカルの内容ではない。テンプレート側へ揃えると次の分類が
+    // ローカルを localOnly と読み、次の push がローカル全体の和集合を送る。
+    const base = baseAfterPush({
+      templateHashes: hashMap({ ".ziku/ziku.jsonc": "scoped", "sent.txt": "sent-new" }),
+      previousBase: hashMap({ ".ziku/ziku.jsonc": "local", "sent.txt": "sent-old" }),
+      pushed: {
+        files: [
+          { path: CONFIG_PATH, content: asPushContent("scoped") },
+          { path: repoRelPath("sent.txt"), content: asPushContent("x") },
+        ],
+        deletions: [],
+      },
+      alreadySynced: new Set(),
+      configWriteBack: { _tag: "Withhold" },
+    });
+
+    expect(base).toEqual({ ".ziku/ziku.jsonc": "local", "sent.txt": "sent-new" });
+  });
+
+  it("元から一致していた ziku.jsonc も、書き戻さずに送ったならベースを据え置く", () => {
+    const base = baseAfterPush({
+      templateHashes: hashMap({ ".ziku/ziku.jsonc": "scoped" }),
+      previousBase: hashMap({ ".ziku/ziku.jsonc": "local" }),
+      pushed: { files: [{ path: CONFIG_PATH, content: asPushContent("scoped") }], deletions: [] },
+      alreadySynced: new Set([CONFIG_PATH]),
+      configWriteBack: { _tag: "Withhold" },
+    });
+
+    expect(base).toEqual({ ".ziku/ziku.jsonc": "local" });
+  });
+
+  it("書き戻したなら ziku.jsonc のベースもテンプレート側へ前進させる", () => {
+    const base = baseAfterPush({
+      templateHashes: hashMap({ ".ziku/ziku.jsonc": "merged" }),
+      previousBase: hashMap({ ".ziku/ziku.jsonc": "local" }),
+      pushed: { files: [{ path: CONFIG_PATH, content: asPushContent("merged") }], deletions: [] },
+      alreadySynced: new Set(),
+      configWriteBack: WRITE_BACK,
+    });
+
+    expect(base).toEqual({ ".ziku/ziku.jsonc": "merged" });
   });
 });
 
@@ -572,7 +628,7 @@ describe("planConfigPropagation", () => {
     });
 
     expect(plan).toEqual({ _tag: "NoConfigChange" });
-    expect(configWriteBackSafe(plan)).toBe(true);
+    expect(zikuConfigWriteBack(plan)).toEqual({ _tag: "WriteBack" });
   });
 
   it("ziku.jsonc が選択済みなら、新規追跡分を足したローカル全体の和集合を送る", () => {
@@ -583,7 +639,7 @@ describe("planConfigPropagation", () => {
     });
 
     expect(plan).toEqual({ _tag: "MergeLocalConfig", extraIncludes: globPatterns(["a.txt"]) });
-    expect(configWriteBackSafe(plan)).toBe(true);
+    expect(zikuConfigWriteBack(plan)).toEqual({ _tag: "WriteBack" });
   });
 
   it("ziku.jsonc が未選択なら、今回の送信対象に関係するパターンだけを和集合する", () => {
@@ -606,7 +662,7 @@ describe("planConfigPropagation", () => {
       localOnlyPatterns: globPatterns(["a.txt"]),
     });
 
-    expect(configWriteBackSafe(plan)).toBe(false);
+    expect(zikuConfigWriteBack(plan)).toEqual({ _tag: "Withhold" });
   });
 
   it("選択から外れた追跡候補のパターンは先に送らない", () => {

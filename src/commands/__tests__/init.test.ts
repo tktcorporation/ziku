@@ -3,9 +3,9 @@ import { Effect } from "effect";
 import { dirname, resolve } from "pathe";
 import { match } from "ts-pattern";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { baseHashesOf, lockSchema } from "../../modules/schemas";
+import { baseHashesOf, lockSchema, templateRefToString } from "../../modules/schemas";
 import { absPath, globPatterns, hashMap, repoRelPath } from "../../__tests__/brands";
-import type { AbsPath } from "../../modules/schemas";
+import type { AbsPath, GitHubSource } from "../../modules/schemas";
 import { classifyFiles } from "../../utils/merge";
 import { partitionSyncPlan, zikuConfigPushAction } from "../../utils/merge/sync-plan";
 
@@ -29,9 +29,10 @@ vi.mock("../../utils/git-remote", () => ({
 }));
 
 vi.mock("../../utils/template", () => ({
-  buildTemplateSource: vi.fn(
-    (source: { owner: string; repo: string }) => `gh:${source.owner}/${source.repo}`,
-  ),
+  buildTemplateSource: vi.fn((source: GitHubSource) => {
+    const base = `gh:${source.owner}/${source.repo}`;
+    return source.ref ? `${base}#${templateRefToString(source.ref)}` : base;
+  }),
   downloadTemplateToTemp: vi.fn(),
   fetchTemplates: vi.fn(),
   writeFileWithStrategy: vi.fn(),
@@ -48,6 +49,7 @@ vi.mock("../../utils/github", async () => {
   return {
     resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
     resolveSourceCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
+    resolveDefaultBranch: vi.fn(() => Promise.resolve<string | undefined>("main")),
     checkRepoExists: vi.fn(() => Promise.resolve({ _tag: "Exists" as const })),
     checkRepoSetup: vi.fn(() => Promise.resolve(true)),
     getGitHubToken: vi.fn(() => {}),
@@ -133,7 +135,8 @@ const { selectDirectories, selectOverwriteStrategy, selectTemplateCandidate } =
 const { log, outro } = await import("../../ui/renderer");
 const { hashFiles, hashContent } = await import("../../utils/hash");
 const { loadTemplateConfig } = await import("../../utils/template-config");
-const { checkRepoExists, checkRepoSetup } = await import("../../utils/github");
+const { checkRepoExists, checkRepoSetup, resolveDefaultBranch, resolveSourceCommitSha } =
+  await import("../../utils/github");
 
 const mockDownloadTemplateToTemp = vi.mocked(downloadTemplateToTemp);
 const mockFetchTemplates = vi.mocked(fetchTemplates);
@@ -149,6 +152,8 @@ const mockHashFiles = vi.mocked(hashFiles);
 const _mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
 const mockCheckRepoExists = vi.mocked(checkRepoExists);
 const mockCheckRepoSetup = vi.mocked(checkRepoSetup);
+const mockResolveDefaultBranch = vi.mocked(resolveDefaultBranch);
+const mockResolveSourceCommitSha = vi.mocked(resolveSourceCommitSha);
 
 describe("initCommand", () => {
   beforeEach(() => {
@@ -627,7 +632,7 @@ describe("initCommand", () => {
       // downloadTemplateToTemp にカスタムソースが渡される
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),
-        "gh:my-org/my-templates",
+        "gh:my-org/my-templates#main",
       );
     });
 
@@ -655,7 +660,7 @@ describe("initCommand", () => {
       // checkRepoExists がデフォルトで Exists を返すため、先頭の .ziku が使われる
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),
-        "gh:my-org/.ziku",
+        "gh:my-org/.ziku#main",
       );
     });
 
@@ -683,7 +688,7 @@ describe("initCommand", () => {
       // セットアップ済みの .github が選ばれる
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),
-        "gh:my-org/.github",
+        "gh:my-org/.github#main",
       );
     });
 
@@ -710,7 +715,7 @@ describe("initCommand", () => {
 
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),
-        "gh:my-org/.ziku",
+        "gh:my-org/.ziku#main",
       );
     });
 
@@ -739,7 +744,7 @@ describe("initCommand", () => {
       // detected-org/.github が使われる
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),
-        "gh:detected-org/.github",
+        "gh:detected-org/.github#main",
       );
     });
 
@@ -769,7 +774,7 @@ describe("initCommand", () => {
       expect(mockInputTemplateSource).toHaveBeenCalled();
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),
-        "gh:custom-org/templates",
+        "gh:custom-org/templates#main",
       );
     });
 
@@ -861,6 +866,62 @@ describe("initCommand", () => {
       );
       // base を記録しない（記録すると次回 pull で deletedFiles 判定→制御ファイル削除になる）
       expect(baseHashesOf(lockContent)[repoRelPath(".ziku/ziku.jsonc")]).toBeUndefined();
+    });
+  });
+
+  describe("配置したファイルの由来と lock に記録する SHA は同じブランチを指す", () => {
+    it("既定ブランチが master のリポジトリでも、取得先とベースの問い合わせ先が揃う", async () => {
+      vol.fromJSON({ "/test": null });
+      mockResolveDefaultBranch.mockResolvedValueOnce("master");
+      mockFetchTemplates.mockResolvedValue([]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
+        expect.any(String),
+        "gh:test-org/.ziku#master",
+      );
+      expect(mockResolveSourceCommitSha).toHaveBeenCalledWith("test-org", ".ziku", {
+        kind: "branch",
+        name: "master",
+      });
+    });
+
+    it("既定ブランチを引けなければ、テンプレートを取得せずに中断する", async () => {
+      vol.fromJSON({ "/test": null });
+      mockResolveDefaultBranch.mockResolvedValueOnce(undefined);
+
+      await expect(
+        (initCommand.run as any)({
+          args: { dir: "/test", force: false, yes: true },
+          rawArgs: [],
+          cmd: initCommand,
+        }),
+      ).rejects.toMatchObject({
+        _tag: "ZikuFailure",
+        reason: { kind: "DefaultBranchUnresolved", repo: "test-org/.ziku" },
+      });
+
+      expect(mockDownloadTemplateToTemp).not.toHaveBeenCalled();
+      expect(vol.existsSync("/test/.ziku/lock.json")).toBe(false);
+    });
+
+    it("--from-dir は GitHub へ問い合わせずにローカルディレクトリを使う", async () => {
+      vol.fromJSON({ "/test": null });
+      mockFetchTemplates.mockResolvedValue([]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true, "from-dir": "/local/template" },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(mockResolveDefaultBranch).not.toHaveBeenCalled();
+      expect(mockDownloadTemplateToTemp).not.toHaveBeenCalled();
     });
   });
 

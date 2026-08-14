@@ -10,10 +10,11 @@
  * 処理されない」が起きる。{@link partitionSyncPlan} が仕分けの唯一の場所で、以降
  * `SyncPlan.files` には設定ファイルが入らない。
  *
- * 扱いの決定は「分類 → pull / push のアクション → 利用者へ見せる結論」の一方向で流す。
- * 表示や案内が独自にカテゴリを決めると、勧めた操作を実行しても何も起きない案内になりうるため、
- * status の表示カテゴリ（{@link zikuConfigStatusCategory}）も push の案内
- * （{@link zikuConfigPushOutcome}）も {@link zikuConfigActions} が返すアクションからしか導かない。
+ * 扱いの決定は「分類 → pull / push のアクション → push の結論 → 利用者へ見せる結論」の一方向で
+ * 流す。表示や案内が独自にカテゴリを決めると、勧めた操作を実行しても何も起きない案内に
+ * なりうるため、push の結論（{@link zikuConfigPushOutcome}）は {@link zikuConfigActions} が
+ * 返すアクションからしか導かず、status の表示カテゴリ（{@link zikuConfigStatusCategory}）は
+ * その push の結論からしか導かない。分岐が枝分かれしないので、片方だけが直った状態を作れない。
  */
 import { match } from "ts-pattern";
 import type { RepoRelPath } from "../../modules/schemas";
@@ -218,31 +219,39 @@ export type ZikuConfigPushOutcome =
 /**
  * push が設定ファイルに対して取る結論を、drift まで見て決める。
  *
- * `TemplateOnly` が表すのは「テンプレート側だけがファイルを変えた」ことだけで、pull が
- * 取り込むものを持つかまでは決まらない。テンプレートがパターンを削除した場合、加法 union は
- * ローカルの内容と一致し、pull は何も書き換えない。この状態を push が pull の対象として
- * 見せると、実行しても何も起きない操作を勧めることになる。案内を出すのは pull が実際に
- * ローカルを書き換えるときだけにし、それ以外は status と同じく終端（同期済み）として扱う
- * （{@link zikuConfigStatusCategory}）。
+ * 分類カテゴリが決めるのは「送ってよいか」までで、送るものがあるかまでは決まらない。
+ * どちらの向きも、加法 union が相手側の内容と一致するなら実行しても何も起きない:
+ *
+ * - ローカルにしか無いパターンが無い（`pushRelevant` が false）なら、送っても差分が
+ *   生まれない。それでも送ると、パターンが 1 つも増えない `ziku.jsonc` だけの PR が立つ。
+ * - テンプレートがパターンを削除しただけなら、pull は何も書き換えない。この状態を pull の
+ *   対象として見せると、実行しても何も起きない操作を勧めることになる。
+ *
+ * どちらも起きないときは終端（同期済み）として扱い、案内を出さない。
  */
 export function zikuConfigPushOutcome(
   state: ZikuConfigState,
   drift: ConfigDrift,
 ): ZikuConfigPushOutcome {
   const actions = zikuConfigActions(state);
-  return match(actions.push)
-    .with({ _tag: "Skip" }, (): ZikuConfigPushOutcome => ({ _tag: "Skip" }))
+  return match({
+    push: pushWritesTemplate(actions.push, drift),
+    pull: pullWritesLocal(actions.pull, drift),
+  })
     .with(
-      { _tag: "TemplateOnly" },
-      (): ZikuConfigPushOutcome =>
-        pullWritesLocal(actions.pull, drift) ? { _tag: "PullToSync" } : { _tag: "Skip" },
+      { push: { _tag: "SendUnion" } },
+      ({ push }): ZikuConfigPushOutcome => ({
+        _tag: "SendUnion",
+        restoresTemplateDeletion: push.restoresTemplateDeletion,
+      }),
     )
     .with(
-      { _tag: "SendUnion" },
-      ({ restoresTemplateDeletion }): ZikuConfigPushOutcome => ({
-        _tag: "SendUnion",
-        restoresTemplateDeletion,
-      }),
+      { push: { _tag: "NoWrite" }, pull: true },
+      (): ZikuConfigPushOutcome => ({ _tag: "PullToSync" }),
+    )
+    .with(
+      { push: { _tag: "NoWrite" }, pull: false },
+      (): ZikuConfigPushOutcome => ({ _tag: "Skip" }),
     )
     .exhaustive();
 }
@@ -262,9 +271,11 @@ export type ZikuConfigStatusCategory = Extract<
 /**
  * status で設定ファイルを入れるカテゴリを決める。
  *
- * 結論は「pull / push が実際にこの設定ファイルを書き換えるか」から導く。分類カテゴリや
- * drift から直接カテゴリを決めると、status だけが別の結論を持つことになり、勧めた操作を
- * 実行しても何も起きない案内になる。
+ * 結論は push の結論（{@link zikuConfigPushOutcome}）と、pull が実際にローカルを書き換えるか
+ * から導く。分類カテゴリや drift から直接カテゴリを決めると、status だけが別の結論を持つ
+ * ことになり、勧めた操作を実行しても何も起きない案内になる。push が送ると決めた状態でだけ
+ * push 方向（`localOnly` / `conflicts`）を見せるので、status が pull だけを勧めた状態で
+ * `ziku push` が PR を作ることはない。
  *
  * テンプレートがパターンを削除し、ローカルが変更していない状態は `unchanged`（同期済み）に
  * なる。加法 union の下でこの状態は終端で、pull は削除を伝播せず、push はテンプレートが
@@ -276,15 +287,14 @@ export function zikuConfigStatusCategory(
   state: ZikuConfigState,
   drift: ConfigDrift,
 ): ZikuConfigStatusCategory {
-  const actions = zikuConfigActions(state);
   return match({
-    pull: pullWritesLocal(actions.pull, drift),
-    push: pushSendsToTemplate(actions.push, drift),
+    push: zikuConfigPushOutcome(state, drift),
+    pull: pullWritesLocal(zikuConfigActions(state).pull, drift),
   })
-    .with({ pull: true, push: true }, (): ZikuConfigStatusCategory => "conflicts")
-    .with({ pull: true, push: false }, (): ZikuConfigStatusCategory => "autoUpdate")
-    .with({ pull: false, push: true }, (): ZikuConfigStatusCategory => "localOnly")
-    .with({ pull: false, push: false }, (): ZikuConfigStatusCategory => "unchanged")
+    .with({ push: { _tag: "SendUnion" }, pull: true }, (): ZikuConfigStatusCategory => "conflicts")
+    .with({ push: { _tag: "SendUnion" }, pull: false }, (): ZikuConfigStatusCategory => "localOnly")
+    .with({ push: { _tag: "PullToSync" } }, (): ZikuConfigStatusCategory => "autoUpdate")
+    .with({ push: { _tag: "Skip" } }, (): ZikuConfigStatusCategory => "unchanged")
     .exhaustive();
 }
 
@@ -302,15 +312,39 @@ function pullWritesLocal(action: ZikuConfigPullAction, drift: ConfigDrift): bool
 }
 
 /**
+ * push がテンプレートの設定ファイルに対して実際に行う書き込み。
+ *
+ * 分類上の位置づけ（{@link ZikuConfigPushAction}）に drift を突き合わせた結果で、
+ * {@link zikuConfigPushOutcome} と {@link zikuConfigStatusCategory} はどちらもこの値を
+ * 経由する。
+ */
+type ZikuConfigPushEffect =
+  /** テンプレートの設定ファイルは変わらない。 */
+  | { readonly _tag: "NoWrite" }
+  /** 加法 union を送り、テンプレートの設定ファイルにパターンが増える。 */
+  | { readonly _tag: "SendUnion"; readonly restoresTemplateDeletion: boolean };
+
+/**
  * push がテンプレートの設定ファイルを書き換えるか。
  *
  * union がテンプレートの内容と一致する（`pushRelevant` が false）なら、送っても差分が
- * 生まれない。`TemplateOnly` は送らないと決めたカテゴリなので、drift によらず false。
+ * 生まれない。`TemplateOnly` は送らないと決めたカテゴリなので、drift によらず書き込まない。
  */
-function pushSendsToTemplate(action: ZikuConfigPushAction, drift: ConfigDrift): boolean {
+function pushWritesTemplate(
+  action: ZikuConfigPushAction,
+  drift: ConfigDrift,
+): ZikuConfigPushEffect {
   return match(action)
-    .with({ _tag: "Skip" }, { _tag: "TemplateOnly" }, () => false)
-    .with({ _tag: "SendUnion" }, () => drift.pushRelevant)
+    .with(
+      { _tag: "Skip" },
+      { _tag: "TemplateOnly" },
+      (): ZikuConfigPushEffect => ({ _tag: "NoWrite" }),
+    )
+    .with(
+      { _tag: "SendUnion" },
+      ({ restoresTemplateDeletion }): ZikuConfigPushEffect =>
+        drift.pushRelevant ? { _tag: "SendUnion", restoresTemplateDeletion } : { _tag: "NoWrite" },
+    )
     .exhaustive();
 }
 

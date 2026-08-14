@@ -6,7 +6,7 @@
  */
 import { Cause, Effect, Exit, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ZikuFailure } from "../../errors";
+import { DefaultBranchUnresolvedError, ZikuFailure } from "../../errors";
 import type { LockState, TemplateSource } from "../../modules/schemas";
 import { createPendingLock, markSynced } from "../../modules/schemas";
 import { absPath, commitSha, hashMap } from "../../__tests__/brands";
@@ -56,7 +56,7 @@ vi.mock("../../utils/template-resolve", async () => {
 
 vi.mock("../../utils/github", () => ({ resolveSourceCommit: vi.fn() }));
 
-const { loadCommandContext } = await import("../command-context");
+const { loadCommandContext, toZikuFailure } = await import("../command-context");
 const { loadLock } = await import("../../utils/lock");
 const { resolveSourceCommit } = await import("../../utils/github");
 
@@ -110,5 +110,18 @@ describe("resolveBaseRef", () => {
 
     expect(exit).toStrictEqual(Exit.succeed(Option.none()));
     expect(mockResolveSourceCommit).not.toHaveBeenCalled();
+  });
+});
+
+describe("toZikuFailure", () => {
+  it("取得先の既定ブランチが決まらない失敗は、到達性を直すか ref を明示する案内へ分類する", () => {
+    const failure = toZikuFailure(
+      new DefaultBranchUnresolvedError({ owner: "tktcorporation", repo: ".github" }),
+    );
+
+    expect(failure.reason).toEqual({
+      kind: "DefaultBranchUnresolved",
+      repo: "tktcorporation/.github",
+    });
   });
 });

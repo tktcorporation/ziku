@@ -16,6 +16,7 @@ import type {
   LockState,
   PendingConflict,
   RepoRelPath,
+  TemplateSource,
 } from "../modules/schemas";
 import { baseCommitSha, baseHashesOf, markSynced } from "../modules/schemas";
 import { LOCK_FILE, saveLock } from "../utils/lock";
@@ -73,6 +74,7 @@ import type {
   PushContent,
   PushFileSelection,
   PushPayload,
+  ZikuConfigWriteBack,
 } from "./push-plan";
 import {
   alreadySyncedPaths,
@@ -83,7 +85,6 @@ import {
   buildPushSummaryRows,
   collectPushCandidates,
   configDiffToInject,
-  configWriteBackSafe,
   defaultPushSelection,
   filterByFilesArg,
   mergedAsPushContent,
@@ -95,6 +96,7 @@ import {
   selectedUnresolvedConflicts,
   templateContentOf,
   withNewlyTrackedPatterns,
+  zikuConfigWriteBack,
 } from "./push-plan";
 
 /** テンプレートのリポジトリルートにある README。マーカー間が同期対象一覧の反映先になる。 */
@@ -387,10 +389,10 @@ interface PushToLocalInput {
    */
   readonly patterns: { include: readonly GlobPattern[]; exclude: readonly GlobPattern[] };
   /**
-   * push される ziku.jsonc の内容をローカルへそのまま書き戻してよいか
-   * （`configWriteBackSafe` の判定結果）。
+   * push される ziku.jsonc の内容をローカルへも残すか（`zikuConfigWriteBack` の判定結果）。
+   * ローカルへの書き戻しと同期ベースの前進範囲は、どちらもこの値から決まる。
    */
-  readonly configWriteBack: boolean;
+  readonly configWriteBack: ZikuConfigWriteBack;
   /** push 前からローカルとテンプレートが一致していたパス（`baseAfterPush` が使う）。 */
   readonly alreadySynced: ReadonlySet<RepoRelPath>;
 }
@@ -455,16 +457,23 @@ function pushToLocal(input: PushToLocalInput): Effect.Effect<boolean, ZikuFailur
       // 乖離したまま baseHashes をテンプレ（union）へ進めてしまい、次回 push で
       // ローカルが localOnly 判定 → テンプレ側の追加分を上書きで落とす。
       // ローカルにも merged 内容を書き戻して local==template==base を保つ。
-      // スコープ限定 union を送った場合に書き戻せない理由は `configWriteBackSafe` を参照。
+      // スコープ限定 union を送った場合に書き戻さない理由は `ZikuConfigWriteBack` を参照。
       const mergedConfig = target.files.find((f) => isZikuConfigPath(f.path));
-      if (mergedConfig && input.configWriteBack) {
-        const localConfigPath = joinAbs(projectDir, ZIKU_CONFIG_FILE);
-        await mkdir(dirname(localConfigPath), { recursive: true });
-        await writeFile(localConfigPath, mergedConfig.content, "utf-8");
+      if (mergedConfig !== undefined) {
+        await match(input.configWriteBack)
+          .with({ _tag: "WriteBack" }, async () => {
+            const localConfigPath = joinAbs(projectDir, ZIKU_CONFIG_FILE);
+            await mkdir(dirname(localConfigPath), { recursive: true });
+            await writeFile(localConfigPath, mergedConfig.content, "utf-8");
+          })
+          .with({ _tag: "Withhold" }, () => Promise.resolve())
+          .exhaustive();
       }
 
       // ベースは push 後のテンプレートを走査して組み立てる。走査結果をそのまま採用せず、
-      // 送ったパスと元から一致していたパスだけを前進させる（`baseAfterPush`）。
+      // 送ったパスと元から一致していたパスだけを前進させる（`baseAfterPush`）。書き戻さ
+      // なかった ziku.jsonc を前進の対象から外すのも同じ規則の一部なので、判定に使った値を
+      // そのまま渡す。
       const templateHashes = await hashFiles(localSource.path, patterns.include, patterns.exclude);
       await saveLock(
         projectDir,
@@ -474,6 +483,7 @@ function pushToLocal(input: PushToLocalInput): Effect.Effect<boolean, ZikuFailur
             previousBase: baseHashesOf(ctx.lock),
             pushed: target,
             alreadySynced: input.alreadySynced,
+            configWriteBack: input.configWriteBack,
           }),
         }),
       );
@@ -743,6 +753,7 @@ async function pushProject(params: {
     await previewPush({
       targetDir,
       templateDir: ctx.templateDir,
+      source: ctx.source,
       candidates,
       unresolvedConflicts,
       restoresTemplateDeletion: candidatePlan.restoresTemplateDeletion,
@@ -801,7 +812,7 @@ async function pushProject(params: {
           projectDir: targetDir,
           args: { yes: args.yes },
           patterns: effectivePatterns,
-          configWriteBack: configResult.writeBackSafe,
+          configWriteBack: configResult.writeBack,
           alreadySynced,
         }),
       )
@@ -833,6 +844,8 @@ async function pushProject(params: {
 async function previewPush(params: {
   targetDir: AbsPath;
   templateDir: AbsPath;
+  /** 送信先。ziku が付け足すファイルは送信先によって変わるので、予告も送信先で分ける。 */
+  source: TemplateSource;
   candidates: readonly ChangedFileDiff[];
   unresolvedConflicts: ReadonlySet<RepoRelPath>;
   restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
@@ -867,7 +880,12 @@ async function previewPush(params: {
     previewFiles,
   });
 
-  await warnIfReadmeWouldBeAutoUpdated(params.templateDir);
+  // README の自動更新が走るのは GitHub への push だけ（`pushToGitHub`）。ローカルテンプレート
+  // への push では触らないので、予告すると起きない更新を予告することになる。
+  await match(params.source)
+    .with({ kind: "github" }, () => warnIfReadmeWouldBeAutoUpdated(params.templateDir))
+    .with({ kind: "local" }, () => Promise.resolve())
+    .exhaustive();
 
   // 未解決の衝突を --files で明示選択した場合、実 push は中断する。予告して挙動を一致させる。
   const selectedConflicts = selectedUnresolvedConflicts(previewFiles, unresolvedConflicts);
@@ -993,7 +1011,7 @@ async function persistNewlyTracked(
  * 何を載せるかは `planConfigPropagation` が決め、ここはその計画に沿って `ziku.jsonc` の内容を
  * 組み立て（I/O）、必要なら送信対象へ注入する。
  *
- * @returns 注入後の送信対象と、その内容をローカルの `ziku.jsonc` へ書き戻してよいか。
+ * @returns 注入後の送信対象と、その内容をローカルの `ziku.jsonc` へも残すか。
  */
 async function propagateConfigPatterns(params: {
   targetDir: AbsPath;
@@ -1002,7 +1020,7 @@ async function propagateConfigPatterns(params: {
   selected: readonly ChangedFileDiff[];
   diffFiles: readonly FileDiff[];
   mergedContents: Map<RepoRelPath, PushContent>;
-}): Promise<{ selected: readonly ChangedFileDiff[]; writeBackSafe: boolean }> {
+}): Promise<{ selected: readonly ChangedFileDiff[]; writeBack: ZikuConfigWriteBack }> {
   const { targetDir, templateDir, selected, mergedContents } = params;
   const selectedPaths = selected.map((f) => f.path);
 
@@ -1018,7 +1036,7 @@ async function propagateConfigPatterns(params: {
     newlyTrackedPaths: params.newlyTrackedPaths,
     localOnlyPatterns,
   });
-  const writeBackSafe = configWriteBackSafe(plan);
+  const writeBack = zikuConfigWriteBack(plan);
 
   const mergedConfig = await match(plan)
     .with({ _tag: "NoConfigChange" }, () => Promise.resolve(undefined))
@@ -1030,21 +1048,21 @@ async function propagateConfigPatterns(params: {
     )
     .exhaustive();
 
-  if (mergedConfig === undefined) return { selected, writeBackSafe };
+  if (mergedConfig === undefined) return { selected, writeBack };
   mergedContents.set(ZIKU_CONFIG_FILE, asPushContent(mergedConfig));
 
   // 選択済みなら content は mergedContents が採用されるので注入は不要。
-  if (configAlreadySelected) return { selected, writeBackSafe };
+  if (configAlreadySelected) return { selected, writeBack };
 
   const configDiff = params.diffFiles.find((f) => isZikuConfigPath(f.path));
   const injected = configDiffToInject({
     mergedConfig,
     templateConfig: configDiff === undefined ? undefined : templateContentOf(configDiff),
   });
-  if (injected === undefined) return { selected, writeBackSafe };
+  if (injected === undefined) return { selected, writeBack };
 
   announceConfigAutoInclude(localOnlyPatterns);
-  return { selected: [...selected, injected], writeBackSafe };
+  return { selected: [...selected, injected], writeBack };
 }
 
 /**

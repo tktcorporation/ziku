@@ -12,6 +12,7 @@ import { match } from "ts-pattern";
 import type { AbsPath, CommitSha, ZikuConfig, LockState, TemplateSource } from "../modules/schemas";
 import { zikuFailure } from "../errors";
 import type {
+  DefaultBranchUnresolvedError,
   FileNotFoundError,
   ParseError,
   TemplateError,
@@ -63,7 +64,12 @@ export class CommandContext extends Context.Tag("CommandContext")<
 >() {}
 
 /** loadCommandContext / loadLock が返しうる、ユーティリティ層の失敗。 */
-export type ContextLoadError = FileNotFoundError | ParseError | ValidationError | TemplateError;
+export type ContextLoadError =
+  | FileNotFoundError
+  | ParseError
+  | ValidationError
+  | TemplateError
+  | DefaultBranchUnresolvedError;
 
 // ─── Effect ヘルパー ───
 
@@ -206,6 +212,9 @@ export function toZikuFailure(err: ContextLoadError): ZikuFailure {
     )
     .with({ _tag: "TemplateError" }, (e) =>
       zikuFailure({ kind: "TemplateUnavailable", detail: e.message }, { cause: e.cause }),
+    )
+    .with({ _tag: "DefaultBranchUnresolvedError" }, (e) =>
+      zikuFailure({ kind: "DefaultBranchUnresolved", repo: `${e.owner}/${e.repo}` }),
     )
     .exhaustive();
 }

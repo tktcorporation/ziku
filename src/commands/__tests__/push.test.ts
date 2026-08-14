@@ -630,6 +630,32 @@ describe("pushCommand", () => {
         expect(mockDetectAndUpdateReadme).not.toHaveBeenCalled();
       });
 
+      it("ローカルテンプレートへの --dry-run では README の更新を予告しない", async () => {
+        // README の自動更新は GitHub への push でしか走らない。ローカルテンプレートへの
+        // push で予告すると、実際には起きない更新を予告することになる。
+        const { effect } = mockContext({
+          source: localTemplateSource,
+          templateDir: absPath("/local/template"),
+          lock: lockWith({ source: localTemplateSource }),
+        });
+        mockLoadCommandContext.mockReturnValue(effect);
+        setupPushableFiles([
+          { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
+        ]);
+        mockDetectReadmeUpdate.mockResolvedValueOnce(updatedReadme);
+
+        await (pushCommand.run as any)({
+          args: { dir: "/test", dryRun: true, yes: false, edit: false },
+          rawArgs: [],
+          cmd: pushCommand,
+        });
+
+        expect(
+          mockLog.warn.mock.calls.map((call) => call[0]).filter((text) => text.includes("README")),
+        ).toEqual([]);
+        expect(mockDetectReadmeUpdate).not.toHaveBeenCalled();
+      });
+
       it("--dry-run でマーカーが無ければ予告しない", async () => {
         setupPushableFiles([
           { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
@@ -1470,32 +1496,30 @@ describe("pushCommand", () => {
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
-    it("localOnly で ziku.jsonc がローカル削除されていてもテンプレのパターンは消さない（codex P2）", async () => {
-      // ローカルが .github/** を削除しただけ（localOnly）。push は生のローカルではなく
-      // union を送るので、テンプレ側の .github/** は保持される（削除は自動伝播しない）。
+    /**
+     * `ziku.jsonc` が localOnly に分類された状態を作る。
+     *
+     * ローカル・テンプレートそれぞれの内容だけを変えて、パターン集合の実差分（drift）が
+     * push の結論をどう変えるかを見る。
+     */
+    function setupLocalOnlyConfig(opts: { localInclude: string[]; templateInclude: string[] }): {
+      localConfig: string;
+    } {
       const { effect } = mockContext({
-        lock: lockWith({
-          hashes: { ".ziku/ziku.jsonc": "oldhash" },
-        }),
+        lock: lockWith({ hashes: { ".ziku/ziku.jsonc": "oldhash" } }),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 
-      const localConfig = JSON.stringify({ include: [".claude/**"] }, null, 2);
-      const templateConfig = JSON.stringify({ include: [".claude/**", ".github/**"] }, null, 2);
+      const localConfig = JSON.stringify({ include: opts.localInclude }, null, 2);
+      const templateConfig = JSON.stringify({ include: opts.templateInclude }, null, 2);
       vol.fromJSON({
         "/test/.ziku/ziku.jsonc": localConfig,
         "/tmp/template/.ziku/ziku.jsonc": templateConfig,
       });
 
       mockClassifyFiles.mockReturnValueOnce({
-        autoUpdate: [],
+        ...emptyClassification,
         localOnly: repoRelPaths([".ziku/ziku.jsonc"]),
-        conflicts: [],
-        newFiles: [],
-        deletedFiles: [],
-        deletedWithLocalEdits: [],
-        deletedLocally: [],
-        unchanged: [],
       });
 
       const pushableFile = {
@@ -1504,9 +1528,7 @@ describe("pushCommand", () => {
         localContent: localConfig,
         templateContent: templateConfig,
       };
-      mockDetectDiff.mockResolvedValueOnce({
-        files: [pushableFile],
-      });
+      mockDetectDiff.mockResolvedValueOnce({ files: [pushableFile] });
       mockSelectPushFiles.mockResolvedValueOnce([pushableFile]);
       mockConfirmAction.mockResolvedValueOnce(true);
       mockGetGitHubToken.mockReturnValue("ghp_token");
@@ -1514,6 +1536,34 @@ describe("pushCommand", () => {
         url: "https://github.com/owner/repo/pull/1",
         branch: "b",
         number: 1,
+      });
+
+      return { localConfig };
+    }
+
+    it("localOnly で ziku.jsonc がローカル削除されていてもテンプレのパターンは消さない（codex P2）", async () => {
+      // ローカルが .github/** を削除しただけ。union はテンプレの内容と一致するので、送っても
+      // パターンが 1 つも増えない PR になる。status もこの状態を同期済みとして見せるため、
+      // push は何も送らない（削除は自動伝播しない）。
+      setupLocalOnlyConfig({
+        localInclude: [".claude/**"],
+        templateInclude: [".claude/**", ".github/**"],
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: false, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+      expect(mockLog.info).toHaveBeenCalledWith("No changes to push");
+    });
+
+    it("localOnly でテンプレに無いパターンがあれば union を送り、テンプレ側の削除も起きない", async () => {
+      setupLocalOnlyConfig({
+        localInclude: [".claude/**", "extra/**"],
+        templateInclude: [".claude/**", ".github/**"],
       });
 
       await (pushCommand.run as any)({
@@ -1528,7 +1578,8 @@ describe("pushCommand", () => {
       const configFile = prArg.files.find((f) => f.path === ".ziku/ziku.jsonc");
       expect(configFile).toBeDefined();
       const pushed = JSON.parse(configFile?.content as string);
-      // 生のローカル（.github/** 削除済み）ではなく union が送られ、.github/** は残る
+      // 生のローカルではなく union が送られる。ローカルが持たない .github/** も残る。
+      expect(pushed.include).toContain("extra/**");
       expect(pushed.include).toContain(".github/**");
       expect(pushed.include).toContain(".claude/**");
     });

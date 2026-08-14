@@ -102,6 +102,11 @@ export type CopyResult = FileOperationResult;
  * giget は "gh:owner/repo" または "gh:owner/repo#ref" 形式を期待する。ref の種別
  * （ブランチ / タグ / コミット）は giget にとって区別が無く、どれも "#" の後ろに載る。
  * その変換は `templateRefToString` に集約している。
+ *
+ * ref を持たないソースからは "#" の無い文字列ができ、giget の既定である `main` から取得
+ * される。リポジトリの既定ブランチは `main` とは限らないので、取得先を lock の `base.ref` や
+ * PR の宛先と揃える必要がある呼び出しは、この関数へ渡す前に既定ブランチを解決して ref を
+ * 埋めること（`utils/template-resolve.ts` の `resolveTemplateDirScoped`）。
  */
 export function buildTemplateSource(source: GitHubSource): string {
   const base = `gh:${source.owner}/${source.repo}`;

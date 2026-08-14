@@ -5,6 +5,7 @@ import { FileNotFoundError, ZikuFailure, zikuFailure } from "../../errors";
 import type {
   AbsPath,
   CommitSha,
+  GitHubSource,
   GlobPattern,
   LockState,
   PendingConflicts,
@@ -42,16 +43,20 @@ vi.mock("../../services/command-context", async (importOriginal) => {
   };
 });
 
-vi.mock("../../utils/template", () => ({
-  downloadTemplateToTemp: vi.fn(),
-  buildTemplateSource: vi.fn(
-    (source: { owner: string; repo: string }) => `gh:${source.owner}/${source.repo}`,
-  ),
-  buildCommitPinnedSource: vi.fn(
-    (source: { owner: string; repo: string }, sha: string) =>
-      `gh:${source.owner}/${source.repo}#${sha}`,
-  ),
-}));
+vi.mock("../../utils/template", async () => {
+  const { templateRefToString } = await import("../../modules/schemas");
+  return {
+    downloadTemplateToTemp: vi.fn(),
+    buildTemplateSource: vi.fn((source: GitHubSource) => {
+      const base = `gh:${source.owner}/${source.repo}`;
+      return source.ref ? `${base}#${templateRefToString(source.ref)}` : base;
+    }),
+    buildCommitPinnedSource: vi.fn(
+      (source: { owner: string; repo: string }, sha: string) =>
+        `gh:${source.owner}/${source.repo}#${sha}`,
+    ),
+  };
+});
 
 // --continue モードで直接使われるため、モックが引き続き必要。
 // パス種別の判定（classifySyncPath 等）は分類の仕分けが実際に使うので実装をそのまま通す。
@@ -139,6 +144,7 @@ vi.mock("../../utils/merge", async () => {
 
 vi.mock("../../utils/github", () => ({
   resolveLatestCommitSha: vi.fn(() => Promise.resolve("latest123")),
+  resolveDefaultBranch: vi.fn(() => Promise.resolve<string | undefined>("main")),
 }));
 
 vi.mock("../../utils/template-config", async () => {
@@ -191,6 +197,8 @@ const mockSelectDeletedFiles = vi.mocked(selectDeletedFiles);
 const mockSelectDeletedFilesWithLocalEdits = vi.mocked(selectDeletedFilesWithLocalEdits);
 const mockSelectUnmergedResolution = vi.mocked(selectUnmergedResolution);
 const { downloadTemplateToTemp, buildCommitPinnedSource } = await import("../../utils/template");
+const { resolveDefaultBranch } = await import("../../utils/github");
+const mockResolveDefaultBranch = vi.mocked(resolveDefaultBranch);
 const { zikuConfigExists } = await import("../../utils/ziku-config");
 const { loadLock, saveLock } = await import("../../utils/lock");
 const { loadTemplateConfig } = await import("../../utils/template-config");
@@ -1572,6 +1580,72 @@ describe("pullCommand", () => {
         sync: "synced",
         base: { hashes: { ".mcp.json": hashContent(editedAfterPause) } },
       });
+    });
+
+    it("--continue: 中断時に SHA を確定できていなければ、既定ブランチから取り寄せる", async () => {
+      // giget の既定 (main) へ倒すと、既定ブランチが master のリポジトリでは書き込む内容だけが
+      // 別ブランチのツリー由来になる。
+      vol.fromJSON({
+        "/test/.mcp.json": "local content",
+        "/tmp/paused-template/.mcp.json": "template content",
+      });
+
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(
+          mergingLock([pendingConflict(".mcp.json", "noBase")], {
+            hashes: hashMap({ ".mcp.json": "newhash" }),
+          }),
+        ),
+      );
+      mockSelectUnmergedResolution.mockResolvedValueOnce("takeTemplate");
+      mockResolveDefaultBranch.mockResolvedValueOnce("master");
+      mockDownloadTemplateToTemp.mockResolvedValueOnce({
+        templateDir: absPath("/tmp/paused-template"),
+        cleanup: vi.fn(),
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false, continue: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
+        expect.any(String),
+        "gh:tktcorporation/.github#master",
+        "continue",
+      );
+      const written = mockWriteFileEnsureDir.mock.calls.find(([p]) => p === "/test/.mcp.json");
+      expect(written?.[1]?.toString()).toBe("template content");
+    });
+
+    it("--continue: 既定ブランチを引けなければ、取得せずに中断してベースを前進させない", async () => {
+      vol.fromJSON({ "/test/.mcp.json": "local content" });
+
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(
+          mergingLock([pendingConflict(".mcp.json", "noBase")], {
+            hashes: hashMap({ ".mcp.json": "newhash" }),
+          }),
+        ),
+      );
+      mockSelectUnmergedResolution.mockResolvedValueOnce("takeTemplate");
+      mockResolveDefaultBranch.mockResolvedValueOnce(undefined);
+
+      const failure = await captureFailure(() =>
+        (pullCommand.run as any)({
+          args: { dir: "/test", force: false, yes: false, continue: true },
+          rawArgs: [],
+          cmd: pullCommand,
+        }),
+      );
+
+      expect(failure.reason).toMatchObject({
+        kind: "DefaultBranchUnresolved",
+        repo: "tktcorporation/.github",
+      });
+      expect(mockDownloadTemplateToTemp).not.toHaveBeenCalled();
+      expect(mockSaveLock).not.toHaveBeenCalled();
     });
 
     it("--continue: テンプレートを取り寄せられなければベースを前進させない", async () => {

@@ -31,6 +31,7 @@ import {
   buildTemplateSource,
   downloadTemplateToTemp,
 } from "../utils/template";
+import { resolveGitHubFetchSource } from "../utils/template-resolve";
 import { ZIKU_CONFIG_FILE, withConfigTracked, zikuConfigExists } from "../utils/ziku-config";
 import { loadCommandContext, runCommandEffect, toZikuFailure } from "../services/command-context";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
@@ -933,8 +934,9 @@ async function applyUnmergedChoices(
  *
  * - ローカルソース: ディレクトリを直接読む。過去のツリーを取り直す手段が無い（`SyncBase` が
  *   ローカルソースでコミット SHA を持たない理由と同じ）。
- * - GitHub ソースで SHA が未記録: API へ到達できないまま中断した場合で、ソースの ref をそのまま
- *   辿るしかない。
+ * - GitHub ソースで SHA が未記録: API へ到達できないまま中断した場合で、ソースの取得先をもう一度
+ *   辿るしかない。取得先の決め方は {@link resolveGitHubFetchSource} に合わせる。ここだけ ref を
+ *   省いて giget の既定へ倒すと、書き込んだ内容とベースが別のブランチのツリーを指す。
  *
  * ズレたまま整合を保つ仕組みは呼び出し側にある。書き込んだ内容のハッシュをベースへ載せるので
  * （{@link applyUnmergedChoices} / {@link finalizeMergedBase}）、どのツリーから読んでも
@@ -953,20 +955,30 @@ function acquireResolutionTemplate(
     )
     .with({ source: { kind: "github" } }, (l) => {
       const ref = l.merge.nextBase.ref;
-      const source =
-        ref === undefined ? buildTemplateSource(l.source) : buildCommitPinnedSource(l.source, ref);
+      const fetchSource: Effect.Effect<string, ZikuFailure> =
+        ref === undefined
+          ? resolveGitHubFetchSource(l.source).pipe(
+              Effect.map(buildTemplateSource),
+              Effect.mapError(toZikuFailure),
+            )
+          : Effect.succeed(buildCommitPinnedSource(l.source, ref));
       return runCommandEffect(
-        Effect.tryPromise({
-          try: () => downloadTemplateToTemp(targetDir, source, "continue"),
-          catch: (cause) =>
-            zikuFailure(
-              {
-                kind: "TemplateUnavailable",
-                detail: `Could not download the template version being merged (${source}): ${String(cause)}`,
-              },
-              { cause },
-            ),
-        }).pipe(Effect.map(({ templateDir, cleanup }) => ({ dir: templateDir, cleanup }))),
+        fetchSource.pipe(
+          Effect.flatMap((source) =>
+            Effect.tryPromise({
+              try: () => downloadTemplateToTemp(targetDir, source, "continue"),
+              catch: (cause) =>
+                zikuFailure(
+                  {
+                    kind: "TemplateUnavailable",
+                    detail: `Could not download the template version being merged (${source}): ${String(cause)}`,
+                  },
+                  { cause },
+                ),
+            }),
+          ),
+          Effect.map(({ templateDir, cleanup }) => ({ dir: templateDir, cleanup })),
+        ),
       );
     })
     .exhaustive();

@@ -378,6 +378,18 @@ export class TemplateError extends Data.TaggedError("TemplateError")<{
 }> {}
 
 /**
+ * ref を明示していないテンプレートソースで、リポジトリの既定ブランチを引けなかった。
+ *
+ * `TemplateError` と分けるのは、取れる行動が違うため。ダウンロードそのものの失敗と違い、
+ * ここでは「どのブランチを取ればよいか」が決まっていない。ユーザーは GitHub への到達性を
+ * 直すか、lock の `source.ref` で取得先を明示することで解決できる。
+ */
+export class DefaultBranchUnresolvedError extends Data.TaggedError("DefaultBranchUnresolvedError")<{
+  readonly owner: string;
+  readonly repo: string;
+}> {}
+
+/**
  * テンプレートに .ziku/ziku.jsonc が存在しない。
  * init 時にテンプレートが未構成の場合に発生する。
  */

@@ -404,6 +404,9 @@ export function alreadySyncedPaths(hashes: SyncHashes): ReadonlySet<RepoRelPath>
  *    なっているので、走査結果がそのままベースになる。
  * 2. push 前からローカルとテンプレートが一致していたパス（{@link alreadySyncedPaths}）。
  *
+ * ただし 1 には例外がある。送った内容がローカルの内容と違うまま残るパスは、テンプレートに
+ * 揃えるとローカルだけが base からずれる（{@link withheldFromLocal}）。
+ *
  * それ以外は前回のベースを据え置く。据え置いたファイルは次回も同じカテゴリに分類されるので、
  * テンプレート側の更新は `pull` が取り込むまで残り、push の候補にも上がり続ける。
  *
@@ -420,12 +423,17 @@ export function baseAfterPush(params: {
   readonly pushed: PushPayload;
   /** push 前からローカルとテンプレートが一致していたパス。 */
   readonly alreadySynced: ReadonlySet<RepoRelPath>;
+  /** 送った `ziku.jsonc` の内容をローカルにも残したか。 */
+  readonly configWriteBack: ZikuConfigWriteBack;
 }): HashMap {
-  const advanced = new Set<RepoRelPath>([
-    ...params.alreadySynced,
-    ...params.pushed.files.map((file) => file.path),
-    ...params.pushed.deletions.map((deletion) => deletion.path),
-  ]);
+  const withheld = withheldFromLocal(params.configWriteBack, params.pushed);
+  const advanced = new Set<RepoRelPath>(
+    [
+      ...params.alreadySynced,
+      ...params.pushed.files.map((file) => file.path),
+      ...params.pushed.deletions.map((deletion) => deletion.path),
+    ].filter((path) => !withheld.has(path)),
+  );
 
   const base: HashMap = {};
   for (const path of repoRelPaths(Object.keys(params.previousBase))) {
@@ -440,6 +448,32 @@ export function baseAfterPush(params: {
     if (advancedHash !== undefined) base[path] = advancedHash;
   }
   return base;
+}
+
+/**
+ * テンプレートへ送ったが、同じ内容がローカルには残らなかったパス。
+ *
+ * スコープ限定の和集合を送った `ziku.jsonc` がこれに当たる（{@link ZikuConfigWriteBack}）。
+ * 送ったのはローカルの内容ではないので、ベースをテンプレート側へ進めると
+ * local != base == template になり、次の分類はローカルを `localOnly`（ローカルだけが変えた）
+ * と読む。すると次の `push` はローカル全体の和集合を送り、スコープ限定で送らずに残した
+ * ローカル限定パターンがテンプレートへ漏れる。ベースを据え置けばテンプレート側の追加は
+ * `autoUpdate` として残り、取り込むのは `pull` の役目になる。
+ */
+function withheldFromLocal(
+  writeBack: ZikuConfigWriteBack,
+  pushed: PushPayload,
+): ReadonlySet<RepoRelPath> {
+  return match(writeBack)
+    .with({ _tag: "WriteBack" }, () => new Set<RepoRelPath>())
+    .with(
+      { _tag: "Withhold" },
+      () =>
+        new Set<RepoRelPath>(
+          pushed.files.filter((file) => isZikuConfigPath(file.path)).map((file) => file.path),
+        ),
+    )
+    .exhaustive();
 }
 
 // ─── `ziku.jsonc` の伝播 ───
@@ -506,16 +540,31 @@ export function planConfigPropagation(params: {
 }
 
 /**
- * 計算した `ziku.jsonc` の内容を、ローカルの `ziku.jsonc` へそのまま書き戻してよいか。
+ * 送る `ziku.jsonc` の内容を、ローカルの `ziku.jsonc` にも残すか。
  *
- * スコープ限定の和集合はテンプレート + 今回関係するパターンだけなので、ローカルの他の
- * パターンを含まない部分集合になりうる。これをローカルへ書き戻すと、無関係なローカル限定
- * パターンを消してしまう（和集合は削除しないという原則に反する）。
+ * `Withhold` になるのはスコープ限定の和集合を送るときで、その内容はテンプレート + 今回
+ * 関係するパターンだけ、つまりローカルの他のパターンを含まない部分集合になりうる。これを
+ * ローカルへ書き戻すと、無関係なローカル限定パターンを消してしまう（和集合は削除しないと
+ * いう原則に反する）。
+ *
+ * 書き戻しの有無は同期ベースの前進範囲も決める（{@link baseAfterPush}）。両者を 1 つの値から
+ * 導くことで、「ローカルへ書き戻していないのにベースだけテンプレート側へ進む」組み合わせを
+ * 作れなくする。
  */
-export function configWriteBackSafe(plan: ConfigPropagationPlan): boolean {
+export type ZikuConfigWriteBack =
+  /** 送った内容をローカルの `ziku.jsonc` へも書き、local == template を保つ。 */
+  | { readonly _tag: "WriteBack" }
+  /** ローカルの `ziku.jsonc` は変えない。送った内容とローカルの内容は一致しない。 */
+  | { readonly _tag: "Withhold" };
+
+/** 伝播の計画から、ローカルの `ziku.jsonc` へ書き戻すかを決める。 */
+export function zikuConfigWriteBack(plan: ConfigPropagationPlan): ZikuConfigWriteBack {
   return match(plan)
-    .with({ _tag: P.union("NoConfigChange", "MergeLocalConfig") }, () => true)
-    .with({ _tag: "MergeScopedConfig" }, () => false)
+    .with(
+      { _tag: P.union("NoConfigChange", "MergeLocalConfig") },
+      (): ZikuConfigWriteBack => ({ _tag: "WriteBack" }),
+    )
+    .with({ _tag: "MergeScopedConfig" }, (): ZikuConfigWriteBack => ({ _tag: "Withhold" }))
     .exhaustive();
 }
 
