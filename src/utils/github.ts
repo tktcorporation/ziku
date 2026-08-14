@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { Octokit } from "@octokit/rest";
 import { Effect, Option } from "effect";
 import { GitHubApiError, ZikuError } from "../errors";
@@ -165,32 +166,57 @@ export function getGitHubToken(): string | undefined {
 }
 
 /**
+ * `getGhCliToken` の結果（取得できなかった場合の undefined も含めて）を
+ * プロセス起動 1 回分だけ保持するモジュールレベルキャッシュ。
+ *
+ * 背景: `githubAuthHeaders()` は GitHub API リクエストのたびに `getGitHubToken()` を呼ぶ。
+ * `GITHUB_TOKEN` / `GH_TOKEN` が未設定の環境では、そのたびに `gh auth token` の同期
+ * サブプロセス起動（タイムアウト 5 秒）が走り、イベントループを止めて
+ * `--concurrency` による並列化の効果を打ち消す。gh CLI の認証状態はプロセス実行中に
+ * 変わらない前提でキャッシュする。
+ */
+let ghCliTokenCache: { readonly token: string | undefined } | undefined;
+
+/**
  * gh CLI の `gh auth token` からトークンを取得する。
  * gh CLI が未インストール or 未ログインの場合は undefined を返す。
+ *
+ * 結果はプロセス内でキャッシュされる（{@link resetGhCliTokenCache} 参照）。
  */
 export function getGhCliToken(): string | undefined {
-  return Option.getOrUndefined(
+  if (ghCliTokenCache !== undefined) return ghCliTokenCache.token;
+
+  const token = Option.getOrUndefined(
     Effect.runSync(
-      Effect.try(() => {
-        const { execFileSync } = require("node:child_process");
-        return (
-          execFileSync("gh", ["auth", "token"], {
-            encoding: "utf-8",
-            timeout: 5000,
-            stdio: ["pipe", "pipe", "pipe"],
-          }) as string
-        ).trim();
-      }).pipe(
-        Effect.flatMap((token) =>
-          token &&
-          (token.startsWith("ghp_") || token.startsWith("gho_") || token.startsWith("github_pat_"))
-            ? Effect.succeed(token)
+      Effect.try(() =>
+        execFileSync("gh", ["auth", "token"], {
+          encoding: "utf-8",
+          timeout: 5000,
+          stdio: ["pipe", "pipe", "pipe"],
+        }).trim(),
+      ).pipe(
+        Effect.flatMap((t) =>
+          t && (t.startsWith("ghp_") || t.startsWith("gho_") || t.startsWith("github_pat_"))
+            ? Effect.succeed(t)
             : Effect.fail("invalid token format" as const),
         ),
         Effect.option,
       ),
     ),
   );
+  ghCliTokenCache = { token };
+  return token;
+}
+
+/**
+ * `getGhCliToken` のモジュールレベルキャッシュをリセットする。
+ *
+ * テストで gh CLI の認証状態（またはそのモック）を切り替える前に呼ぶこと。
+ * プロダクションコードから呼ぶ必要はない（プロセス寿命の間キャッシュが有効という
+ * 前提のため）。
+ */
+export function resetGhCliTokenCache(): void {
+  ghCliTokenCache = undefined;
 }
 
 /**
@@ -429,7 +455,10 @@ export async function scaffoldTemplateRepo(
  *
  * 背景: init/pull 時に baseRef として保存し、後で 3-way マージのベース取得に使用する。
  * GitHub API の `Accept: application/vnd.github.sha` を使い、SHA 文字列のみを取得する。
- * 認証不要（公開リポジトリの場合）。
+ *
+ * トークンがあれば付与する（`githubAuthHeaders()`）。プライベートリポジトリは未認証だと
+ * 404 扱いになり解決不能になるため。トークンが無くても public リポジトリの解決は
+ * 引き続き動作する（未認証 60req/h の制限を受けるだけ）。
  */
 export async function resolveLatestCommitSha(
   owner: string,
@@ -441,7 +470,7 @@ export async function resolveLatestCommitSha(
       Effect.tryPromise(async () => {
         const url = `https://api.github.com/repos/${owner}/${repo}/commits/${ref}`;
         const res = await fetch(url, {
-          headers: { Accept: "application/vnd.github.sha" },
+          headers: { Accept: "application/vnd.github.sha", ...githubAuthHeaders() },
         });
         if (!res.ok) return undefined;
         return (await res.text()).trim();
@@ -564,9 +593,13 @@ function isOrganization(owner: string): Effect.Effect<boolean, GitHubApiError> {
  *
  * `per_page=100` で取得し、返却件数が `per_page` 未満になったページを最後と判定する
  * （GitHub の Link ヘッダをパースする方法もあるが、この用途では単純な件数判定で十分）。
+ *
+ * @param extraParams `baseUrl` だけでは表現できない追加クエリパラメータ
+ *   （例: `/user/repos?affiliation=owner` の `affiliation`）。
  */
 function fetchAllRepoPages(
   baseUrl: string,
+  extraParams?: Record<string, string>,
 ): Effect.Effect<readonly GitHubRepoListItem[], GitHubApiError> {
   const perPage = 100;
   const loop = (
@@ -574,7 +607,13 @@ function fetchAllRepoPages(
     acc: readonly GitHubRepoListItem[],
   ): Effect.Effect<readonly GitHubRepoListItem[], GitHubApiError> =>
     Effect.gen(function* () {
-      const res = yield* githubFetch(`${baseUrl}?per_page=${perPage}&page=${page}`);
+      const url = new URL(baseUrl);
+      url.searchParams.set("per_page", String(perPage));
+      url.searchParams.set("page", String(page));
+      for (const [key, value] of Object.entries(extraParams ?? {})) {
+        url.searchParams.set(key, value);
+      }
+      const res = yield* githubFetch(url.toString());
       if (!res.ok) return yield* Effect.fail(githubResponseError(res));
       const items = yield* parseGitHubJson<readonly GitHubRepoListItem[]>(res);
       const combined = [...acc, ...items];
@@ -582,6 +621,40 @@ function fetchAllRepoPages(
       return yield* loop(page + 1, combined);
     });
   return loop(1, []);
+}
+
+/**
+ * Personal アカウント owner のリポジトリ一覧を取得する。
+ *
+ * `GET /users/{owner}/repos` は認証していても public リポジトリしか返さない
+ * （GitHub API の仕様）。探索対象の owner が認証ユーザー自身の場合は
+ * `GET /user/repos?affiliation=owner` に切り替える。このエンドポイントは
+ * 認証ユーザーが owner のリポジトリ（private を含む）を返す。
+ *
+ * 他人の Personal アカウントを探索する場合に public リポジトリしか見えないのは
+ * GitHub API 側の仕様上の制約であり、この関数の対処範囲外（挙動は変えない）。
+ */
+function fetchPersonalOwnerRepoPages(
+  owner: string,
+): Effect.Effect<readonly GitHubRepoListItem[], GitHubApiError> {
+  return Effect.gen(function* () {
+    const authenticatedLogin = yield* Effect.tryPromise({
+      try: () => getAuthenticatedUserLogin(),
+      catch: (cause) =>
+        new GitHubApiError({ message: cause instanceof Error ? cause.message : String(cause) }),
+    });
+    // login はケースを区別しないため、比較前に正規化する。
+    const isSelf =
+      authenticatedLogin !== undefined && authenticatedLogin.toLowerCase() === owner.toLowerCase();
+    if (isSelf) {
+      return yield* fetchAllRepoPages("https://api.github.com/user/repos", {
+        affiliation: "owner",
+      });
+    }
+    return yield* fetchAllRepoPages(
+      `https://api.github.com/users/${encodeURIComponent(owner)}/repos`,
+    );
+  });
 }
 
 /** `listOwnerRepos` が返すリポジトリ 1 件分の情報 */
@@ -606,8 +679,11 @@ export interface ListOwnerReposOptions {
  * 背景: `ziku aggregate` がテンプレート利用リポジトリの候補を洗い出すために使う、
  * owner 横断探索の入口。
  *
- * - owner が Organization か User かを `isOrganization` で判定し、
- *   `/orgs/{owner}/repos` または `/users/{owner}/repos` を使い分ける。
+ * - owner が Organization か User かを `isOrganization` で判定する。Organization
+ *   なら `/orgs/{owner}/repos` を使う。
+ * - User の場合、`fetchPersonalOwnerRepoPages` が owner が認証ユーザー自身かどうかで
+ *   さらに使い分ける。認証ユーザー自身なら `/user/repos?affiliation=owner`（private を
+ *   含む）、他人なら `/users/{owner}/repos`（public のみ、GitHub API の仕様上の制約）。
  * - ページネーションを最後まで辿るため、リポジトリ数が多い owner でも全件返る
  *   （1 ページ目だけで打ち切らない）。
  * - `includeArchived` が false（既定）の場合、アーカイブ済みリポジトリは結果から除く。
@@ -622,10 +698,9 @@ export function listOwnerRepos(
   const includeArchived = options?.includeArchived ?? false;
   return Effect.gen(function* () {
     const isOrg = yield* isOrganization(owner);
-    const kind = isOrg ? "orgs" : "users";
-    const items = yield* fetchAllRepoPages(
-      `https://api.github.com/${kind}/${encodeURIComponent(owner)}/repos`,
-    );
+    const items = yield* isOrg
+      ? fetchAllRepoPages(`https://api.github.com/orgs/${encodeURIComponent(owner)}/repos`)
+      : fetchPersonalOwnerRepoPages(owner);
     return items
       .filter((item) => includeArchived || !item.archived)
       .map(
@@ -638,6 +713,34 @@ export function listOwnerRepos(
           isPrivate: item.private,
         }),
       );
+  });
+}
+
+/** GitHub Repos API (`/repos/{owner}/{repo}`) の必要フィールドのみ */
+interface GitHubRepoDetail {
+  readonly default_branch: string;
+}
+
+/**
+ * 単一リポジトリの既定ブランチ名を取得する。
+ *
+ * 背景: `listOwnerRepos` の列挙結果から owner/repo 一致で defaultBranch を引く方法は、
+ * 探索対象の owner（`ziku aggregate` の `--owner`）がリポジトリ自身の owner と異なる
+ * 場合や、リポジトリがアーカイブ済みで列挙結果に含まれない場合に defaultBranch を
+ * 解決できない。`GET /repos/{owner}/{repo}` は列挙に依存せず単一リポジトリの既定
+ * ブランチを直接返すため、そのようなケースでも解決できる。
+ */
+export function getRepoDefaultBranch(
+  owner: string,
+  repo: string,
+): Effect.Effect<string, GitHubApiError> {
+  return Effect.gen(function* () {
+    const res = yield* githubFetch(
+      `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+    );
+    if (!res.ok) return yield* Effect.fail(githubResponseError(res));
+    const data = yield* parseGitHubJson<GitHubRepoDetail>(res);
+    return data.default_branch;
   });
 }
 

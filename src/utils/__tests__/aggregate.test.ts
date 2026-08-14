@@ -15,7 +15,8 @@ vi.mock("node:fs", async () => {
 
 // tinyglobby は実際の fs を直接使うため memfs と互換性がない（hash.test.ts と同じ理由）。
 // glob 自体をモックし、各テストで cwd ごとに期待するファイル一覧を
-// mockResolvedValueOnce の呼び出し順（repoDir → templateDir）で注入する。
+// mockResolvedValueOnce の呼び出し順（analyzeSync が並列実行する hashFiles(templateDir) →
+// hashFiles(targetDir) の順、詳細は queueGlobResults 参照）で注入する。
 vi.mock("tinyglobby", () => ({
   glob: vi.fn(),
 }));
@@ -24,12 +25,14 @@ const mockListOwnerRepos = vi.fn();
 const mockFetchRepoTextFile = vi.fn();
 const mockGetLastCommitDate = vi.fn();
 const mockResolveLatestCommitSha = vi.fn();
+const mockGetRepoDefaultBranch = vi.fn();
 
 vi.mock("../github", () => ({
   listOwnerRepos: (...args: unknown[]) => mockListOwnerRepos(...args),
   fetchRepoTextFile: (...args: unknown[]) => mockFetchRepoTextFile(...args),
   getLastCommitDate: (...args: unknown[]) => mockGetLastCommitDate(...args),
   resolveLatestCommitSha: (...args: unknown[]) => mockResolveLatestCommitSha(...args),
+  getRepoDefaultBranch: (...args: unknown[]) => mockGetRepoDefaultBranch(...args),
 }));
 
 const mockAcquireTempTemplate = vi.fn();
@@ -42,10 +45,28 @@ vi.mock("../template", () => ({
   acquireTempTemplate: (...args: unknown[]) => mockAcquireTempTemplate(...args),
 }));
 
+// tmpBaseDir の register/finalizer 呼び出しを検証するためモックする（#10）。
+// aggregate.ts の他の一時ディレクトリ操作は "../template" 経由の acquireTempTemplate が
+// 完全にモックされているため、このモックの影響を受けない。
+const mockRegisterTempDirEffect = vi.fn();
+const mockUnregisterTempDirEffect = vi.fn();
+const mockRemoveTempDirEffect = vi.fn();
+
+vi.mock("../temp-tracker", () => ({
+  registerTempDirEffect: (...args: unknown[]) => mockRegisterTempDirEffect(...args),
+  unregisterTempDirEffect: (...args: unknown[]) => mockUnregisterTempDirEffect(...args),
+  removeTempDirEffect: (...args: unknown[]) => mockRemoveTempDirEffect(...args),
+}));
+
 const { aggregateTemplateUsage } = await import("../aggregate");
 const { hashContent } = await import("../hash");
+const { ZIKU_CONFIG_FILE } = await import("../ziku-config");
 const { glob } = await import("tinyglobby");
 const mockedGlob = vi.mocked(glob);
+
+mockRegisterTempDirEffect.mockImplementation(() => Effect.void);
+mockUnregisterTempDirEffect.mockImplementation(() => Effect.void);
+mockRemoveTempDirEffect.mockImplementation(() => Effect.void);
 
 // ---------------------------------------------------------------------------
 // フィクスチャヘルパー
@@ -90,9 +111,15 @@ function setLockFixture(
   fixtures.set(`${owner}/${repo}`, result);
 }
 
-/** repoDir → templateDir の順で glob 結果を積む（hashFiles の呼び出し順に対応） */
-function queueGlobResults(repoFiles: string[], templateFiles: string[]): void {
-  mockedGlob.mockResolvedValueOnce(repoFiles).mockResolvedValueOnce(templateFiles);
+/**
+ * templateDir → repoDir の順で glob 結果を積む。
+ *
+ * `analyzeSync` は `Promise.all([hashFiles(templateDir, ...), hashFiles(targetDir, ...)])` で
+ * 2つの hashFiles を並列実行するが、配列リテラルの評価順は左から右なので、
+ * template 側の hashFiles が先に glob() を呼び出す（await で中断する前に同期的に呼ばれる）。
+ */
+function queueGlobResults(templateFiles: string[], repoFiles: string[]): void {
+  mockedGlob.mockResolvedValueOnce(templateFiles).mockResolvedValueOnce(repoFiles);
 }
 
 describe("aggregateTemplateUsage", () => {
@@ -121,6 +148,9 @@ describe("aggregateTemplateUsage", () => {
       return Effect.succeed(dir);
     });
     mockGetLastCommitDate.mockImplementation(() => Effect.succeed(Option.none()));
+    // ほとんどのテストは template.ref を明示指定するため呼ばれないが、既定値も
+    // 用意しておく（呼ばれるテストは個別に上書きする）。
+    mockGetRepoDefaultBranch.mockReturnValue(Effect.succeed("main"));
   });
 
   it("`.ziku/lock.json` が無いリポジトリは skipped に入らず黙って除外される", async () => {
@@ -187,7 +217,7 @@ describe("aggregateTemplateUsage", () => {
       "/tmpl-dir-simple/.ziku/ziku.jsonc": JSON.stringify({ include: ["**"] }),
       "/tmpl-dir-simple/a.txt": "hello",
     });
-    queueGlobResults([], ["a.txt"]);
+    queueGlobResults(["a.txt"], []);
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
@@ -212,10 +242,13 @@ describe("aggregateTemplateUsage", () => {
     });
   });
 
-  it("分類結果が pendingPush / pendingPull / conflicts に正しく写る", async () => {
+  it("分類結果が pendingPush / pendingPull / conflicts に正しく写る（ziku.jsonc 自身の drift を含む）", async () => {
     mockListOwnerRepos.mockReturnValue(
       Effect.succeed([repoInfo({ owner: "acme", repo: "proj-a" })]),
     );
+    // リポジトリは `ziku track` で "docs/local.md" を追加済み（テンプレートには無い）。
+    const templateZikuJsonc = JSON.stringify({ include: [".github/**"] });
+    const repoZikuJsonc = JSON.stringify({ include: [".github/**", "docs/local.md"] });
     setLockFixture(
       lockFixtures,
       "acme",
@@ -229,6 +262,10 @@ describe("aggregateTemplateUsage", () => {
               ".github/local-change.yml": hashContent("orig"),
               ".github/removed-locally.yml": hashContent("stable"),
               "docs/local.md": hashContent("base-doc"),
+              // 前回 sync 時点ではテンプレートと同じ内容だった（= track 前）。
+              // withConfigTracked による同期対象化（#1）を検証するため、実運用同様に
+              // baseHashes へ ziku.jsonc 自身のハッシュも含める。
+              [ZIKU_CONFIG_FILE]: hashContent(templateZikuJsonc),
             },
           }),
         ),
@@ -239,12 +276,12 @@ describe("aggregateTemplateUsage", () => {
     dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir");
 
     vol.fromJSON({
-      "/repo-a-dir/.ziku/ziku.jsonc": JSON.stringify({ include: [".github/**", "docs/local.md"] }),
+      "/repo-a-dir/.ziku/ziku.jsonc": repoZikuJsonc,
       "/repo-a-dir/.github/ci.yml": "v1",
       "/repo-a-dir/.github/old.yml": "old-content",
       "/repo-a-dir/.github/local-change.yml": "modified-by-user",
       "/repo-a-dir/docs/local.md": "local-doc-edit",
-      "/tmpl-dir/.ziku/ziku.jsonc": JSON.stringify({ include: [".github/**"] }),
+      "/tmpl-dir/.ziku/ziku.jsonc": templateZikuJsonc,
       "/tmpl-dir/.github/ci.yml": "v2",
       "/tmpl-dir/.github/new.yml": "new-from-template",
       "/tmpl-dir/.github/local-change.yml": "orig",
@@ -252,7 +289,6 @@ describe("aggregateTemplateUsage", () => {
       "/tmpl-dir/docs/local.md": "template-doc-edit",
     });
     queueGlobResults(
-      [".github/ci.yml", ".github/old.yml", ".github/local-change.yml", "docs/local.md"],
       [
         ".github/ci.yml",
         ".github/new.yml",
@@ -260,6 +296,7 @@ describe("aggregateTemplateUsage", () => {
         ".github/removed-locally.yml",
         "docs/local.md",
       ],
+      [".github/ci.yml", ".github/old.yml", ".github/local-change.yml", "docs/local.md"],
     );
 
     const report = await Effect.runPromise(
@@ -280,15 +317,21 @@ describe("aggregateTemplateUsage", () => {
         { path: ".github/old.yml", reason: "deletedFiles" },
       ]),
     );
+    // ziku.jsonc がテンプレート/ローカルどちらのハッシュマップにも載っていれば
+    // deletedFiles（誤った pendingPull）には出ない（#1 の回帰確認）。
+    expect(result?.pendingPull.some((e) => e.path === ZIKU_CONFIG_FILE)).toBe(false);
     expect(result?.pendingPull).toHaveLength(3);
 
+    // ziku.jsonc は前回 sync 以降ローカルだけが変更した（track で新パターンを追加した）ので
+    // localOnly → pendingPush として実差分が報告される（#1 の主張どおり）。
     expect(result?.pendingPush).toEqual(
       expect.arrayContaining([
         { path: ".github/local-change.yml", reason: "localOnly" },
         { path: ".github/removed-locally.yml", reason: "deletedLocally" },
+        { path: ZIKU_CONFIG_FILE, reason: "localOnly" },
       ]),
     );
-    expect(result?.pendingPush).toHaveLength(2);
+    expect(result?.pendingPush).toHaveLength(3);
 
     expect(result?.conflicts).toEqual([{ path: "docs/local.md" }]);
   });
@@ -348,10 +391,12 @@ describe("aggregateTemplateUsage", () => {
 
     expect(report.repositories.map((r) => r.repo)).toEqual(["recent"]);
     expect(report.skipped).toEqual([]);
+    // attachLastCommittedAt が UTC ISO 8601 へ正規化する（#7）ため、ミリ秒付きの
+    // 表記 (.000Z) になる。
     expect(report.repositories[0]?.pendingPush[0]).toMatchObject({
       path: "f.txt",
       reason: "localOnly",
-      lastCommittedAt: "2026-08-10T00:00:00Z",
+      lastCommittedAt: "2026-08-10T00:00:00.000Z",
     });
   });
 
@@ -443,5 +488,248 @@ describe("aggregateTemplateUsage", () => {
     );
 
     expect(mockListOwnerRepos.mock.calls[0]?.[0]).toBe("another-org");
+  });
+
+  it("`.ziku/ziku.jsonc` はテンプレートと内容が同じなら pendingPull にも pendingPush にも出ない（同期対象からの漏れ修正・#1）", async () => {
+    mockListOwnerRepos.mockReturnValue(
+      Effect.succeed([repoInfo({ owner: "acme", repo: "config-sync" })]),
+    );
+    const configContent = JSON.stringify({ include: ["docs/**"] });
+    setLockFixture(
+      lockFixtures,
+      "acme",
+      "config-sync",
+      Effect.succeed(
+        Option.some(
+          lockJson({
+            // 実運用では push/pull/init が withConfigTracked 経由で ziku.jsonc 自身の
+            // ハッシュを baseHashes に記録する。この値が local/template どちらの
+            // ハッシュ計算からも漏れずに含まれることを検証する。
+            baseHashes: {
+              [ZIKU_CONFIG_FILE]: hashContent(configContent),
+              "docs/a.md": hashContent("a"),
+            },
+          }),
+        ),
+      ),
+    );
+    shaFixtures.set("acme/config-sync", "config-sync-sha");
+    dirsBySource.set("gh:acme/config-sync#config-sync-sha", "/config-sync-dir");
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-config");
+
+    vol.fromJSON({
+      "/config-sync-dir/.ziku/ziku.jsonc": configContent,
+      "/config-sync-dir/docs/a.md": "a",
+      "/tmpl-dir-config/.ziku/ziku.jsonc": configContent,
+      "/tmpl-dir-config/docs/a.md": "a",
+    });
+    queueGlobResults(["docs/a.md"], ["docs/a.md"]);
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        tmpBaseDir: "/tmp-base",
+      }),
+    );
+
+    expect(report.skipped).toEqual([]);
+    expect(report.repositories).toHaveLength(1);
+    const [result] = report.repositories;
+    expect(result?.pendingPull.some((e) => e.path === ZIKU_CONFIG_FILE)).toBe(false);
+    expect(result?.pendingPush.some((e) => e.path === ZIKU_CONFIG_FILE)).toBe(false);
+  });
+
+  it("--since 指定時、コミット日時の取得が全件失敗したリポジトリは filteredBySince で消えず skipped に入る（#4）", async () => {
+    mockListOwnerRepos.mockReturnValue(
+      Effect.succeed([repoInfo({ owner: "acme", repo: "rate-limited" })]),
+    );
+    const baseHashes = { "f.txt": hashContent("v1") };
+    setLockFixture(
+      lockFixtures,
+      "acme",
+      "rate-limited",
+      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    );
+    shaFixtures.set("acme/rate-limited", "rl-sha");
+    dirsBySource.set("gh:acme/rate-limited#rl-sha", "/rl-dir");
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-rl");
+
+    vol.fromJSON({
+      "/rl-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/rl-dir/f.txt": "v2-local",
+      "/tmpl-dir-rl/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/tmpl-dir-rl/f.txt": "v1",
+    });
+    queueGlobResults(["f.txt"], ["f.txt"]);
+
+    // レート制限などで getLastCommitDate が全件失敗する状況を再現する。
+    mockGetLastCommitDate.mockReturnValue(
+      Effect.fail(new GitHubApiError({ message: "rate limited", status: 403 })),
+    );
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        tmpBaseDir: "/tmp-base",
+        since: "2026-08-01T00:00:00.000Z",
+      }),
+    );
+
+    // 「0 件 = 全部同期済み」という誤読を招く filteredBySince ではなく、
+    // 理由付きで skipped に入り、判定不能だったことが分かる。
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(1);
+    expect(report.skipped[0]).toMatchObject({ owner: "acme", repo: "rate-limited" });
+    expect(report.skipped[0]?.reason.length).toBeGreaterThan(0);
+  });
+
+  it("--since 比較はコミット日時をオフセットに関わらず UTC へ正規化してから行う（#7）", async () => {
+    mockListOwnerRepos.mockReturnValue(
+      Effect.succeed([repoInfo({ owner: "acme", repo: "offset-commit" })]),
+    );
+    const baseHashes = { "f.txt": hashContent("v1") };
+    setLockFixture(
+      lockFixtures,
+      "acme",
+      "offset-commit",
+      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    );
+    shaFixtures.set("acme/offset-commit", "oc-sha");
+    dirsBySource.set("gh:acme/offset-commit#oc-sha", "/oc-dir");
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-oc");
+
+    vol.fromJSON({
+      "/oc-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/oc-dir/f.txt": "v2-local",
+      "/tmpl-dir-oc/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/tmpl-dir-oc/f.txt": "v1",
+    });
+    queueGlobResults(["f.txt"], ["f.txt"]);
+
+    // UTC 換算では since (2026-08-10T00:00:00.000Z) より前だが、"+09:00" のオフセット
+    // 表記のせいで文字列の辞書順比較では since 以降に見えてしまう値。
+    mockGetLastCommitDate.mockReturnValue(Effect.succeed(Option.some("2026-08-10T08:00:00+09:00")));
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        tmpBaseDir: "/tmp-base",
+        since: "2026-08-10T00:00:00.000Z",
+      }),
+    );
+
+    // UTC 正規化後は since より前 (2026-08-09T23:00:00.000Z) なので除外される。
+    // 正規化しなければ文字列比較で since 以降と誤判定され、このリポジトリが
+    // repositories に残ってしまう。
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toEqual([]);
+  });
+
+  it("sanitizeLabel で衝突しうる owner/repo でも、候補ごとに一意なテンポラリラベルを使う（#8）", async () => {
+    mockListOwnerRepos.mockReturnValue(
+      Effect.succeed([
+        repoInfo({ owner: "foo.bar", repo: "x" }),
+        repoInfo({ owner: "foo_bar", repo: "x" }),
+      ]),
+    );
+    const baseHashes = { "f.txt": hashContent("v1") };
+    setLockFixture(
+      lockFixtures,
+      "foo.bar",
+      "x",
+      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    );
+    setLockFixture(
+      lockFixtures,
+      "foo_bar",
+      "x",
+      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    );
+    shaFixtures.set("foo.bar/x", "sha-1");
+    shaFixtures.set("foo_bar/x", "sha-2");
+    dirsBySource.set("gh:foo.bar/x#sha-1", "/dir-1");
+    dirsBySource.set("gh:foo_bar/x#sha-2", "/dir-2");
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-collision");
+
+    vol.fromJSON({
+      "/dir-1/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/dir-1/f.txt": "v1",
+      "/dir-2/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/dir-2/f.txt": "v1",
+      "/tmpl-dir-collision/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/tmpl-dir-collision/f.txt": "v1",
+    });
+    queueGlobResults(["f.txt"], ["f.txt"]);
+    queueGlobResults(["f.txt"], ["f.txt"]);
+
+    await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+      }),
+    );
+
+    // sanitizeLabel("foo.bar-x") と sanitizeLabel("foo_bar-x") はどちらも "foo_bar-x" に
+    // 潰れる。candidateIndex を付与することで、渡されるラベル自体は一意になる。
+    const repoLabels = mockAcquireTempTemplate.mock.calls
+      .filter(([, source]) => source === "gh:foo.bar/x#sha-1" || source === "gh:foo_bar/x#sha-2")
+      .map(([, , label]) => label);
+    expect(repoLabels).toHaveLength(2);
+    expect(new Set(repoLabels).size).toBe(2);
+  });
+
+  it("テンプレートの既定ブランチを GET /repos で解決する（main 決め打ちにならない・#6）", async () => {
+    // searchOwner がテンプレートと別 owner のため、listOwnerRepos の列挙結果に
+    // テンプレート自身が含まれない状況を再現する。
+    mockListOwnerRepos.mockReturnValue(Effect.succeed([]));
+    mockGetRepoDefaultBranch.mockReturnValue(Effect.succeed("develop"));
+    mockResolveLatestCommitSha.mockImplementation(
+      async (_owner: string, _repo: string, ref?: string) => {
+        expect(ref).toBe("develop");
+        return "resolved-sha";
+      },
+    );
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template" }, // ref 未指定
+        searchOwner: "another-org",
+        tmpBaseDir: "/tmp-base",
+      }),
+    );
+
+    expect(mockGetRepoDefaultBranch).toHaveBeenCalledWith("acme", "template");
+    expect(report.template.ref).toBe("resolved-sha");
+  });
+
+  it("tmpBaseDir 省略時は Scope クローズ時に tmpBaseDir を削除する（#10）", async () => {
+    mockListOwnerRepos.mockReturnValue(Effect.succeed([]));
+
+    await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+      }),
+    );
+
+    expect(mockRegisterTempDirEffect).toHaveBeenCalledTimes(1);
+    expect(mockRemoveTempDirEffect).toHaveBeenCalledTimes(1);
+    expect(mockRegisterTempDirEffect.mock.calls[0]?.[0]).toBe(
+      mockRemoveTempDirEffect.mock.calls[0]?.[0],
+    );
+  });
+
+  it("tmpBaseDir を明示指定した場合は削除しない（#10）", async () => {
+    mockListOwnerRepos.mockReturnValue(Effect.succeed([]));
+
+    await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        tmpBaseDir: "/explicit-tmp-base",
+      }),
+    );
+
+    expect(mockRegisterTempDirEffect).not.toHaveBeenCalled();
+    expect(mockRemoveTempDirEffect).not.toHaveBeenCalled();
   });
 });

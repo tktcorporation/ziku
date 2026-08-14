@@ -7,10 +7,33 @@ import {
   getGhCliToken,
   getGitHubToken,
   getLastCommitDate,
+  getRepoDefaultBranch,
   listOwnerRepos,
   rateLimitedError,
+  resetGhCliTokenCache,
+  resolveLatestCommitSha,
   unauthorizedError,
 } from "../github";
+
+// getGhCliToken() が呼ぶ execFileSync をモックし、getGhCliToken/getGitHubToken を
+// ホスト環境の gh CLI 認証状態に依存しない決定的なテストにする。
+// 型を明示しないと throw のみのアロー関数から `() => never` と推論され、
+// 後続の mockReturnValue(string) が型エラーになるため、シグネチャを明示する。
+const mockExecFileSync = vi.fn<(...args: unknown[]) => string>();
+vi.mock("node:child_process", () => ({
+  execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
+}));
+
+// getGhCliToken はモジュールレベルでキャッシュされる（#9）ため、各テスト前に
+// キャッシュとサブプロセスモックの両方をリセットしないと前のテストの結果が
+// 漏れ込む。
+beforeEach(() => {
+  resetGhCliTokenCache();
+  mockExecFileSync.mockReset();
+  mockExecFileSync.mockImplementation(() => {
+    throw new Error("gh: command not found");
+  });
+});
 
 // Octokit をモック
 const mockGetAuthenticated = vi.fn();
@@ -85,10 +108,9 @@ describe("getGitHubToken", () => {
     delete process.env.GITHUB_TOKEN;
     delete process.env.GH_TOKEN;
 
-    // getGhCliToken() が gh auth token を execSync で呼ぶため、
-    // CI 環境ではタイムアウトする可能性がある。結果が undefined か string かのみ確認。
-    const token = getGitHubToken();
-    expect(token === undefined || typeof token === "string").toBe(true);
+    // execFileSync は beforeEach で gh CLI 未インストール相当の例外を投げるようモック
+    // されているため、getGhCliToken() 経由のフォールバックも決定的に undefined になる。
+    expect(getGitHubToken()).toBeUndefined();
   });
 
   it("両方ある場合は GITHUB_TOKEN を優先する", () => {
@@ -101,10 +123,47 @@ describe("getGitHubToken", () => {
 
 describe("getGhCliToken", () => {
   it("gh CLI が利用できない場合は undefined を返す", () => {
-    // テスト環境では gh CLI が利用できない可能性が高いので undefined が返ることを確認
-    const token = getGhCliToken();
-    // token が string なら gh CLI 経由で取得済み、undefined なら未インストール/未ログイン
-    expect(token === undefined || typeof token === "string").toBe(true);
+    expect(getGhCliToken()).toBeUndefined();
+  });
+});
+
+describe("getGhCliToken のキャッシュ（#9）", () => {
+  it("複数回呼んでもサブプロセス起動は1回だけで、以降はキャッシュされた値を返す", () => {
+    mockExecFileSync.mockReturnValue("ghp_cached_token_1234567890");
+
+    const first = getGhCliToken();
+    const second = getGhCliToken();
+    const third = getGhCliToken();
+
+    expect(first).toBe("ghp_cached_token_1234567890");
+    expect(second).toBe("ghp_cached_token_1234567890");
+    expect(third).toBe("ghp_cached_token_1234567890");
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("取得できなかった場合（undefined）もキャッシュされ、再実行しない", () => {
+    mockExecFileSync.mockImplementation(() => {
+      throw new Error("ENOENT");
+    });
+
+    const first = getGhCliToken();
+    const second = getGhCliToken();
+
+    expect(first).toBeUndefined();
+    expect(second).toBeUndefined();
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("resetGhCliTokenCache() 後は再度サブプロセスを起動する", () => {
+    mockExecFileSync.mockReturnValue("ghp_first_1234567890");
+    expect(getGhCliToken()).toBe("ghp_first_1234567890");
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+
+    resetGhCliTokenCache();
+    mockExecFileSync.mockReturnValue("ghp_second_1234567890");
+
+    expect(getGhCliToken()).toBe("ghp_second_1234567890");
+    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -626,6 +685,52 @@ describe("checkRepoSetup", () => {
   });
 });
 
+describe("resolveLatestCommitSha", () => {
+  const originalFetch = globalThis.fetch;
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    process.env = originalEnv;
+  });
+
+  it("GITHUB_TOKEN がある場合は Authorization ヘッダを付与する（#3: プライベートリポジトリが 404 になる問題の修正）", async () => {
+    process.env.GITHUB_TOKEN = "ghp_test_sha_token";
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: true, text: () => Promise.resolve("abc123\n") });
+
+    const sha = await resolveLatestCommitSha("owner", "repo", "develop");
+
+    expect(sha).toBe("abc123");
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "https://api.github.com/repos/owner/repo/commits/develop",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer ghp_test_sha_token" }),
+      }),
+    );
+  });
+
+  it("トークンが無い場合は Authorization ヘッダを付けない（既存の public リポジトリ利用を壊さない）", async () => {
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: true, text: () => Promise.resolve("def456\n") });
+
+    const sha = await resolveLatestCommitSha("owner", "repo");
+
+    expect(sha).toBe("def456");
+    const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    const headers = (call?.[1] as { headers?: Record<string, string> } | undefined)?.headers;
+    expect(headers).not.toHaveProperty("Authorization");
+  });
+});
+
 describe("scaffoldTemplateRepo", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -702,9 +807,19 @@ function repoFixture(overrides: Partial<RepoListItemFixture> = {}): RepoListItem
 
 describe("listOwnerRepos", () => {
   const originalFetch = globalThis.fetch;
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    // getAuthenticatedUserLogin() 経由でトークンの有無が分岐に影響するため、
+    // 明示的に上書きするテスト以外は「未認証」の決定的な状態から始める。
+    process.env = { ...originalEnv };
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+  });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    process.env = originalEnv;
   });
 
   it("2ページ以上のページネーションを最後まで辿る", async () => {
@@ -789,6 +904,75 @@ describe("listOwnerRepos", () => {
     expect(result[0]?.owner).toBe("someone");
   });
 
+  it("owner が認証ユーザー自身の Personal アカウントの場合は /user/repos?affiliation=owner を使う（private を含む・#5）", async () => {
+    process.env.GITHUB_TOKEN = "ghp_self_token";
+    const items = [
+      repoFixture({ name: "private-repo", owner: { login: "self-owner" }, private: true }),
+    ];
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/self-owner") {
+        return Promise.resolve(jsonResponse(404, undefined));
+      }
+      if (url === "https://api.github.com/user") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ login: "self-owner" }) });
+      }
+      expect(url).toContain("https://api.github.com/user/repos");
+      expect(url).toContain("affiliation=owner");
+      return Promise.resolve(jsonResponse(200, items));
+    });
+    globalThis.fetch = fetchMock;
+
+    const result = await Effect.runPromise(listOwnerRepos("self-owner"));
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.isPrivate).toBe(true);
+    expect(
+      fetchMock.mock.calls.some(([url]) => String(url).includes("/users/self-owner/repos")),
+    ).toBe(false);
+  });
+
+  it("owner が認証ユーザー自身の Personal アカウントでも login の大文字小文字は区別しない（#5）", async () => {
+    process.env.GITHUB_TOKEN = "ghp_self_token";
+    const items = [
+      repoFixture({ name: "private-repo", owner: { login: "Self-Owner" }, private: true }),
+    ];
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/Self-Owner") {
+        return Promise.resolve(jsonResponse(404, undefined));
+      }
+      if (url === "https://api.github.com/user") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ login: "self-owner" }) });
+      }
+      return Promise.resolve(jsonResponse(200, items));
+    });
+
+    const result = await Effect.runPromise(listOwnerRepos("Self-Owner"));
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.isPrivate).toBe(true);
+  });
+
+  it("owner が他人の Personal アカウントの場合は認証済みでも /users/{owner}/repos のまま（public のみ）", async () => {
+    process.env.GITHUB_TOKEN = "ghp_self_token";
+    const items = [repoFixture({ name: "public-repo", owner: { login: "someone-else" } })];
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/someone-else") {
+        return Promise.resolve(jsonResponse(404, undefined));
+      }
+      if (url === "https://api.github.com/user") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ login: "self-owner" }) });
+      }
+      expect(url).toContain("https://api.github.com/users/someone-else/repos");
+      return Promise.resolve(jsonResponse(200, items));
+    });
+    globalThis.fetch = fetchMock;
+
+    const result = await Effect.runPromise(listOwnerRepos("someone-else"));
+
+    expect(result).toHaveLength(1);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/user/repos"))).toBe(false);
+  });
+
   it("/orgs/{owner} が 404 以外で失敗した場合は user へフォールバックせずエラーにする", async () => {
     const fetchMock = vi.fn().mockImplementation((url: string) => {
       if (url === "https://api.github.com/orgs/acme") {
@@ -818,6 +1002,38 @@ describe("listOwnerRepos", () => {
 
     expect(error._tag).toBe("GitHubApiError");
     expect(error.status).toBe(403);
+  });
+});
+
+describe("getRepoDefaultBranch", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("GET /repos/{owner}/{repo} の default_branch を返す（main 決め打ちにならない・#6）", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { default_branch: "develop" }));
+    globalThis.fetch = fetchMock;
+
+    const branch = await Effect.runPromise(getRepoDefaultBranch("acme", "template"));
+
+    expect(branch).toBe("develop");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.github.com/repos/acme/template",
+      expect.anything(),
+    );
+  });
+
+  it("404 等の失敗は GitHubApiError として返す", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse(404, undefined, "Not Found"));
+
+    const error = await Effect.runPromise(
+      getRepoDefaultBranch("acme", "missing").pipe(Effect.flip),
+    );
+
+    expect(error._tag).toBe("GitHubApiError");
+    expect(error.status).toBe(404);
   });
 });
 

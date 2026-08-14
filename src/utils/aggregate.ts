@@ -28,17 +28,22 @@ import { isGitHubSource, lockSchema } from "../modules/schemas";
 import {
   fetchRepoTextFile,
   getLastCommitDate,
+  getRepoDefaultBranch,
   listOwnerRepos,
   resolveLatestCommitSha,
 } from "./github";
 import type { OwnerRepoInfo } from "./github";
 import { LOCK_FILE } from "./lock";
-import { classifyFiles } from "./merge/classify";
 import type { FileClassification } from "./merge/types";
 import { mergePatterns } from "./patterns";
+import { analyzeSync } from "./sync-analysis";
 import { acquireTempTemplate, buildTemplateSource } from "./template";
-import { hashFiles } from "./hash";
-import { loadZikuConfig } from "./ziku-config";
+import {
+  registerTempDirEffect,
+  removeTempDirEffect,
+  unregisterTempDirEffect,
+} from "./temp-tracker";
+import { loadZikuConfig, withConfigTracked } from "./ziku-config";
 
 /** aggregate の対象となるテンプレートリポジトリ */
 export interface AggregateTemplateRepo {
@@ -97,14 +102,26 @@ export function aggregateTemplateUsage(
   const { template, includeArchived, since } = options;
   const searchOwner = options.searchOwner ?? template.owner;
   const concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
-  const tmpBaseDir = options.tmpBaseDir ?? defaultTmpBaseDir();
+  const explicitTmpBaseDir = options.tmpBaseDir;
+  const tmpBaseDir = explicitTmpBaseDir ?? defaultTmpBaseDir();
 
   return Effect.scoped(
     Effect.gen(function* () {
+      // 呼び出し側が tmpBaseDir を明示指定しなかった場合のみ、この関数が生成した既定の
+      // 一時ディレクトリを Scope クローズ時に削除する。テスト・利用者が明示指定した
+      // ディレクトリは呼び出し側が管理しているため、ここでは削除しない。
+      if (explicitTmpBaseDir === undefined) {
+        yield* registerTempDirEffect(tmpBaseDir);
+        yield* Effect.addFinalizer(() =>
+          unregisterTempDirEffect(tmpBaseDir).pipe(
+            Effect.zipRight(removeTempDirEffect(tmpBaseDir)),
+          ),
+        );
+      }
+
       const allRepos = yield* listOwnerRepos(searchOwner, { includeArchived });
 
-      const templateInfo = allRepos.find((r) => isSameRepo(r, template));
-      const templateRef = template.ref ?? (yield* resolveTemplateRef(template, templateInfo));
+      const templateRef = template.ref ?? (yield* resolveTemplateRef(template));
 
       const candidates = allRepos.filter((r) => !isSameRepo(r, template));
 
@@ -134,13 +151,20 @@ export function aggregateTemplateUsage(
         templateSnapshot === undefined
           ? []
           : yield* Effect.forEach(
-              acceptedCandidates,
-              (candidate) =>
+              // sanitizeLabel は owner/repo の記号をすべて "_" に潰すため、異なる候補が
+              // 同じテンポラリラベルに衝突しうる（#8）。候補配列内の位置を label に
+              // 付与し、衝突しても一意になるようにする。
+              acceptedCandidates.map((candidate, candidateIndex) => ({
+                candidate,
+                candidateIndex,
+              })),
+              ({ candidate, candidateIndex }) =>
                 processCandidate({
                   templateDir: templateSnapshot.dir,
                   templateInclude: templateSnapshot.include,
                   templateExclude: templateSnapshot.exclude,
                   candidate,
+                  candidateIndex,
                   tmpBaseDir,
                   since,
                 }),
@@ -189,6 +213,13 @@ function toMessage(e: unknown): string {
 /**
  * テンプレートリポジトリ自身の比較用 commit SHA を解決する。
  *
+ * 既定ブランチは `getRepoDefaultBranch` で直接取得する（`GET /repos/{owner}/{repo}`）。
+ * `listOwnerRepos` の列挙結果から owner/repo 一致で defaultBranch を引く方法だと、
+ * `--owner`（searchOwner）がテンプレートと別 owner を指す場合や、テンプレートが
+ * アーカイブ済みで列挙結果に含まれない場合に defaultBranch が引けず、
+ * `resolveLatestCommitSha` の既定値 `"main"` にフォールバックしてしまう
+ * （`master` / `develop` を既定ブランチにしているテンプレートで失敗する）。
+ *
  * `resolveLatestCommitSha` は 404・ネットワークエラーいずれも `undefined` を返し例外を
  * 投げないため、"解決できなかった" ことを検知するには戻り値チェックが必要。
  * テンプレート側の基準 commit が定まらないとレポート全体の `template.ref` が
@@ -197,11 +228,11 @@ function toMessage(e: unknown): string {
  */
 function resolveTemplateRef(
   template: AggregateTemplateRepo,
-  templateInfo: OwnerRepoInfo | undefined,
 ): Effect.Effect<string, GitHubApiError> {
   return Effect.gen(function* () {
+    const defaultBranch = yield* getRepoDefaultBranch(template.owner, template.repo);
     const ref = yield* Effect.tryPromise({
-      try: () => resolveLatestCommitSha(template.owner, template.repo, templateInfo?.defaultBranch),
+      try: () => resolveLatestCommitSha(template.owner, template.repo, defaultBranch),
       catch: (e) => new GitHubApiError({ message: toMessage(e) }),
     });
     if (ref === undefined) {
@@ -341,6 +372,8 @@ interface ProcessCandidateOptions {
   readonly templateInclude: string[];
   readonly templateExclude: string[];
   readonly candidate: AcceptedCandidate;
+  /** 候補配列内の位置。テンポラリラベルの一意性確保に使う（#8） */
+  readonly candidateIndex: number;
   readonly tmpBaseDir: string;
   readonly since: string | undefined;
 }
@@ -354,7 +387,15 @@ interface ProcessCandidateOptions {
  * 共有するため、この Scope には含めない。
  */
 function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessOutcome> {
-  const { templateDir, templateInclude, templateExclude, candidate, tmpBaseDir, since } = opts;
+  const {
+    templateDir,
+    templateInclude,
+    templateExclude,
+    candidate,
+    candidateIndex,
+    tmpBaseDir,
+    since,
+  } = opts;
   const { repoInfo, lock } = candidate;
 
   return Effect.gen(function* () {
@@ -380,6 +421,7 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
           templateExclude,
           repoInfo,
           ref,
+          candidateIndex,
           tmpBaseDir,
           baseHashes: lock.baseHashes ?? {},
         }),
@@ -402,8 +444,22 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
       // 「利用リポジトリ側でいつ変更されたか」という since フィルタの関心事に該当しない。
       // 対象を pendingPush/conflicts だけに絞ることで、この関数の GitHub API 呼び出し回数を
       // 増やさない。
-      pendingPush = yield* attachLastCommittedAt(repoInfo, ref, pendingPush);
-      conflicts = yield* attachLastCommittedAt(repoInfo, ref, conflicts);
+      const pushResult = yield* attachLastCommittedAt(repoInfo, ref, pendingPush);
+      const conflictResult = yield* attachLastCommittedAt(repoInfo, ref, conflicts);
+      pendingPush = pushResult.entries;
+      conflicts = conflictResult.entries;
+
+      // コミット日時の取得が 1 件でも失敗した場合、「該当ファイルの変更が無い」
+      // （getLastCommitDate が正常に Option.none() を返すケース）と「レート制限等で
+      // 判定不能」を区別できない。判定不能なリポジトリを filteredBySince（=「同期済み」の
+      // 意味）として静かに結果から落とすと、レポートを見た利用者が「0 件 = 全部同期済み」
+      // と誤読するため、理由付きで skipped に積み aggregate 全体は継続する。
+      if (pushResult.anyFetchFailed || conflictResult.anyFetchFailed) {
+        return processSkipped(
+          repoInfo,
+          "コミット日時の取得に失敗したファイルがあるため、--since による絞り込みを判定できませんでした",
+        );
+      }
 
       const newest = newestCommittedAt([...pendingPush, ...conflicts]);
       if (newest === undefined || newest < since) {
@@ -437,20 +493,33 @@ interface ClassifyAgainstTemplateOptions {
   readonly templateExclude: string[];
   readonly repoInfo: OwnerRepoInfo;
   readonly ref: string;
+  /** 候補配列内の位置。テンポラリラベルの一意性確保に使う（#8） */
+  readonly candidateIndex: number;
   readonly tmpBaseDir: string;
   readonly baseHashes: Record<string, string>;
 }
 
 /**
- * 利用リポジトリをテンポラリへ取得し、取得済みのテンプレートとハッシュ比較で分類する。
- * `Effect.scoped` で包んで呼び出すこと（Scope クローズ時にテンポラリが削除される）。
+ * 利用リポジトリをテンポラリへ取得し、取得済みのテンプレートと {@link analyzeSync} で
+ * 3-way ハッシュ比較して分類する。`Effect.scoped` で包んで呼び出すこと
+ * （Scope クローズ時にテンポラリが削除される）。
  */
 function classifyAgainstTemplate(
   opts: ClassifyAgainstTemplateOptions,
 ): Effect.Effect<FileClassification, string, Scope.Scope> {
-  const { templateDir, templateInclude, templateExclude, repoInfo, ref, tmpBaseDir, baseHashes } =
-    opts;
-  const label = sanitizeLabel(`${repoInfo.owner}-${repoInfo.repo}`);
+  const {
+    templateDir,
+    templateInclude,
+    templateExclude,
+    repoInfo,
+    ref,
+    candidateIndex,
+    tmpBaseDir,
+    baseHashes,
+  } = opts;
+  // sanitizeLabel は記号を "_" に潰すだけなので、owner/repo が違っても衝突しうる
+  // （例: "foo.bar" と "foo_bar"）。candidateIndex を付与して一意性を保証する。
+  const label = `${sanitizeLabel(`${repoInfo.owner}-${repoInfo.repo}`)}-${candidateIndex}`;
 
   return Effect.gen(function* () {
     const repoDir = yield* acquireTempTemplate(
@@ -470,20 +539,32 @@ function classifyAgainstTemplate(
     const include = mergePatterns(templateInclude, repoConfig.config.include);
     const exclude = mergePatterns(templateExclude, repoConfig.config.exclude ?? []);
 
-    const localHashes = yield* Effect.tryPromise({
-      try: () => hashFiles(repoDir, include, exclude),
-      catch: toMessage,
-    });
-    const templateHashes = yield* Effect.tryPromise({
-      try: () => hashFiles(templateDir, include, exclude),
+    // `.ziku/ziku.jsonc` 自体を同期対象に含める（init/pull/push/status と同じ扱い）。
+    // これを省くと、baseHashes には載っているのに local/template どちらのハッシュにも
+    // 載らず、全リポジトリで一律に deletedFiles（誤った pendingPull）として報告される。
+    // ハッシュ比較の手順は analyzeSync（SSOT）に委ね、hashFiles を手書きで 2 回呼ぶ
+    // 複製をしない。
+    const { classification } = yield* Effect.tryPromise({
+      try: () =>
+        analyzeSync({
+          targetDir: repoDir,
+          templateDir,
+          baseHashes,
+          include: withConfigTracked(include),
+          exclude,
+        }),
       catch: toMessage,
     });
 
-    return classifyFiles({ baseHashes, localHashes, templateHashes });
+    return classification;
   });
 }
 
-/** テンポラリディレクトリ名に使えない文字を潰す（owner/repo に記号が含まれる場合の保険） */
+/**
+ * テンポラリディレクトリ名に使えない文字を潰す（owner/repo に記号が含まれる場合の保険）。
+ * 記号が異なる owner/repo の組が同じ結果に潰れうるため、呼び出し側で
+ * candidateIndex 等を付与して一意性を確保すること（このヘルパー単体では保証しない）。
+ */
 function sanitizeLabel(label: string): string {
   return label.replaceAll(/[^a-zA-Z0-9_-]/g, "_");
 }
@@ -508,27 +589,75 @@ function toConflictEntries(c: FileClassification): ConflictEntry[] {
 }
 
 /**
+ * GitHub API から受け取ったコミット日時 (ISO 8601) を UTC 表記へ正規化する。
+ *
+ * `--since` はコマンド層 (`normalizeSince`) で UTC へ正規化済みだが、GitHub の
+ * commit API が返す日時はオフセット付き（例: `+09:00`）の場合がある。
+ * `newestCommittedAt` / since 比較は文字列の辞書順に依存するため、両者を
+ * 同じ UTC 表記に揃えないと最大値判定・比較が壊れる。
+ */
+function normalizeCommitDateToUtc(date: string): string {
+  const parsed = new Date(date);
+  // GitHub の commit API が非 ISO 8601 な日時を返すことは通常無いが、パース不能な
+  // 値で例外を起こさないよう、その場合は正規化を諦めて元の文字列を返す。
+  return Number.isNaN(parsed.getTime()) ? date : parsed.toISOString();
+}
+
+/** {@link attachLastCommittedAt} の結果 */
+interface AttachLastCommittedAtResult<T> {
+  readonly entries: (T & { readonly lastCommittedAt: string | undefined })[];
+  /**
+   * 1 件でも `getLastCommitDate` が失敗（レート制限・権限不足等）した場合 true。
+   * 呼び出し側はこれを使い、「該当ファイルの変更履歴が無い」（成功して
+   * `Option.none()`）と「取得できず判定不能」（失敗）を区別できる。
+   */
+  readonly anyFetchFailed: boolean;
+}
+
+/**
  * 各エントリに最終コミット日時を付与する。
  *
- * `getLastCommitDate` の失敗（レート制限など）はエントリ単位で `lastCommittedAt` を
- * 未設定のままにするだけに留め、リポジトリ全体を `skipped` にはしない。日時は
- * `since` フィルタの補助情報であり、取得できないことがレポート自体の価値を
- * 損なうものではないため。
+ * `getLastCommitDate` の成功時 `Option.none()`（そのファイルのコミット履歴が無いという
+ * 正常系）と失敗（レート制限など）を区別し、`anyFetchFailed` に集計する。これを区別
+ * しないと、失敗したリポジトリを「変更なし」と誤判定して `since` フィルタが静かに
+ * 取りこぼす（呼び出し側 `processCandidate` が `anyFetchFailed` を見て `skipped` に
+ * 振り分ける）。
  */
 function attachLastCommittedAt<T extends { readonly path: string }>(
   repoInfo: OwnerRepoInfo,
   ref: string,
   entries: readonly T[],
-): Effect.Effect<T[]> {
-  return Effect.forEach(entries, (entry) =>
-    getLastCommitDate(repoInfo.owner, repoInfo.repo, entry.path, ref).pipe(
-      Effect.map((opt) => ({ ...entry, lastCommittedAt: Option.getOrUndefined(opt) })),
-      Effect.catchAll(() => Effect.succeed({ ...entry, lastCommittedAt: undefined })),
-    ),
-  );
+): Effect.Effect<AttachLastCommittedAtResult<T>> {
+  return Effect.gen(function* () {
+    const results = yield* Effect.forEach(entries, (entry) =>
+      getLastCommitDate(repoInfo.owner, repoInfo.repo, entry.path, ref).pipe(
+        Effect.map((opt) => ({
+          entry: {
+            ...entry,
+            lastCommittedAt: Option.match(opt, {
+              onNone: () => undefined,
+              onSome: normalizeCommitDateToUtc,
+            }),
+          },
+          fetchFailed: false,
+        })),
+        Effect.catchAll(() =>
+          Effect.succeed({ entry: { ...entry, lastCommittedAt: undefined }, fetchFailed: true }),
+        ),
+      ),
+    );
+    return {
+      entries: results.map((r) => r.entry),
+      anyFetchFailed: results.some((r) => r.fetchFailed),
+    };
+  });
 }
 
-/** エントリ群の中で最も新しい lastCommittedAt を返す。ISO 8601 文字列は辞書順比較で時系列順になる */
+/**
+ * エントリ群の中で最も新しい lastCommittedAt を返す。
+ * {@link attachLastCommittedAt} が UTC へ正規化済みの前提で、ISO 8601 文字列を
+ * 辞書順比較する（同じ表記に揃っていれば辞書順が時系列順と一致する）。
+ */
 function newestCommittedAt(
   entries: readonly { readonly lastCommittedAt?: string }[],
 ): string | undefined {
