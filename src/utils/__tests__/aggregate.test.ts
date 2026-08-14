@@ -240,6 +240,48 @@ describe("aggregateTemplateUsage", () => {
     expect(report.skipped[0]?.reason).toContain("v1.0.0");
   });
 
+  // lock.source.ref はブランチ名・タグ名も取りうる。比較基準は解決済み SHA なので、
+  // 文字列一致だけで判定すると「既定ブランチ名で固定しているだけ」の利用リポジトリを
+  // 別系列として落としてしまう。
+  it("ブランチ名で固定していても、同じ SHA に解決されるなら対象に含める", async () => {
+    mockListOwnerRepos.mockReturnValue(
+      Effect.succeed([repoInfo({ owner: "acme", repo: "branch-pinned" })]),
+    );
+    setLockFixture(
+      lockFixtures,
+      "acme",
+      "branch-pinned",
+      Effect.succeed(
+        Option.some(lockJson({ source: { owner: "acme", repo: "template", ref: "main" } })),
+      ),
+    );
+    shaFixtures.set("acme/branch-pinned", "branch-pinned-sha");
+    // テンプレートの "main" は比較基準と同じ SHA に解決される
+    mockResolveLatestCommitSha.mockImplementation(
+      async (owner: string, repo: string, ref?: string) => {
+        if (owner === "acme" && repo === "template" && ref === "main") return "tmpl-sha";
+        return shaFixtures.get(`${owner}/${repo}`);
+      },
+    );
+    dirsBySource.set("gh:acme/branch-pinned#branch-pinned-sha", "/branch-pinned-dir");
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/branch-pinned-tmpl-dir");
+    vol.fromJSON({
+      "/branch-pinned-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["**"] }),
+      "/branch-pinned-tmpl-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["**"] }),
+    });
+    queueGlobResults([], []);
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        tmpBaseDir: "/tmp-base",
+      }),
+    );
+
+    expect(report.skipped).toEqual([]);
+    expect(report.repositories.map((r) => r.repo)).toEqual(["branch-pinned"]);
+  });
+
   it("lock.source.ref がスキャンの比較基準と一致していれば対象に含める", async () => {
     mockListOwnerRepos.mockReturnValue(
       Effect.succeed([repoInfo({ owner: "acme", repo: "same-ref" })]),

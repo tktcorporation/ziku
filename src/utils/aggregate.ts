@@ -132,7 +132,7 @@ export function aggregateTemplateUsage(
 
       const evaluations = yield* Effect.forEach(
         candidates,
-        (candidate) => evaluateCandidate(template, candidate),
+        (candidate) => evaluateCandidate(template, templateRef, candidate),
         { concurrency },
       );
 
@@ -370,10 +370,11 @@ function resolveCandidateRef(candidate: OwnerRepoInfo): Effect.Effect<CandidateR
  */
 function evaluateCandidate(
   template: AggregateTemplateRepo,
+  templateRef: string,
   candidate: OwnerRepoInfo,
 ): Effect.Effect<CandidateEvaluation> {
   return Effect.gen(function* () {
-    const screening = yield* readCandidateLock(template, candidate, undefined);
+    const screening = yield* readCandidateLock(template, templateRef, candidate, undefined);
     if (screening._tag !== "usable") return screening;
 
     const refResolution = yield* resolveCandidateRef(candidate);
@@ -384,13 +385,43 @@ function evaluateCandidate(
 
     // 固定した ref で読み直したものを採用する。ふるい用の読み取りとの間に
     // 対象リポジトリが ziku を外した場合は、そのコミット時点では利用リポジトリではない。
-    const pinned = yield* readCandidateLock(template, candidate, ref);
+    const pinned = yield* readCandidateLock(template, templateRef, candidate, ref);
     if (pinned._tag !== "usable") return pinned;
 
     return {
       _tag: "accepted" as const,
       candidate: { repoInfo: candidate, lock: pinned.lock, ref },
     };
+  });
+}
+
+/**
+ * 利用リポジトリが固定しているテンプレートのリビジョンが、このスキャンの比較基準と
+ * 同じスナップショットを指すかを確かめる。同じなら `undefined`、違えば skipped の理由文を返す。
+ *
+ * `lock.source.ref` はブランチ名・タグ名・SHA のいずれも取りうる。比較基準 `templateRef` は
+ * 解決済みの SHA なので、文字列の一致だけでは「既定ブランチ名で固定している利用リポジトリ」を
+ * 別系列と誤判定する。一致しない場合は ref を SHA へ解決してから比べ直す。
+ */
+function checkPinnedRef(
+  template: AggregateTemplateRepo,
+  pinnedRef: string,
+  templateRef: string,
+): Effect.Effect<string | undefined> {
+  if (pinnedRef === templateRef) return Effect.succeed(undefined);
+
+  return Effect.gen(function* () {
+    const resolved = yield* Effect.either(
+      Effect.tryPromise({
+        try: () => resolveLatestCommitSha(template.owner, template.repo, pinnedRef),
+        catch: toMessage,
+      }),
+    );
+    if (Either.isLeft(resolved) || resolved.right === undefined) {
+      return `Pinned to template ref "${pinnedRef}", which could not be resolved to a commit in ${template.owner}/${template.repo}`;
+    }
+    if (resolved.right === templateRef) return undefined;
+    return `Pinned to template ref "${pinnedRef}" (${resolved.right}), which is a different revision from the one this scan compares against (${templateRef})`;
   });
 }
 
@@ -406,6 +437,7 @@ type LockReadResult =
  */
 function readCandidateLock(
   template: AggregateTemplateRepo,
+  templateRef: string,
   candidate: OwnerRepoInfo,
   ref: string | undefined,
 ): Effect.Effect<LockReadResult> {
@@ -449,11 +481,9 @@ function readCandidateLock(
     // 追っている。そのまま比較すると、追随していないだけの差分が未同期として並ぶ。
     // 対象外だが「見つかったのに比較しなかった」ことは伝える必要があるため、
     // 黙って除外せず理由付きで残す。
-    if (lock.source.ref !== undefined && lock.source.ref !== template.ref) {
-      return skippedEvaluation(
-        candidate,
-        `Pinned to template ref "${lock.source.ref}", which differs from the revision this scan compares against (${template.ref ?? "the template's default branch"})`,
-      );
+    if (lock.source.ref !== undefined) {
+      const pinnedCheck = yield* checkPinnedRef(template, lock.source.ref, templateRef);
+      if (pinnedCheck !== undefined) return skippedEvaluation(candidate, pinnedCheck);
     }
 
     // `ziku pull` の途中（衝突未解決）で止まっているリポジトリ。ファイルには衝突マーカーや
