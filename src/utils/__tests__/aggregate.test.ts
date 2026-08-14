@@ -336,6 +336,63 @@ describe("aggregateTemplateUsage", () => {
     expect(result?.conflicts).toEqual([{ path: "docs/local.md" }]);
   });
 
+  // classifyFiles の deletedFiles 分岐は base/template の有無だけで判定し local を見ない。
+  // 切り分けずに pendingPull へ流すと、利用リポジトリ側の編集が「削除を配布せよ」と
+  // 読めてしまい、そのリポジトリにしか無い変更が捨てられる。
+  it("テンプレートで削除されたファイルを、利用リポジトリ側の状態で切り分ける", async () => {
+    mockListOwnerRepos.mockReturnValue(Effect.succeed([repoInfo({ owner: "acme", repo: "proj" })]));
+    const zikuJsonc = JSON.stringify({ include: ["f/**"] });
+    setLockFixture(
+      lockFixtures,
+      "acme",
+      "proj",
+      Effect.succeed(
+        Option.some(
+          lockJson({
+            baseHashes: {
+              "f/edited.txt": hashContent("base"),
+              "f/untouched.txt": hashContent("base"),
+              "f/gone-both.txt": hashContent("base"),
+              [ZIKU_CONFIG_FILE]: hashContent(zikuJsonc),
+            },
+          }),
+        ),
+      ),
+    );
+    shaFixtures.set("acme/proj", "proj-sha");
+    dirsBySource.set("gh:acme/proj#proj-sha", "/del-repo-dir");
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/del-tmpl-dir");
+
+    // テンプレートは 3 ファイルすべてを削除済み。
+    vol.fromJSON({
+      "/del-repo-dir/.ziku/ziku.jsonc": zikuJsonc,
+      "/del-repo-dir/f/edited.txt": "edited-by-consumer",
+      "/del-repo-dir/f/untouched.txt": "base",
+      "/del-tmpl-dir/.ziku/ziku.jsonc": zikuJsonc,
+    });
+    queueGlobResults([], ["f/edited.txt", "f/untouched.txt"]);
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        tmpBaseDir: "/tmp-base",
+      }),
+    );
+
+    const [result] = report.repositories;
+
+    // 利用リポジトリ側で編集済み → 双方が変更した状態なので conflicts
+    expect(result?.conflicts).toEqual([{ path: "f/edited.txt" }]);
+    // 前回 sync 時点から変わっていない → 削除をそのまま配布できる
+    expect(result?.pendingPull).toEqual(
+      expect.arrayContaining([{ path: "f/untouched.txt", reason: "deletedFiles" }]),
+    );
+    // 双方で削除済み → 保留しているものは無い
+    expect(result?.pendingPull.some((e) => e.path === "f/gone-both.txt")).toBe(false);
+    expect(result?.pendingPush.some((e) => e.path === "f/gone-both.txt")).toBe(false);
+    expect(result?.conflicts.some((e) => e.path === "f/gone-both.txt")).toBe(false);
+  });
+
   it("since フィルタが効く（pendingPush/conflicts の最終コミット日時でリポジトリ単位に絞り込む）", async () => {
     mockListOwnerRepos.mockReturnValue(
       Effect.succeed([

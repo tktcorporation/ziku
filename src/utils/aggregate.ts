@@ -37,6 +37,7 @@ import { LOCK_FILE } from "./lock";
 import type { FileClassification } from "./merge/types";
 import { mergePatterns } from "./patterns";
 import { analyzeSync } from "./sync-analysis";
+import type { SyncHashes } from "./sync-analysis";
 import { acquireTempTemplate, buildTemplateSource } from "./template";
 import {
   registerTempDirEffect,
@@ -546,7 +547,7 @@ function classifyAgainstTemplate(
     // 載らず、全リポジトリで一律に deletedFiles（誤った pendingPull）として報告される。
     // ハッシュ比較の手順は analyzeSync（SSOT）に委ね、hashFiles を手書きで 2 回呼ぶ
     // 複製をしない。
-    const { classification } = yield* Effect.tryPromise({
+    const { classification, hashes } = yield* Effect.tryPromise({
       try: () =>
         analyzeSync({
           targetDir: repoDir,
@@ -558,8 +559,42 @@ function classifyAgainstTemplate(
       catch: toMessage,
     });
 
-    return classification;
+    return refineDeletedFiles(classification, hashes);
   });
+}
+
+/**
+ * `deletedFiles`（テンプレート側で削除されたファイル）を、利用リポジトリ側の状態で
+ * 3 つに切り分ける。
+ *
+ * `classifyFiles` の `deletedFiles` 分岐は base と template の有無だけで判定し、
+ * local を見ない。pull は該当ファイルを利用者に確認してから消すのでそれで足りるが、
+ * aggregate のレポートは人ではなく後段のエージェントが読む。切り分けずに
+ * `pendingPull` へ流すと、次の 2 つが「削除を配布せよ」と読める。
+ *
+ * - 利用リポジトリ側で編集済み: 双方が変更した状態なので `conflicts` に回す。
+ *   削除として扱うと、その利用リポジトリにしか無い編集が黙って捨てられる
+ * - 利用リポジトリ側でも削除済み: 既に一致しているので、何も保留していない
+ */
+function refineDeletedFiles(
+  classification: FileClassification,
+  hashes: SyncHashes,
+): FileClassification {
+  const propagatableDeletions: string[] = [];
+  const editedAgainstDeletion: string[] = [];
+
+  for (const path of classification.deletedFiles) {
+    const local = hashes.localHashes[path];
+    if (local === undefined) continue; // 双方で削除済み。保留は無い
+    if (local === hashes.baseHashes[path]) propagatableDeletions.push(path);
+    else editedAgainstDeletion.push(path);
+  }
+
+  return {
+    ...classification,
+    deletedFiles: propagatableDeletions,
+    conflicts: [...classification.conflicts, ...editedAgainstDeletion],
+  };
 }
 
 /**

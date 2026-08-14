@@ -70,6 +70,25 @@ const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
  */
 const HAS_EXPLICIT_OFFSET_PATTERN = /(?:Z|[+-]\d{2}:?\d{2})$/;
 
+/** ISO 8601 の日時形式。秒とミリ秒は省略可、オフセットは `Z` / `±HH:MM` / `±HHMM` */
+const ISO_DATE_TIME_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})?$/;
+
+const SINCE_FORMAT_HINT =
+  'Use an ISO 8601 date ("2026-01-01") or date-time ("2026-01-01T09:30:00"). An explicit offset ("+09:00" / "Z") is honored; without one the value is read as UTC.';
+
+/**
+ * 年月日が実在する組み合わせかを判定する。
+ *
+ * `new Date("2026-02-30")` は例外を投げず 3 月 2 日へ繰り上がるため、
+ * パース結果だけでは存在しない日付を弾けない。
+ */
+function isRealCalendarDate(year: number, month: number, day: number): boolean {
+  if (month < 1 || month > 12 || day < 1) return false;
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return day <= daysInMonth;
+}
+
 /**
  * `--since` を UTC の ISO 8601 文字列へ正規化する。
  *
@@ -84,21 +103,57 @@ const HAS_EXPLICIT_OFFSET_PATTERN = /(?:Z|[+-]\d{2}:?\d{2})$/;
  *   解釈される仕様があり、同じ `--since` の指定でも実行環境のタイムゾーンによって
  *   結果が変わってしまう。日付のみの入力と同じ扱いに揃えるため、オフセットが
  *   無ければ `Z` を補って UTC として固定する。
+ *
+ * `new Date()` に判定を委ねず、形式と暦日を先に検証する。`new Date()` は
+ * `"2026-02-30"` を 3 月 2 日へ繰り上げ、`"01/02/2026"` のような非 ISO 形式も
+ * 処理系依存で受理する。どちらも例外にならないため、絞り込みの境界が黙って
+ * ずれてレポートからリポジトリが落ちる。
  */
 export function normalizeSince(raw: string): SinceParseResult {
-  const candidate = DATE_ONLY_PATTERN.test(raw)
-    ? `${raw}T00:00:00.000Z`
-    : HAS_EXPLICIT_OFFSET_PATTERN.test(raw)
-      ? raw
-      : `${raw}Z`;
-  const parsed = new Date(candidate);
-  if (Number.isNaN(parsed.getTime())) {
-    return {
-      ok: false,
-      message: `Invalid --since value: "${raw}". Use an ISO 8601 date (e.g. "2026-01-01") or a date-time (an explicit offset such as "2026-01-01T00:00:00+09:00" is honored; without one, it is interpreted as UTC).`,
-    };
-  }
-  return { ok: true, value: parsed.toISOString() };
+  const normalized = DATE_ONLY_PATTERN.test(raw) ? normalizeDateOnly(raw) : normalizeDateTime(raw);
+  return normalized === undefined
+    ? { ok: false, message: `Invalid --since value: "${raw}". ${SINCE_FORMAT_HINT}` }
+    : { ok: true, value: normalized };
+}
+
+/** `YYYY-MM-DD` を UTC の 0 時として正規化する。暦上ありえない日付は undefined */
+function normalizeDateOnly(raw: string): string | undefined {
+  const [year, month, day] = raw.split("-").map(Number);
+  if (year === undefined || month === undefined || day === undefined) return undefined;
+  if (!isRealCalendarDate(year, month, day)) return undefined;
+  return new Date(`${raw}T00:00:00.000Z`).toISOString();
+}
+
+/**
+ * 正規表現のキャプチャを数値化する。省略されたグループ（`undefined`）は
+ * `Number()` が `NaN` にしてしまい、以降の範囲比較がすべて false になるため、
+ * `undefined` のまま返して呼び出し側の既定値に委ねる。
+ */
+function toOptionalNumber(captured: string | undefined): number | undefined {
+  return captured === undefined ? undefined : Number(captured);
+}
+
+/** ISO 8601 の日時を UTC へ正規化する。形式・暦日・時刻が不正なら undefined */
+function normalizeDateTime(raw: string): string | undefined {
+  const matched = ISO_DATE_TIME_PATTERN.exec(raw);
+  if (!matched) return undefined;
+
+  const [year, month, day] = [matched[1], matched[2], matched[3]].map((c) => toOptionalNumber(c));
+  if (year === undefined || month === undefined || day === undefined) return undefined;
+  if (!isRealCalendarDate(year, month, day)) return undefined;
+
+  const [hour, minute, second] = [matched[4], matched[5], matched[6]].map((c) =>
+    toOptionalNumber(c),
+  );
+  if (!isRealTimeOfDay(hour, minute, second)) return undefined;
+
+  const parsed = new Date(HAS_EXPLICIT_OFFSET_PATTERN.test(raw) ? raw : `${raw}Z`);
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
+}
+
+/** 秒 60 はうるう秒表記として ISO 8601 が許すため上限に含める */
+function isRealTimeOfDay(hour = 0, minute = 0, second = 0): boolean {
+  return hour <= 23 && minute <= 59 && second <= 60;
 }
 
 type ConcurrencyParseResult =

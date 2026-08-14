@@ -114,6 +114,36 @@ describe("normalizeSince", () => {
       expect(result.message).toContain("Invalid --since value");
     }
   });
+
+  // new Date() は "2026-02-30" を 3 月 2 日へ繰り上げ、"01/02/2026" のような
+  // 非 ISO 形式も処理系依存で受理する。どちらも例外にならないため、検証を
+  // new Date() に委ねると絞り込みの境界が黙ってずれる。
+  it.each([
+    ["暦上ありえない日付", "2026-02-30"],
+    ["存在しない月", "2026-13-01"],
+    ["0 日", "2026-01-00"],
+    ["非 ISO のスラッシュ区切り", "01/02/2026"],
+    ["範囲外の時刻", "2026-01-01T24:00:00"],
+    ["範囲外の分", "2026-01-01T00:60:00"],
+  ])("%s (%s) は繰り上げずにエラーにする", (_label, input) => {
+    const result = normalizeSince(input);
+    expect(result.ok).toBe(false);
+  });
+
+  it("うるう年の 2 月 29 日は受理する", () => {
+    expect(normalizeSince("2028-02-29")).toEqual({ ok: true, value: "2028-02-29T00:00:00.000Z" });
+  });
+
+  it("平年の 2 月 29 日はエラーにする", () => {
+    expect(normalizeSince("2026-02-29").ok).toBe(false);
+  });
+
+  it("秒を省略した日時を受理する", () => {
+    expect(normalizeSince("2026-01-01T09:30")).toEqual({
+      ok: true,
+      value: "2026-01-01T09:30:00.000Z",
+    });
+  });
 });
 
 describe("parseConcurrency", () => {
