@@ -1,8 +1,12 @@
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { existsSync, statSync } from "node:fs";
+import { readFile, readdir } from "node:fs/promises";
 import ignore, { type Ignore } from "ignore";
-import type { AbsPath, RepoRelPath } from "../modules/schemas";
+import type { AbsPath, GlobPattern, RepoRelPath } from "../modules/schemas";
 import { joinAbs } from "./paths";
+import { getBaseDirsFromPatterns } from "./patterns";
+
+/** git が無視規則を読むファイル名。 */
+const GITIGNORE_FILE = ".gitignore";
 
 /**
  * 複数リポジトリの無視判定をまとめたもの。
@@ -27,35 +31,94 @@ export interface IgnoreDecision {
  * テンプレート側の否定規則によって同期対象へ戻る。否定規則が効くのは、それが書かれた
  * リポジトリの中だけでよい。
  *
- * `nestedDirs` 配下の `.gitignore` は、そのリポジトリの Ignore へ畳み込む。git は各
+ * ルート以外に置かれた `.gitignore` も、そのリポジトリの Ignore へ畳み込む。git は各
  * ディレクトリの `.gitignore` をそのディレクトリ起点で解釈するので、規則をルート起点へ
  * 読み替えてから足す（{@link scopeToDir}）。これを省くと、`.claude/.gitignore` のように
  * ネストして置かれた無視規則だけが判定から漏れ、リポジトリの他の場所にある同名のファイルまで
- * 巻き込んで無視する規則になる。同一リポジトリ内では深い側の規則が後に来るので、そこでの
- * 否定は意図どおり効く。
+ * 巻き込んで無視する規則になる。浅い順に足すので、同一リポジトリ内では深い側の `.gitignore`
+ * が浅い側を上書きし、そこでの否定も意図どおり効く。
+ *
+ * 読む先はディスクを走査して決める（{@link findGitignoreDirs}）。include パターンを受け取る
+ * のは探索範囲を絞るためだけで、どのディレクトリを見るかを呼び出し側が列挙する必要はない。
  *
  * @param dirs `.gitignore` の探索起点（ローカル・テンプレートのリポジトリルート）。
- * @param nestedDirs 各起点の配下で `.gitignore` を追加で読むディレクトリ（起点からの相対）。
+ * @param include 同期対象の include パターン。探索するサブツリーをここから導く。
  */
 export async function loadMergedGitignore(
   dirs: readonly AbsPath[],
-  nestedDirs: readonly string[],
+  include: readonly GlobPattern[],
 ): Promise<IgnoreDecision> {
+  const { dirs: baseDirs } = getBaseDirsFromPatterns(include);
   const perRepository: Ignore[] = [];
 
   for (const dir of dirs) {
     const ig = ignore();
-    const rootRules = await readGitignore(joinAbs(dir, ".gitignore"));
+    const rootRules = await readGitignore(joinAbs(dir, GITIGNORE_FILE));
     if (rootRules !== undefined) ig.add(rootRules);
 
-    for (const nested of nestedDirs) {
-      const nestedRules = await readGitignore(joinAbs(dir, nested, ".gitignore"));
+    for (const nested of await findGitignoreDirs(dir, baseDirs)) {
+      const nestedRules = await readGitignore(joinAbs(dir, nested, GITIGNORE_FILE));
       if (nestedRules !== undefined) ig.add(prefixRules(nestedRules, nested));
     }
     perRepository.push(ig);
   }
 
   return { ignores: (path) => perRepository.some((ig) => ig.ignores(path)) };
+}
+
+/**
+ * 走査に入らないディレクトリ名。
+ *
+ * 依存パッケージと git のオブジェクトデータベースは同期の対象にならないので、その中に
+ * `.gitignore` があっても判定には要らない。除かないと、数万ファイルを持つ `node_modules`
+ * を `.gitignore` 1 本を探すためだけに全走査することになる。
+ */
+const UNSCANNED_DIRS: ReadonlySet<string> = new Set([".git", "node_modules"]);
+
+/**
+ * `.gitignore` を持つディレクトリを、走査対象のサブツリーから浅い順に集める。
+ *
+ * どこに `.gitignore` が置かれているかは、走査しなければ分からない。パターンの先頭
+ * セグメントのような静的な列挙で決めると、`.claude/sub/.gitignore` のように深い位置に
+ * 置かれた規則が判定から漏れる。漏れた規則が資格情報を無視していれば、そのファイルは
+ * 同期の対象に残り、pull が上書きし push が送る。
+ *
+ * 探索は include パターンが到達しうるサブツリーに限る（{@link getBaseDirsFromPatterns}）。
+ * リポジトリ全体を歩くと、同期の対象にならないディレクトリの走査に実行時間を取られる。
+ *
+ * 戻り値は浅い順。呼び出し側がこの順で規則を足すことで、深い側が浅い側を上書きするという
+ * git の規則が、Ignore へ追加する順序として表れる。
+ *
+ * @param repoDir 走査するリポジトリのルート。
+ * @param baseDirs ルートからの相対で表した、走査を始めるサブツリー。
+ */
+async function findGitignoreDirs(repoDir: AbsPath, baseDirs: readonly string[]): Promise<string[]> {
+  const found: string[] = [];
+  // 深さごとに区切って進める。幅優先にすることで、戻り値の並びがそのまま浅い順になる。
+  let frontier = baseDirs.filter((rel) => isDirectory(joinAbs(repoDir, rel)));
+
+  while (frontier.length > 0) {
+    const deeper: string[] = [];
+    for (const rel of frontier) {
+      const entries = await readdir(joinAbs(repoDir, rel), { withFileTypes: true });
+      for (const entry of entries) {
+        // シンボリックリンクは辿らない（`isDirectory()` はリンク自体には false を返す）。
+        // リンク先がサブツリーの外なら、そこの `.gitignore` はこのリポジトリの規則ではなく、
+        // リンクが循環すれば走査が終わらない。
+        const descend = entry.isDirectory() && !UNSCANNED_DIRS.has(entry.name);
+        if (descend) deeper.push(`${rel}/${entry.name}`);
+        else if (!entry.isDirectory() && entry.name === GITIGNORE_FILE) found.push(rel);
+      }
+    }
+    frontier = deeper;
+  }
+
+  return found;
+}
+
+/** パスがディレクトリとして存在するか。不在・ファイルのどちらも false。 */
+function isDirectory(path: AbsPath): boolean {
+  return statSync(path, { throwIfNoEntry: false })?.isDirectory() === true;
 }
 
 /** `.gitignore` の中身を読む。無ければ undefined（規則ゼロと区別する必要はない）。 */

@@ -65,7 +65,7 @@ export function unionPatterns(
  * パターンが触れうるディレクトリの範囲。
  *
  * glob を評価せずに「どこを見ればよいか」だけを先頭セグメントから導く。走査範囲を組み立てる
- * 側（どのディレクトリの `.gitignore` を読むか）と、未追跡ファイルを探す側（どのディレクトリを
+ * 側（どのサブツリーから `.gitignore` を探すか）と、未追跡ファイルを探す側（どのディレクトリを
  * 走査するか）が同じ答えを使うための型。
  */
 export interface PatternBaseDirs {
@@ -79,7 +79,8 @@ export interface PatternBaseDirs {
  * include パターンから、触れうるディレクトリを抽出する。
  *
  * 先頭セグメントだけを見るので、`.claude/**` も `.claude/rules/*.md` も `.claude` に畳まれる。
- * 走査の基点も、ネストした `.gitignore` を探す先も、この粒度で足りる。
+ * 走査の基点も、`.gitignore` の探索を始める位置も、この粒度で足りる。どちらもここから
+ * 下へ辿るので、パターンが実際に届く深さまで畳んでも得るものが無い。
  */
 export function getBaseDirsFromPatterns(include: readonly GlobPattern[]): PatternBaseDirs {
   const dirs = new Set<string>();

@@ -141,7 +141,6 @@ vi.mock("../../ui/diff-view", () => ({
 
 vi.mock("../../utils/readme", () => ({
   renderTemplateReadme: vi.fn(() => Promise.resolve(null)),
-  detectReadmeUpdate: vi.fn(() => Promise.resolve(null)),
 }));
 
 vi.mock("../../utils/hash", async (importOriginal) => ({

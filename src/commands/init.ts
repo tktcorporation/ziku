@@ -30,11 +30,7 @@ import {
   selectTemplateCandidate,
 } from "../ui/prompts";
 import type { TemplateCandidate } from "../ui/prompts";
-import {
-  DEFAULT_TEMPLATE_REPO,
-  DEFAULT_TEMPLATE_REPOS,
-  detectGitHubOwner,
-} from "../utils/git-remote";
+import { DEFAULT_TEMPLATE_REPOS, detectGitHubOwner } from "../utils/git-remote";
 import {
   checkRepoExists,
   checkRepoSetup,
@@ -986,27 +982,4 @@ function invalidFromArg(from: string): ZikuFailure {
     value: from,
     expected: "owner or owner/repo (e.g., my-org or my-org/my-templates)",
   });
-}
-
-/**
- * テンプレートソースを解決する（純粋な解決ロジック、存在チェックなし）。
- * 存在チェックなしのため、デフォルトリポジトリ候補の先頭を使用する。
- */
-export function resolveTemplateSource(from: string | undefined): GitHubTemplateRef | null {
-  return match(planFromArg(from))
-    .with({ _tag: "Repo" }, ({ owner, repo }) => ({ sourceOwner: owner, sourceRepo: repo }))
-    .with({ _tag: "OwnerOnly" }, ({ owner }) => ({
-      sourceOwner: owner,
-      sourceRepo: DEFAULT_TEMPLATE_REPO,
-    }))
-    .with({ _tag: "Invalid" }, ({ value }): never => {
-      throw invalidFromArg(value);
-    })
-    .with({ _tag: "Unspecified" }, () => {
-      const detectedOwner = detectGitHubOwner();
-      return detectedOwner
-        ? { sourceOwner: detectedOwner, sourceRepo: DEFAULT_TEMPLATE_REPO }
-        : null;
-    })
-    .exhaustive();
 }

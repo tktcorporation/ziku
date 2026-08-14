@@ -29,7 +29,7 @@ import { getGitHubToken } from "./github";
 import { loadMergedGitignore, separateByGitignore } from "./gitignore";
 import { absPath, joinAbs } from "./paths";
 import type { FlatPatterns } from "./patterns";
-import { getBaseDirsFromPatterns, resolvePatterns } from "./patterns";
+import { resolvePatterns } from "./patterns";
 import {
   registerTempDir,
   registerTempDirEffect,
@@ -332,12 +332,9 @@ export function fetchTemplates(options: DownloadOptions): Promise<FileOperationR
       templateDir = preDownloadedDir;
     }
 
-    // ローカルとテンプレート両方の .gitignore をマージして読み込み。ネストした .gitignore を
-    // 探す先は、コピー対象のパターンが触れるディレクトリに揃える。
-    const gitignore = await loadMergedGitignore(
-      [targetDir, templateDir],
-      getBaseDirsFromPatterns(patterns.include).dirs,
-    );
+    // ローカルとテンプレート両方の .gitignore をマージして読み込み。探索の範囲は
+    // コピー対象のパターンに揃える。
+    const gitignore = await loadMergedGitignore([targetDir, templateDir], patterns.include);
 
     // フラットパターンでファイルを解決
     const resolvedFiles = resolvePatterns(templateDir, patterns.include, patterns.exclude);

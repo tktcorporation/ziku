@@ -64,14 +64,9 @@ import { calculateDiffStats, formatStats } from "../ui/diff-view";
 import { padToWidth } from "../ui/text-width";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
 import { detectDiff } from "../utils/diff";
-import {
-  classifyGitHubApiFailure,
-  createPullRequest,
-  getGitHubToken,
-  githubApiFailure,
-} from "../utils/github";
+import { createPullRequest, getGitHubToken } from "../utils/github";
 import { hashFiles } from "../utils/hash";
-import { detectReadmeUpdate, renderTemplateReadme } from "../utils/readme";
+import { renderTemplateReadme } from "../utils/readme";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked";
 import type {
   ChangedFileDiff,
@@ -161,53 +156,20 @@ export const pushLifecycle: CommandLifecycle = {
 /**
  * push 中に飛んだ例外を、ユーザーが取れる行動がある失敗と、そうでない defect に振り分ける。
  *
- * `ZikuFailure` として文言で報告するのは、ユーザーが次の一手を選べるものだけ:
+ * ここが新たに文言へ変換するのは、ローカルへの書き込みが権限・容量で失敗した場合だけ
+ * （{@link localWriteFailure}）。ユーザーは権限を直すか空きを作れば同じコマンドを通せる。
  *
- * | 失敗                                       | ユーザーが取る行動               |
- * | ------------------------------------------ | -------------------------------- |
- * | トークンを拒否された (401)                 | トークンを更新する               |
- * | レート制限 (429 / 403 + rate limit ヘッダ) | 待つ、またはトークンを設定する   |
- * | 操作を拒否された (403)                     | 権限と fork の可否を見直す       |
- * | 宛先が見つからない (404)                   | lock の参照を今あるものへ直す    |
- * | GitHub へ届かない                          | 接続を確かめて実行し直す         |
- * | ローカルへの書き込みが権限・容量で失敗     | 権限を直す / 空きを作る          |
- *
- * 呼び出し先が既に `ZikuFailure` として分類した失敗（同期対象が多すぎてツリーを取り切れない等）
- * は、そのまま通す。GitHub API の例外として分類し直すと `Unclassified` に落ちて defect になり、
- * 呼び出し先が用意した案内が消える。
+ * GitHub API の失敗（401 / 403 / 404 / 429 / 接続断）は、API を呼ぶ側（`src/utils/github.ts`）が
+ * 既に `ZikuFailure` へ分類して投げる。ここは `instanceof` でそのまま通すだけにする。同じ規則を
+ * 写して分類し直すと、案内の文面と「行動を書けるか」の線引きが 2 箇所に散り、片方だけが動く。
  *
  * これ以外は defect のまま運び、トップレベルが原因とスタックトレースごと見せる。プロンプトの
  * 中断・想定外のレスポンス形・GitHub の 5xx がここに入る。文言に潰すと、ziku の不具合が
  * 「ユーザー側の問題」として案内され、原因を追う材料も消える。
- *
- * ケースを足すときの基準: **ユーザーが次に取る行動を 1 文で書けるか**。書けないなら足さない。
- * 分類されない失敗が defect として出るのは取りこぼしではなく、この設計の正しい出力。
- *
- * @param operation 何をしようとして失敗したか（文中に埋め込むので動詞から始める）。
  */
-function pushFailure(operation: string): (cause: unknown) => Effect.Effect<never, ZikuFailure> {
-  return (cause) => {
-    if (cause instanceof ZikuFailure) return Effect.fail(cause);
-
-    return match(classifyGitHubApiFailure(cause))
-      .with(
-        {
-          _tag: P.union(
-            "AuthRejected",
-            "RateLimited",
-            "PermissionDenied",
-            "NotFound",
-            "Unreachable",
-          ),
-        },
-        (failure) =>
-          // push が GitHub API を呼ぶのはトークンを用意できた後だけなので、レート制限は
-          // 常に認証済みクォータのもの。
-          Effect.fail(githubApiFailure(failure, { operation, authenticated: true, cause })),
-      )
-      .with({ _tag: "Unclassified" }, () => localWriteFailure(cause))
-      .exhaustive();
-  };
+function pushFailure(cause: unknown): Effect.Effect<never, ZikuFailure> {
+  if (cause instanceof ZikuFailure) return Effect.fail(cause);
+  return localWriteFailure(cause);
 }
 
 /**
@@ -378,7 +340,7 @@ function pushToGitHub(
         outro(`Review and merge at ${pc.cyan(result.url)}`);
         return true;
       },
-    }).pipe(Effect.catchAll(pushFailure("create a pull request")));
+    }).pipe(Effect.catchAll(pushFailure));
   });
 }
 
@@ -486,7 +448,7 @@ function pushToLocal(input: PushToLocalInput): Effect.Effect<boolean, ZikuFailur
       outro("Push complete");
       return true;
     },
-  }).pipe(Effect.catchAll(pushFailure("push to the local template")));
+  }).pipe(Effect.catchAll(pushFailure));
 }
 
 /**
@@ -829,9 +791,6 @@ async function pushProject(params: {
     withheldFromDefault,
     diffFiles: diff.files,
   });
-  if (configResult.mergedConfig !== undefined) {
-    mergedContents.set(ZIKU_CONFIG_FILE, configResult.mergedConfig);
-  }
   announceConfigAutoInclude(configResult.inclusion);
 
   // 選択したファイルが残っていても、送る内容が 1 件も無いことがある（`planPushDelivery`）。
@@ -839,7 +798,7 @@ async function pushProject(params: {
   // 組み合わせは作れない。
   const delivery = planPushDelivery({
     selected: configResult.selected,
-    mergedContents,
+    mergedContents: withPropagatedConfig(mergedContents, configResult.mergedConfig),
     restoresTemplateDeletion: candidatePlan.restoresTemplateDeletion,
   });
   const target = match(delivery)
@@ -963,7 +922,27 @@ async function previewPush(params: {
   // README の自動更新が走るのは GitHub への push だけ（`pushToGitHub`）。ローカルテンプレート
   // への push では触らないので、予告すると起きない更新を予告することになる。
   await match(params.source)
-    .with({ kind: "github" }, () => warnIfReadmeWouldBeAutoUpdated(params.templateDir))
+    .with({ kind: "github" }, async () => {
+      // 予告の材料は、実 push が README を組み直すときと同じ「送る集合」。表示する一覧
+      // （`previewFiles`）は自動同梱を含めない方針なので、README の判断だけは実 push と
+      // 同じ入力に揃える。ディスク上の README / `ziku.jsonc` から予告すると、同じ push が
+      // 運ぶ `ziku.jsonc` の変更を反映しない予告になる。
+      const send = planPushDelivery({
+        selected: propagation.selected,
+        mergedContents: withPropagatedConfig(params.mergedContents, propagation.mergedConfig),
+        restoresTemplateDeletion,
+      });
+      warnIfReadmeWouldBeRebuilt(
+        await match(send)
+          .with({ _tag: "Nothing" }, () =>
+            Promise.resolve<TemplateReadmeRebuild>({ _tag: "NotRebuilt" }),
+          )
+          .with({ _tag: "Send" }, ({ send: target }) =>
+            planTemplateReadmeRebuild(target, params.templateDir),
+          )
+          .exhaustive(),
+      );
+    })
     .with({ kind: "local" }, () => Promise.resolve())
     .exhaustive();
 
@@ -1127,6 +1106,20 @@ type ZikuConfigNotInjected =
   /** テンプレートに `ziku.jsonc` が無く、スコープ限定の内容を足す先の文書が無い。 */
   | "NoTemplateConfig";
 
+/**
+ * 伝播で組み立てた `ziku.jsonc` の内容を、送る内容の写像へ載せる。
+ *
+ * 実 push もプレビューも、送る集合はこの写像を通した値から導く。片方だけが伝播の結論を
+ * 載せ忘れると、送られる `ziku.jsonc` と、そこから導く README が食い違う。
+ */
+function withPropagatedConfig(
+  mergedContents: ReadonlyMap<RepoRelPath, PushContent>,
+  mergedConfig: PushContent | undefined,
+): ReadonlyMap<RepoRelPath, PushContent> {
+  if (mergedConfig === undefined) return mergedContents;
+  return new Map([...mergedContents, [ZIKU_CONFIG_FILE, mergedConfig]]);
+}
+
 /** {@link propagateConfigPatterns} の結論。 */
 interface ConfigPropagation {
   /** 自動同梱を反映した送信対象。 */
@@ -1288,25 +1281,66 @@ function announceConfigAutoInclude(inclusion: ZikuConfigInclusion): void {
  * 選ばなかった側が正しいのか判断する材料がユーザーにも ziku にも無い。派生物は導出元に
  * 従わせ、選択ではなく確認（`Create PR?`）で降りられるようにする。そのため組み直しは
  * 選択によらず行い、送信対象に手を入れた事実を送信前に伝える
- * （{@link announceReadmeAutoUpdate} / {@link announceReadmeRebuild}）。
+ * （{@link announceReadmeRebuild}）。
+ *
+ * README が追跡ファイルとして既に送信対象に入っているときは、そのエントリを **置き換える**。
+ * 足すと同じパスを 2 回送ることになり、GitHub への 2 回目の書き込みが 1 回目で変わった
+ * blob SHA と食い違って弾かれる。
+ */
+async function withTemplateReadme(send: PushSend, templateDir: AbsPath): Promise<PushSend> {
+  const rebuild = await planTemplateReadmeRebuild(send, templateDir);
+
+  return match(rebuild)
+    .with({ _tag: "NotRebuilt" }, () => send)
+    .with({ _tag: "Rebuilt" }, ({ file, base }) => {
+      announceReadmeRebuild(base);
+      // 置き換えと追加のどちらも `withAutoUpdatedFile` に任せる。送る集合を直に組み直すと、
+      // サマリに出ないファイルが PR に載る経路ができる。
+      return withAutoUpdatedFile(send, file);
+    })
+    .exhaustive();
+}
+
+/** 組み直す README の土台。案内と予告の文面がここで変わる。 */
+type TemplateReadmeBase =
+  /** 送信対象に無い README を、ziku が付け足す。 */
+  | "AutoIncluded"
+  /** 追跡ファイルとして送信対象に選ばれている README の、マーカー間だけを差し替える。 */
+  | "Selected";
+
+/**
+ * テンプレート README の組み直しの決着。
+ *
+ * 送信対象そのもの（{@link PushSend}）を材料に取り、結論をこの値で返すことで、実 push の
+ * 案内も dry-run の予告も同じ入力・同じ関数の結論からしか作れなくなる。予告側がディスク上の
+ * README と `ziku.jsonc` を読み直す入口を残すと、`ziku track` で足したばかりのパターンを
+ * 同じ push が運ぶ場合に、予告は「何も起きない」と言い、実 push は README を PR に載せる。
+ */
+type TemplateReadmeRebuild =
+  /** 組み直した内容を送信対象へ載せる。 */
+  | { readonly _tag: "Rebuilt"; readonly file: PushFile; readonly base: TemplateReadmeBase }
+  /** 組み直さない（README を消す push / README が無い / マーカーが無い / 内容が変わらない）。 */
+  | { readonly _tag: "NotRebuilt" };
+
+/**
+ * 送信対象から、テンプレート README を組み直した結果を出す。ディスクへは書かない。
  *
  * 生成元は同じ PR に載る内容に採る。README も `ziku.jsonc` もこの PR で書き換わるので、
  * テンプレートのディスク上の内容から作ると、この PR が追加するパターン（`ziku track` した
  * 直後など）を反映しない README を配ることになる。
  *
- * README が追跡ファイルとして既に送信対象に入っているときは、そのエントリを **置き換える**。
- * 足すと同じパスを 2 回送ることになり、GitHub への 2 回目の書き込みが 1 回目で変わった
- * blob SHA と食い違って弾かれる。組み直しの土台に採るのは自動生成の内容ではなく、追跡
- * ファイルとして送ろうとしているローカルの内容のほう。マーカー外はユーザーが書いた文章で、
- * ziku が選り分ける立場にない。ziku が従わせてよいのはマーカー間だけなので、土台は
- * ユーザーの内容にして、その中のマーカー間だけを `ziku.jsonc` から組み直す。
+ * 組み直しの土台に採るのは、追跡ファイルとして送ろうとしているローカルの README。マーカー外は
+ * ユーザーが書いた文章で、ziku が選り分ける立場にない。ziku が従わせてよいのはマーカー間だけ
+ * なので、土台はユーザーの内容にして、その中のマーカー間だけを `ziku.jsonc` から組み直す。
  *
- * README をテンプレートから消す push では組み直さない。消すと決めたファイルの中身を作る
- * 作業に意味が無く、案内（{@link announceReadmeAutoUpdate}）まで出すと「削除する push」を
- * 「README も更新する push」と読ませることになる。
+ * README をテンプレートから消す push では組み直さない。消すと決めたファイルの中身を作る作業に
+ * 意味が無く、案内まで出すと「削除する push」を「README も更新する push」と読ませることになる。
  */
-async function withTemplateReadme(send: PushSend, templateDir: AbsPath): Promise<PushSend> {
-  if (isPushedDeletion(send.payload, TEMPLATE_README)) return send;
+async function planTemplateReadmeRebuild(
+  send: PushSend,
+  templateDir: AbsPath,
+): Promise<TemplateReadmeRebuild> {
+  if (isPushedDeletion(send.payload, TEMPLATE_README)) return { _tag: "NotRebuilt" };
 
   const files = pushedFiles(send.payload);
   const tracked = files.find((f) => f.path === TEMPLATE_README);
@@ -1317,60 +1351,68 @@ async function withTemplateReadme(send: PushSend, templateDir: AbsPath): Promise
     readme: tracked?.content,
     config: config?.content,
   });
-  if (rendered === null || !rendered.updated) return send;
+  if (rendered === null || !rendered.updated) return { _tag: "NotRebuilt" };
 
-  const rebuilt: PushFile = {
-    path: TEMPLATE_README,
-    content: asPushContent(rendered.content),
-    // マーカー間は `ziku.jsonc` から導出した内容で、ローカルの README には残らない。
-    origin: { _tag: "Synthesized" },
+  return {
+    _tag: "Rebuilt",
+    file: {
+      path: TEMPLATE_README,
+      content: asPushContent(rendered.content),
+      // マーカー間は `ziku.jsonc` から導出した内容で、ローカルの README には残らない。
+      origin: { _tag: "Synthesized" },
+    },
+    base: tracked === undefined ? "AutoIncluded" : "Selected",
   };
-
-  if (tracked === undefined) announceReadmeAutoUpdate();
-  else announceReadmeRebuild();
-
-  // 置き換えと追加のどちらも `withAutoUpdatedFile` に任せる。送る集合を直に組み直すと、
-  // サマリに出ないファイルが PR に載る経路ができる。
-  return withAutoUpdatedFile(send, rebuilt);
 }
 
 /**
- * 明示指定されていない README を同梱する理由を伝える。
+ * 送信対象へ手を入れた事実を、確認プロンプトの前に伝える。
  *
- * サマリには `(auto-updated)` の 1 行として並ぶが、記号だけでは「なぜ自分が選んでいない
- * ファイルが PR に出るのか」が読み取れない。導出元を名指しして、確認プロンプトの前に
- * 判断材料を渡す（`ziku.jsonc` の自動同梱と同じ扱い）。
+ * 付け足す場合: サマリには `(auto-updated)` の 1 行として並ぶが、記号だけでは「なぜ自分が
+ * 選んでいないファイルが PR に出るのか」が読み取れない。導出元を名指しする（`ziku.jsonc` の
+ * 自動同梱と同じ扱い）。
+ *
+ * 選ばれている場合: 追跡ファイルとして選んだ内容がそのまま送られると読めるので、マーカー間
+ * だけを差し替えたことを知らせる。
  */
-function announceReadmeAutoUpdate(): void {
+function announceReadmeRebuild(base: TemplateReadmeBase): void {
   log.info(
-    `Also pushing ${TEMPLATE_README} — its generated sections are rebuilt from ${ZIKU_CONFIG_FILE}.`,
+    match(base)
+      .with(
+        "AutoIncluded",
+        () =>
+          `Also pushing ${TEMPLATE_README} — its generated sections are rebuilt from ${ZIKU_CONFIG_FILE}.`,
+      )
+      .with(
+        "Selected",
+        () =>
+          `Rebuilding the generated sections of ${TEMPLATE_README} from ${ZIKU_CONFIG_FILE} before pushing it.`,
+      )
+      .exhaustive(),
   );
 }
 
-/**
- * 選ばれた README の中身に手を入れた事実を伝える。
- *
- * 追跡ファイルとして選んだ内容がそのまま送られると読めるので、マーカー間だけ差し替えたことを
- * 確認プロンプトの前に知らせる。
- */
-function announceReadmeRebuild(): void {
-  log.info(
-    `Rebuilding the generated sections of ${TEMPLATE_README} from ${ZIKU_CONFIG_FILE} before pushing it.`,
-  );
-}
-
-/**
- * dry-run で、実 push なら同梱されるテンプレート README の更新を予告する。
- *
- * 検出だけを行い README へは書き込まない（dry-run は何も変えない）。
- */
-async function warnIfReadmeWouldBeAutoUpdated(templateDir: AbsPath): Promise<void> {
-  const result = await detectReadmeUpdate(templateDir, templateDir);
-  if (!result?.updated) return;
-
-  log.warn(
-    `${TEMPLATE_README} would also be pushed — its generated sections are rebuilt from ${ZIKU_CONFIG_FILE}.`,
-  );
+/** dry-run で、実 push が同梱する README の組み直しを予告する。 */
+function warnIfReadmeWouldBeRebuilt(rebuild: TemplateReadmeRebuild): void {
+  match(rebuild)
+    .with({ _tag: "NotRebuilt" }, () => undefined)
+    .with({ _tag: "Rebuilt" }, ({ base }) => {
+      log.warn(
+        match(base)
+          .with(
+            "AutoIncluded",
+            () =>
+              `${TEMPLATE_README} would also be pushed — its generated sections are rebuilt from ${ZIKU_CONFIG_FILE}.`,
+          )
+          .with(
+            "Selected",
+            () =>
+              `${TEMPLATE_README} would be pushed with its generated sections rebuilt from ${ZIKU_CONFIG_FILE}.`,
+          )
+          .exhaustive(),
+      );
+    })
+    .exhaustive();
 }
 
 // ─── ファイル選択 ───

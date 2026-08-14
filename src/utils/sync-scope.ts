@@ -1,7 +1,6 @@
 import type { AbsPath, GlobPattern, RepoRelPath } from "../modules/schemas";
 import { loadMergedGitignore } from "./gitignore";
 import type { IgnoreDecision } from "./gitignore";
-import { getBaseDirsFromPatterns } from "./patterns";
 import { mergeTemplatePatterns } from "./template-patterns";
 import { alwaysTrackedPathsIn, withConfigTracked } from "./ziku-config";
 
@@ -71,7 +70,8 @@ export interface SyncScope {
    * 走査から外すファイルの判定。
    *
    * ローカルとテンプレートのルート `.gitignore` に加えて、宣言されたパターンが触れる
-   * ディレクトリのネストした `.gitignore`（`.claude/.gitignore` など）も畳み込んである。
+   * サブツリーに実在する `.gitignore`（`.claude/.gitignore` や `.claude/sub/.gitignore`）も
+   * 深さに関わらず畳み込んである。
    * 参照は {@link isExcludedFromScope} 経由に閉じる。ここから直接 `ignores()` を呼ぶと
    * `alwaysTracked` の例外が抜け落ちる。
    */
@@ -105,13 +105,12 @@ async function composeScope(params: {
   include: readonly GlobPattern[];
   exclude: readonly GlobPattern[];
 }): Promise<SyncScope> {
-  // ネストした `.gitignore` を探す先は、宣言されたパターンが触れるディレクトリに限る。
-  // 走査用パターン（`.ziku/ziku.jsonc` を足したもの）から導くと、ziku 自身の設定ディレクトリを
-  // 探索の基点として扱う経路が範囲の決定側にも生まれる。
-  const { dirs: nestedGitignoreDirs } = getBaseDirsFromPatterns(params.include);
+  // `.gitignore` を探す範囲は、宣言されたパターンが触れる位置に限る。走査用パターン
+  // （`.ziku/ziku.jsonc` を足したもの）を渡すと、ziku 自身の設定ディレクトリを探索の基点として
+  // 扱う経路が範囲の決定側にも生まれる。
   const gitignore = await loadMergedGitignore(
     [params.targetDir, params.templateDir],
-    nestedGitignoreDirs,
+    params.include,
   );
   const alwaysTracked = [
     ...new Set([

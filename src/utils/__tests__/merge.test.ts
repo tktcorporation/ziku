@@ -832,6 +832,49 @@ line2`;
       expect(regions).toEqual([]);
     });
 
+    it("開始マーカーだけを消した残骸を未解決として数える", () => {
+      // 数えないと `pull --continue` が通り、マーカー断片を載せた内容が同期ベースへ
+      // 確定して以後テンプレートへ送られる。
+      const content = ["a", "||||||| BASE", "o", "=======", "b", ">>>>>>> TEMPLATE", ""].join("\n");
+
+      const regions = findConflictRegions(content);
+
+      expect(regions.map((r) => r.startLine)).toEqual([2]);
+    });
+
+    it("`=======` から `>>>>>>>` だけの並びも未解決として数える", () => {
+      const content = ["a", "=======", "b", ">>>>>>> TEMPLATE", ""].join("\n");
+
+      const regions = findConflictRegions(content);
+
+      expect(regions.map((r) => r.startLine)).toEqual([2]);
+    });
+
+    it("単独の `|||||||`（空セルだけのテーブル行）を未解決とみなさない", () => {
+      const content = ["| a | b |", "| --- | --- |", "|||||||", "", "本文", ""].join("\n");
+
+      const regions = findConflictRegions(content);
+
+      expect(regions).toEqual([]);
+    });
+
+    it("単独の `>>>>>>>`（深くネストした引用）を未解決とみなさない", () => {
+      const content = ["本文", ">>>>>>> quoted", "本文", ""].join("\n");
+
+      const regions = findConflictRegions(content);
+
+      expect(regions).toEqual([]);
+    });
+
+    it("`=======` で終わってファイルが終わる並びを未解決とみなさない", () => {
+      // 閉じ側まで揃わない並びは、setext 見出しの下線と区別できない。
+      const content = ["Section", "=======", "", "本文", ""].join("\n");
+
+      const regions = findConflictRegions(content);
+
+      expect(regions).toEqual([]);
+    });
+
     it("マージ結果に残るブロックだけを数え、内容中の短いマーカーは本文として扱う", () => {
       const withMarkers = ["intro", "<<<<<<< LOCAL", "a", "=======", "b", ">>>>>>> TEMPLATE", ""];
       const base = withMarkers.join("\n");

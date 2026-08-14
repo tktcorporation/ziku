@@ -80,7 +80,6 @@ vi.mock("../../utils/github", async (importOriginal) => {
 // utils/readme をモック
 vi.mock("../../utils/readme", () => ({
   renderTemplateReadme: vi.fn(() => Promise.resolve(null)),
-  detectReadmeUpdate: vi.fn(() => Promise.resolve(null)),
 }));
 
 // utils/untracked をモック
@@ -227,7 +226,7 @@ const {
 // PR 本文の中身そのものを見るテストは、固定値を返すモックではなく素の実装へ差し替える。
 const actualPrompts = await vi.importActual<typeof import("../../ui/prompts")>("../../ui/prompts");
 const { detectUntrackedFiles } = await import("../../utils/untracked");
-const { renderTemplateReadme, detectReadmeUpdate } = await import("../../utils/readme");
+const { renderTemplateReadme } = await import("../../utils/readme");
 const { log, logDiffSummary } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
 const { classifyFiles, mergeOneFile, downloadBaseForMerge } = await import("../../utils/merge");
@@ -260,7 +259,6 @@ const mockSelectUntrackedToTrack = vi.mocked(selectUntrackedToTrack);
 const mockLogUntrackedFilesNotice = vi.mocked(logUntrackedFilesNotice);
 const mockDetectUntrackedFiles = vi.mocked(detectUntrackedFiles);
 const mockRenderTemplateReadme = vi.mocked(renderTemplateReadme);
-const mockDetectReadmeUpdate = vi.mocked(detectReadmeUpdate);
 const mockLog = vi.mocked(log);
 const mockLogDiffSummary = vi.mocked(logDiffSummary);
 const mockHashFiles = vi.mocked(hashFiles);
@@ -413,8 +411,6 @@ function resetPushMocks(): void {
   mockHashFiles.mockResolvedValue({});
   mockRenderTemplateReadme.mockReset();
   mockRenderTemplateReadme.mockResolvedValue(null);
-  mockDetectReadmeUpdate.mockReset();
-  mockDetectReadmeUpdate.mockResolvedValue(null);
   mockFetchDefaultBranch.mockReset();
   mockFetchDefaultBranch.mockResolvedValue({ _tag: "Resolved", name: "main" });
 }
@@ -589,7 +585,6 @@ describe("pushCommand", () => {
         updated: true,
         content: "# Template\n\n<!-- FILES:START -->\n- `.github/**`\n<!-- FILES:END -->\n",
       };
-      const updatedReadme = { ...rebuiltReadme, readmePath: "/tmp/template/README.md" };
 
       /** README 以外に 1 件だけ送るものがある状態を作る。 */
       function setupSinglePushableFile(): void {
@@ -745,7 +740,7 @@ describe("pushCommand", () => {
         setupPushableFiles([
           { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
         ]);
-        mockDetectReadmeUpdate.mockResolvedValueOnce(updatedReadme);
+        mockRenderTemplateReadme.mockResolvedValueOnce(rebuiltReadme);
 
         await (pushCommand.run as any)({
           args: { dir: "/test", dryRun: true, yes: false, edit: false },
@@ -756,8 +751,33 @@ describe("pushCommand", () => {
         expect(mockLog.warn).toHaveBeenCalledWith(
           "README.md would also be pushed — its generated sections are rebuilt from .ziku/ziku.jsonc.",
         );
-        // プレビューは何も書き換えない
-        expect(mockRenderTemplateReadme).not.toHaveBeenCalled();
+        // 予告だけで、PR も書き込みも起こさない
+        expect(mockCreatePullRequest).not.toHaveBeenCalled();
+        expect(mockWriteFile).not.toHaveBeenCalled();
+      });
+
+      it("--dry-run は、同じ push が運ぶ ziku.jsonc から README の更新を予告する", async () => {
+        // 予告をディスク上の ziku.jsonc から作ると、この push が届けるパターン
+        // （`ziku track` で足した直後など）を反映せず「何も起きない」と予告してしまう。
+        // 実 push は送る内容から README を組み直すので、予告も同じ内容から出す。
+        setupLocalOnlyConfig({
+          localInclude: [".claude/**", "extra/**"],
+          templateInclude: [".claude/**"],
+        });
+        mockRenderTemplateReadme.mockResolvedValueOnce(rebuiltReadme);
+
+        await (pushCommand.run as any)({
+          args: { dir: "/test", dryRun: true, yes: false, edit: false },
+          rawArgs: [],
+          cmd: pushCommand,
+        });
+
+        // 組み立ての材料は、ディスクの内容ではなく送る内容の ziku.jsonc
+        const rendered = mockRenderTemplateReadme.mock.calls[0]?.[0];
+        expect(rendered?.config).toContain("extra/**");
+        expect(mockLog.warn).toHaveBeenCalledWith(
+          "README.md would also be pushed — its generated sections are rebuilt from .ziku/ziku.jsonc.",
+        );
       });
 
       it("ローカルテンプレートへの --dry-run では README の更新を予告しない", async () => {
@@ -772,7 +792,7 @@ describe("pushCommand", () => {
         setupPushableFiles([
           { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
         ]);
-        mockDetectReadmeUpdate.mockResolvedValueOnce(updatedReadme);
+        mockRenderTemplateReadme.mockResolvedValueOnce(rebuiltReadme);
 
         await (pushCommand.run as any)({
           args: { dir: "/test", dryRun: true, yes: false, edit: false },
@@ -783,7 +803,7 @@ describe("pushCommand", () => {
         expect(
           mockLog.warn.mock.calls.map((call) => call[0]).filter((text) => text.includes("README")),
         ).toEqual([]);
-        expect(mockDetectReadmeUpdate).not.toHaveBeenCalled();
+        expect(mockRenderTemplateReadme).not.toHaveBeenCalled();
       });
 
       it("--dry-run でマーカーが無ければ予告しない", async () => {
@@ -2766,15 +2786,6 @@ describe("pushCommand", () => {
   });
 });
 
-/** Octokit の RequestError を模した例外。ステータスとレスポンスヘッダを載せる。 */
-function githubApiError(
-  status: number,
-  message: string,
-  headers: Record<string, string> = {},
-): Error {
-  return Object.assign(new Error(message), { status, response: { status, headers } });
-}
-
 /**
  * push が失敗したとき、ユーザーが取れる行動があるものは文言で案内し、それ以外だけを
  * ziku の不具合として原因ごと見せる — その振り分けを症状の側から確かめる。
@@ -2802,84 +2813,6 @@ describe("push の失敗の報告", () => {
     );
   }
 
-  it("トークンが失効していたら、バグ報告ではなくトークンの更新を促す", async () => {
-    const cause = githubApiError(401, "Bad credentials");
-    mockCreatePullRequest.mockRejectedValueOnce(cause);
-
-    const failure = await failingGitHubPush();
-
-    expect(failure).toBeInstanceOf(ZikuFailure);
-    expect(failure).toMatchObject({
-      reason: { kind: "GitHubAuthRejected", detail: "Bad credentials" },
-      // 原因を捨てない
-      cause,
-    });
-    expect((failure as ZikuFailure).hint).toContain("gh auth login");
-  });
-
-  it("レート制限は、待つか認証するかを案内する", async () => {
-    mockCreatePullRequest.mockRejectedValueOnce(
-      githubApiError(403, "API rate limit exceeded", {
-        "x-ratelimit-remaining": "0",
-        "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 300),
-      }),
-    );
-
-    const failure = await failingGitHubPush();
-
-    expect(failure).toMatchObject({
-      reason: { kind: "GitHubRateLimited", authenticated: true },
-    });
-    expect((failure as ZikuFailure).hint).toMatch(/resets in ~\d+ min/);
-  });
-
-  it("連投を弾く secondary rate limit も、待てば解ける失敗として案内する", async () => {
-    // 1 時間あたりのクォータとは別の制限で、`retry-after` だけが返る。
-    mockCreatePullRequest.mockRejectedValueOnce(
-      githubApiError(403, "You have exceeded a secondary rate limit", { "retry-after": "60" }),
-    );
-
-    const failure = await failingGitHubPush();
-
-    expect(failure).toMatchObject({ reason: { kind: "GitHubRateLimited" } });
-    expect((failure as ZikuFailure).hint).toMatch(/resets in ~\d+ min/);
-  });
-
-  it("権限が足りない 403 は、権限と fork の設定を見直すよう案内する", async () => {
-    // レート制限のヘッダを持たない 403 は、待っても解けない権限の問題。
-    mockCreatePullRequest.mockRejectedValueOnce(
-      githubApiError(403, "Resource not accessible by personal access token"),
-    );
-
-    const failure = await failingGitHubPush();
-
-    expect(failure).toMatchObject({
-      reason: { kind: "GitHubPermissionDenied", operation: "create a pull request" },
-    });
-    expect((failure as ZikuFailure).hint).toContain("forking");
-  });
-
-  it("GitHub へ届かなければ、再実行を案内する", async () => {
-    // Octokit は fetch の失敗を status 500 の RequestError に包み直すので、届かなかった
-    // 事実は例外チェーンの奥の errno にしか残らない。
-    const wrapped = Object.assign(new Error("request to https://api.github.com/user failed"), {
-      status: 500,
-      cause: Object.assign(new TypeError("fetch failed"), {
-        cause: Object.assign(new Error("getaddrinfo ENOTFOUND api.github.com"), {
-          code: "ENOTFOUND",
-        }),
-      }),
-    });
-    mockCreatePullRequest.mockRejectedValueOnce(wrapped);
-
-    const failure = await failingGitHubPush();
-
-    expect(failure).toMatchObject({
-      reason: { kind: "GitHubUnreachable", operation: "create a pull request" },
-    });
-    expect((failure as ZikuFailure).hint).toContain("network");
-  });
-
   it("ツリーを取り切れなかった失敗は、分類済みの案内のまま届く", async () => {
     // createPullRequest が分類済みの ZikuFailure を投げる。GitHub API の例外として
     // 分類し直すと Unclassified → defect になり、ファイル数を減らす案内が消える。
@@ -2895,22 +2828,20 @@ describe("push の失敗の報告", () => {
     expect((failure as ZikuFailure).hint).toContain("Reduce the number of files");
   });
 
-  it("控えたブランチが上流に無ければ、バグ報告ではなく宛先の直し方を案内する", async () => {
-    // ref を明示していないテンプレートでは lock の source.defaultBranch が宛先になるので、
-    // 上流で改名されると repos.getBranch が 404 を返す。分類しないと defect として
-    // 「ziku のバグを報告してください」と出る。
-    const cause = githubApiError(404, "Branch not found");
-    mockCreatePullRequest.mockRejectedValueOnce(cause);
+  it("GitHub API の失敗は、API を呼ぶ側が付けた案内のまま届く", async () => {
+    // 宛先にした参照が上流から消えた状態。分類は `utils/github.ts` が済ませているので、
+    // push はその `ZikuFailure` をそのまま運ぶ。ここで分類し直すと同じ規則が 2 箇所に散る。
+    const notFound = zikuFailure({
+      kind: "GitHubTargetNotFound",
+      operation: "create a pull request",
+      detail: "Branch not found",
+    });
+    mockCreatePullRequest.mockRejectedValueOnce(notFound);
 
     const failure = await failingGitHubPush();
 
-    expect(failure).toBeInstanceOf(ZikuFailure);
-    expect(failure).toMatchObject({
-      reason: { kind: "GitHubTargetNotFound", operation: "create a pull request" },
-      cause,
-    });
+    expect(failure).toBe(notFound);
     expect((failure as ZikuFailure).hint).toContain("source.ref");
-    expect((failure as ZikuFailure).hint).toContain("ziku init");
   });
 
   it("分類していない失敗は、文言に潰さず原因のまま投げる", async () => {

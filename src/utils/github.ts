@@ -940,13 +940,15 @@ function httpStatusOf(cause: unknown): number | undefined {
  * GitHub API の呼び出しが失敗した理由のうち、ユーザーが次に取る行動が変わるもの。
  *
  * {@link RepoExistence} と同じく、行動の単位でケースを分ける。`Unclassified` は「ユーザーに
- * 書ける行動が無い」ことを表す明示的なケースで、呼び出し側はこれを文言へ潰さず defect の
- * まま運ぶ（{@link githubApiFailure} が受け取れないシグネチャになっている）。
+ * 書ける行動が無い」ことを表す明示的なケースで、文言へ潰さず defect のまま運ぶ
+ * （{@link githubApiFailure} が受け取れないシグネチャになっている）。
  *
- * ライフサイクル: {@link classifyGitHubApiFailure} が例外から作り、コマンド層が
- * {@link githubApiFailure} で `ZikuFailure` へ変換する。
+ * ライフサイクル: {@link classifyGitHubApiFailure} が例外から作り、{@link githubApiFailure} が
+ * `ZikuFailure` へ変換する。どちらもこのモジュールの外へ出さない。分類の規則を外から呼べると、
+ * API を呼ぶ側で分類済みの失敗を、コマンド層が同じ規則を写して分類し直す形が書けてしまう。
+ * 呼び出し元が見るのは {@link createPullRequest} 等が投げる `ZikuFailure` だけでよい。
  */
-export type GitHubApiFailure =
+type GitHubApiFailure =
   /** 付与したトークンを拒否された (401)。人がトークンを直すまで結果は変わらない。 */
   | { readonly _tag: "AuthRejected"; readonly detail: string }
   /** クォータを使い切った、または連投を弾かれた。待てば解ける。 */
@@ -974,7 +976,7 @@ export type GitHubApiFailure =
  * 既定ブランチ名は引き直せないときの宛先になるので、上流でブランチが改名・削除されると
  * この形で届く。分類しないと「ziku のバグを報告してください」と案内することになる。
  */
-export function classifyGitHubApiFailure(cause: unknown): GitHubApiFailure {
+function classifyGitHubApiFailure(cause: unknown): GitHubApiFailure {
   const detail = cause instanceof Error ? cause.message : String(cause);
 
   return match(httpStatusOf(cause))
@@ -1002,7 +1004,7 @@ export function classifyGitHubApiFailure(cause: unknown): GitHubApiFailure {
  * @param context.authenticated トークンを付けて呼んだか。レート制限の案内が変わる。
  * @param context.cause 元の例外。原因を捨てないため必ず渡す。
  */
-export function githubApiFailure(
+function githubApiFailure(
   failure: Exclude<GitHubApiFailure, { readonly _tag: "Unclassified" }>,
   context: { readonly operation: string; readonly authenticated: boolean; readonly cause: unknown },
 ): ZikuFailure {

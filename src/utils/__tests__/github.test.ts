@@ -7,10 +7,8 @@ import { ZikuFailure } from "../../errors";
 import {
   checkRepoExists,
   checkRepoSetup,
-  classifyGitHubApiFailure,
   getGhCliToken,
   getGitHubToken,
-  githubApiFailure,
   rateLimitedError,
   unauthorizedError,
 } from "../github";
@@ -128,37 +126,41 @@ describe("getGhCliToken", () => {
   });
 });
 
+/** PR の作成が最後まで通るモック構成。失敗を見るテストはここから 1 呼び出しだけ差し替える。 */
+function setupSuccessfulPushMocks(): void {
+  vi.clearAllMocks();
+
+  mockGetAuthenticated.mockResolvedValue({
+    data: { login: "testuser" },
+  });
+
+  mockReposGet.mockResolvedValue({
+    data: { name: "test-repo", fork: true, parent: { full_name: "owner/repo" } },
+  });
+
+  mockReposGetBranch.mockResolvedValue({
+    data: { commit: { sha: "abc123" } },
+  });
+
+  mockGitCreateRef.mockResolvedValue({});
+
+  mockGitGetTree.mockResolvedValue({
+    data: { tree: [], truncated: false },
+  });
+
+  mockReposCreateOrUpdateFileContents.mockResolvedValue({});
+
+  mockPullsCreate.mockResolvedValue({
+    data: {
+      html_url: "https://github.com/owner/repo/pull/123",
+      number: 123,
+    },
+  });
+}
+
 describe("createPullRequest", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
-
-    // デフォルトのモック設定
-    mockGetAuthenticated.mockResolvedValue({
-      data: { login: "testuser" },
-    });
-
-    mockReposGet.mockResolvedValue({
-      data: { name: "test-repo", fork: true, parent: { full_name: "owner/repo" } },
-    });
-
-    mockReposGetBranch.mockResolvedValue({
-      data: { commit: { sha: "abc123" } },
-    });
-
-    mockGitCreateRef.mockResolvedValue({});
-
-    mockGitGetTree.mockResolvedValue({
-      data: { tree: [], truncated: false },
-    });
-
-    mockReposCreateOrUpdateFileContents.mockResolvedValue({});
-
-    mockPullsCreate.mockResolvedValue({
-      data: {
-        html_url: "https://github.com/owner/repo/pull/123",
-        number: 123,
-      },
-    });
+    setupSuccessfulPushMocks();
   });
 
   it("PR を作成できる", async () => {
@@ -289,7 +291,7 @@ describe("createPullRequest", () => {
     }).catch((e: unknown) => e);
 
     expect(thrown).toBe(broken);
-    expect(classifyGitHubApiFailure(thrown)).toMatchObject({ _tag: "Unclassified" });
+    expect(thrown).not.toBeInstanceOf(ZikuFailure);
   });
 
   it("複数のファイルをコミットする", async () => {
@@ -987,115 +989,99 @@ function apiError(status: number, message: string, headers: Record<string, strin
   return Object.assign(new Error(message), { status, response: { status, headers } });
 }
 
-describe("classifyGitHubApiFailure", () => {
-  it("401 は認証拒否として、GitHub のメッセージごと分類する", () => {
-    expect(classifyGitHubApiFailure(apiError(401, "Bad credentials"))).toEqual({
-      _tag: "AuthRejected",
-      detail: "Bad credentials",
-    });
+/**
+ * GitHub API の失敗が、利用者に行動を書ける文言へ変換されることを `createPullRequest` 越しに見る。
+ *
+ * 分類の規則は `utils/github.ts` の中に閉じている。呼び出し元が見えるのは、API を呼ぶ関数が
+ * 投げる `ZikuFailure` だけなので、検証もその出口から行う。
+ */
+describe("GitHub API の失敗の分類", () => {
+  beforeEach(() => {
+    setupSuccessfulPushMocks();
   });
 
-  it("クォータ超過の 403 はレート制限として、リセット時刻付きで分類する", () => {
+  /** 宛先ブランチの問い合わせだけを失敗させ、投げられた値を返す。 */
+  function pushFailingWith(cause: unknown): Promise<unknown> {
+    mockReposGetBranch.mockRejectedValue(cause);
+
+    return createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
+      title: "Test PR",
+      body: "Test body",
+      baseBranch: "main",
+    }).catch((e: unknown) => e);
+  }
+
+  /** 分類済みの失敗として投げられたことを確かめ、文言を見られる形で返す。 */
+  async function failureOf(cause: unknown): Promise<ZikuFailure> {
+    const thrown = await pushFailingWith(cause);
+    expect(thrown).toBeInstanceOf(ZikuFailure);
+    // 原因を捨てないので、元の例外は追える。
+    expect((thrown as ZikuFailure).cause).toBe(cause);
+    return thrown as ZikuFailure;
+  }
+
+  it("401 は認証拒否として、GitHub のメッセージごと伝えトークンの直し方を案内する", async () => {
+    const failure = await failureOf(apiError(401, "Bad credentials"));
+
+    expect(failure.reason).toEqual({ kind: "GitHubAuthRejected", detail: "Bad credentials" });
+    expect(failure.hint).toContain("gh auth login");
+  });
+
+  it("クォータ超過の 403 はレート制限として、リセットまでの残り時間を案内する", async () => {
     const resetEpoch = Math.floor(Date.now() / 1000) + 600;
-    const failure = classifyGitHubApiFailure(
+    const failure = await failureOf(
       apiError(403, "API rate limit exceeded", {
         "x-ratelimit-remaining": "0",
         "x-ratelimit-reset": String(resetEpoch),
       }),
     );
 
-    expect(failure).toEqual({ _tag: "RateLimited", resetAt: new Date(resetEpoch * 1000) });
+    // API を呼ぶのはトークンを用意できた後だけなので、常に認証済みクォータとして案内する。
+    expect(failure.reason).toEqual({
+      kind: "GitHubRateLimited",
+      authenticated: true,
+      resetAt: new Date(resetEpoch * 1000),
+    });
+    expect(failure.hint).toContain("Authenticated quota (5000/hr) exhausted");
+    expect(failure.hint).toMatch(/resets in ~\d+ min/);
   });
 
-  it("secondary rate limit は retry-after の秒数を時刻に直す", () => {
-    const failure = classifyGitHubApiFailure(
+  it("secondary rate limit は retry-after の秒数を時刻に直す", async () => {
+    const failure = await failureOf(
       apiError(403, "You have exceeded a secondary rate limit", { "retry-after": "60" }),
     );
 
-    // 「あと何秒」を時刻へ直すので、リセット時刻は今より後になる
-    expect(failure).toMatchObject({ _tag: "RateLimited" });
-    const { resetAt } = failure as { resetAt: Date | undefined };
-    expect(resetAt?.getTime()).toBeGreaterThan(Date.now());
+    expect(failure.hint).toMatch(/resets in ~\d+ min/);
   });
 
-  it("レート制限のヘッダを持たない 403 は権限不足として分ける", () => {
-    expect(classifyGitHubApiFailure(apiError(403, "Must have admin rights"))).toEqual({
-      _tag: "PermissionDenied",
+  it("429 はヘッダが無くてもレート制限として扱い、残り時間は付けない", async () => {
+    const failure = await failureOf(apiError(429, "Too Many Requests"));
+
+    expect(failure.reason).toEqual({
+      kind: "GitHubRateLimited",
+      authenticated: true,
+      resetAt: undefined,
+    });
+    expect(failure.hint).not.toContain("resets in");
+  });
+
+  it("レート制限のヘッダを持たない 403 は権限不足として分ける", async () => {
+    const failure = await failureOf(apiError(403, "Must have admin rights"));
+
+    expect(failure.reason).toEqual({
+      kind: "GitHubPermissionDenied",
+      operation: "create a pull request",
       detail: "Must have admin rights",
     });
   });
 
-  it("404 は宛先が見つからない失敗として分類する", () => {
+  it("404 は宛先が見つからない失敗として、参照の直し方を案内する", async () => {
     // 宛先にした参照が上流から消えた状態。ユーザーが lock の参照を直せるので、
     // 分類せずに defect へ落とすと「ziku のバグ」として案内されてしまう。
-    expect(classifyGitHubApiFailure(apiError(404, "Branch not found"))).toEqual({
-      _tag: "NotFound",
-      detail: "Branch not found",
-    });
-  });
-
-  it("429 はヘッダが無くてもレート制限として扱う", () => {
-    expect(classifyGitHubApiFailure(apiError(429, "Too Many Requests"))).toEqual({
-      _tag: "RateLimited",
-      resetAt: undefined,
-    });
-  });
-
-  it("接続断は、例外チェーンの奥の errno から見分ける", () => {
-    // Octokit は fetch の失敗を status 500 に包み直すので、ステータスでは判別できない。
-    const wrapped = Object.assign(new Error("request to https://api.github.com failed"), {
-      status: 500,
-      cause: Object.assign(new TypeError("fetch failed"), {
-        cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
-      }),
-    });
-
-    expect(classifyGitHubApiFailure(wrapped)).toMatchObject({ _tag: "Unreachable" });
-  });
-
-  it("GitHub の 5xx と素の例外は分類しない", () => {
-    expect(classifyGitHubApiFailure(apiError(500, "Internal Server Error"))).toEqual({
-      _tag: "Unclassified",
-    });
-    expect(classifyGitHubApiFailure(new TypeError("x is not a function"))).toEqual({
-      _tag: "Unclassified",
-    });
-  });
-});
-
-describe("githubApiFailure", () => {
-  const cause = new Error("boom");
-
-  it("認証拒否はトークンの更新を促し、原因を捨てない", () => {
-    const failure = githubApiFailure(
-      { _tag: "AuthRejected", detail: "Bad credentials" },
-      { operation: "create a pull request", authenticated: true, cause },
-    );
-
-    expect(failure.reason).toEqual({ kind: "GitHubAuthRejected", detail: "Bad credentials" });
-    expect(failure.hint).toContain("gh auth login");
-    expect(failure.cause).toBe(cause);
-  });
-
-  it("権限不足と到達不能は、何をしようとして失敗したかを文面に残す", () => {
-    const denied = githubApiFailure(
-      { _tag: "PermissionDenied", detail: "Must have admin rights" },
-      { operation: "create a pull request", authenticated: true, cause },
-    );
-    const unreachable = githubApiFailure(
-      { _tag: "Unreachable", detail: "getaddrinfo ENOTFOUND api.github.com" },
-      { operation: "create a pull request", authenticated: true, cause },
-    );
-
-    expect(denied.message).toContain("create a pull request");
-    expect(unreachable.message).toContain("create a pull request");
-  });
-
-  it("宛先が見つからない失敗は、参照の直し方を案内する", () => {
-    const failure = githubApiFailure(
-      { _tag: "NotFound", detail: "Branch not found" },
-      { operation: "create a pull request", authenticated: true, cause },
-    );
+    const failure = await failureOf(apiError(404, "Branch not found"));
 
     expect(failure.reason).toEqual({
       kind: "GitHubTargetNotFound",
@@ -1104,7 +1090,29 @@ describe("githubApiFailure", () => {
     });
     expect(failure.hint).toContain("source.defaultBranch");
     expect(failure.hint).toContain("source.ref");
-    expect(failure.cause).toBe(cause);
+  });
+
+  it("接続断は、例外チェーンの奥の errno から見分ける", async () => {
+    // Octokit は fetch の失敗を status 500 に包み直すので、ステータスでは判別できない。
+    const wrapped = Object.assign(new Error("request to https://api.github.com failed"), {
+      status: 500,
+      cause: Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+      }),
+    });
+
+    const failure = await failureOf(wrapped);
+
+    expect(failure.reason).toMatchObject({ kind: "GitHubUnreachable" });
+    expect(failure.hint).toContain("network connection");
+  });
+
+  it("GitHub の 5xx と素の例外は文言に潰さず、原因ごと投げ直す", async () => {
+    const serverError = apiError(500, "Internal Server Error");
+    expect(await pushFailingWith(serverError)).toBe(serverError);
+
+    const bug = new TypeError("x is not a function");
+    expect(await pushFailingWith(bug)).toBe(bug);
   });
 });
 

@@ -253,6 +253,9 @@ export async function updateReadmeFile(
 /**
  * テンプレートの README を、これから配る内容から組み直す。ディスクへは書かない。
  *
+ * テンプレートの README を組み直す入口はこの 1 本だけにする。ディスクから読んで組み直す入口を
+ * 別に置くと、push が送る内容と、それを予告する側が別の材料から README を作れてしまう。
+ *
  * 生成元をディスクではなく引数で受け取れるようにしている理由: マーカー間は `ziku.jsonc` の
  * include から導出される派生物なので、導出元と派生物が同じ変更（同じ PR）に載るときは、
  * 生成もその変更に載る内容から行わないと配る README が導出元と食い違う。ディスク上の
@@ -287,33 +290,4 @@ export async function renderTemplateReadme(params: {
 /** マーカー間を ziku が組み直す README か。マーカーが無い README には触れない。 */
 function hasGeneratedSections(readme: string): boolean {
   return readme.includes(MARKERS.features.start) || readme.includes(MARKERS.files.start);
-}
-
-/**
- * プロジェクトディレクトリ内の README を検出し、更新後の内容を返す。ディスクへは書かない。
- *
- * 書き込みを伴わないので、更新の有無だけを知りたい呼び出し元（push の dry-run プレビュー）が
- * そのまま使える。「何も変えない」ことを守るためにプレビュー側で判定を書き直すと、予告した
- * 内容と実 push が同梱する内容が食い違う。
- *
- * @param targetDir 更新対象の README.md があるディレクトリ
- * @param templateDir 同期パターンを定義する ziku.jsonc があるディレクトリ
- * @returns README が無い / マーカーが無い場合は null。
- */
-export async function detectReadmeUpdate(
-  targetDir: string,
-  templateDir: string,
-): Promise<GenerateReadmeResult | null> {
-  const readmePath = join(targetDir, "README.md");
-
-  // README にマーカーがあるか確認
-  if (!existsSync(readmePath)) {
-    return null;
-  }
-
-  if (!hasGeneratedSections(await readFile(readmePath, "utf-8"))) {
-    return null;
-  }
-
-  return generateReadme({ readmePath, configDir: templateDir });
 }

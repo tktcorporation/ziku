@@ -13,14 +13,8 @@ vi.mock("node:fs/promises", async () => {
 });
 
 // モック後にインポート
-const {
-  MARKERS,
-  generateReadme,
-  updateReadmeFile,
-  detectReadmeUpdate,
-  renderTemplateReadme,
-  updateSection,
-} = await import("../readme");
+const { MARKERS, generateReadme, updateReadmeFile, renderTemplateReadme, updateSection } =
+  await import("../readme");
 
 const CONFIG_DIR = "/project";
 const CONFIG_PATH = `${CONFIG_DIR}/.ziku/ziku.jsonc`;
@@ -286,35 +280,6 @@ describe("updateReadmeFile", () => {
 
     const savedContent = vol.readFileSync("/project/README.md", "utf8");
     expect(savedContent).toBe(readme);
-  });
-});
-
-describe("detectReadmeUpdate", () => {
-  beforeEach(() => {
-    vol.reset();
-  });
-
-  it("マーカーが無ければ null を返す", async () => {
-    vol.fromJSON({
-      "/project/README.md": "# My Project\n\nNo markers",
-      "/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"] }),
-    });
-
-    expect(await detectReadmeUpdate("/project", "/template")).toBeNull();
-  });
-
-  it("更新後の内容を返すが README には書き込まない", async () => {
-    const original = "# My Project\n\n<!-- FILES:START -->\n<!-- FILES:END -->";
-    vol.fromJSON({
-      "/project/README.md": original,
-      "/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"] }),
-    });
-
-    const result = await detectReadmeUpdate("/project", "/template");
-
-    expect(result?.updated).toBe(true);
-    expect(result?.content).toContain(".mcp.json");
-    expect(vol.readFileSync("/project/README.md", "utf8")).toBe(original);
   });
 });
 

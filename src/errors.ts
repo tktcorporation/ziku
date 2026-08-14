@@ -327,7 +327,7 @@ export function describeFailure(reason: FailureReason): FailureDisplay {
     }))
     .with({ kind: "NoMergePaused" }, () => ({
       message: "No pending merge found",
-      hint: "Run `ziku pull` first to start a merge",
+      hint: "まず `ziku pull` を実行してください",
     }))
     .with({ kind: "ConflictsUnresolved" }, (r) => ({
       message: "Unresolved conflict markers remain",

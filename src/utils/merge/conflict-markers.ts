@@ -103,29 +103,41 @@ export function conflictMarkers(size: number): ConflictMarkers {
 
 // ---- 未解決コンフリクトの検出 ----
 
-/** 走査中のブロック。開始行と、そのブロックのマーカー長を持つ。 */
+/** ブロック内のフェーズ。直前に読んだマーカーがどこまで進んだかを表す。 */
+type BlockPhase = "local" | "base" | "template";
+
+/**
+ * ブロックの始まり方。
+ *
+ * 利用者は解決の途中で開始マーカーだけを消すことがあり、残された閉じ側の並びも
+ * コンフリクトの残骸である。始まり方を状態に持たせるのは、残骸として数える条件が
+ * 両者で違うため（{@link unresolvedStart}）。
+ */
+type BlockOrigin = "started" | "orphan";
+
+/** 走査中のブロック。開始行・マーカー長・始まり方を持つ。 */
 interface OpenBlock {
   readonly startLine: number;
   readonly size: number;
+  readonly origin: BlockOrigin;
 }
 
-type ScanState =
-  | { readonly phase: "outside" }
-  | ({ readonly phase: "local" | "base" | "template" } & OpenBlock);
+type ScanState = { readonly phase: "outside" } | ({ readonly phase: BlockPhase } & OpenBlock);
 
 const OUTSIDE: ScanState = { phase: "outside" };
 
 /**
  * 開いているブロックを次のフェーズへ移す。
  *
- * 開始行とマーカー長はブロックが閉じるまで引き継ぐ。フィールドを明示して組み立てるのは、
- * 引数の block が現フェーズを持つ状態そのものであり、spread すると phase まで引き継いで
- * しまうため。
+ * 開始行・マーカー長・始まり方はブロックが終わるまで引き継ぐ。フィールドを明示して
+ * 組み立てるのは、引数の block が現フェーズを持つ状態そのものであり、spread すると
+ * phase まで引き継いでしまうため。
  */
-const openBlock = (phase: "local" | "base" | "template", block: OpenBlock): ScanState => ({
+const openBlock = (phase: BlockPhase, block: OpenBlock): ScanState => ({
   phase,
   startLine: block.startLine,
   size: block.size,
+  origin: block.origin,
 });
 
 interface ScanStep {
@@ -141,21 +153,42 @@ interface ScanStep {
 }
 
 /**
- * 打ち切られたブロックのうち、未解決として数えるものの開始行。
+ * ブロックの終わり方。
  *
- * 区切り（`=======`）か base マーカー（`|||||||`）まで進んだブロックは、ziku が生成した
- * コンフリクトの残骸とみなす。開始マーカーしか見ていないものは数えない。単独の `<<<<<<<` は
- * 本文にも現れうる一方、区切りや base マーカーを伴う並びは本文にはまず現れないので、
- * そこに誤検出と取りこぼしの境目を引く。誤検出すると `pull --continue` が永久に通らず、
- * lock を手で直す以外の復旧手段が無くなる。
- *
- * この判断はここ 1 箇所にある。打ち切りが起きる経路（別のブロックの開始・対応しない
- * `>>>>>>>`・ファイル末尾）が増えても、数える条件は分岐しない。
+ * `closed` は `>>>>>>>` に出会って終わったこと（途中のマーカーが欠けていてもよい）、
+ * `cutOff` はそれを見ないまま打ち切られたこと（別のブロックの開始・ファイル末尾）を表す。
  */
-function abandonedStart(state: ScanState): number | undefined {
-  return match(state)
-    .with({ phase: P.union("base", "template") }, (open) => open.startLine)
-    .with({ phase: P.union("outside", "local") }, () => undefined)
+type BlockEnding = "closed" | "cutOff";
+
+/**
+ * 終わったブロックのうち、未解決として数えるものの開始行。
+ *
+ * 数える条件は 2 つある。どちらも区切り（`=======`）か base マーカー（`|||||||`）まで
+ * 進んでいることを求める。単独の `<<<<<<<` は本文にも現れうる一方、複数のマーカーが順序どおり
+ * 並ぶ形は本文にはまず現れないので、そこに誤検出と取りこぼしの境目を引く。誤検出すると
+ * `pull --continue` が永久に通らず、lock を手で直す以外の復旧手段が無くなる。
+ *
+ * - 開始マーカーから始まったブロックは、閉じても打ち切られても数える。閉じたものだけを
+ *   数えると、`>>>>>>>` を消せば解決したことになってしまう。
+ * - 開始マーカーが無い並びは、`>>>>>>>` で閉じたときだけ数える。`=======` は Markdown の
+ *   setext 見出しの下線、`|||||||` は空セルだけのテーブル行として本文に現れるので、閉じ側
+ *   まで揃わない並びはそれらと区別できない。
+ *
+ * この判断はここ 1 箇所にある。ブロックの終わり方（別のブロックの開始・`>>>>>>>`・
+ * ファイル末尾）が増えても、数える条件は分岐しない。
+ */
+function unresolvedStart(state: ScanState, ending: BlockEnding): number | undefined {
+  return match([state, ending] as const)
+    .with(
+      [{ phase: P.union("base", "template"), origin: "started" }, P.any],
+      ([open]) => open.startLine,
+    )
+    .with(
+      [{ phase: P.union("base", "template"), origin: "orphan" }, "closed"],
+      ([open]) => open.startLine,
+    )
+    .with([{ phase: P.union("base", "template"), origin: "orphan" }, "cutOff"], () => undefined)
+    .with([{ phase: P.union("outside", "local") }, P.any], () => undefined)
     .exhaustive();
 }
 
@@ -163,32 +196,44 @@ function abandonedStart(state: ScanState): number | undefined {
  * マーカー行 1 本を受けて走査状態を進める。
  *
  * `<<<<<<<` → （`|||||||`）→ `=======` → `>>>>>>>` の順序で揃ったときブロックが閉じる。
- * 順序から外れたマーカーは開いているブロックを打ち切るか、新しいブロックの開始として扱う。
- * 打ち切られたブロックを未解決に数えるかは {@link abandonedStart} が決める。
+ * 開始マーカーが無くても、閉じ側のマーカーが順序どおり並べばブロックとして追う。順序から
+ * 外れたマーカーは開いているブロックを打ち切るか、新しいブロックの開始として扱う。
+ * 終わったブロックを未解決に数えるかは {@link unresolvedStart} が決める。
  */
 function stepScan(state: ScanState, marker: Marker, lineNumber: number): ScanStep {
-  const started = { startLine: lineNumber, size: marker.length };
+  const opened = (origin: BlockOrigin): OpenBlock => ({
+    startLine: lineNumber,
+    size: marker.length,
+    origin,
+  });
   return (
     match([state, marker.kind] as const)
       // 開いているブロックの途中で現れる `<<<<<<<` は、そこまでを打ち切って新しく開き直す。
       .with([P.any, "start"], ([open]) => ({
-        next: openBlock("local", started),
-        unresolved: abandonedStart(open),
+        next: openBlock("local", opened("started")),
+        unresolved: unresolvedStart(open, "cutOff"),
       }))
-      // 開始マーカーが無いまま現れる `=======` は、setext 見出しの下線や区切り線などの本文。
-      .with([{ phase: "outside" }, P.any], () => ({ next: OUTSIDE }))
+      // 開始マーカーが無いまま現れる `|||||||` / `=======` は、解決の途中で開始行だけを
+      // 消した残骸かもしれない。`>>>>>>>` まで揃うかを見るために開く。
+      .with([{ phase: "outside" }, "base"], () => ({ next: openBlock("base", opened("orphan")) }))
+      .with([{ phase: "outside" }, "separator"], () => ({
+        next: openBlock("template", opened("orphan")),
+      }))
+      // 単独の `>>>>>>>` は 7 段以上ネストした引用として本文に現れる。並びの先頭にはしない。
+      .with([{ phase: "outside" }, "end"], () => ({ next: OUTSIDE }))
       .with([{ phase: "local" }, "base"], ([open]) => ({ next: openBlock("base", open) }))
       .with([{ phase: P.union("local", "base") }, "separator"], ([open]) => ({
         next: openBlock("template", open),
       }))
-      .with([{ phase: "template" }, "end"], ([open]) => ({
+      .with([{ phase: P.union("base", "template") }, "end"], ([open]) => ({
         next: OUTSIDE,
-        unresolved: open.startLine,
+        unresolved: unresolvedStart(open, "closed"),
       }))
-      // `=======` を伴わない `>>>>>>>` は順序が揃っていない。ここまでを打ち切る。
-      .with([{ phase: P.union("local", "base") }, "end"], ([open]) => ({
+      // 区切りも base マーカーも見ていない `<<<<<<<` → `>>>>>>>` は、コンフリクトの残骸と
+      // 言い切れない。ここまでを打ち切る。
+      .with([{ phase: "local" }, "end"], ([open]) => ({
         next: OUTSIDE,
-        unresolved: abandonedStart(open),
+        unresolved: unresolvedStart(open, "cutOff"),
       }))
       // ブロック内に重ねて現れる同種のマーカーは本文として読み飛ばす。
       .with([{ phase: "base" }, "base"], ([open]) => ({ next: openBlock("base", open) }))
@@ -204,10 +249,10 @@ function stepScan(state: ScanState, marker: Marker, lineNumber: number): ScanSte
  *
  * 行頭の前方一致だけで判定すると、Markdown の setext 見出し下線や区切り線
  * `========` を未解決と誤検出する。誤検出すると `pull --continue` が永久に通らず、
- * 解決済みのマージを確定できなくなるため、開始マーカーから始まる順序の取れたブロックだけを
- * 未解決とみなす。順序が揃わずに打ち切られたブロックも、区切りか base マーカーまで進んで
- * いれば未解決に数える（{@link abandonedStart}）。閉じたものだけを数えると、閉じ側の
- * マーカーだけを消せば解決したことになってしまう。
+ * 解決済みのマージを確定できなくなるため、マーカーが順序どおり並ぶブロックだけを未解決と
+ * みなす。開始マーカーが消えていても、閉じ側の並びが揃っていれば数える
+ * （{@link unresolvedStart}）。数える条件を開始マーカーで定義すると、それを消しただけの
+ * 残骸が未解決 0 件になり、マーカー断片を載せたまま同期ベースが確定する。
  *
  * ブロックの内側では、開始マーカーより短いマーカー行は本文として扱う。マージ結果は
  * 内容中の最長マーカーより長いマーカーで囲まれているので、この長さ比較で
@@ -233,7 +278,7 @@ export function findConflictRegions(content: string): ConflictRegion[] {
   }
 
   // ファイル末尾も打ち切りの一種。走査の途中で起きる打ち切りと同じ規則で数える。
-  const trailing = abandonedStart(state);
+  const trailing = unresolvedStart(state, "cutOff");
   if (trailing !== undefined) regions.push({ startLine: trailing });
 
   return regions;
