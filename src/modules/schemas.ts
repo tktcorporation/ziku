@@ -1,6 +1,7 @@
 import { match } from "ts-pattern";
 import { z } from "zod";
 import type { ConflictedContent, MergedContent } from "../utils/merge";
+import { MIN_MARKER_LENGTH } from "../utils/merge/conflict-markers";
 import type { SyncPath } from "../utils/ziku-config";
 
 /**
@@ -261,7 +262,21 @@ export type HashMap = z.infer<typeof hashMapSchema>;
  * ベースだけが前進し、テンプレートの変更が黙って消える。
  */
 const pendingConflictSchema = z.discriminatedUnion("reason", [
-  z.object({ path: repoRelPathSchema, reason: z.literal("markers") }),
+  z.object({
+    path: repoRelPathSchema,
+    reason: z.literal("markers"),
+    /**
+     * ziku が書き込んだマーカーの長さ。再開時の走査が、内容として正当に書かれたマーカー例と
+     * 残骸を見分ける根拠になる（`GeneratedMarkerSize`）。
+     *
+     * `markers` の変種だけが持つ。他の 2 つはローカルへ何も書いていないので、長さという値の
+     * 出どころ自体が無い。
+     *
+     * この項目を持たない lock も読めるようにする。長さが無ければ走査はラベルだけを根拠に
+     * 倒れ、記録より緩い判定になるだけで、解決済みの内容がベースへ載る経路は生まれない。
+     */
+    markerSize: z.number().int().min(MIN_MARKER_LENGTH).optional(),
+  }),
   z.object({ path: repoRelPathSchema, reason: z.literal("noBase") }),
   z.object({ path: repoRelPathSchema, reason: z.literal("binary") }),
 ]);

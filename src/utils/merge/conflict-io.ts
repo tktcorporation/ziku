@@ -270,8 +270,8 @@ export const mergeConflictFiles = (
           base,
         });
         yield* input.onFileResult(result);
-        const reason = unresolvedReasonOf(result.outcome);
-        if (reason !== undefined) unresolved.push({ path: file, reason });
+        const pending = unresolvedConflictOf(file, result.outcome);
+        if (pending !== undefined) unresolved.push(pending);
       }
       return unresolved;
     }).pipe(Effect.ensuring(Effect.sync(() => downloaded?.cleanup())));
@@ -295,16 +295,32 @@ const isBinaryConflict = (
   });
 
 /**
- * 自動マージで確定しなかった経路。クリーンに終わったなら undefined。
+ * 自動マージで確定しなかった 1 件。クリーンに終わったなら undefined。
  *
  * 結末をそのまま持ち回らず `PendingConflict` の語彙へ落とすのは、この値が lock に残って
  * 再開時まで生き延びるため。マージ結果の内容（`Conflicted` が抱えるマーカー入りテキスト）は
- * 再開時には既に古く、残すべきなのは「ローカルに何が書かれたか」だけになる。
+ * 再開時には既に古く、残すのは「ローカルに何が書かれたか」だけでよい。
+ *
+ * 書き込んだマーカーの長さは、内容と違って再開時にも古くならない。ディスク上のファイルを
+ * 走査するとき、内容として正当に書かれたマーカー例と残骸を見分ける根拠になる
+ * （`GeneratedMarkerSize`）ので、分かっているときだけ載せる。
  */
-function unresolvedReasonOf(outcome: FileMergeOutcome): PendingConflict["reason"] | undefined {
+function unresolvedConflictOf(
+  file: RepoRelPath,
+  outcome: FileMergeOutcome,
+): PendingConflict | undefined {
   return match(outcome)
     .with({ _tag: "Clean" }, () => undefined)
-    .with({ _tag: "Conflicted" }, () => "markers" as const)
-    .with({ _tag: "NoBase" }, () => "noBase" as const)
+    .with({ _tag: "Conflicted" }, ({ markerSize }) =>
+      match(markerSize)
+        .with({ kind: "known" }, ({ size }) => ({
+          path: file,
+          reason: "markers" as const,
+          markerSize: size,
+        }))
+        .with({ kind: "unknown" }, () => ({ path: file, reason: "markers" as const }))
+        .exhaustive(),
+    )
+    .with({ _tag: "NoBase" }, () => ({ path: file, reason: "noBase" as const }))
     .exhaustive();
 }

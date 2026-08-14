@@ -10,6 +10,7 @@
  * 組み立てだけにする。
  */
 import ignore from "ignore";
+import { P, match } from "ts-pattern";
 import type {
   AbsPath,
   BlobSha,
@@ -93,12 +94,19 @@ export function blobSha(value: string): BlobSha {
  *
  * 経路を省いたときはマーカー入りで書き出された側にする。ziku が実際に書き込むのはこの
  * 経路だけなので、経路そのものが主題ではないテストの既定として扱いやすい。
+ *
+ * `markerSize` は `markers` の経路だけが持つ。省くと、生成長を記録していない lock を
+ * 表す（`PendingConflict`）。
  */
 export function pendingConflict(
   path: string,
   reason: PendingConflict["reason"] = "markers",
+  markerSize?: number,
 ): PendingConflict {
-  return { path: repoRelPath(path), reason };
+  return match(reason)
+    .with("markers", (r) => ({ path: repoRelPath(path), reason: r, markerSize }))
+    .with(P.union("noBase", "binary"), (r) => ({ path: repoRelPath(path), reason: r }))
+    .exhaustive();
 }
 
 /**

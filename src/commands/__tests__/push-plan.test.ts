@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { FileClassification } from "../../utils/merge";
-import { classifyFiles } from "../../utils/merge";
+import { UNKNOWN_MARKER_SIZE, classifyFiles } from "../../utils/merge";
 import { classifyMergeOutcome } from "../../utils/merge/types";
 import type { SyncPlan, ZikuConfigState } from "../../utils/merge/sync-plan";
 import { partitionSyncPlan } from "../../utils/merge/sync-plan";
@@ -489,7 +489,7 @@ function deliveryPayload(
 
 describe("planPushDelivery", () => {
   it("削除と送信内容を分け、自動マージ済みの内容を優先する", () => {
-    const merged = classifyMergeOutcome("merged content");
+    const merged = classifyMergeOutcome("merged content", UNKNOWN_MARKER_SIZE);
     if (merged._tag !== "Clean") throw new Error("fixture must merge cleanly");
     const mergedContents = new Map<RepoRelPath, PushContent>([
       [repoRelPath("b.txt"), mergedAsPushContent(merged.content)],
@@ -542,7 +542,7 @@ describe("planPushDelivery", () => {
     // ベースが A、ローカルが B、テンプレートが B + C の衝突。自動マージはクリーンに
     // B + C へ解決し、それはテンプレートの内容そのもの。差分の無い PR を作りにいくと
     // GitHub が拒み、その状態はどの分類にも無いので ziku の不具合として表示される。
-    const merged = classifyMergeOutcome("B\nC\n");
+    const merged = classifyMergeOutcome("B\nC\n", UNKNOWN_MARKER_SIZE);
     if (merged._tag !== "Clean") throw new Error("fixture must merge cleanly");
     const mergedContents = new Map<RepoRelPath, PushContent>([
       [repoRelPath("a.txt"), mergedAsPushContent(merged.content)],

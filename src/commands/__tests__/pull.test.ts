@@ -83,6 +83,7 @@ vi.mock("../../utils/merge", async () => {
   const effectMod = await import("effect");
   const fsMod = await import("node:fs/promises");
   const errorsMod = await import("../../errors");
+  const conflictMarkersMod = await import("../../utils/merge/conflict-markers");
 
   const mergeOneFile = vi.fn();
   type BaseDownload = { templateDir: string; cleanup: () => void } | null;
@@ -95,9 +96,9 @@ vi.mock("../../utils/merge", async () => {
 
   return {
     classifyFiles: vi.fn(),
-    findConflictRegions: vi.fn((content: string) =>
-      content.includes("<<<<<<<") ? [{ startLine: 1 }] : [],
-    ),
+    // マーカーの検出は本物を使う。`--continue` が「解決したか」をどう数えるかはコマンドの
+    // 挙動そのもので、近似したモックに置き換えると本番と違う規則を検証してしまう。
+    findConflictRegions: conflictMarkersMod.findConflictRegions,
     // conflict-io の共通ユーティリティ（pull.ts はこれらを経由して merge する）
     readFileSafe: vi.fn((path: string) =>
       effectMod.Effect.tryPromise(() => fsMod.readFile(path, "utf-8")).pipe(
@@ -114,7 +115,11 @@ vi.mock("../../utils/merge", async () => {
     // 後処理（書き込むか / 何もしないか）を検証するために代替側でも同じにしておく。
     mergeConflictFiles: vi.fn((input: MergeConflictFilesInput) =>
       effectMod.Effect.gen(function* () {
-        const unresolved: Array<{ path: string; reason: "markers" | "noBase" | "binary" }> = [];
+        const unresolved: Array<{
+          path: string;
+          reason: "markers" | "noBase" | "binary";
+          markerSize?: number;
+        }> = [];
         if (input.conflicts.length === 0) return unresolved;
 
         const downloaded = yield* downloadBaseForMerge({
@@ -132,7 +137,15 @@ vi.mock("../../utils/merge", async () => {
                   base: { kind: "with-base", dir: downloaded.templateDir },
                 })).outcome;
           yield* input.onFileResult({ file, outcome });
-          if (outcome._tag === "Conflicted") unresolved.push({ path: file, reason: "markers" });
+          // 書き込んだマーカーの長さも本体と同じく記録する。`--continue` の走査はこの値を
+          // 根拠にするので、落とすと再開時の判定が本番より緩くなる。
+          if (outcome._tag === "Conflicted") {
+            unresolved.push({
+              path: file,
+              reason: "markers",
+              markerSize: outcome.markerSize.kind === "known" ? outcome.markerSize.size : undefined,
+            });
+          }
           if (outcome._tag === "NoBase") unresolved.push({ path: file, reason: "noBase" });
         }
         downloaded?.cleanup();
@@ -213,6 +226,7 @@ const { classifyFiles, mergeOneFile, writeFileEnsureDir, downloadBaseForMerge } 
 // マージ結果の判定は本物を使う（"../../utils/merge" のモックは index 経由の import だけを
 // 置き換えるので、実装モジュールを直接読み込めば素の関数が得られる）。
 const { classifyMergeOutcome } = await import("../../utils/merge/types");
+const { knownMarkerSize } = await import("../../utils/merge/conflict-markers");
 const { log } = await import("../../ui/renderer");
 const {
   absPath,
@@ -355,10 +369,16 @@ function mockScannedHashes(files: {
  * マージ結果の内容から `MergeOutcome` を組み立てる。判定を本物の
  * `classifyMergeOutcome` に任せることで、「マーカー入りなのに Clean」という
  * 実装では作れない値をテストが作ってしまうのを防ぐ。
+ *
+ * 生成長は、内容に書いたマーカーの長さを渡す。既定の 7 は、内容へマーカーを含まない
+ * ファイル同士をマージしたときに `conflictMarkerSize` が返す長さ。
  */
-function mockMergeResult(file: string, content: string) {
+function mockMergeResult(file: string, content: string, markerSize = 7) {
   mockMergeOneFile.mockReturnValueOnce(
-    Effect.succeed({ file: repoRelPath(file), outcome: classifyMergeOutcome(content) }),
+    Effect.succeed({
+      file: repoRelPath(file),
+      outcome: classifyMergeOutcome(content, knownMarkerSize(markerSize)),
+    }),
   );
 }
 
@@ -1274,7 +1294,8 @@ describe("pullCommand", () => {
         expect.objectContaining({
           sync: "merging",
           merge: expect.objectContaining({
-            conflicts: [pendingConflict(".mcp.json")],
+            // 書き込んだマーカーの長さも残す。`--continue` の走査がこれを根拠にする。
+            conflicts: [pendingConflict(".mcp.json", "markers", 7)],
           }),
         }),
       );
@@ -1413,6 +1434,92 @@ describe("pullCommand", () => {
       const savedLock = mockSaveLock.mock.calls.at(-1)?.[1];
       expect(savedLock).not.toHaveProperty("merge");
       expect(mockLog.success).toHaveBeenCalledWith("All conflicts resolved");
+    });
+
+    it("--continue: 記録した生成長より短いマーカーは、本文の記述として解決済みに数える", async () => {
+      // マーカーの書き方を説明する文書を同期していると、解決後もこの行がファイルに残る。
+      // 残骸と数えると `--continue` が永久に通らず、正当な記述を消す以外の復旧手段が無くなる。
+      vol.fromJSON({
+        "/test/.mcp.json": "開始行はこう書かれる:\n\n<<<<<<< LOCAL\n\n以上。\n",
+      });
+
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(
+          mergingLock([pendingConflict(".mcp.json", "markers", 8)], {
+            hashes: hashMap({ ".mcp.json": "newhash" }),
+            commitSha: commitSha("newref123"),
+          }),
+        ),
+      );
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false, continue: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockLog.success).toHaveBeenCalledWith("All conflicts resolved");
+      const savedLock = mockSaveLock.mock.calls.at(-1)?.[1];
+      expect(savedLock).not.toHaveProperty("merge");
+    });
+
+    it("--continue: 記録した生成長のマーカーが残っていれば、同じ文書でも未解決とする", async () => {
+      vol.fromJSON({
+        "/test/.mcp.json": "開始行はこう書かれる:\n\n<<<<<<< LOCAL\n\n<<<<<<<< LOCAL\n残骸\n",
+      });
+
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(
+          mergingLock([pendingConflict(".mcp.json", "markers", 8)], {
+            hashes: hashMap({ ".mcp.json": "newhash" }),
+            commitSha: commitSha("newref123"),
+          }),
+        ),
+      );
+
+      const failure = await captureFailure(() =>
+        (pullCommand.run as any)({
+          args: { dir: "/test", force: false, yes: false, continue: true },
+          rawArgs: [],
+          cmd: pullCommand,
+        }),
+      );
+
+      expect(failure.reason).toEqual({
+        kind: "ConflictsUnresolved",
+        files: [{ path: ".mcp.json", lines: [5] }],
+      });
+      expect(mockSaveLock).not.toHaveBeenCalled();
+    });
+
+    it("--continue: 生成長を持たない lock でも、残ったマーカーを長さによらず数える", async () => {
+      // 生成長の記録が無い lock はラベルだけを根拠にする。見分ける手がかりが無い以上、
+      // 取りこぼすより多めに数える側へ倒す。
+      vol.fromJSON({
+        "/test/.mcp.json": "開始行はこう書かれる:\n\n<<<<<<< LOCAL\n\n以上。\n",
+      });
+
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(
+          mergingLock([pendingConflict(".mcp.json")], {
+            hashes: hashMap({ ".mcp.json": "newhash" }),
+            commitSha: commitSha("newref123"),
+          }),
+        ),
+      );
+
+      const failure = await captureFailure(() =>
+        (pullCommand.run as any)({
+          args: { dir: "/test", force: false, yes: false, continue: true },
+          rawArgs: [],
+          cmd: pullCommand,
+        }),
+      );
+
+      expect(failure.reason).toEqual({
+        kind: "ConflictsUnresolved",
+        files: [{ path: ".mcp.json", lines: [3] }],
+      });
     });
 
     it("--continue --dryRun: 全解決済みでも saveLock を呼ばずベースを確定しない", async () => {
@@ -1960,7 +2067,7 @@ describe("pullCommand", () => {
         expect.objectContaining({
           sync: "merging",
           merge: expect.objectContaining({
-            conflicts: [pendingConflict("b.txt")],
+            conflicts: [pendingConflict("b.txt", "markers", 7)],
           }),
         }),
       );

@@ -1,6 +1,11 @@
 import { diff3Merge } from "node-diff3";
 import { match } from "ts-pattern";
-import { type ConflictMarkers, conflictMarkerSize, conflictMarkers } from "./conflict-markers";
+import {
+  type ConflictMarkers,
+  conflictMarkerSize,
+  conflictMarkers,
+  knownMarkerSize,
+} from "./conflict-markers";
 import { validateStructuredContent } from "./file-detection";
 import { type MergeOutcome, classifyMergeOutcome } from "./types";
 
@@ -21,7 +26,11 @@ export function textThreeWayMerge(
   template: string,
   filePath?: string,
 ): MergeOutcome {
-  const markers = conflictMarkers(conflictMarkerSize([base, local, template]));
+  // ここで決めた長さは、書き込んだマーカーを後から見分けるための根拠として結果に載せる
+  // （{@link GeneratedMarkerSize}）。ファイル全体を 1 ブロックにする経路も同じ長さで囲む。
+  const size = conflictMarkerSize([base, local, template]);
+  const markers = conflictMarkers(size);
+  const generated = knownMarkerSize(size);
 
   // node-diff3: diff3Merge(a, o, b) — a=local, o=base, b=template
   const regions = diff3Merge(local.split("\n"), base.split("\n"), template.split("\n"));
@@ -48,12 +57,12 @@ export function textThreeWayMerge(
   // diff3Merge は行レベルで競合を判定するため、構造的に壊れた出力を
   // クリーンマージとして返す可能性がある。検証に失敗した場合はファイル全体を
   // 1 つのコンフリクトブロックにして、壊れたファイルの生成を防ぐ。
-  return match(classifyMergeOutcome(resultLines.join("\n")))
+  return match(classifyMergeOutcome(resultLines.join("\n"), generated))
     .with({ _tag: "Conflicted" }, (outcome) => outcome)
     .with({ _tag: "Clean" }, (outcome) =>
       filePath === undefined || validateStructuredContent(outcome.content, filePath)
         ? outcome
-        : classifyMergeOutcome(wholeFileConflict({ base, local, template, markers })),
+        : classifyMergeOutcome(wholeFileConflict({ base, local, template, markers }), generated),
     )
     .exhaustive();
 }

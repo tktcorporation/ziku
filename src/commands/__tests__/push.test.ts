@@ -233,6 +233,7 @@ const { classifyFiles, mergeOneFile, downloadBaseForMerge } = await import("../.
 // マージ結果の判定は本物を使う（"../../utils/merge" のモックは index 経由の import だけを
 // 置き換えるので、実装モジュールを直接読み込めば素の関数が得られる）。
 const { classifyMergeOutcome } = await import("../../utils/merge/types");
+const { UNKNOWN_MARKER_SIZE, knownMarkerSize } = await import("../../utils/merge/conflict-markers");
 const {
   absPath,
   commitSha,
@@ -2281,7 +2282,7 @@ describe("pushCommand", () => {
       mockMergeOneFile.mockReturnValueOnce(
         Effect.succeed({
           file: repoRelPath("file.txt"),
-          outcome: classifyMergeOutcome("merged content"),
+          outcome: classifyMergeOutcome("merged content", UNKNOWN_MARKER_SIZE),
         }),
       );
 
@@ -2366,7 +2367,7 @@ describe("pushCommand", () => {
       mockMergeOneFile.mockReturnValueOnce(
         Effect.succeed({
           file: repoRelPath("file.txt"),
-          outcome: classifyMergeOutcome("B\nC\n"),
+          outcome: classifyMergeOutcome("B\nC\n", UNKNOWN_MARKER_SIZE),
         }),
       );
 
@@ -2421,7 +2422,7 @@ describe("pushCommand", () => {
       mockMergeOneFile.mockReturnValueOnce(
         Effect.succeed({
           file: repoRelPath("file.txt"),
-          outcome: classifyMergeOutcome("B\nC\n"),
+          outcome: classifyMergeOutcome("B\nC\n", UNKNOWN_MARKER_SIZE),
         }),
       );
       mockDetectDiff.mockResolvedValueOnce({
@@ -2485,7 +2486,7 @@ describe("pushCommand", () => {
       mockMergeOneFile.mockReturnValueOnce(
         Effect.succeed({
           file: repoRelPath("clean.txt"),
-          outcome: classifyMergeOutcome("merged clean"),
+          outcome: classifyMergeOutcome("merged clean", UNKNOWN_MARKER_SIZE),
         }),
       );
       mockMergeOneFile.mockReturnValueOnce(
@@ -2493,6 +2494,7 @@ describe("pushCommand", () => {
           file: repoRelPath("conflicted.txt"),
           outcome: classifyMergeOutcome(
             "<<<<<<< LOCAL\nlocal conflicted\n=======\ntemplate conflicted\n>>>>>>> TEMPLATE",
+            knownMarkerSize(7),
           ),
         }),
       );
@@ -2646,6 +2648,7 @@ describe("pushCommand", () => {
           file: repoRelPath("deleted-file.txt"),
           outcome: classifyMergeOutcome(
             "<<<<<<< LOCAL\n=======\ntemplate content updated\n>>>>>>> TEMPLATE",
+            knownMarkerSize(7),
           ),
         }),
       );

@@ -1,6 +1,6 @@
 import { z } from "zod/v4";
 import type { HashMap, RepoRelPath } from "../../modules/schemas";
-import { findConflictRegions } from "./conflict-markers";
+import { type GeneratedMarkerSize, findConflictRegions } from "./conflict-markers";
 
 // ---- Branded types: base/local/template の取り違えをコンパイル時に検出 ----
 //
@@ -89,6 +89,14 @@ export type MergeOutcome =
       readonly _tag: "Conflicted";
       readonly content: ConflictedContent;
       readonly regions: ConflictRegions;
+      /**
+       * この内容へ ziku が書いたマーカーの長さ。
+       *
+       * 解決待ちとして lock に残り、`pull --continue` が同じ内容を走査し直すときの根拠に
+       * なる（`PendingConflict`）。`Clean` が持たないのは、マーカーが 1 本も無い内容に
+       * ついて「ziku が書いた長さ」を問う場面が無いため。
+       */
+      readonly markerSize: GeneratedMarkerSize;
     };
 
 /**
@@ -112,9 +120,15 @@ export type FileMergeOutcome = MergeOutcome | { readonly _tag: "NoBase" };
  * 前回のコンフリクトを解決しないまま再マージした場合のように、アルゴリズムが新しい
  * ブロックを作らなくても内容にマーカーが残っていることがあり、そのまま Clean 扱いすると
  * マーカーがテンプレートへ流れる。
+ *
+ * @param markerSize この内容へ ziku が書いたマーカーの長さ。マーカーを書いていない経路では
+ *   `UNKNOWN_MARKER_SIZE` を渡す（{@link GeneratedMarkerSize}）。
  */
-export function classifyMergeOutcome(content: string): MergeOutcome {
-  const [first, ...rest] = findConflictRegions(content);
+export function classifyMergeOutcome(
+  content: string,
+  markerSize: GeneratedMarkerSize,
+): MergeOutcome {
+  const [first, ...rest] = findConflictRegions(content, markerSize);
   if (first === undefined) {
     return { _tag: "Clean", content: MergedContentSchema.parse(content) };
   }
@@ -122,6 +136,7 @@ export function classifyMergeOutcome(content: string): MergeOutcome {
     _tag: "Conflicted",
     content: ConflictedContentSchema.parse(content),
     regions: [first, ...rest],
+    markerSize,
   };
 }
 

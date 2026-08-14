@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { hashMap, repoRelPath } from "../../__tests__/brands";
 import {
+  UNKNOWN_MARKER_SIZE,
   asBaseContent,
   asLocalContent,
   asTemplateContent,
   classifyFiles,
   findConflictRegions,
+  knownMarkerSize,
   threeWayMerge,
 } from "../merge";
 
@@ -659,7 +661,7 @@ template content
 >>>>>>> TEMPLATE
 line2`;
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions).toEqual([{ startLine: 2 }]);
     });
@@ -676,7 +678,7 @@ line2`;
         "",
       ].join("\n");
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions).toEqual([{ startLine: 1 }]);
     });
@@ -693,7 +695,7 @@ line2`;
         "",
       ].join("\n");
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions).toEqual([{ startLine: 1 }]);
     });
@@ -714,7 +716,7 @@ line2`;
         "",
       ].join("\n");
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions.map((r) => r.startLine)).toEqual([1, 7]);
     });
@@ -722,7 +724,7 @@ line2`;
     it("コンフリクトマーカーがない場合", () => {
       const content = "normal line1\nnormal line2\nnormal line3\n";
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions).toEqual([]);
     });
@@ -741,7 +743,7 @@ line2`;
         "",
       ].join("\n");
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions).toEqual([]);
     });
@@ -751,7 +753,7 @@ line2`;
       // 復旧手段が無くなる。ziku のラベルも並びも無い行は本文として扱う。
       const content = "line1\n<<<<<<<\nsome content\n";
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions).toEqual([]);
     });
@@ -761,7 +763,7 @@ line2`;
       // 同期ベースへ載って、以後テンプレートへ送られる。
       const content = ["<<<<<<< LOCAL", "a", "=======", "b", ""].join("\n");
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions.map((r) => r.startLine)).toEqual([1]);
     });
@@ -769,7 +771,7 @@ line2`;
     it("`|||||||` まで進んで閉じないブロックも未解決のまま", () => {
       const content = ["<<<<<<< LOCAL", "a", "||||||| BASE", "o", ""].join("\n");
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions.map((r) => r.startLine)).toEqual([1]);
     });
@@ -788,7 +790,7 @@ line2`;
         "",
       ].join("\n");
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions.map((r) => r.startLine)).toEqual([1, 6]);
     });
@@ -799,7 +801,7 @@ line2`;
         "\n",
       );
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions.map((r) => r.startLine)).toEqual([1]);
     });
@@ -818,7 +820,7 @@ line2`;
         "",
       ].join("\n");
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions.map((r) => r.startLine)).toEqual([1, 5]);
     });
@@ -827,7 +829,7 @@ line2`;
       // ziku が書いたラベルが残っている以上、並びが崩れていても残骸である。
       const content = ["<<<<<<< LOCAL", "a", ">>>>>>> TEMPLATE", ""].join("\n");
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions.map((r) => r.startLine)).toEqual([1]);
     });
@@ -836,7 +838,7 @@ line2`;
       // ラベルが無く、区切りも base マーカーも無い並びは、コンフリクトの残骸と言い切れない。
       const content = ["<<<<<<<", "a", ">>>>>>>", ""].join("\n");
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions).toEqual([]);
     });
@@ -844,7 +846,7 @@ line2`;
     it("`||||||| BASE` だけが残った場合を数える", () => {
       const content = ["a", "||||||| BASE", "b", ""].join("\n");
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions.map((r) => r.startLine)).toEqual([2]);
     });
@@ -852,7 +854,7 @@ line2`;
     it("`>>>>>>> TEMPLATE` だけが残った場合を数える", () => {
       const content = ["a", ">>>>>>> TEMPLATE", "b", ""].join("\n");
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions.map((r) => r.startLine)).toEqual([2]);
     });
@@ -860,7 +862,7 @@ line2`;
     it("ラベルの付かない `>>>>>>>`（深い引用）を未解決とみなさない", () => {
       const content = ["本文", ">>>>>>> some quoted text", "本文", ""].join("\n");
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions).toEqual([]);
     });
@@ -870,7 +872,7 @@ line2`;
       // ziku 自身が書いた行に限る。
       const content = ["本文", ">>>>>>> feature/my-branch", "本文", ""].join("\n");
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions).toEqual([]);
     });
@@ -880,7 +882,7 @@ line2`;
       // 確定して以後テンプレートへ送られる。
       const content = ["a", "||||||| BASE", "o", "=======", "b", ">>>>>>> TEMPLATE", ""].join("\n");
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions.map((r) => r.startLine)).toEqual([2]);
     });
@@ -888,7 +890,7 @@ line2`;
     it("`=======` から `>>>>>>>` だけの並びも未解決として数える", () => {
       const content = ["a", "=======", "b", ">>>>>>> TEMPLATE", ""].join("\n");
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions.map((r) => r.startLine)).toEqual([2]);
     });
@@ -896,7 +898,7 @@ line2`;
     it("単独の `|||||||`（空セルだけのテーブル行）を未解決とみなさない", () => {
       const content = ["| a | b |", "| --- | --- |", "|||||||", "", "本文", ""].join("\n");
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions).toEqual([]);
     });
@@ -904,7 +906,7 @@ line2`;
     it("単独の `>>>>>>>`（深くネストした引用）を未解決とみなさない", () => {
       const content = ["本文", ">>>>>>> quoted", "本文", ""].join("\n");
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions).toEqual([]);
     });
@@ -913,7 +915,7 @@ line2`;
       // 閉じ側まで揃わない並びは、setext 見出しの下線と区別できない。
       const content = ["Section", "=======", "", "本文", ""].join("\n");
 
-      const regions = findConflictRegions(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
       expect(regions).toEqual([]);
     });
@@ -925,9 +927,13 @@ line2`;
       const template = base.replace("intro", "intro-template");
 
       const merged = merge(base, local, template);
-      const regions = findConflictRegions(merged.content);
+      const regions = findConflictRegions(
+        merged.content,
+        merged._tag === "Conflicted" ? merged.markerSize : UNKNOWN_MARKER_SIZE,
+      );
 
-      // 生成された 8 文字ブロック（1 行目）と、未解決のまま残る 7 文字ブロックの両方
+      // 生成された 8 文字ブロック（1 行目）と、未解決のまま残る 7 文字ブロックの両方。
+      // 後者は生成長より短いのでラベルでは数えず、並びが揃っていることで数える。
       expect(regions.map((r) => r.startLine)).toEqual([1, 8]);
     });
 
@@ -943,12 +949,67 @@ line2`;
         const kept = block.filter((_, i) => !removed.has(i));
         const remainsLabeled = labeledLines.some((i) => !removed.has(i));
 
-        const regions = findConflictRegions(kept.join("\n"));
+        const regions = findConflictRegions(kept.join("\n"), UNKNOWN_MARKER_SIZE);
 
         // ラベル付きの行が 1 本も残らないのは、`=======` だけが残る形と全部消した形。
         // 前者は setext 見出しの下線と区別できないので数えない。
         expect({ mask, detected: regions.length > 0 }).toEqual({ mask, detected: remainsLabeled });
       }
+    });
+
+    it("生成長より短いラベル付きマーカーは、本文に書かれた例として扱う", () => {
+      // マーカーの書き方を説明する文書を同期していると、解決し終えた後もこの行は残る。
+      // 数えると `pull --continue` が永久に通らず、正当な記述を消す以外の復旧手段が無くなる。
+      const content = [
+        "コンフリクトの開始行はこう書かれる:",
+        "",
+        "<<<<<<< LOCAL",
+        "",
+        "以上。",
+        "",
+      ].join("\n");
+
+      const regions = findConflictRegions(content, knownMarkerSize(8));
+
+      expect(regions).toEqual([]);
+    });
+
+    it("生成長以上のラベル付きマーカーは、本文に同じ形の例があっても数える", () => {
+      const content = [
+        "コンフリクトの開始行はこう書かれる:",
+        "",
+        "<<<<<<< LOCAL",
+        "",
+        "<<<<<<<< LOCAL",
+        "残骸",
+        "",
+      ].join("\n");
+
+      const regions = findConflictRegions(content, knownMarkerSize(8));
+
+      expect(regions.map((r) => r.startLine)).toEqual([5]);
+    });
+
+    it("生成長が分からなければ、ラベル付きマーカーを長さによらず数える", () => {
+      // ziku が書いた行かを見分ける手がかりが無い以上、取りこぼすより多めに数える側へ倒す。
+      const content = ["コンフリクトの開始行はこう書かれる:", "", "<<<<<<< LOCAL", ""].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions.map((r) => r.startLine)).toEqual([3]);
+    });
+
+    it("マージ結果は、囲むのに使ったマーカーの長さを持つ", () => {
+      // この長さが `--continue` の走査へ渡り、本文のマーカー例と残骸を分ける根拠になる。
+      const withMarkers = ["intro", "<<<<<<< LOCAL", "a", "=======", "b", ">>>>>>> TEMPLATE", ""];
+      const base = withMarkers.join("\n");
+
+      const merged = merge(base, base.replace("intro", "local"), base.replace("intro", "template"));
+
+      expect(merged._tag === "Conflicted" ? merged.markerSize : undefined).toEqual({
+        kind: "known",
+        size: 8,
+      });
     });
   });
 

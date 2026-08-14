@@ -30,7 +30,13 @@ export type {
 } from "./types";
 export { asBaseContent, asLocalContent, asTemplateContent, classifyMergeOutcome } from "./types";
 export { classifyFiles } from "./classify";
-export { findConflictRegions } from "./conflict-markers";
+export type { GeneratedMarkerSize } from "./conflict-markers";
+export {
+  MIN_MARKER_LENGTH,
+  UNKNOWN_MARKER_SIZE,
+  findConflictRegions,
+  knownMarkerSize,
+} from "./conflict-markers";
 export { threeWayMerge } from "./three-way-merge";
 export {
   readFileSafe,

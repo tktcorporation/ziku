@@ -1,4 +1,6 @@
+import { match } from "ts-pattern";
 import { type TextShape, applyTextShape, detectTextShape, normalizeText } from "../text-shape";
+import { type GeneratedMarkerSize, UNKNOWN_MARKER_SIZE } from "./conflict-markers";
 import { textThreeWayMerge } from "./text-merge";
 import { type MergeOutcome, type ThreeWayMergeParams, classifyMergeOutcome } from "./types";
 
@@ -35,9 +37,10 @@ export function threeWayMerge({
 
   // ローカルとテンプレートが同一ならマージするものが無い。それでも内容の検査は通す。
   // 両側が未解決のマーカーを含んだまま一致していることがあり、素通しさせると
-  // 「マーカー入りだがクリーン」な結果になる。
+  // 「マーカー入りだがクリーン」な結果になる。マーカーがあってもそれは両側が元から
+  // 持っていたもので、ziku は 1 本も書いていない。
   if (normalizedLocal === normalizedTemplate) {
-    return restore(classifyMergeOutcome(normalizedLocal), shape);
+    return restore(classifyMergeOutcome(normalizedLocal, UNKNOWN_MARKER_SIZE), shape);
   }
 
   return restore(
@@ -52,7 +55,18 @@ export function threeWayMerge({
  * 戻した内容をもう一度分類し直すのは、`MergedContent`（マーカー非混入が検証済み）を
  * 作れる経路を `classifyMergeOutcome` の 1 本に保つため。復元は改行コードと BOM しか
  * 足さないので、分類結果は復元前と変わらない。
+ *
+ * 生成長は分類し直しても変わらないので、復元前の結果が持つ値をそのまま引き継ぐ。改めて
+ * 内容から測ると、内容由来のマーカーまで生成長として数えてしまう。
  */
 function restore(outcome: MergeOutcome, shape: TextShape): MergeOutcome {
-  return classifyMergeOutcome(applyTextShape(outcome.content, shape));
+  return classifyMergeOutcome(applyTextShape(outcome.content, shape), markerSizeOf(outcome));
+}
+
+/** マージ結果が持つ生成長。マーカーの無い結果からは長さを引き出せない。 */
+function markerSizeOf(outcome: MergeOutcome): GeneratedMarkerSize {
+  return match(outcome)
+    .with({ _tag: "Clean" }, () => UNKNOWN_MARKER_SIZE)
+    .with({ _tag: "Conflicted" }, ({ markerSize }) => markerSize)
+    .exhaustive();
 }

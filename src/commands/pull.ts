@@ -57,6 +57,7 @@ import {
   hasReadableText,
   isNonInteractive,
   isUnmergedConflict,
+  markerSizeOf,
   nextSyncBase,
   planPullChanges,
   resolveDeletionPolicy,
@@ -879,6 +880,10 @@ function describeUnmergedPreview(count: number, flags: PullApprovalFlags): strin
  *
  * ziku がマーカーを書いていない `noBase` も走査する。ユーザーが自分でマーカーを書いた
  * まま再開することがあり、そのままテンプレートへ送らせないため。
+ *
+ * 走査には中断時に記録した生成長を渡す。ファイルの内容としてマーカー例を持つドキュメント
+ * （マーカーの書き方を説明する文書）を、解決し終えた後も残骸として数え続けないため
+ * （{@link markerSizeOf}）。
  */
 function findRemainingMarkers(
   targetDir: AbsPath,
@@ -886,10 +891,11 @@ function findRemainingMarkers(
 ): Effect.Effect<Array<{ file: RepoRelPath; regions: readonly ConflictRegion[] }>> {
   return Effect.gen(function* () {
     const stillConflicted: Array<{ file: RepoRelPath; regions: readonly ConflictRegion[] }> = [];
-    for (const { path } of conflicts) {
+    for (const conflict of conflicts) {
+      const { path } = conflict;
       const contentOption = yield* readFileSafe(joinAbs(targetDir, path)).pipe(Effect.option);
       if (Option.isNone(contentOption)) continue;
-      const regions = findConflictRegions(contentOption.value);
+      const regions = findConflictRegions(contentOption.value, markerSizeOf(conflict));
       if (regions.length > 0) stillConflicted.push({ file: path, regions });
     }
     return stillConflicted;

@@ -8,9 +8,10 @@ import {
   pendingConflict,
   repoRelPath,
 } from "../../__tests__/brands";
+import { UNKNOWN_MARKER_SIZE, knownMarkerSize } from "../../utils/merge";
 import { classifyMergeOutcome } from "../../utils/merge/types";
 import { classifySyncPath } from "../../utils/ziku-config";
-import type { FileDiff, LockState, PushContent, SyncPoint } from "../schemas";
+import type { FileDiff, LockState, PendingConflict, PushContent, SyncPoint } from "../schemas";
 import {
   asDeletablePath,
   asPushContent,
@@ -221,6 +222,44 @@ describe("lockSchema", () => {
       },
     };
     expect(lockSchema.parse(lock)).toEqual(lock);
+  });
+
+  it("マーカーを書いた経路は、書き込んだマーカーの長さも記録できる", () => {
+    const lock = {
+      ...identity,
+      source: githubSource,
+      sync: "merging",
+      base: { hashes: {} },
+      merge: {
+        conflicts: [{ path: ".mcp.json", reason: "markers", markerSize: 8 }],
+        nextBase: { hashes: { ".mcp.json": "abc123" }, ref: "def456" },
+      },
+    };
+    expect(lockSchema.parse(lock)).toEqual(lock);
+  });
+
+  it("型: マーカーを書いていない経路はマーカーの長さを持てない", () => {
+    // `noBase` / `binary` はローカルへ何も書いていないので、長さという値の出どころが無い。
+    // 持てないことが型の役目なので、@ts-expect-error が外れたら typecheck が失敗する。
+    const invalid: PendingConflict = {
+      path: repoRelPath("icon.png"),
+      reason: "binary",
+      // @ts-expect-error マーカーを書いていない経路に markerSize は無い
+      markerSize: 8,
+    };
+    const lock = {
+      ...identity,
+      source: githubSource,
+      sync: "merging",
+      base: { hashes: {} },
+      merge: { conflicts: [invalid], nextBase: { hashes: {} } },
+    };
+
+    // 実行時の検証を通しても、長さは記録に残らない。
+    expect(lockSchema.parse(lock)).toEqual({
+      ...lock,
+      merge: { conflicts: [{ path: "icon.png", reason: "binary" }], nextBase: { hashes: {} } },
+    });
   });
 
   it("未解決の経路が不明なコンフリクトは拒否する", () => {
@@ -607,6 +646,7 @@ describe("PushContent", () => {
   it("型: マーカー入りと確定した内容は送信対象へ変換できない", () => {
     const outcome = classifyMergeOutcome(
       "<<<<<<< LOCAL\nmine\n=======\ntheirs\n>>>>>>> TEMPLATE\n",
+      knownMarkerSize(7),
     );
     if (outcome._tag !== "Conflicted") throw new Error("fixture must conflict");
 
@@ -620,7 +660,7 @@ describe("PushContent", () => {
   });
 
   it("クリーンと判定された内容は専用の経路で送信対象になる", () => {
-    const outcome = classifyMergeOutcome("merged content");
+    const outcome = classifyMergeOutcome("merged content", UNKNOWN_MARKER_SIZE);
     if (outcome._tag !== "Clean") throw new Error("fixture must merge cleanly");
 
     expect(mergedAsPushContent(outcome.content)).toBe("merged content");

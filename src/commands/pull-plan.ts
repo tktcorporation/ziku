@@ -24,6 +24,8 @@ import type {
 } from "../modules/schemas";
 import { markSynced, resolveMerge } from "../modules/schemas";
 import type { FileClassification } from "../utils/merge";
+import type { GeneratedMarkerSize } from "../utils/merge/conflict-markers";
+import { UNKNOWN_MARKER_SIZE, knownMarkerSize } from "../utils/merge/conflict-markers";
 import { repoRelPaths } from "../utils/paths";
 import type { SyncHashes } from "../utils/sync-analysis";
 import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
@@ -403,6 +405,22 @@ export function hasReadableText(conflict: PendingConflict): boolean {
   return match(conflict)
     .with({ reason: P.union("markers", "noBase") }, () => true)
     .with({ reason: "binary" }, () => false)
+    .exhaustive();
+}
+
+/**
+ * 中断時に ziku がそのファイルへ書いたマーカーの長さ。
+ *
+ * `noBase` / `binary` はローカルへ何も書いていないので長さを持たない。`noBase` のファイルに
+ * ユーザー自身が書いたマーカーが残っていることはあるが、その長さを ziku は知らない。
+ * 長さを記録していない lock も同じ扱いになる。
+ */
+export function markerSizeOf(conflict: PendingConflict): GeneratedMarkerSize {
+  return match(conflict)
+    .with({ reason: "markers", markerSize: P.number }, ({ markerSize }) =>
+      knownMarkerSize(markerSize),
+    )
+    .with({ reason: P.union("markers", "noBase", "binary") }, () => UNKNOWN_MARKER_SIZE)
     .exhaustive();
 }
 

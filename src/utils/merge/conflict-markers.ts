@@ -11,7 +11,7 @@ import { stripBom } from "../text-shape";
 import type { ConflictRegion } from "./types";
 
 /** マーカーの最小長。git の既定と同じ 7 文字。 */
-const MIN_MARKER_LENGTH = 7;
+export const MIN_MARKER_LENGTH = 7;
 
 /** マーカーの種類。コンフリクトブロック内での出現順に対応する。 */
 type MarkerKind = "start" | "base" | "separator" | "end";
@@ -30,7 +30,7 @@ const MARKER_KINDS: readonly MarkerKind[] = ["start", "base", "separator", "end"
  * （{@link parseMarkerLine}）が同じ値を読むので、片方だけが変わることはない。
  *
  * 側の名前だけを載せるのは ziku 固有で、git はここにブランチ名を書く。この違いが
- * 「ziku が書いた行か」の判断材料になる（{@link findConflictRegions}）ので、ラベルを
+ * 「ziku が書いた行か」の判断材料の 1 つになる（{@link findConflictRegions}）ので、ラベルを
  * 変えると既にファイルへ書き込まれたマーカーが残骸として検出されなくなる。
  *
  * 区切り（`=======`）にラベルが無いのは git の形式に合わせているため。ラベルの無い行は
@@ -80,6 +80,9 @@ function parseMarkerLine(line: string): Marker | undefined {
  * 入力に既にマーカーが含まれる場合（前回のコンフリクトを解決しないまま再マージした、
  * マーカーの書き方を説明するドキュメントを同期している等）、同じ長さのマーカーで
  * 囲むとブロックの入れ子が区別できなくなる。git と同様に 1 文字長いマーカーを使う。
+ *
+ * 戻り値は入力 3 者に現れるどのマーカーよりも真に長い。この不変条件が検出側の根拠になる
+ * （{@link GeneratedMarkerSize}）ので、長さの決め方を緩めると検出も緩む。
  */
 export function conflictMarkerSize(contents: readonly string[]): number {
   let longest = 0;
@@ -91,6 +94,30 @@ export function conflictMarkerSize(contents: readonly string[]): number {
   }
   return Math.max(MIN_MARKER_LENGTH, longest + 1);
 }
+
+/**
+ * 走査する内容に ziku が書いたマーカーの長さ。
+ *
+ * {@link conflictMarkerSize} の不変条件により、生成時点で内容に含まれていたマーカーは
+ * 生成長より必ず短い。したがって「生成長以上の長さを持つラベル付きマーカー」は内容由来では
+ * ありえず、ziku が書いた残骸だと言い切れる（{@link findConflictRegions}）。
+ *
+ * 長さが定まらない経路もある。自動マージを試みなかったファイル、ローカルとテンプレートが
+ * 元から同じマーカー入りのテキストだった場合、そして長さを記録していない lock からの再開が
+ * それにあたる。省略可能な数値ではなく union で表すのは、この「長さが無い」側にも意味が
+ * あるため。`undefined` だと、渡し忘れと区別が付かない。
+ */
+export type GeneratedMarkerSize =
+  | { readonly kind: "known"; readonly size: number }
+  | { readonly kind: "unknown" };
+
+/** {@link conflictMarkerSize} が返した生成長を {@link GeneratedMarkerSize} に載せる。 */
+export function knownMarkerSize(size: number): GeneratedMarkerSize {
+  return { kind: "known", size };
+}
+
+/** ziku がマーカーを書いていない、または生成長が残っていない場合。 */
+export const UNKNOWN_MARKER_SIZE: GeneratedMarkerSize = { kind: "unknown" };
 
 /**
  * 1 つのコンフリクトブロックを構成する 4 本のマーカー行。
@@ -297,12 +324,19 @@ function markerBlockStart(state: ScanState, kind: MarkerKind, lineNumber: number
  *
  * 未解決と数える根拠は 2 つあり、どちらかが当たれば数える。
  *
- * 1. ziku が書いたラベル（{@link MARKER_LABEL}）付きのマーカー行が 1 本でも残っている。
- *    利用者が解決の途中でどのマーカーを消しても、残った 1 本が根拠になる。ラベルは ziku
- *    固有で、git のマーカーはブランチ名を載せ、setext 見出し・空セルのテーブル行・深い引用は
- *    ラベルを持たないので、本文と取り違えない。
+ * 1. ziku が書いたラベル（{@link MARKER_LABEL}）付きで、かつ生成長以上のマーカー行が
+ *    1 本でも残っている。利用者が解決の途中でどのマーカーを消しても、残った
+ *    1 本が根拠になる。ラベルは ziku 固有で、git のマーカーはブランチ名を載せ、setext
+ *    見出し・空セルのテーブル行・深い引用はラベルを持たないので、本文と取り違えない。
+ *    長さの下限が要るのは、ラベル付きのマーカー行が本文として正当に書かれうるため
+ *    （マーカーの書き方を説明する文書を同期している場合）。生成長以上という条件は
+ *    {@link GeneratedMarkerSize} の不変条件により「内容由来ではない」と同義になる。
+ *    生成長が分からないときは下限を {@link MIN_MARKER_LENGTH} まで下げ、ラベルだけを
+ *    根拠にする。内容由来のラベル付き行と区別する手がかりが無い以上、取りこぼすより
+ *    多めに数える側へ倒す。
  * 2. ラベルを持たない `=======` だけが残った並びは 1 で拾えないので、マーカーが順序どおり
- *    並ぶ形を並びから判定する（{@link unresolvedStart}）。
+ *    並ぶ形を並びから判定する（{@link unresolvedStart}）。こちらは ziku が書いたかどうかを
+ *    区別できないため、生成長によらず同じ規則で数える。
  *
  * 行頭の前方一致だけで数えると、Markdown の setext 見出し下線や区切り線 `========` を
  * 未解決と誤検出する。誤検出すると `pull --continue` が永久に通らず、解決済みのマージを
@@ -319,7 +353,15 @@ function markerBlockStart(state: ScanState, kind: MarkerKind, lineNumber: number
  * 残したまま比べると、1 行目から始まるブロックの開始マーカーが本文として読まれ、未解決の
  * ファイルが解決済みとして通ってしまう。
  */
-export function findConflictRegions(content: string): ConflictRegion[] {
+export function findConflictRegions(
+  content: string,
+  markerSize: GeneratedMarkerSize,
+): ConflictRegion[] {
+  const labeledFrom = match(markerSize)
+    .with({ kind: "known" }, ({ size }) => size)
+    .with({ kind: "unknown" }, () => MIN_MARKER_LENGTH)
+    .exhaustive();
+
   // 2 つの根拠が同じブロックを指すことがあるので、開始行の集合として持つ。
   const startLines = new Set<number>();
   let state: ScanState = OUTSIDE;
@@ -331,7 +373,9 @@ export function findConflictRegions(content: string): ConflictRegion[] {
     if (state.phase !== "outside" && marker.length < state.size) continue;
 
     const lineNumber = i + 1;
-    if (marker.labeled) startLines.add(markerBlockStart(state, marker.kind, lineNumber));
+    if (marker.labeled && marker.length >= labeledFrom) {
+      startLines.add(markerBlockStart(state, marker.kind, lineNumber));
+    }
 
     const step = stepScan(state, marker, lineNumber);
     state = step.next;
