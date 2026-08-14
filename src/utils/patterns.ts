@@ -11,13 +11,13 @@ export interface FlatPatterns {
 }
 
 /**
- * ローカル優先でパターン列を重ね合わせた結果。
+ * パターン列を重ね合わせた結果。
  *
- * `merged` はローカル側の並びをそのまま先頭に置き、その後ろへローカルに無いパターンだけを
+ * `merged` は `base` 側の並びをそのまま先頭に置き、その後ろへ `base` に無いパターンだけを
  * 追記したもの。同じパターンは 1 度しか現れない。
  */
 export interface PatternUnion {
-  /** ローカル優先の順序に整えた和集合。 */
+  /** `base` の並びを保ったまま整えた和集合。 */
   readonly merged: GlobPattern[];
   /** `incoming` 側にだけあったパターン。取り込んだ差分をユーザーへ提示するために返す。 */
   readonly added: GlobPattern[];
@@ -29,22 +29,24 @@ export interface PatternUnion {
  * ziku のパターン同期（テンプレート ⇄ ローカルの include / exclude）は、どちら側の
  * パターンも失わないことを前提に組み立てられている。この関数はその前提を 2 点で満たす。
  *
- * - ローカルが先。ユーザーが `ziku.jsonc` に書いた並びは、テンプレート側の追加によって
- *   崩れない（差分は常に末尾へ積まれるので、設定ファイルの diff も読みやすい）。
+ * - `base` が先。`base` には「この和集合を書き戻す先の `ziku.jsonc` が今持っている並び」を
+ *   渡す。書き戻し先と並びの基準を揃えると、その文書の差分は末尾への追記だけになる。
+ *   逆にすると既存の要素が並べ替わり、1 行の追加でも配列ごと入れ替わった差分になる
+ *   （`src/utils/config-merge.ts` の `renderUnionInto` が両者を 1 つの引数から導く）。
  * - 重複除去。両側に同じパターンがあっても 1 つになるので、和集合を繰り返し適用しても
  *   結果は増えない（pull と push を往復してもパターンが増殖しない）。
  *
- * 呼び出し側は `added` を見て「テンプレート側で新しく増えたパターン」を判断してよい。
+ * 呼び出し側は `added` を見て「取り込む側にだけあったパターン」を判断してよい。
  */
 export function unionPatterns(
-  local: readonly GlobPattern[],
+  base: readonly GlobPattern[],
   incoming: readonly GlobPattern[],
 ): PatternUnion {
   const seen = new Set<string>();
   const merged: GlobPattern[] = [];
   const added: GlobPattern[] = [];
 
-  for (const pattern of local) {
+  for (const pattern of base) {
     if (seen.has(pattern)) continue;
     seen.add(pattern);
     merged.push(pattern);

@@ -71,9 +71,11 @@ import type {
   ChangedFileDiff,
   PushCandidatePlan,
   PushContent,
+  PushDelivery,
   PushFile,
   PushFileSelection,
   PushPayload,
+  PushSend,
   ZikuConfigWriteBack,
 } from "./push-plan";
 import {
@@ -81,8 +83,6 @@ import {
   applyPushSelection,
   asPushContent,
   baseAfterPush,
-  buildPushPayload,
-  buildPushSummaryRows,
   collectPushCandidates,
   configDiffToInject,
   defaultPushSelection,
@@ -91,10 +91,13 @@ import {
   patternsToPersist,
   planConfigPropagation,
   planPushCandidates,
+  planPushDelivery,
   planUntrackedTracking,
+  pushSummaryRows,
   resolvePrBaseBranch,
   selectedUnresolvedConflicts,
   templateContentOf,
+  withAutoUpdatedFile,
   zikuConfigWriteBack,
 } from "./push-plan";
 
@@ -144,17 +147,6 @@ export const pushLifecycle: CommandLifecycle = {
     "`ziku.jsonc` 自体が追跡ファイルとして同期対象に含まれる。`ziku track` で追加したローカルパターンは、push 時にテンプレートの `ziku.jsonc` へ加法 union マージで伝播する（pull と双方向）。パターンの削除は自動伝播しない。",
   ],
 };
-
-// ─── Push 戦略: GitHub / Local を Effect で分離 ───
-
-interface PushTarget extends PushPayload {
-  readonly pushableFiles: readonly ChangedFileDiff[];
-  /**
-   * テンプレートが削除したファイルのうち、ローカルの編集を保持したまま push するもの。
-   * push はテンプレート側の削除を取り消すことになるので、サマリで明示する。
-   */
-  readonly restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
-}
 
 // ─── push 中の失敗の分類 ───
 
@@ -311,7 +303,7 @@ function prBaseBranch(source: GitHubSource): Effect.Effect<string, ZikuFailure> 
  */
 function pushToGitHub(
   ghSource: GitHubSource,
-  target: PushTarget,
+  target: PushSend,
   ctx: CommandContextShape,
   args: { message?: string; edit?: boolean; yes?: boolean },
 ): Effect.Effect<boolean, ZikuFailure> {
@@ -349,7 +341,8 @@ function pushToGitHub(
           }))
           .otherwise(() => ({ title: suggestedTitle, body: suggestedBody }));
 
-        const files = await withTemplateReadme(target.files, ctx.templateDir);
+        // README の自動更新も送信対象そのものへ載せる。サマリも PR も同じ集合から作られる。
+        const sent = await withTemplateReadme(target, ctx.templateDir);
 
         // サマリー表示
         const baseSha = baseCommitSha(ctx.lock);
@@ -359,8 +352,7 @@ function pushToGitHub(
           `→ ${baseBranch}`,
           baseHashStr,
           title,
-          target,
-          files,
+          sent,
         );
 
         if (!args.yes) {
@@ -376,8 +368,8 @@ function pushToGitHub(
           createPullRequest(token, {
             owner: ghSource.owner,
             repo: ghSource.repo,
-            files,
-            deletions: [...target.deletions],
+            files: sent.payload.files,
+            deletions: [...sent.payload.deletions],
             title,
             body,
             baseBranch,
@@ -388,7 +380,7 @@ function pushToGitHub(
         log.message(
           [
             `${pc.dim("To")} ${pc.bold(`${ghSource.owner}/${ghSource.repo}`)}`,
-            `  ${baseSha ? `${pc.dim(baseSha.slice(0, 7))}..` : ""}${pc.green(result.branch)}  ${pc.dim(`(${files.length + target.deletions.length} file${files.length + target.deletions.length === 1 ? "" : "s"} changed)`)}`,
+            `  ${baseSha ? `${pc.dim(baseSha.slice(0, 7))}..` : ""}${pc.green(result.branch)}  ${pc.dim(`(${changedCount(sent.payload)} file${changedCount(sent.payload) === 1 ? "" : "s"} changed)`)}`,
             "",
             `  ${pc.bold(`PR #${result.number}`)}  ${pc.cyan(result.url)}`,
           ].join("\n"),
@@ -403,7 +395,7 @@ function pushToGitHub(
 /** ローカルテンプレートへの書き込みと lock 更新に要るもの。 */
 interface PushToLocalInput {
   readonly localSource: LocalSource;
-  readonly target: PushTarget;
+  readonly target: PushSend;
   readonly ctx: CommandContextShape;
   readonly projectDir: AbsPath;
   readonly args: { yes?: boolean };
@@ -440,9 +432,8 @@ function pushToLocal(input: PushToLocalInput): Effect.Effect<boolean, ZikuFailur
         localSource.path,
         "(local)",
         "",
-        `push ${target.files.length + target.deletions.length} file(s)`,
+        `push ${changedCount(target.payload)} file(s)`,
         target,
-        target.files,
       );
 
       if (!args.yes) {
@@ -455,7 +446,7 @@ function pushToLocal(input: PushToLocalInput): Effect.Effect<boolean, ZikuFailur
 
       log.step("Pushing to local template...");
 
-      for (const file of target.files) {
+      for (const file of target.payload.files) {
         const destPath = joinAbs(localSource.path, file.path);
         const destDir = dirname(destPath);
         if (!existsSync(destDir)) {
@@ -468,7 +459,7 @@ function pushToLocal(input: PushToLocalInput): Effect.Effect<boolean, ZikuFailur
       }
 
       // 削除対象ファイルを処理
-      for (const file of target.deletions) {
+      for (const file of target.payload.deletions) {
         const destPath = joinAbs(localSource.path, file.path);
         if (existsSync(destPath)) {
           await rm(destPath, { force: true });
@@ -477,7 +468,7 @@ function pushToLocal(input: PushToLocalInput): Effect.Effect<boolean, ZikuFailur
       }
 
       const writtenBackToLocal = await writeBackZikuConfig({
-        files: target.files,
+        files: target.payload.files,
         projectDir,
         writeBack: input.configWriteBack,
       });
@@ -493,15 +484,14 @@ function pushToLocal(input: PushToLocalInput): Effect.Effect<boolean, ZikuFailur
           hashes: baseAfterPush({
             templateHashes,
             previousBase: baseHashesOf(ctx.lock),
-            pushed: target,
+            pushed: target.payload,
             alreadySynced: input.alreadySynced,
             writtenBackToLocal,
           }),
         }),
       );
 
-      const totalCount = target.files.length + target.deletions.length;
-      log.success(`Pushed ${totalCount} file(s) to ${pc.cyan(localSource.path)}`);
+      log.success(`Pushed ${changedCount(target.payload)} file(s) to ${pc.cyan(localSource.path)}`);
       outro("Push complete");
       return true;
     },
@@ -541,25 +531,30 @@ function writeBackZikuConfig(params: {
 
 // ─── サマリー表示 ───
 
+/**
+ * 送る内容が 1 件も残らなかったときの案内。
+ *
+ * dry-run のプレビューと実 push が同じ文言を出す。判定も同じ（`planPushDelivery`）なので、
+ * 片方だけが「送れる」と言う状態にならない。
+ */
+const NOTHING_TO_PUSH = "Nothing to push — the selected file(s) already match the template.";
+
+/** サマリでパスの後ろの情報を揃える桁位置。 */
+const PATH_COLUMN_WIDTH = 50;
+
+/** 送るものの件数。内容と削除はどちらも 1 ファイルの変更として数える。 */
+function changedCount(payload: PushPayload): number {
+  return payload.files.length + payload.deletions.length;
+}
+
 function logPushSummary(
   destination: string,
   branchInfo: string,
   baseHashStr: string,
   title: string,
-  target: PushTarget,
-  files: readonly { path: RepoRelPath; content: PushContent }[],
+  send: PushSend,
 ): void {
-  /** サマリでパスの後ろの情報を揃える桁位置。 */
-  const PATH_COLUMN_WIDTH = 50;
-
-  const rows = buildPushSummaryRows({
-    pushableFiles: target.pushableFiles,
-    files,
-    deletions: target.deletions,
-    restoresTemplateDeletion: target.restoresTemplateDeletion,
-  });
-
-  const fileLines = rows.map((row) =>
+  const fileLines = pushSummaryRows(send).map((row) =>
     match(row)
       .with({ _tag: "Change" }, ({ diff, restoresTemplateDeletion }) => {
         const icon = match(diff.type)
@@ -800,6 +795,7 @@ async function pushProject(params: {
       templateDir: ctx.templateDir,
       source: ctx.source,
       candidates,
+      mergedContents,
       unresolvedConflicts,
       restoresTemplateDeletion: candidatePlan.restoresTemplateDeletion,
       args,
@@ -832,22 +828,22 @@ async function pushProject(params: {
     mergedContents,
   });
 
-  const payload = buildPushPayload(configResult.selected, mergedContents);
-
-  // 選択したファイルが残っていても、送る内容が 1 件も無いことがある。自動マージの結果や
-  // `ziku.jsonc` の和集合がテンプレートと同一になった場合で、送信ペイロードはそれを落とす
-  // （`buildPushPayload`）。そのまま進むと差分の無い PR を作ろうとして GitHub に拒まれ、
-  // ローカルテンプレートへは書くものが無いまま同期ベースだけが進む。
-  if (payload.files.length === 0 && payload.deletions.length === 0) {
-    log.info("Nothing to push — the selected file(s) already match the template.");
-    return;
-  }
-
-  const target: PushTarget = {
-    ...payload,
-    pushableFiles: configResult.selected,
+  // 選択したファイルが残っていても、送る内容が 1 件も無いことがある（`planPushDelivery`）。
+  // dry-run のプレビューも同じ判定を通るので、プレビューに出たのに実行すると何も送られない
+  // 組み合わせは作れない。
+  const delivery = planPushDelivery({
+    selected: configResult.selected,
+    mergedContents,
     restoresTemplateDeletion: candidatePlan.restoresTemplateDeletion,
-  };
+  });
+  const target = match(delivery)
+    .with({ _tag: "Nothing" }, () => {
+      log.info(NOTHING_TO_PUSH);
+      return undefined;
+    })
+    .with({ _tag: "Send" }, ({ send }) => send)
+    .exhaustive();
+  if (target === undefined) return;
 
   // ─── 分岐: ソース種別に応じた push 戦略 (ts-pattern + Effect) ───
   const pushed = await runCommandEffect(
@@ -879,8 +875,8 @@ async function pushProject(params: {
   // 確認キャンセル（pushed=false）では設定を変えない。
   if (pushed && newlyTrackedPaths.length > 0) {
     const pushedPaths = new Set<RepoRelPath>([
-      ...payload.files.map((f) => f.path),
-      ...payload.deletions.map((d) => d.path),
+      ...target.payload.files.map((f) => f.path),
+      ...target.payload.deletions.map((d) => d.path),
     ]);
     await persistNewlyTracked(targetDir, newlyTrackedPaths, pushedPaths);
   }
@@ -891,7 +887,10 @@ async function pushProject(params: {
 /**
  * 実 push と同じ規則で「実際に送られる集合」を表示する。
  *
- * プレビューだけ別の規則で組み立てると、表示された集合と実際に送られる集合が食い違う。
+ * 選択の絞り込み（`--files` / 既定集合）も、そこから送る集合を導く計算（`planPushDelivery`）も
+ * 実 push と同じ関数を通る。プレビューだけ別の規則で組み立てると、表示された集合と実際に
+ * 送られる集合が食い違う。
+ *
  * 対話選択と、ziku が付け足すファイル（`ziku.jsonc` の自動同梱・README の自動更新）は
  * プレビューでは行わず、実 push で何が起きるかを注意書きで補う（プレビューの集合は
  * 「今の指定で送られるもの」に保つ）。
@@ -902,6 +901,8 @@ async function previewPush(params: {
   /** 送信先。ziku が付け足すファイルは送信先によって変わるので、予告も送信先で分ける。 */
   source: TemplateSource;
   candidates: readonly ChangedFileDiff[];
+  /** 自動マージの結果と `ziku.jsonc` の和集合。実際に送る内容はここが優先される。 */
+  mergedContents: ReadonlyMap<RepoRelPath, PushContent>;
   unresolvedConflicts: ReadonlySet<RepoRelPath>;
   restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
   args: PushArgs;
@@ -926,7 +927,13 @@ async function previewPush(params: {
   if (previewFiles.length === 0) {
     log.info("No files match the current selection — nothing would be pushed.");
   } else {
-    logDiffSummary([...previewFiles]);
+    logPreviewedDelivery(
+      planPushDelivery({
+        selected: previewFiles,
+        mergedContents: params.mergedContents,
+        restoresTemplateDeletion,
+      }),
+    );
   }
 
   await warnIfConfigWouldBeAutoIncluded({
@@ -950,6 +957,30 @@ async function previewPush(params: {
     );
     for (const f of selectedConflicts) log.message(`  ${pc.yellow("!")} ${f.path}`);
   }
+}
+
+/**
+ * プレビューに、実 push が送る集合をそのまま出す。
+ *
+ * 表示する差分は選択そのものではなく、送る内容で組み直したもの（`pushSummaryRows`）。
+ * 自動マージの結果がテンプレートと同一になったファイルは実 push が落とすので、プレビューにも
+ * 出さない。1 件も残らない場合は実 push と同じ文言で伝える。
+ */
+function logPreviewedDelivery(delivery: PushDelivery): void {
+  match(delivery)
+    .with({ _tag: "Nothing" }, () => {
+      log.info(NOTHING_TO_PUSH);
+    })
+    .with({ _tag: "Send" }, ({ send }) => {
+      const shown = pushSummaryRows(send).flatMap((row) =>
+        match(row)
+          .with({ _tag: "Change" }, ({ diff }) => [diff])
+          .with({ _tag: "AutoUpdated" }, () => [])
+          .exhaustive(),
+      );
+      logDiffSummary(shown);
+    })
+    .exhaustive();
 }
 
 /**
@@ -1163,10 +1194,8 @@ function announceConfigAutoInclude(localOnlyPatterns: readonly GlobPattern[]): v
  * ziku が選り分ける立場にない。ziku が従わせてよいのはマーカー間だけなので、土台は
  * ユーザーの内容にして、その中のマーカー間だけを `ziku.jsonc` から組み直す。
  */
-async function withTemplateReadme(
-  files: readonly PushFile[],
-  templateDir: AbsPath,
-): Promise<readonly PushFile[]> {
+async function withTemplateReadme(send: PushSend, templateDir: AbsPath): Promise<PushSend> {
+  const files = send.payload.files;
   const tracked = files.find((f) => f.path === TEMPLATE_README);
   const config = files.find((f) => isZikuConfigPath(f.path));
 
@@ -1175,7 +1204,7 @@ async function withTemplateReadme(
     readme: tracked?.content,
     config: config?.content,
   });
-  if (rendered === null || !rendered.updated) return files;
+  if (rendered === null || !rendered.updated) return send;
 
   const rebuilt: PushFile = {
     path: TEMPLATE_README,
@@ -1184,13 +1213,12 @@ async function withTemplateReadme(
     origin: { _tag: "Synthesized" },
   };
 
-  if (tracked === undefined) {
-    announceReadmeAutoUpdate();
-    return [...files, rebuilt];
-  }
+  if (tracked === undefined) announceReadmeAutoUpdate();
+  else announceReadmeRebuild();
 
-  announceReadmeRebuild();
-  return files.map((f) => (f.path === TEMPLATE_README ? rebuilt : f));
+  // 置き換えと追加のどちらも `withAutoUpdatedFile` に任せる。送る集合を直に組み直すと、
+  // サマリに出ないファイルが PR に載る経路ができる。
+  return withAutoUpdatedFile(send, rebuilt);
 }
 
 /**

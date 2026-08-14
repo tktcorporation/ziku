@@ -141,7 +141,7 @@ describe("readConfigAt 経由の入口（テンプレートが壊れていれば
     });
     expect(parseJsonc(merged)).toMatchObject({
       kind: "parsed",
-      value: { include: [".github/**", ".claude/**"] },
+      value: { include: [".claude/**", ".github/**"] },
     });
   });
 });

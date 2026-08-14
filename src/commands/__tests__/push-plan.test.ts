@@ -26,8 +26,6 @@ import {
   asDeletablePath,
   asPushContent,
   baseAfterPush,
-  buildPushPayload,
-  buildPushSummaryRows,
   collectPushCandidates,
   configDiffToInject,
   defaultPushSelection,
@@ -36,12 +34,22 @@ import {
   patternsToPersist,
   planConfigPropagation,
   planPushCandidates,
+  planPushDelivery,
   planUntrackedTracking,
+  pushSummaryRows,
   resolvePrBaseBranch,
   selectedUnresolvedConflicts,
+  withAutoUpdatedFile,
   zikuConfigWriteBack,
 } from "../push-plan";
-import type { ChangedFileDiff, DeletablePath, PushContent, PushFile } from "../push-plan";
+import type {
+  ChangedFileDiff,
+  DeletablePath,
+  PushContent,
+  PushFile,
+  PushPayload,
+  PushSend,
+} from "../push-plan";
 
 /** 送った内容をローカルへ書き戻していないケース。ベース前進の例外が要らない既定の入力。 */
 const NOTHING_WRITTEN_BACK: ReadonlySet<RepoRelPath> = new Set();
@@ -473,7 +481,21 @@ describe("PushContent", () => {
   });
 });
 
-describe("buildPushPayload", () => {
+/** 送るものがある前提で payload を取り出す。無ければテストの前提が崩れている。 */
+function deliveryPayload(
+  selected: Parameters<typeof planPushDelivery>[0]["selected"],
+  mergedContents: Parameters<typeof planPushDelivery>[0]["mergedContents"],
+): PushPayload {
+  const delivery = planPushDelivery({
+    selected,
+    mergedContents,
+    restoresTemplateDeletion: pathSet(),
+  });
+  if (delivery._tag !== "Send") throw new Error("fixture must have something to push");
+  return delivery.send.payload;
+}
+
+describe("planPushDelivery", () => {
   it("削除と送信内容を分け、自動マージ済みの内容を優先する", () => {
     const merged = classifyMergeOutcome("merged content");
     if (merged._tag !== "Clean") throw new Error("fixture must merge cleanly");
@@ -481,7 +503,7 @@ describe("buildPushPayload", () => {
       [repoRelPath("b.txt"), mergedAsPushContent(merged.content)],
     ]);
 
-    const payload = buildPushPayload(
+    const payload = deliveryPayload(
       [added("a.txt", "local a"), modified("b.txt", "local b"), deleted("gone.txt")],
       mergedContents,
     );
@@ -494,7 +516,7 @@ describe("buildPushPayload", () => {
   });
 
   it("マージ結果が無いファイルはローカルの内容をそのまま送る", () => {
-    const payload = buildPushPayload([added("a.txt", "local a")], new Map());
+    const payload = deliveryPayload([added("a.txt", "local a")], new Map());
 
     expect(payload.files).toEqual([
       { path: "a.txt", content: "local a", origin: { _tag: "LocalContent" } },
@@ -508,7 +530,7 @@ describe("buildPushPayload", () => {
       [repoRelPath("a.txt"), asPushContent("local a")],
     ]);
 
-    const payload = buildPushPayload([added("a.txt", "local a")], mergedContents);
+    const payload = deliveryPayload([added("a.txt", "local a")], mergedContents);
 
     expect(payload.files).toEqual([
       { path: "a.txt", content: "local a", origin: { _tag: "Synthesized" } },
@@ -518,7 +540,7 @@ describe("buildPushPayload", () => {
   it("ziku.jsonc の削除は送らない（通常ファイルの削除は送る）", () => {
     // テンプレートの ziku.jsonc が消えると、そのテンプレートを使う全プロジェクトの
     // init / pull が同期対象パターンを引けなくなる。
-    const payload = buildPushPayload([deleted(".ziku/ziku.jsonc"), deleted("gone.txt")], new Map());
+    const payload = deliveryPayload([deleted(".ziku/ziku.jsonc"), deleted("gone.txt")], new Map());
 
     expect(payload.deletions).toEqual([{ path: "gone.txt" }]);
     expect(payload.files).toEqual([]);
@@ -534,10 +556,13 @@ describe("buildPushPayload", () => {
       [repoRelPath("a.txt"), mergedAsPushContent(merged.content)],
     ]);
 
-    const payload = buildPushPayload([modified("a.txt", "B\n", "B\nC\n")], mergedContents);
+    const delivery = planPushDelivery({
+      selected: [modified("a.txt", "B\n", "B\nC\n")],
+      mergedContents,
+      restoresTemplateDeletion: pathSet(),
+    });
 
-    expect(payload.files).toEqual([]);
-    expect(payload.deletions).toEqual([]);
+    expect(delivery).toEqual({ _tag: "Nothing" });
   });
 
   it("送信ペイロードとサマリーの行は同じ集合になる", () => {
@@ -551,13 +576,14 @@ describe("buildPushPayload", () => {
       modified("differs.txt", "local", "template"),
     ];
 
-    const payload = buildPushPayload(pushableFiles, mergedContents);
-    const rows = buildPushSummaryRows({
-      pushableFiles,
-      files: payload.files,
-      deletions: payload.deletions,
+    const delivery = planPushDelivery({
+      selected: pushableFiles,
+      mergedContents,
       restoresTemplateDeletion: pathSet(),
     });
+    if (delivery._tag !== "Send") throw new Error("fixture must have something to push");
+    const { payload } = delivery.send;
+    const rows = pushSummaryRows(delivery.send);
 
     expect(payload.files.map((f) => f.path)).toEqual(["differs.txt"]);
     expect(rows.map((row) => (row._tag === "Change" ? row.diff.path : row.path))).toEqual([
@@ -953,16 +979,30 @@ describe("resolvePrBaseBranch", () => {
   });
 });
 
-describe("buildPushSummaryRows", () => {
+describe("pushSummaryRows", () => {
   const noRestores = pathSet();
 
+  /** 送る集合を直に組んだ {@link PushSend}。行が payload から導かれることを見る。 */
+  function sendOf(params: {
+    pushableFiles: readonly ChangedFileDiff[];
+    files?: readonly PushFile[];
+    deletions?: readonly { path: DeletablePath }[];
+    restoresTemplateDeletion?: ReadonlySet<RepoRelPath>;
+  }): PushSend {
+    return {
+      payload: { files: params.files ?? [], deletions: params.deletions ?? [] },
+      pushableFiles: params.pushableFiles,
+      restoresTemplateDeletion: params.restoresTemplateDeletion ?? noRestores,
+    };
+  }
+
   it("送る内容とテンプレートの内容から種別を決め直す", () => {
-    const rows = buildPushSummaryRows({
-      pushableFiles: [modified("a.txt", "local", "template")],
-      files: [{ path: repoRelPath("a.txt"), content: asPushContent("merged") }],
-      deletions: [],
-      restoresTemplateDeletion: noRestores,
-    });
+    const rows = pushSummaryRows(
+      sendOf({
+        pushableFiles: [modified("a.txt", "local", "template")],
+        files: [synthesizedFile("a.txt", "merged")],
+      }),
+    );
 
     expect(rows).toEqual([
       {
@@ -979,23 +1019,23 @@ describe("buildPushSummaryRows", () => {
   });
 
   it("送る内容がテンプレートと同一になったファイルは行に出さない", () => {
-    const rows = buildPushSummaryRows({
-      pushableFiles: [modified("a.txt", "local", "template")],
-      files: [{ path: repoRelPath("a.txt"), content: asPushContent("template") }],
-      deletions: [],
-      restoresTemplateDeletion: noRestores,
-    });
+    const rows = pushSummaryRows(
+      sendOf({
+        pushableFiles: [modified("a.txt", "local", "template")],
+        files: [synthesizedFile("a.txt", "template")],
+      }),
+    );
 
     expect(rows).toEqual([]);
   });
 
   it("削除は送信内容を持たないまま行に出す", () => {
-    const rows = buildPushSummaryRows({
-      pushableFiles: [deleted("gone.txt")],
-      files: [],
-      deletions: [{ path: repoRelPath("gone.txt") }],
-      restoresTemplateDeletion: noRestores,
-    });
+    const rows = pushSummaryRows(
+      sendOf({
+        pushableFiles: [deleted("gone.txt")],
+        deletions: [{ path: deletablePath("gone.txt") }],
+      }),
+    );
 
     expect(rows).toEqual([
       {
@@ -1007,35 +1047,53 @@ describe("buildPushSummaryRows", () => {
   });
 
   it("テンプレートの削除を取り消すファイルには印を付ける", () => {
-    const rows = buildPushSummaryRows({
-      pushableFiles: [added("restored.txt", "local")],
-      files: [{ path: repoRelPath("restored.txt"), content: asPushContent("local") }],
-      deletions: [],
-      restoresTemplateDeletion: pathSet(["restored.txt"]),
-    });
+    const rows = pushSummaryRows(
+      sendOf({
+        pushableFiles: [added("restored.txt", "local")],
+        files: [synthesizedFile("restored.txt", "local")],
+        restoresTemplateDeletion: pathSet(["restored.txt"]),
+      }),
+    );
 
     expect(rows[0]).toMatchObject({ _tag: "Change", restoresTemplateDeletion: true });
   });
 
   it("選択に無いのに送るファイルは自動更新として並べる", () => {
-    const rows = buildPushSummaryRows({
-      pushableFiles: [],
-      files: [{ path: repoRelPath("README.md"), content: asPushContent("generated") }],
-      deletions: [],
-      restoresTemplateDeletion: noRestores,
-    });
+    const rows = pushSummaryRows(
+      sendOf({ pushableFiles: [], files: [synthesizedFile("README.md", "generated")] }),
+    );
 
     expect(rows).toEqual([{ _tag: "AutoUpdated", path: "README.md" }]);
   });
 
   it("送信内容も削除指定も無いファイルは行に出さない", () => {
-    const rows = buildPushSummaryRows({
-      pushableFiles: [added("a.txt")],
-      files: [],
-      deletions: [],
-      restoresTemplateDeletion: noRestores,
-    });
+    const rows = pushSummaryRows(sendOf({ pushableFiles: [added("a.txt")] }));
 
     expect(rows).toEqual([]);
+  });
+
+  it("付け足したファイルは送る集合にも行にも同時に載る", () => {
+    // 片方だけに足せると、PR には出るのにサマリには出ないファイルができる。
+    const before = sendOf({
+      pushableFiles: [modified("a.txt", "local", "template")],
+      files: [synthesizedFile("a.txt", "merged")],
+    });
+
+    const after = withAutoUpdatedFile(before, synthesizedFile("README.md", "generated"));
+
+    expect(after.payload.files.map((f) => f.path)).toEqual(["a.txt", "README.md"]);
+    expect(pushSummaryRows(after)).toContainEqual({ _tag: "AutoUpdated", path: "README.md" });
+  });
+
+  it("既に送る集合にあるパスを付け足すと内容を差し替える", () => {
+    // 同じパスを 2 回送ると、2 回目の書き込みが 1 回目で変わった blob SHA と食い違って弾かれる。
+    const before = sendOf({
+      pushableFiles: [modified("README.md", "local", "template")],
+      files: [synthesizedFile("README.md", "local")],
+    });
+
+    const after = withAutoUpdatedFile(before, synthesizedFile("README.md", "rebuilt"));
+
+    expect(after.payload.files).toEqual([synthesizedFile("README.md", "rebuilt")]);
   });
 });

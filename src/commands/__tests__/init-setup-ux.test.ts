@@ -58,6 +58,7 @@ vi.mock("../../utils/github", async () => {
     resolveSourceCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
     checkRepoExists: vi.fn(() => Promise.resolve({ _tag: "Exists" as const })),
     checkRepoSetup: vi.fn(() => Promise.resolve(true)),
+    fetchRepoSetupState: vi.fn(() => Promise.resolve({ _tag: "NotConfigured" as const })),
     fetchDefaultBranch: vi.fn(() => Promise.resolve({ _tag: "Resolved" as const, name: "main" })),
     getGitHubToken: vi.fn(() => {}),
     getAuthenticatedUserLogin: vi.fn(() => Promise.resolve()),
@@ -167,6 +168,7 @@ const {
   createPullRequest,
   getAuthenticatedUserLogin,
   fetchDefaultBranch,
+  fetchRepoSetupState,
   getGitHubToken,
   scaffoldTemplateRepo,
 } = await import("../../utils/github");
@@ -186,6 +188,7 @@ const _mockLog = vi.mocked(log);
 const mockHashFiles = vi.mocked(hashFiles);
 const mockCheckRepoExists = vi.mocked(checkRepoExists);
 const mockCheckRepoSetup = vi.mocked(checkRepoSetup);
+const mockFetchRepoSetupState = vi.mocked(fetchRepoSetupState);
 const mockGetAuthenticatedUserLogin = vi.mocked(getAuthenticatedUserLogin);
 const mockGetGitHubToken = vi.mocked(getGitHubToken);
 const mockScaffoldTemplateRepo = vi.mocked(scaffoldTemplateRepo);
@@ -640,6 +643,7 @@ describe("setup: セットアップ UX", () => {
     vi.resetAllMocks();
     mockDetectGitHubOwner.mockReturnValue("detected-org");
     mockCheckRepoExists.mockResolvedValue({ _tag: "Exists" });
+    mockFetchRepoSetupState.mockResolvedValue({ _tag: "NotConfigured" });
     mockGetGitHubToken.mockReturnValue("ghp_test_token");
     mockFetchDefaultBranch.mockResolvedValue({ _tag: "Resolved", name: "main" });
     mockConfirmAction.mockResolvedValue(true);
@@ -689,6 +693,39 @@ describe("setup: セットアップ UX", () => {
       expect(mockCreatePullRequest).toHaveBeenCalledWith(
         "ghp_test_token",
         expect.objectContaining({ owner: "my-org", repo: "my-templates" }),
+      );
+    });
+
+    it("既に設定済みのテンプレートには PR を作らない（--yes でも）", async () => {
+      // 既存の ziku.jsonc を規定パターンで置き換える PR を作ると、マージ時点で
+      // そのテンプレートを使う全プロジェクトの同期対象が規定値に戻る。
+      mockFetchRepoSetupState.mockResolvedValue({ _tag: "Configured" });
+
+      await runSetup(["--remote", "--from", "my-org/my-templates", "--yes"]);
+
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+      expect(mockOutro).toHaveBeenCalledWith("Template repository is already configured.");
+    });
+
+    it("--dryRun でも設定済みなら PR の予告を出さない", async () => {
+      mockFetchRepoSetupState.mockResolvedValue({ _tag: "Configured" });
+
+      await runSetup(["--remote", "--from", "my-org/my-templates", "--dryRun"]);
+
+      expect(mockOutro).toHaveBeenCalledWith("Template repository is already configured.");
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
+    it("設定済みか確かめられなければ、警告して進み、置き換えない指定で PR を作る", async () => {
+      // 一時的な障害で作業を止めない代わりに、既存を置き換える PR は作成の直前で止まる。
+      mockFetchRepoSetupState.mockResolvedValue({ _tag: "Unknown", reason: "HTTP 503" });
+
+      await runSetup(["--remote", "--from", "my-org/my-templates", "--yes"]);
+
+      expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining("HTTP 503"));
+      expect(mockCreatePullRequest).toHaveBeenCalledWith(
+        "ghp_test_token",
+        expect.objectContaining({ onExistingFiles: "fail" }),
       );
     });
 

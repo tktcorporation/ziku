@@ -91,7 +91,7 @@ describe("glob で追跡したパターンの push 伝播", () => {
       additionalIncludes: relevant,
     });
 
-    expect(JSON.parse(merged).include).toEqual([".claude/rules/*.md", ".github/**"]);
+    expect(JSON.parse(merged).include).toEqual([".github/**", ".claude/rules/*.md"]);
   });
 
   it("push するファイルに一致しない glob は巻き込まない", async () => {

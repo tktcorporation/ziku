@@ -102,6 +102,19 @@ export type FailureReason =
       readonly paths: readonly string[];
     }
   /**
+   * 新しく足すはずのファイルが、PR の宛先ブランチに既にある。
+   *
+   * 取る行動はそのファイルを直接編集すること。`ziku setup` は「まだ ziku を使っていない
+   * テンプレートに規定の設定を置く」操作なので、既にあるものを規定値へ戻すことはしない
+   * （戻すと、そのテンプレートを使う全プロジェクトの同期対象が規定値に変わる）。
+   * `PushDeletionTargetMissing` と逆向きで、宛先の状態が操作の前提と食い違っている。
+   */
+  | {
+      readonly kind: "PushCreateTargetExists";
+      readonly repo: string;
+      readonly paths: readonly string[];
+    }
+  /**
    * PR の head に使う名前のリポジトリが認証ユーザー配下に既にあるが、対象の fork ではない。
    *
    * 取る行動はそのリポジトリを改名するか消すこと。ziku は対象リポジトリと同じ名前で fork を
@@ -274,6 +287,10 @@ export function describeFailure(reason: FailureReason): FailureDisplay {
     .with({ kind: "PushDeletionTargetMissing" }, (r) => ({
       message: `${r.repo} has no such file to delete: ${r.paths.join(", ")}`,
       hint: `ziku derives deletions from the sync base recorded in \`.ziku/lock.json\`, and these files are already gone from the branch the pull request targets. Run \`ziku pull\` to bring the base up to date, then push again.`,
+    }))
+    .with({ kind: "PushCreateTargetExists" }, (r) => ({
+      message: `${r.repo} already has: ${r.paths.join(", ")}`,
+      hint: `ziku setup adds these files to a template that does not have them yet, and never replaces what is already there — replacing them would reset the sync patterns for every project using this template. Edit the file in ${r.repo} directly to change what the template tracks.`,
     }))
     .with({ kind: "ForkNameTaken" }, (r) => ({
       message: `${r.existing} already exists and is not a fork of ${r.repo}`,

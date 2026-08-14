@@ -361,7 +361,9 @@ describe("createPullRequest", () => {
     );
   });
 
-  it("getTree で既存ファイルの SHA を一括取得する", async () => {
+  it("getTree は対象リポジトリの宛先ブランチから既存ファイルの SHA を一括取得する", async () => {
+    // fork ではなく対象リポジトリを引くのは、fork を作る前に検証を終えるため。
+    // 同期ブランチは同じコミットから生やすので、blob SHA は fork でもそのまま使える。
     await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
@@ -370,12 +372,12 @@ describe("createPullRequest", () => {
       baseBranch: "main",
     });
 
-    expect(mockGitGetTree).toHaveBeenCalledWith(
-      expect.objectContaining({
-        owner: "testuser",
-        recursive: "true",
-      }),
-    );
+    expect(mockGitGetTree).toHaveBeenCalledWith({
+      owner: "owner",
+      repo: "repo",
+      tree_sha: "abc123",
+      recursive: "true",
+    });
   });
 
   it("truncated な tree は、バグ報告ではなくファイル数を減らす案内として失敗する", async () => {
@@ -396,9 +398,12 @@ describe("createPullRequest", () => {
 
     expect(thrown).toBeInstanceOf(ZikuFailure);
     expect(thrown).toMatchObject({
-      reason: { kind: "RepoTreeTooLarge", repo: "testuser/test-repo" },
+      reason: { kind: "RepoTreeTooLarge", repo: "owner/repo" },
     });
     expect((thrown as ZikuFailure).hint).toContain("Reduce the number of files");
+    // 検証は副作用より先。落ちた実行が fork に同期ブランチを残さない。
+    expect(mockGitCreateRef).not.toHaveBeenCalled();
+    expect(mockReposCreateFork).not.toHaveBeenCalled();
   });
 
   it("削除対象ファイルを deleteFile API で削除する", async () => {
@@ -454,6 +459,93 @@ describe("createPullRequest", () => {
     });
     expect(mockReposDeleteFile).not.toHaveBeenCalled();
     expect(mockPullsCreate).not.toHaveBeenCalled();
+    // リトライのたびに孤児ブランチが増えないよう、ブランチを作る前に確かめる。
+    expect(mockGitCreateRef).not.toHaveBeenCalled();
+  });
+
+  it("onExistingFiles: fail は、宛先に既にあるファイルを置き換えずに止める", async () => {
+    // setup が既存の設定を規定値へ戻す PR を作らないための歯止め。
+    mockGitGetTree.mockResolvedValue({
+      data: {
+        tree: [{ path: ".ziku/ziku.jsonc", type: "blob", sha: "existing-sha" }],
+        truncated: false,
+      },
+    });
+
+    const thrown = await createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [{ path: repoRelPath(".ziku/ziku.jsonc"), content: "defaults" }],
+      title: "Test PR",
+      baseBranch: "main",
+      onExistingFiles: "fail",
+    }).then(
+      () => expect.unreachable("PR が作成されてしまった"),
+      (error: unknown) => error,
+    );
+
+    expect(thrown).toBeInstanceOf(ZikuFailure);
+    expect(thrown).toMatchObject({
+      reason: {
+        kind: "PushCreateTargetExists",
+        repo: "owner/repo",
+        paths: [".ziku/ziku.jsonc"],
+      },
+    });
+    expect(mockGitCreateRef).not.toHaveBeenCalled();
+    expect(mockReposCreateOrUpdateFileContents).not.toHaveBeenCalled();
+    expect(mockPullsCreate).not.toHaveBeenCalled();
+  });
+
+  it("onExistingFiles: fail でも宛先に無ければそのまま作る", async () => {
+    await createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [{ path: repoRelPath(".ziku/ziku.jsonc"), content: "defaults" }],
+      title: "Test PR",
+      baseBranch: "main",
+      onExistingFiles: "fail",
+    });
+
+    expect(mockPullsCreate).toHaveBeenCalled();
+  });
+
+  it("既定では既存ファイルを置き換える", async () => {
+    // push はローカルの変更をテンプレートへ届ける操作なので、既存の内容を更新する。
+    mockGitGetTree.mockResolvedValue({
+      data: {
+        tree: [{ path: "existing.txt", type: "blob", sha: "existing-sha" }],
+        truncated: false,
+      },
+    });
+
+    await createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [{ path: repoRelPath("existing.txt"), content: "new content" }],
+      title: "Test PR",
+      baseBranch: "main",
+    });
+
+    expect(mockPullsCreate).toHaveBeenCalled();
+  });
+
+  it("検証で落ちる実行は fork も作らない", async () => {
+    // fork が未作成のプロジェクトでも、検証で落ちるだけの実行が fork を残さない。
+    mockReposGet.mockRejectedValue(new Error("Not Found"));
+    mockGitGetTree.mockResolvedValue({ data: { tree: [], truncated: false } });
+
+    await createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [],
+      deletions: [{ path: repoRelPath("gone.txt") }],
+      title: "Test PR",
+      baseBranch: "main",
+    }).catch(() => undefined);
+
+    expect(mockReposCreateFork).not.toHaveBeenCalled();
+    expect(mockGitCreateRef).not.toHaveBeenCalled();
   });
 
   it("削除対象が 1 件でも欠ければ、他のファイルも書き込まずに止める", async () => {

@@ -1649,7 +1649,7 @@ describe("pushCommand", () => {
       return { localConfig };
     }
 
-    it("localOnly で ziku.jsonc がローカル削除されていてもテンプレのパターンは消さない（codex P2）", async () => {
+    it("localOnly で ziku.jsonc がローカル削除されていてもテンプレのパターンは消さない", async () => {
       // ローカルが .github/** を削除しただけ。union はテンプレの内容と一致するので、送っても
       // パターンが 1 つも増えない PR になる。status もこの状態を同期済みとして見せるため、
       // push は何も送らない（削除は自動伝播しない）。
@@ -1692,7 +1692,7 @@ describe("pushCommand", () => {
       expect(pushed.include).toContain(".claude/**");
     });
 
-    it("ローカルテンプレへの push: ziku.jsonc の union 結果をローカルにも書き戻す（codex P2）", async () => {
+    it("ローカルテンプレへの push: ziku.jsonc の union 結果をローカルにも書き戻す", async () => {
       const { effect } = mockContext({
         source: localTemplateSource,
         // ローカルソースでは templateDir は localSource.path に解決される
@@ -2220,6 +2220,62 @@ describe("pushCommand", () => {
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
       expect(mockConfirmAction).not.toHaveBeenCalled();
       expect(mockLog.info).toHaveBeenCalledWith(expect.stringContaining("Nothing to push"));
+    });
+
+    it("--dry-run のプレビューも、自動マージでテンプレートと同一になったファイルを出さない", async () => {
+      // プレビューが候補をそのまま並べると、実行すると何も送られないファイルを
+      // 「送られる」と見せることになる。
+      const { effect } = mockContext({
+        lock: lockWith({ hashes: { "file.txt": "abc123" }, commitSha: "abc123def456" }),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      vol.fromJSON({
+        "/test/file.txt": "B\n",
+        "/tmp/template/file.txt": "B\nC\n",
+        "/tmp/base-template/file.txt": "A\n",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: repoRelPaths(["file.txt"]),
+        newFiles: [],
+        deletedFiles: [],
+        deletedWithLocalEdits: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+      mockDownloadBaseForMerge.mockReturnValueOnce(
+        Effect.succeed({ templateDir: absPath("/tmp/base-template"), cleanup: vi.fn() }),
+      );
+      mockMergeOneFile.mockReturnValueOnce(
+        Effect.succeed({
+          file: repoRelPath("file.txt"),
+          outcome: classifyMergeOutcome("B\nC\n"),
+        }),
+      );
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [
+          {
+            path: repoRelPath("file.txt"),
+            type: "modified" as const,
+            localContent: "B\n",
+            templateContent: "B\nC\n",
+          },
+        ],
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: true, yes: false, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      expect(mockLog.info).toHaveBeenCalledWith(expect.stringContaining("Nothing to push"));
+      // 一覧そのものが出ない（送るものが 1 件も無い）
+      expect(mockLogDiffSummary).not.toHaveBeenCalled();
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 
     it("未解決の衝突があっても PR に載る内容にコンフリクトマーカーが混入しない", async () => {
@@ -2914,7 +2970,7 @@ describe("未追跡ファイルの追跡フロー", () => {
     ).rejects.toThrow("Failed to read .ziku/ziku.jsonc");
   });
 
-  it("新規追跡パターンが同一 push でテンプレの ziku.jsonc にも届く（codex P2）", async () => {
+  it("新規追跡パターンが同一 push でテンプレの ziku.jsonc にも届く", async () => {
     // ディスク上の ziku.jsonc は旧 include のまま（push 成功後に persistNewlyTracked が書く）。
     // detectDiff には ziku.jsonc が現れない（unchanged 相当で push 対象から漏れるケース）。
     // ローカル・テンプレともに .github/** を既に持つ（だから classify は差分なしと判定した）。

@@ -15,10 +15,10 @@ const {
 const { parse: parseJsonc } = await import("jsonc-parser");
 
 describe("mergeConfigPatterns（要素レベル加法マージ＝和集合）", () => {
-  it("ローカルとテンプレ双方の追加を保持する", () => {
+  it("書き換える文書と取り込む側、双方の追加を保持する", () => {
     const result = mergeConfigPatterns({
-      local: { include: globPatterns([".claude/**", ".eslintrc.json"]), exclude: [] },
-      template: { include: globPatterns([".claude/**", ".github/**"]), exclude: [] },
+      document: { include: globPatterns([".claude/**", ".eslintrc.json"]), exclude: [] },
+      incoming: { include: globPatterns([".claude/**", ".github/**"]), exclude: [] },
     });
     expect(result.include).toEqual([".claude/**", ".eslintrc.json", ".github/**"]);
   });
@@ -26,32 +26,32 @@ describe("mergeConfigPatterns（要素レベル加法マージ＝和集合）", 
   it("削除は伝播しない（片側に無いパターンも結果に残る）", () => {
     // ローカルが .old/** を持たなくても、テンプレにあれば結果に残る（和集合）。
     const result = mergeConfigPatterns({
-      local: { include: globPatterns([".claude/**"]), exclude: [] },
-      template: { include: globPatterns([".claude/**", ".old/**"]), exclude: [] },
+      document: { include: globPatterns([".claude/**"]), exclude: [] },
+      incoming: { include: globPatterns([".claude/**", ".old/**"]), exclude: [] },
     });
     expect(result.include).toEqual([".claude/**", ".old/**"]);
   });
 
   it("exclude も独立に和集合でマージする", () => {
     const result = mergeConfigPatterns({
-      local: { include: [], exclude: globPatterns(["a", "b"]) },
-      template: { include: [], exclude: globPatterns(["a", "c"]) },
+      document: { include: [], exclude: globPatterns(["a", "b"]) },
+      incoming: { include: [], exclude: globPatterns(["a", "c"]) },
     });
     expect(result.exclude).toEqual(["a", "b", "c"]);
   });
 
-  it("出現順を保つ（ローカル優先 → テンプレ追加分）", () => {
+  it("出現順を保つ（書き換える文書 → 取り込む側の追加分）", () => {
     const result = mergeConfigPatterns({
-      local: { include: globPatterns(["L1", "shared"]), exclude: [] },
-      template: { include: globPatterns(["shared", "T1"]), exclude: [] },
+      document: { include: globPatterns(["D1", "shared"]), exclude: [] },
+      incoming: { include: globPatterns(["shared", "I1"]), exclude: [] },
     });
-    expect(result.include).toEqual(["L1", "shared", "T1"]);
+    expect(result.include).toEqual(["D1", "shared", "I1"]);
   });
 
   it("重複を除去する", () => {
     const result = mergeConfigPatterns({
-      local: { include: globPatterns([".claude/**", ".claude/**"]), exclude: [] },
-      template: { include: globPatterns([".claude/**"]), exclude: [] },
+      document: { include: globPatterns([".claude/**", ".claude/**"]), exclude: [] },
+      incoming: { include: globPatterns([".claude/**"]), exclude: [] },
     });
     expect(result.include).toEqual([".claude/**"]);
   });
@@ -184,7 +184,41 @@ describe("computeScopedZikuConfig（テンプレ側の内容 + 明示した追�
     });
 
     expect(merged).toContain("// 共通ルール");
-    expect(parseJsonc(merged).include).toEqual([".mcp.json", ".claude/**"]);
+    expect(parseJsonc(merged).include).toEqual([".claude/**", ".mcp.json"]);
+  });
+
+  it("テンプレートの並びを変えず、追加分を末尾に付ける", async () => {
+    // 書き換える先はテンプレートの文書なので、並べ替えると 1 行の追加が配列全体の
+    // 差し替えになり、要素間の注釈ごと入れ替わった差分がテンプレートの PR に出る。
+    vol.fromJSON({
+      "/template/.ziku/ziku.jsonc": JSON.stringify(
+        { include: [".claude/**", ".github/**"] },
+        null,
+        2,
+      ),
+    });
+
+    const merged = await computeScopedZikuConfig({
+      templateDir: absPath("/template"),
+      additionalIncludes: globPatterns([".mcp.json", ".claude/**"]),
+    });
+
+    expect(parseJsonc(merged).include).toEqual([".claude/**", ".github/**", ".mcp.json"]);
+  });
+
+  it("追加分がすべてテンプレートにあれば元の内容をそのまま返す", async () => {
+    // 送るものが無い push で `ziku.jsonc` だけが差分として出るのを防ぐ。
+    const raw = ["{", "  // 共通ルール", '  "include": [".claude/**", ".github/**"]', "}", ""].join(
+      "\n",
+    );
+    vol.fromJSON({ "/template/.ziku/ziku.jsonc": raw });
+
+    expect(
+      await computeScopedZikuConfig({
+        templateDir: absPath("/template"),
+        additionalIncludes: globPatterns([".github/**"]),
+      }),
+    ).toBe(raw);
   });
 });
 

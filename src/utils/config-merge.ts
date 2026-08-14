@@ -13,7 +13,7 @@
  *   プロジェクトでは、lock に記録される base は合成された部分集合である一方、履歴テンプレ
  *   （ベースのコミットからのダウンロード）は full なので両者が矛盾する。この矛盾下で削除を伝播させると、
  *   ユーザーが未選択にしただけのテンプレ側パターンを「削除」とみなして push で消してしまう
- *   （全下流に波及する事故 / codex review P1）。
+ *   （全下流に波及する事故）。
  * - 和集合なら、ローカルの追加もテンプレの追加も保持し、いかなるパターンも削除しないため、
  *   テンプレートを壊さず・ローカルの追加も失わない。
  *
@@ -31,8 +31,8 @@ import { unionPatterns } from "./patterns";
 import { ZIKU_CONFIG_FILE, generateZikuJsonc, withPatterns } from "./ziku-config";
 
 export interface ConfigPatterns {
-  readonly include: GlobPattern[];
-  readonly exclude: GlobPattern[];
+  readonly include: readonly GlobPattern[];
+  readonly exclude: readonly GlobPattern[];
 }
 
 const EMPTY_PATTERNS: ConfigPatterns = { include: [], exclude: [] };
@@ -40,16 +40,17 @@ const EMPTY_PATTERNS: ConfigPatterns = { include: [], exclude: [] };
 /**
  * include / exclude を要素レベルで加法マージ（和集合）する純粋関数。
  *
- * ローカル優先の出現順で、ローカルにもテンプレにもあるパターンを保持する。
- * いずれの側のパターンも削除しない（削除は伝播しない）。
+ * `document` は、この結果を書き戻す先の `ziku.jsonc` が今持っているパターン。その並びを
+ * 保ったまま `incoming` の追加分を末尾へ積む（{@link unionPatterns}）。いずれの側の
+ * パターンも削除しない（削除は伝播しない）。
  */
 export function mergeConfigPatterns(opts: {
-  local: ConfigPatterns;
-  template: ConfigPatterns;
+  document: ConfigPatterns;
+  incoming: ConfigPatterns;
 }): ConfigPatterns {
   return {
-    include: unionPatterns(opts.local.include, opts.template.include).merged,
-    exclude: unionPatterns(opts.local.exclude, opts.template.exclude).merged,
+    include: unionPatterns(opts.document.include, opts.incoming.include).merged,
+    exclude: unionPatterns(opts.document.exclude, opts.incoming.exclude).merged,
   };
 }
 
@@ -70,7 +71,7 @@ interface ConfigDocument {
  * ファイルが無ければ undefined（base が無いケースの判定に使う）。
  *
  * 構文が壊れていれば、ユーザーが手で直せる失敗として報告して中断する。パターン無しとして
- * 扱わないのは、ここで読んだ内容が union の入力であると同時に、{@link renderMergedConfig} が
+ * 扱わないのは、ここで読んだ内容が union の入力であると同時に、{@link renderUnionInto} が
  * 書き戻す先の土台でもあるため。壊れた側を空集合とみなすと、その側のパターンを 1 つ残らず
  * 落とした内容を「マージ結果」として書き出す。テンプレート側でそれが起きると、パターンを
  * 失った `ziku.jsonc` が PR に載り、マージされた時点で全プロジェクトの init / pull が
@@ -108,13 +109,22 @@ async function readConfigAt(dir: AbsPath): Promise<ConfigDocument | undefined> {
 }
 
 /**
- * union の結果を `ziku.jsonc` の内容として書き出す。
+ * 書き換える対象の文書に `incoming` を和集合で足した `ziku.jsonc` の内容を返す。
  *
  * 元の文書があればその include / exclude だけを差し替え、注釈と他のキーを残す。無い場合
  * （まだ `ziku.jsonc` が存在しないテンプレート / プロジェクト）だけ新規に生成する。
+ *
+ * union の並びの基準（{@link unionPatterns} の `base`）と書き戻し先の文書を、同じ 1 つの
+ * 引数から導く。マージ済みのパターン列を受け取る形にすると「テンプレートの文書を、ローカルを
+ * 先にした並びで書き換える」組み合わせが作れてしまい、既存要素が並べ替わって配列全体の
+ * 差し替えになる（追記のはずの差分が全行の入れ替えとして PR に出る）。
  */
-function renderMergedConfig(base: ConfigDocument | undefined, merged: ConfigPatterns): string {
-  return base === undefined ? generateZikuJsonc(merged) : withPatterns(base.raw, merged);
+function renderUnionInto(document: ConfigDocument | undefined, incoming: ConfigPatterns): string {
+  const merged = mergeConfigPatterns({
+    document: document?.patterns ?? EMPTY_PATTERNS,
+    incoming,
+  });
+  return document === undefined ? generateZikuJsonc(merged) : withPatterns(document.raw, merged);
 }
 
 /** 2 つのパターン配列が集合として等しいか（順序・重複を無視）。 */
@@ -152,7 +162,8 @@ export async function analyzeConfigDrift(
   const [local, template] = await Promise.all([readConfigAt(targetDir), readConfigAt(templateDir)]);
   const l = local?.patterns ?? EMPTY_PATTERNS;
   const t = template?.patterns ?? EMPTY_PATTERNS;
-  const union = mergeConfigPatterns({ local: l, template: t });
+  // どちら向きの判定も集合の包含だけを見るので、並びの基準はどちらでも結果が変わらない。
+  const union = mergeConfigPatterns({ document: l, incoming: t });
   const eq = (a: ConfigPatterns, b: ConfigPatterns): boolean =>
     sameSet(a.include, b.include) && sameSet(a.exclude, b.exclude);
   return {
@@ -173,11 +184,12 @@ export async function analyzeConfigDrift(
  * 追跡選択の永続化（`persistNewlyTracked`）は push 成功後に走るため、ディスク内容だけを
  * 読むと新規パターンが union から漏れ、テンプレにファイル本体だけ届いて include が届かない
  * （他プロジェクトの init/pull が拾えるのが 2 回目の push 後になる）。これを防ぐため、
- * 確定した新規追跡パターンをローカル側へ加えてから union を取る（codex P2）。
+ * 確定した新規追跡パターンを取り込む側へ加えてから union を取る。
  *
- * 結果はローカルの `ziku.jsonc` を土台に組み立てる（{@link renderMergedConfig}）。この内容は
+ * 結果はローカルの `ziku.jsonc` を土台に組み立てる（{@link renderUnionInto}）。この内容は
  * pull ならローカルへ書き戻され、push ならローカルの `ziku.jsonc` を送ると決めた場面で使われる
- * ので、どちらもローカルの注釈が残る側が正しい土台になる。
+ * ので、どちらもローカルの注釈が残る側が正しい土台になる。並びもローカルの文書が基準になり、
+ * 取り込む分（新規追跡パターン → テンプレートの追加分）が末尾へ積まれる。
  */
 export async function computeMergedZikuConfig(opts: {
   targetDir: AbsPath;
@@ -189,18 +201,12 @@ export async function computeMergedZikuConfig(opts: {
     readConfigAt(opts.templateDir),
   ]);
 
-  const localBase = local?.patterns ?? EMPTY_PATTERNS;
-  const localWithExtra: ConfigPatterns = {
-    include: [...localBase.include, ...(opts.extraIncludes ?? [])],
-    exclude: localBase.exclude,
-  };
+  const templatePatterns = template?.patterns ?? EMPTY_PATTERNS;
 
-  const merged = mergeConfigPatterns({
-    local: localWithExtra,
-    template: template?.patterns ?? EMPTY_PATTERNS,
+  return renderUnionInto(local, {
+    include: [...(opts.extraIncludes ?? []), ...templatePatterns.include],
+    exclude: templatePatterns.exclude,
   });
-
-  return renderMergedConfig(local, merged);
 }
 
 /**
@@ -253,18 +259,16 @@ export async function findLocalOnlyPatternsForPaths(opts: {
  * （issue #90 で懸念されていたリスク）。この関数はテンプレの内容 + 明示的に渡した
  * 追加分だけを union するため、無関係なパターンを一切巻き込まない。
  *
- * 結果はテンプレートの `ziku.jsonc` を土台に組み立てる（{@link renderMergedConfig}）。この
+ * 結果はテンプレートの `ziku.jsonc` を土台に組み立てる（{@link renderUnionInto}）。この
  * 内容はテンプレートへ送るだけでローカルへは書き戻さない（`push-plan.ts` の
- * `ZikuConfigWriteBack`）ので、残すべき注釈はテンプレート側のもの。
+ * `ZikuConfigWriteBack`）ので、残すべき注釈はテンプレート側のもの。並びもテンプレートの
+ * 文書が基準になるため、既存パターンは動かず追加分だけが末尾に付く。追加分が既にテンプレート
+ * にあるだけなら内容は 1 文字も変わらず、送るものが無いと判定される。
  */
 export async function computeScopedZikuConfig(opts: {
   templateDir: AbsPath;
   additionalIncludes: readonly GlobPattern[];
 }): Promise<string> {
   const template = await readConfigAt(opts.templateDir);
-  const merged = mergeConfigPatterns({
-    local: { include: [...opts.additionalIncludes], exclude: [] },
-    template: template?.patterns ?? EMPTY_PATTERNS,
-  });
-  return renderMergedConfig(template, merged);
+  return renderUnionInto(template, { include: opts.additionalIncludes, exclude: [] });
 }

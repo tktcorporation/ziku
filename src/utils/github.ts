@@ -13,6 +13,7 @@ import type {
 } from "../modules/schemas";
 import { blobShaSchema, commitShaSchema } from "../modules/schemas";
 import { transportTextToBytes } from "./file-content";
+import { ZIKU_CONFIG_FILE } from "./ziku-config";
 
 export interface PushOptions {
   owner: string;
@@ -33,23 +34,91 @@ export interface PushOptions {
    * 404 になる。必須にすることで、宛先の解決を呼び出し側へ強制する。
    */
   baseBranch: string;
+  /**
+   * 送るファイルが宛先に既にあるときの扱い。
+   *
+   * - `replace`（既定）: 既存の内容を置き換える。ローカルの変更を届ける `ziku push`。
+   * - `fail`: 副作用の前に失敗する。「まだ無いファイルを足す」操作（`ziku setup`）が、
+   *   既に設定済みのテンプレートを規定値で書き戻さないための歯止め。宛先の状態を事前に
+   *   確かめられなかった実行でも、この判定は PR に載せる内容と同じ一覧から導かれるので
+   *   すり抜けない。
+   */
+  onExistingFiles?: "replace" | "fail";
 }
 
 /**
- * GitHub API を使って PR を作成
+ * GitHub API を使って PR を作成する。
+ *
+ * 処理は 2 段に分かれる。{@link preparePush} が読み取りと検証だけを行い、
+ * {@link applyPush} が副作用（fork の作成・ブランチ・コミット・PR）だけを行う。
+ * 検証が済むまで GitHub 上には何も作らないので、失敗しても後片付けの要る痕跡が残らない。
  */
 export async function createPullRequest(token: string, options: PushOptions): Promise<PrResult> {
   const octokit = new Octokit({ auth: token });
+  const prepared = await preparePush(octokit, options);
+  return applyPush(octokit, prepared);
+}
+
+/** PR の宛先と文言。送る内容とは別に運ぶ。 */
+interface PullRequestMeta {
+  readonly owner: string;
+  readonly repo: string;
+  readonly title: string;
+  readonly body: string;
+  readonly baseBranch: string;
+}
+
+/** 送信直前のファイル 1 件。内容はバイト列に、更新先は blob SHA に解決済み。 */
+interface PreparedFile {
+  readonly path: RepoRelPath;
+  readonly bytes: Buffer;
+  /** 宛先に同名のファイルがあればその blob SHA。無ければ新規作成。 */
+  readonly sha: BlobSha | undefined;
+}
+
+/** 送信直前の削除 1 件。宛先に実在することを確かめた blob SHA を持つ。 */
+interface PreparedDeletion {
+  readonly path: RepoRelPath;
+  readonly sha: BlobSha;
+}
+
+/** fork の状態。作成という副作用が要るかどうかだけを表す。 */
+type ForkState = { readonly _tag: "Existing"; readonly name: string } | { readonly _tag: "Absent" };
+
+/**
+ * 読み取りと検証を終えた送信内容。{@link applyPush} はこの型しか受け取らない。
+ *
+ * ここに載る値はすべて解決済み（内容はバイト列、更新先と削除先は blob SHA）で、
+ * `applyPush` には確かめるべきことが残っていない。新しい検証は必要な材料が揃う
+ * {@link preparePush} にしか書けないので、「副作用を起こしてから検証する」順序を後から
+ * 作れない。
+ */
+interface PreparedPush {
+  readonly meta: PullRequestMeta;
+  /** PR の head を置く側（認証ユーザー）。 */
+  readonly forkOwner: string;
+  readonly fork: ForkState;
+  /** 同期ブランチを生やす、宛先ブランチの先端コミット。 */
+  readonly baseSha: string;
+  readonly files: readonly PreparedFile[];
+  readonly deletions: readonly PreparedDeletion[];
+}
+
+/**
+ * GitHub 上に何も作らずに、送信内容を送れる形へ解決する。
+ *
+ * 問い合わせるのは対象リポジトリ（fork ではなく）の宛先ブランチ。同期ブランチはその先端から
+ * 生やすので、blob SHA も存在するパスの一覧も同じものが得られる。fork を先に用意しないのは、
+ * 検証で落ちる実行のために fork を作らないため。
+ */
+async function preparePush(octokit: Octokit, options: PushOptions): Promise<PreparedPush> {
   const { owner, repo, files, title, body, baseBranch } = options;
 
-  // 1. 認証ユーザー情報を取得
   const { data: user } = await octokit.users.getAuthenticated();
   const forkOwner = user.login;
 
-  // 2. fork を確認・作成
-  const forkRepo = await resolveForkRepo(octokit, { owner, repo, forkOwner });
+  const fork = await lookupFork(octokit, { owner, repo, forkOwner });
 
-  // 3. ベースブランチの最新コミット SHA を取得
   const { data: baseBranchRef } = await octokit.repos.getBranch({
     owner,
     repo,
@@ -57,63 +126,57 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
   });
   const baseSha = baseBranchRef.commit.sha;
 
-  // 4. 新しいブランチ名を生成
-  const branchName = `ziku-sync-${Date.now()}`;
+  const shaMap = await fetchBlobShas(octokit, { owner, repo, treeSha: baseSha });
 
-  // 5. fork に新しいブランチを作成
+  checkExistingFiles(options, shaMap);
+
+  return {
+    meta: { owner, repo, title, body: body || generatePrBody(files), baseBranch },
+    forkOwner,
+    fork,
+    baseSha,
+    files: files.map((file) => ({
+      path: file.path,
+      // base64 は入力のバイト列をそのまま符号化する。バイナリを utf-8 として符号化すると
+      // 1 文字が複数バイトへ膨らみ、PR には壊れたファイルが載る。
+      bytes: transportTextToBytes(file.content),
+      sha: shaMap.get(file.path),
+    })),
+    deletions: resolveDeletions(options.deletions ?? [], shaMap, `${owner}/${repo}`),
+  };
+}
+
+/**
+ * 送信内容を GitHub 上へ反映する。ここから先はすべて副作用で、検証は行わない。
+ */
+async function applyPush(octokit: Octokit, prepared: PreparedPush): Promise<PrResult> {
+  const { meta, forkOwner } = prepared;
+  const forkRepo = await ensureFork(octokit, prepared.fork, {
+    owner: meta.owner,
+    repo: meta.repo,
+  });
+
+  const branchName = `ziku-sync-${Date.now()}`;
   await octokit.git.createRef({
     owner: forkOwner,
     repo: forkRepo,
     ref: `refs/heads/${branchName}`,
-    sha: baseSha,
+    sha: prepared.baseSha,
   });
 
-  // 6. 既存ファイルの SHA を一括取得
-  //    getContent を個別に呼ぶと、未存在ファイルで 404 レスポンスが
-  //    @octokit/plugin-request-log によりコンソールに出力されるため、
-  //    getTree で一括取得して Map で引く。
-  const { data: treeData } = await octokit.git.getTree({
-    owner: forkOwner,
-    repo: forkRepo,
-    tree_sha: branchName,
-    recursive: "true",
-  });
-  // 欠けた一覧のまま進むと、既存ファイルの blob SHA を引けず更新が新規作成として送られる。
-  // ユーザーが取れる行動（リポジトリのファイル数を減らす）があるので、分類済みの失敗にする。
-  if (treeData.truncated) {
-    throw zikuFailure({ kind: "RepoTreeTooLarge", repo: `${forkOwner}/${forkRepo}` });
-  }
-  // GitHub が採番した blob SHA の写像。ziku が計算する内容ハッシュと形が同じなので、
-  // API レスポンスから取り出すここで blob SHA として brand しておく。
-  const shaMap = new Map<string, BlobSha>();
-  for (const item of treeData.tree) {
-    if (item.type === "blob" && item.sha !== undefined && item.sha !== null && item.path) {
-      shaMap.set(item.path, blobShaSchema.parse(item.sha));
-    }
-  }
-
-  // 7. 削除の宛先が揃っているか先に確かめる。1 つでも欠けたまま進むと、サマリで「削除する」と
-  //    見せたファイルが残ったままの PR ができる。ツリー全体が切り詰められた場合と同じく、
-  //    ユーザーが取れる行動（ベースを取り直して push し直す）があるので分類済みの失敗にする。
-  const deletions = resolveDeletions(options.deletions ?? [], shaMap, `${owner}/${repo}`);
-
-  // 8. ファイルを作成または更新
-  for (const file of files) {
+  for (const file of prepared.files) {
     await octokit.repos.createOrUpdateFileContents({
       owner: forkOwner,
       repo: forkRepo,
       path: file.path,
       message: `Update ${file.path}`,
-      // base64 は入力のバイト列をそのまま符号化する。バイナリを utf-8 として符号化すると
-      // 1 文字が複数バイトへ膨らみ、PR には壊れたファイルが載る。
-      content: transportTextToBytes(file.content).toString("base64"),
+      content: file.bytes.toString("base64"),
       branch: branchName,
-      sha: shaMap.get(file.path),
+      sha: file.sha,
     });
   }
 
-  // 9. ファイルを削除
-  for (const deletion of deletions) {
+  for (const deletion of prepared.deletions) {
     await octokit.repos.deleteFile({
       owner: forkOwner,
       repo: forkRepo,
@@ -124,14 +187,13 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
     });
   }
 
-  // 10. PR を作成
   const { data: pr } = await octokit.pulls.create({
-    owner,
-    repo,
-    title,
-    body: body || generatePrBody(files),
+    owner: meta.owner,
+    repo: meta.repo,
+    title: meta.title,
+    body: meta.body,
     head: `${forkOwner}:${branchName}`,
-    base: baseBranch,
+    base: meta.baseBranch,
   });
 
   return {
@@ -139,6 +201,64 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
     number: pr.number,
     branch: branchName,
   };
+}
+
+/**
+ * 「足すだけ」と宣言した送信が、宛先に既にあるファイルを含んでいないか確かめる。
+ *
+ * 判定に使うのは PR へ載せる内容を組み立てるのと同じ一覧なので、宛先の状態を別の問い合わせで
+ * 事前確認できなかった実行でもすり抜けない（`PushOptions.onExistingFiles`）。
+ */
+function checkExistingFiles(options: PushOptions, shaMap: ReadonlyMap<string, BlobSha>): void {
+  match(options.onExistingFiles ?? "replace")
+    .with("replace", () => undefined)
+    .with("fail", () => {
+      const existing = options.files
+        .filter((file) => shaMap.has(file.path))
+        .map((file) => file.path);
+      if (existing.length > 0) {
+        throw zikuFailure({
+          kind: "PushCreateTargetExists",
+          repo: `${options.owner}/${options.repo}`,
+          paths: existing,
+        });
+      }
+      return undefined;
+    })
+    .exhaustive();
+}
+
+/**
+ * ツリーを一括で引き、パスから blob SHA を引ける写像にする。
+ *
+ * getContent を個別に呼ぶと、未存在ファイルで 404 レスポンスが
+ * `@octokit/plugin-request-log` によりコンソールに出力されるため、getTree で一括取得する。
+ */
+async function fetchBlobShas(
+  octokit: Octokit,
+  target: { owner: string; repo: string; treeSha: string },
+): Promise<ReadonlyMap<string, BlobSha>> {
+  const { data: treeData } = await octokit.git.getTree({
+    owner: target.owner,
+    repo: target.repo,
+    tree_sha: target.treeSha,
+    recursive: "true",
+  });
+  // 欠けた一覧のまま進むと、既存ファイルの blob SHA を引けず更新が新規作成として送られる。
+  // ユーザーが取れる行動（リポジトリのファイル数を減らす）があるので、分類済みの失敗にする。
+  if (treeData.truncated) {
+    throw zikuFailure({ kind: "RepoTreeTooLarge", repo: `${target.owner}/${target.repo}` });
+  }
+
+  // GitHub が採番した blob SHA の写像。ziku が計算する内容ハッシュと形が同じなので、
+  // API レスポンスから取り出すここで blob SHA として brand しておく。
+  const shaMap = new Map<string, BlobSha>();
+  for (const item of treeData.tree) {
+    if (item.type === "blob" && item.sha !== undefined && item.sha !== null && item.path) {
+      shaMap.set(item.path, blobShaSchema.parse(item.sha));
+    }
+  }
+  return shaMap;
 }
 
 /**
@@ -153,8 +273,8 @@ function resolveDeletions(
   deletions: readonly { readonly path: RepoRelPath }[],
   shaMap: ReadonlyMap<string, BlobSha>,
   repo: string,
-): { path: RepoRelPath; sha: BlobSha }[] {
-  const resolved: { path: RepoRelPath; sha: BlobSha }[] = [];
+): PreparedDeletion[] {
+  const resolved: PreparedDeletion[] = [];
   const missing: RepoRelPath[] = [];
   for (const deletion of deletions) {
     const sha = shaMap.get(deletion.path);
@@ -172,42 +292,57 @@ function resolveDeletions(
 const FORK_PROPAGATION_WAIT_MS = 3000;
 
 /**
+ * PR の head に使える fork が既にあるかを問い合わせる。作成はしない（{@link ensureFork}）。
+ *
+ * 既存 fork の問い合わせが失敗したときは「無い」に倒す。未 fork なら 404 が返るが、それ以外の
+ * 理由（トークンの失効等）でも作成が同じ理由で失敗し、そちらの例外が呼び出し側へ届く。
+ *
+ * 同名のリポジトリが見つかっても、対象の fork でなければ使わない（{@link isForkOf}）。
+ * 無関係なリポジトリへ同期ブランチを作ると、GitHub のエラーがそのまま出て原因が分からない。
+ * この判定は読み取りだけで済むので、副作用の前に済ませる。
+ */
+async function lookupFork(
+  octokit: Octokit,
+  target: { owner: string; repo: string; forkOwner: string },
+): Promise<ForkState> {
+  const existing = await octokit.repos
+    .get({ owner: target.forkOwner, repo: target.repo })
+    .then(({ data }) => data)
+    .catch(() => undefined);
+
+  if (existing === undefined) return { _tag: "Absent" };
+
+  if (!isForkOf(existing, target)) {
+    throw zikuFailure({
+      kind: "ForkNameTaken",
+      repo: `${target.owner}/${target.repo}`,
+      existing: `${target.forkOwner}/${target.repo}`,
+    });
+  }
+  return { _tag: "Existing", name: existing.name };
+}
+
+/**
  * PR の head に使う fork のリポジトリ名を返す。まだ無ければ fork を作る。
  *
  * 作成の失敗は包み直さずそのまま投げる。Octokit の例外は HTTP ステータスを持っており、
  * 呼び出し側はそれを見て「権限が足りない」「レート制限」をユーザー向けの案内へ分類する
  * （{@link classifyGitHubApiFailure}）。`Effect.runPromise` で包むと失敗が FiberFailure に
  * 埋もれ、ステータスごと分類の材料が失われる。
- *
- * 既存 fork の問い合わせが失敗したときだけ作成へ倒す。未 fork なら 404 が返るが、それ以外の
- * 理由（トークンの失効等）でも作成が同じ理由で失敗し、そちらの例外が呼び出し側へ届く。
- *
- * 同名のリポジトリが見つかっても、対象の fork でなければ使わない（{@link isForkOf}）。
- * 無関係なリポジトリへ同期ブランチを作ると、GitHub のエラーがそのまま出て原因が分からない。
  */
-async function resolveForkRepo(
+function ensureFork(
   octokit: Octokit,
-  target: { owner: string; repo: string; forkOwner: string },
+  fork: ForkState,
+  target: { owner: string; repo: string },
 ): Promise<string> {
-  const existing = await octokit.repos
-    .get({ owner: target.forkOwner, repo: target.repo })
-    .then(({ data }) => data)
-    .catch(() => undefined);
-
-  if (existing !== undefined) {
-    if (!isForkOf(existing, target)) {
-      throw zikuFailure({
-        kind: "ForkNameTaken",
-        repo: `${target.owner}/${target.repo}`,
-        existing: `${target.forkOwner}/${target.repo}`,
-      });
-    }
-    return existing.name;
-  }
-
-  const { data } = await octokit.repos.createFork({ owner: target.owner, repo: target.repo });
-  await sleep(FORK_PROPAGATION_WAIT_MS);
-  return data.name;
+  return match(fork)
+    .with({ _tag: "Existing" }, ({ name }) => Promise.resolve(name))
+    .with({ _tag: "Absent" }, async () => {
+      const { data } = await octokit.repos.createFork({ owner: target.owner, repo: target.repo });
+      await sleep(FORK_PROPAGATION_WAIT_MS);
+      return data.name;
+    })
+    .exhaustive();
 }
 
 /**
@@ -461,26 +596,63 @@ function classifyRepoResponse(res: Response, authenticated: boolean): RepoExiste
 }
 
 /**
- * テンプレートリポジトリがセットアップ済み（.ziku/ziku.jsonc が存在する）か確認する。
+ * リモートのテンプレートリポジトリが ziku 設定済み（`.ziku/ziku.jsonc` がある）か。
  *
- * 背景: リポジトリが存在しても .ziku/ziku.jsonc がなければテンプレートとして
- * 機能しないため、候補の優先順位付けやユーザーへのヒント表示に利用する。
- * GitHub Contents API で軽量に確認。
+ * `Unknown` を分けるのは、確認できなかった状態を「設定されていない」に潰すと、既に設定済みの
+ * テンプレートを規定値で書き戻す操作（`ziku setup --remote`）が通ってしまうため。呼び出し側は
+ * 3 ケースを網羅して扱う。
+ *
+ * ライフサイクル: {@link fetchRepoSetupState} が返し、`init` は候補の並べ替えに、`setup` は
+ * 「作るか、既に設定済みとして何もしないか」の判断（`src/commands/setup.ts` の `planSetup`）に
+ * 使う。
  */
-export function checkRepoSetup(owner: string, repo: string): Promise<boolean> {
+export type RepoSetupState =
+  | { readonly _tag: "Configured" }
+  | { readonly _tag: "NotConfigured" }
+  | {
+      readonly _tag: "Unknown";
+      /** 確認できなかった事情。HTTP ステータス文か例外のメッセージ。 */
+      readonly reason: string;
+    };
+
+/**
+ * テンプレートリポジトリが ziku 設定済みか問い合わせる。GitHub Contents API で軽量に確認。
+ *
+ * 認証トークンがあれば付ける理由は {@link checkRepoExists} と同じ（未認証の 60req/h と、
+ * プライベートリポジトリの 404 化を避ける）。
+ */
+export function fetchRepoSetupState(owner: string, repo: string): Promise<RepoSetupState> {
   const headers = githubAuthHeaders(getGitHubToken());
   return Effect.runPromise(
-    Effect.tryPromise(() =>
-      fetch(`https://api.github.com/repos/${owner}/${repo}/contents/.ziku/ziku.jsonc`, {
-        method: "HEAD",
-        headers,
+    Effect.tryPromise({
+      try: () =>
+        fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${ZIKU_CONFIG_FILE}`, {
+          method: "HEAD",
+          headers,
+        }),
+      catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+    }).pipe(
+      Effect.map((res): RepoSetupState => {
+        if (res.ok) return { _tag: "Configured" };
+        if (res.status === 404) return { _tag: "NotConfigured" };
+        return { _tag: "Unknown", reason: res.statusText || `HTTP ${res.status}` };
       }),
-    ).pipe(
-      Effect.map((res) => res.ok),
-      // ネットワークエラー等の場合は不明として false を返す
-      Effect.orElseSucceed(() => false),
+      Effect.catchAll((cause) =>
+        Effect.succeed<RepoSetupState>({ _tag: "Unknown", reason: cause.message }),
+      ),
     ),
   );
+}
+
+/**
+ * テンプレートとして使える状態だと確かめられたか。
+ *
+ * 候補の並べ替え（`init` のテンプレート選択）専用。確認できなかった場合も false になるので、
+ * 「設定済みのものを上書きしないためのガード」には使えない。そちらは 3 ケースを扱える
+ * {@link fetchRepoSetupState} を直接使う。
+ */
+export function checkRepoSetup(owner: string, repo: string): Promise<boolean> {
+  return fetchRepoSetupState(owner, repo).then((state) => state._tag === "Configured");
 }
 
 /**

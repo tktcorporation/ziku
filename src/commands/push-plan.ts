@@ -358,6 +358,78 @@ export interface PushPayload {
 }
 
 /**
+ * 送信対象として確定した集合。
+ *
+ * 送る中身（{@link PushPayload}）と、それを組み立てる材料を 1 つの値にまとめる。サマリの行は
+ * この値からしか作れない（{@link pushSummaryRows}）ので、「送る集合」と「見せる集合」を別々に
+ * 組み立てた消費者は存在しえない。付け足すファイルの反映も {@link withAutoUpdatedFile} を
+ * 通り、payload と行の両方へ同時に載る。
+ */
+export interface PushSend {
+  /** 実際にテンプレートへ送る内容と削除。 */
+  readonly payload: PushPayload;
+  /** 送信対象として選ばれた差分。行を組み直す材料になる。 */
+  readonly pushableFiles: readonly ChangedFileDiff[];
+  /** 送るとテンプレート側の削除を取り消すパス。行の注記に使う。 */
+  readonly restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
+}
+
+/**
+ * 選択に対して実際に送るものがあるか。
+ *
+ * 選択が空でなくても送るものが無いことがある。自動マージの結果や `ziku.jsonc` の和集合が
+ * テンプレートと同一になった場合で、そのまま進むと差分の無い PR を作ろうとして GitHub に
+ * 拒まれる。dry-run のプレビューと実 push が同じ判定を通るので、「プレビューには出たのに
+ * 実行すると何も送られない」組み合わせを作れない。
+ */
+export type PushDelivery =
+  | { readonly _tag: "Nothing" }
+  | { readonly _tag: "Send"; readonly send: PushSend };
+
+/**
+ * 選択済みの差分から、実際に送る集合を決める。
+ *
+ * 送信対象の決定はこの 1 本に閉じる。プレビュー・実 push・サマリ表示のいずれも、ここが
+ * 返した {@link PushSend} からしか「何が送られるか」を読めない。
+ */
+export function planPushDelivery(params: {
+  readonly selected: readonly ChangedFileDiff[];
+  readonly mergedContents: ReadonlyMap<RepoRelPath, PushContent>;
+  readonly restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
+}): PushDelivery {
+  const payload = buildPushPayload(params.selected, params.mergedContents);
+  if (payload.files.length === 0 && payload.deletions.length === 0) return { _tag: "Nothing" };
+  return {
+    _tag: "Send",
+    send: {
+      payload,
+      pushableFiles: params.selected,
+      restoresTemplateDeletion: params.restoresTemplateDeletion,
+    },
+  };
+}
+
+/**
+ * 選択とは別に ziku が付け足すファイル（README の自動更新）を送信対象へ載せる。
+ *
+ * 同じパスが既に載っていれば内容を差し替え、無ければ足す。送る集合への追加をこの関数に
+ * 限ることで、PR には出るのにサマリには出ないファイルを作れない（行は常に payload から
+ * 導き直される）。
+ */
+export function withAutoUpdatedFile(send: PushSend, file: PushFile): PushSend {
+  const replaced = send.payload.files.some((f) => f.path === file.path);
+  return {
+    ...send,
+    payload: {
+      ...send.payload,
+      files: replaced
+        ? send.payload.files.map((f) => (f.path === file.path ? file : f))
+        : [...send.payload.files, file],
+    },
+  };
+}
+
+/**
  * 選択済みの差分から送信ペイロードを組み立てる。
  *
  * 内容は自動マージ済みならその結果を、それ以外はローカルの内容をそのまま採用する。
@@ -373,13 +445,13 @@ export interface PushPayload {
  * テンプレートで内容が違う」ファイルだが、実際に送る内容はローカルの内容とは限らない
  * （自動マージの結果・`ziku.jsonc` の和集合）。組み立てた内容がテンプレートと同一になった
  * ファイルを送ると、差分の無いコミットだけの PR ができて GitHub が PR の作成を拒む。
- * サマリーの行も同じ関数を通るので、「0 件と表示しながら中身の無い送信をする」組み合わせは
- * 作れない。
+ * サマリーの行（{@link pushSummaryRows}）はここが返した payload から導くので、「見せた集合と
+ * 送る集合が違う」組み合わせは作れない。
  *
  * 削除は {@link asDeletablePath} を通ったパスだけが載る。設定ファイルの削除がここへ来ても
  * 落とす理由は {@link DeletablePath} を参照。
  */
-export function buildPushPayload(
+function buildPushPayload(
   selected: readonly ChangedFileDiff[],
   mergedContents: ReadonlyMap<RepoRelPath, PushContent>,
 ): PushPayload {
@@ -794,24 +866,23 @@ export type PushSummaryRow =
   | { readonly _tag: "AutoUpdated"; readonly path: RepoRelPath };
 
 /**
- * サマリーに出す行を決める。
+ * サマリーに出す行を、実際に送る集合から導く。
  *
- * 差分の種別と行数は、ディスク上のローカル内容ではなく実際に送る内容から計算する。
- * auto-merge や `ziku.jsonc` の和集合では両者が食い違い、そのまま表示すると PR の差分と
- * サマリーの数字がずれる。送る内容がテンプレートと同一になったファイルは行に含めない。
+ * 差分の種別と行数は、ディスク上のローカル内容ではなく送る内容から計算する。auto-merge や
+ * `ziku.jsonc` の和集合では両者が食い違い、そのまま表示すると PR の差分とサマリーの数字が
+ * ずれる。送る内容がテンプレートと同一になったファイルは {@link PushSend} の payload に
+ * 載っていないので、行にも現れない。
+ *
+ * 引数を {@link PushSend} に限るのは、送る集合と別のリスト（選択そのもの・ディスク上の差分）
+ * から行を組み立てる経路を無くすため。表示したいものは、まず送る集合に載せる必要がある。
  */
-export function buildPushSummaryRows(params: {
-  readonly pushableFiles: readonly ChangedFileDiff[];
-  readonly files: readonly { readonly path: RepoRelPath; readonly content: string }[];
-  readonly deletions: readonly { readonly path: RepoRelPath }[];
-  readonly restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
-}): PushSummaryRow[] {
-  const pushedContentMap = new Map(params.files.map((f) => [f.path, f.content]));
+export function pushSummaryRows(send: PushSend): PushSummaryRow[] {
+  const pushedContentMap = new Map(send.payload.files.map((f) => [f.path, f.content]));
   const rows: PushSummaryRow[] = [];
 
-  for (const file of params.pushableFiles) {
+  for (const file of send.pushableFiles) {
     const pushedContent = pushedContentMap.get(file.path);
-    const isDeletion = params.deletions.some((d) => d.path === file.path);
+    const isDeletion = send.payload.deletions.some((d) => d.path === file.path);
     if (pushedContent === undefined && !isDeletion) continue;
 
     const diff = effectivePushDiff(file, pushedContent);
@@ -819,12 +890,12 @@ export function buildPushSummaryRows(params: {
     rows.push({
       _tag: "Change",
       diff,
-      restoresTemplateDeletion: params.restoresTemplateDeletion.has(file.path),
+      restoresTemplateDeletion: send.restoresTemplateDeletion.has(file.path),
     });
   }
 
-  for (const file of params.files) {
-    if (!params.pushableFiles.some((pf) => pf.path === file.path)) {
+  for (const file of send.payload.files) {
+    if (!send.pushableFiles.some((pf) => pf.path === file.path)) {
       rows.push({ _tag: "AutoUpdated", path: file.path });
     }
   }
@@ -836,7 +907,7 @@ export function buildPushSummaryRows(params: {
  * 実際に送る内容で差分を組み直す。送る内容がテンプレートと同一なら `undefined`。
  *
  * 「テンプレートと内容が違うものだけを送る」という規則をこの 1 本に閉じる。送信ペイロード
- * （{@link buildPushPayload}）とサマリーの行（{@link buildPushSummaryRows}）がどちらもここを
+ * （{@link buildPushPayload}）とサマリーの行（{@link pushSummaryRows}）がどちらもここを
  * 通るので、送る集合と見せる集合が食い違わない。
  *
  * `pushedContent` が無いのは削除を送る場合で、そのときは元の差分をそのまま使う。
