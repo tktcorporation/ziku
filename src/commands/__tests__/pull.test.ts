@@ -12,7 +12,13 @@ import type {
   SyncPoint,
   TemplateSource,
 } from "../../modules/schemas";
-import { baseCommitSha, baseHashesOf, markMerging, markSynced } from "../../modules/schemas";
+import {
+  baseCommitSha,
+  baseHashesOf,
+  createPendingLock,
+  markMerging,
+  markSynced,
+} from "../../modules/schemas";
 import type { FileMergeOutcome, MergeConflictFilesInput } from "../../utils/merge";
 
 // fs モジュールをモック
@@ -188,7 +194,7 @@ const { downloadTemplateToTemp, buildCommitPinnedSource } = await import("../../
 const { zikuConfigExists } = await import("../../utils/ziku-config");
 const { loadLock, saveLock } = await import("../../utils/lock");
 const { loadTemplateConfig } = await import("../../utils/template-config");
-const { hashFiles } = await import("../../utils/hash");
+const { hashContent, hashFiles } = await import("../../utils/hash");
 const { classifyFiles, mergeOneFile, writeFileEnsureDir, downloadBaseForMerge } =
   await import("../../utils/merge");
 // マージ結果の判定は本物を使う（"../../utils/merge" のモックは index 経由の import だけを
@@ -260,6 +266,23 @@ async function captureFailure(run: () => Promise<unknown>): Promise<ZikuFailure>
 function mergingLock(conflicts: PendingConflicts, next: SyncPoint): LockState {
   return markMerging(baseLock, next, conflicts);
 }
+
+const localTemplateSource: TemplateSource = { kind: "local", path: absPath("/tmp/local-template") };
+
+/**
+ * ローカルテンプレートを参照する同期済みロック。
+ *
+ * ローカルソースには過去のツリーを取り直す手段が無いため、`--continue` が読むのは常に現在の
+ * テンプレートディレクトリになる。その経路を通すためのフィクスチャ。
+ */
+const localBaseLock: ResumableLockState = markSynced(
+  createPendingLock({
+    version: "0.1.0",
+    installedAt: "2024-01-01T00:00:00.000Z",
+    source: localTemplateSource,
+  }),
+  { hashes: hashMap({ ".mcp.json": "abc123" }) },
+);
 
 /**
  * テスト用の CommandContext を生成するヘルパー。
@@ -521,7 +544,6 @@ describe("pullCommand", () => {
       expect(JSON.parse(written).include).toEqual([".a/**", ".b/**", ".c/**"]);
 
       // lock の base[ziku.jsonc] は書き込んだ union のハッシュと一致する（テンプレ縮小版ではない）
-      const { hashContent } = await import("../../utils/hash");
       const saveArg = lastSavedLock();
       expect(baseHashesOf(saveArg)[repoRelPath(".ziku/ziku.jsonc")]).toBe(hashContent(written));
     });
@@ -1473,7 +1495,44 @@ describe("pullCommand", () => {
       const written = mockWriteFileEnsureDir.mock.calls.find(([p]) => p === "/test/.mcp.json");
       expect(written?.[1]?.toString()).toBe("template content");
       expect(cleanup).toHaveBeenCalled();
-      expect(lastSavedLock()).toMatchObject({ sync: "synced" });
+      // ベースに載るのは書き込んだ内容そのもののハッシュ
+      expect(lastSavedLock()).toMatchObject({
+        sync: "synced",
+        base: { hashes: { ".mcp.json": hashContent("template content") } },
+      });
+    });
+
+    it("--continue: ローカルテンプレートが中断後に変わっていても、書き込んだ内容とベースが一致する", async () => {
+      // ローカルソースには中断時点のツリーを取り直す手段が無いので、書き込まれるのは中断後の
+      // 内容になる。ベースを nextBase のまま確定すると、直後から同じファイルが localOnly として
+      // 現れ、次の push が新しいテンプレートの内容をローカルの変更として送り返す。
+      const editedAfterPause = "template content edited after the pause";
+      vol.fromJSON({
+        "/test/.mcp.json": "local content",
+        "/tmp/local-template/.mcp.json": editedAfterPause,
+      });
+
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(
+          markMerging(localBaseLock, { hashes: hashMap({ ".mcp.json": "paused-template-hash" }) }, [
+            pendingConflict(".mcp.json", "noBase"),
+          ]),
+        ),
+      );
+      mockSelectUnmergedResolution.mockResolvedValueOnce("takeTemplate");
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false, continue: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      const written = mockWriteFileEnsureDir.mock.calls.find(([p]) => p === "/test/.mcp.json");
+      expect(written?.[1]?.toString()).toBe(editedAfterPause);
+      expect(lastSavedLock()).toMatchObject({
+        sync: "synced",
+        base: { hashes: { ".mcp.json": hashContent(editedAfterPause) } },
+      });
     });
 
     it("--continue: テンプレートを取り寄せられなければベースを前進させない", async () => {

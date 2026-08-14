@@ -68,8 +68,10 @@ import type {
   PushPayload,
 } from "./push-plan";
 import {
+  alreadySyncedPaths,
   applyPushSelection,
   asPushContent,
+  baseAfterPush,
   buildPushPayload,
   buildPushSummaryRows,
   collectPushCandidates,
@@ -275,27 +277,37 @@ function pushToGitHub(
   });
 }
 
+/** ローカルテンプレートへの書き込みと lock 更新に要るもの。 */
+interface PushToLocalInput {
+  readonly localSource: LocalSource;
+  readonly target: PushTarget;
+  readonly ctx: CommandContextShape;
+  readonly projectDir: AbsPath;
+  readonly args: { yes?: boolean };
+  /**
+   * テンプレート走査に使うパターン。新規追跡ファイルを含む effectivePatterns を渡すことで、
+   * 追跡したファイルもベースに乗り、lock と配置のズレを防ぐ。
+   */
+  readonly patterns: { include: readonly GlobPattern[]; exclude: readonly GlobPattern[] };
+  /**
+   * push される ziku.jsonc の内容をローカルへそのまま書き戻してよいか
+   * （`configWriteBackSafe` の判定結果）。
+   */
+  readonly configWriteBack: boolean;
+  /** push 前からローカルとテンプレートが一致していたパス（`baseAfterPush` が使う）。 */
+  readonly alreadySynced: ReadonlySet<RepoRelPath>;
+}
+
 /**
  * ローカルテンプレートへ push: ファイルを直接コピーする。
  *
- * PR の代わりにテンプレートディレクトリにファイルを書き込み、
- * lock.json の baseHashes を更新する。
+ * PR の代わりにテンプレートディレクトリにファイルを書き込み、lock.json のベースを更新する。
+ * ベースを前進させてよい範囲は `baseAfterPush` が決める。
  *
- * @param patterns baseHashes 再計算に使うパターン。新規追跡ファイルを含む effectivePatterns を
- *   渡すことで、追跡したファイルが baseHashes に反映され、lock と配置のズレを防ぐ。
- * @param configWriteBack push される ziku.jsonc の内容をローカルへそのまま書き戻して
- *   よいか（`configWriteBackSafe` の判定結果）。
  * @returns push したら true、確認でキャンセルされたら false。
  */
-function pushToLocal(
-  localSource: LocalSource,
-  target: PushTarget,
-  ctx: CommandContextShape,
-  projectDir: AbsPath,
-  args: { yes?: boolean },
-  patterns: { include: readonly GlobPattern[]; exclude: readonly GlobPattern[] },
-  configWriteBack: boolean,
-): Effect.Effect<boolean> {
+function pushToLocal(input: PushToLocalInput): Effect.Effect<boolean> {
+  const { localSource, target, ctx, projectDir, args, patterns } = input;
   // ファイルコピーや lock 更新の失敗はユーザーが対処を選べる失敗ではないので、
   // 文言に潰さず defect として運ぶ（`pushToGitHub` と同じ扱い）。
   return Effect.promise(async () => {
@@ -346,17 +358,26 @@ function pushToLocal(
     // ローカルにも merged 内容を書き戻して local==template==base を保つ。
     // スコープ限定 union を送った場合に書き戻せない理由は `configWriteBackSafe` を参照。
     const mergedConfig = target.files.find((f) => isZikuConfigPath(f.path));
-    if (mergedConfig && configWriteBack) {
+    if (mergedConfig && input.configWriteBack) {
       const localConfigPath = joinAbs(projectDir, ZIKU_CONFIG_FILE);
       await mkdir(dirname(localConfigPath), { recursive: true });
       await writeFile(localConfigPath, mergedConfig.content, "utf-8");
     }
 
-    // lock.json の baseHashes を更新（テンプレート側のハッシュを再計算）。
-    // 新規追跡ファイルと ziku.jsonc を含む effectivePatterns で計算するため、
-    // 追跡したファイルも ziku.jsonc も baseHashes に入る（push 後はテンプレと一致する）。
-    const baseHashes = await hashFiles(localSource.path, patterns.include, patterns.exclude);
-    await saveLock(projectDir, markSynced(ctx.lock, { hashes: baseHashes }));
+    // ベースは push 後のテンプレートを走査して組み立てる。走査結果をそのまま採用せず、
+    // 送ったパスと元から一致していたパスだけを前進させる（`baseAfterPush`）。
+    const templateHashes = await hashFiles(localSource.path, patterns.include, patterns.exclude);
+    await saveLock(
+      projectDir,
+      markSynced(ctx.lock, {
+        hashes: baseAfterPush({
+          templateHashes,
+          previousBase: baseHashesOf(ctx.lock),
+          pushed: target,
+          alreadySynced: input.alreadySynced,
+        }),
+      }),
+    );
 
     const totalCount = target.files.length + target.deletions.length;
     log.success(`Pushed ${totalCount} file(s) to ${pc.cyan(localSource.path)}`);
@@ -581,12 +602,13 @@ async function pushProject(params: {
   );
 
   // 分類 + auto-merge。未解決の衝突は控えておき、送信対象に含めようとした時だけ中断する。
-  const { candidatePlan, mergedContents, unresolvedConflicts } = await analyzePushTargets({
-    targetDir,
-    templateDir: ctx.templateDir,
-    lock: ctx.lock,
-    patterns: effectivePatterns,
-  });
+  const { candidatePlan, mergedContents, unresolvedConflicts, alreadySynced } =
+    await analyzePushTargets({
+      targetDir,
+      templateDir: ctx.templateDir,
+      lock: ctx.lock,
+      patterns: effectivePatterns,
+    });
 
   log.step("Detecting changes...");
 
@@ -668,15 +690,16 @@ async function pushProject(params: {
         }),
       )
       .with({ kind: "local" }, (localSource) =>
-        pushToLocal(
+        pushToLocal({
           localSource,
           target,
           ctx,
-          targetDir,
-          { yes: args.yes },
-          effectivePatterns,
-          configResult.writeBackSafe,
-        ),
+          projectDir: targetDir,
+          args: { yes: args.yes },
+          patterns: effectivePatterns,
+          configWriteBack: configResult.writeBackSafe,
+          alreadySynced,
+        }),
       )
       .exhaustive(),
   );
@@ -1027,8 +1050,10 @@ async function analyzePushTargets(params: {
   candidatePlan: PushCandidatePlan;
   mergedContents: Map<RepoRelPath, PushContent>;
   unresolvedConflicts: Set<RepoRelPath>;
+  /** push 前からローカルとテンプレートが一致していたパス。ベースの前進範囲を決めるのに使う。 */
+  alreadySynced: ReadonlySet<RepoRelPath>;
 }> {
-  const { plan } = await analyzeSync({
+  const { plan, hashes } = await analyzeSync({
     targetDir: params.targetDir,
     templateDir: params.templateDir,
     baseHashes: baseHashesOf(params.lock),
@@ -1073,7 +1098,12 @@ async function analyzePushTargets(params: {
     for (const conflict of unresolved) unresolvedConflicts.add(conflict.path);
   }
 
-  return { candidatePlan, mergedContents, unresolvedConflicts };
+  return {
+    candidatePlan,
+    mergedContents,
+    unresolvedConflicts,
+    alreadySynced: alreadySyncedPaths(hashes),
+  };
 }
 
 // ─── コンフリクト解決 ───

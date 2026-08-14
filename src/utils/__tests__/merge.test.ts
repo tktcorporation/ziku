@@ -569,6 +569,30 @@ describe("merge", () => {
       expect(result.content).toBe("\uFEFFline1\nadded\n");
     });
 
+    it("ローカルが削除されている場合はテンプレートの改行コードを保つ", () => {
+      const base = "line1\r\nline2\r\n";
+      const template = "line1\r\nline2\r\ntemplate-added\r\n";
+
+      const result = merge(base, "", template);
+
+      expect(result.content).toContain("\r\n");
+      expect(result.content).not.toMatch(/[^\r]\n/);
+    });
+
+    it("ローカルが削除されている場合はテンプレートの BOM を保つ", () => {
+      const result = merge("\uFEFFline1\n", "", "\uFEFFline1\ntemplate-added\n");
+
+      expect(result.content.startsWith("\uFEFF")).toBe(true);
+      expect(result.content.slice(1)).not.toContain("\uFEFF");
+    });
+
+    it("ローカルもテンプレートも空なら結果も空", () => {
+      const result = merge("line1\r\n", "", "");
+
+      expect(result._tag).toBe("Clean");
+      expect(result.content).toBe("");
+    });
+
     it("BOM 付きファイルの 1 行目から始まるコンフリクトも未解決として検出される", () => {
       const base = "\uFEFForiginal\ntail\n";
       const local = "\uFEFFlocal-change\ntail\n";

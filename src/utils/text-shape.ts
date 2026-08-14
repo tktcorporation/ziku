@@ -31,6 +31,9 @@ export interface TextShape {
  * 改行コードが混在している場合は多数派を採る（同数なら LF）。マージは行を並べ替えるので、
  * どの行がどの改行コードだったかを結果の行へ対応付けることはできない。ファイル全体で
  * 1 つに揃えるほかなく、そのとき変更が最も少ないのが多数派の側になる。
+ *
+ * 内容が空なら LF・BOM 無しを返す。形を読み取る材料が無いときの既定なので、他に材料を持つ
+ * 呼び出し側はそちらを先に見る（`src/utils/merge/three-way-merge.ts`）。
  */
 export function detectTextShape(content: string): TextShape {
   const total = countOccurrences(content, "\n");

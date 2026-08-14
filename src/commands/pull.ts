@@ -41,7 +41,7 @@ import { ZIKU_CONFIG_FILE, withConfigTracked, zikuConfigExists } from "../utils/
 import { loadCommandContext, runCommandEffect, toZikuFailure } from "../services/command-context";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
-import { hashContent } from "../utils/hash";
+import { hashBytes, hashContent } from "../utils/hash";
 import { absPath, joinAbs } from "../utils/paths";
 import type { ConflictRegion, FileMergeOutcome } from "../utils/merge";
 import {
@@ -918,11 +918,11 @@ function loadPausedMerge(targetDir: AbsPath): Effect.Effect<MergingLockState, Zi
  * と同じく、テンプレートの変更を意図して拒否したという意思表示なので、次回以降その差分を
  * 蒸し返さない。
  *
- * 確定するベースは中断時に記録した `merge.nextBase` そのもので、ここでは組み直さない。
- * 中断は削除の問い合わせより手前で起きるため、`nextBase` はテンプレートが削除したファイルの
- * エントリを据え置いた状態で書かれている（{@link baseAfterDeletions}）。そのまま昇格させる
- * ことで、問われないまま削除が失われる経路が無くなり、未処理の削除は次回の pull で改めて
- * ユーザーに提示される。
+ * 確定するベースの土台は中断時に記録した `merge.nextBase`。中断は削除の問い合わせより手前で
+ * 起きるため、`nextBase` はテンプレートが削除したファイルのエントリを据え置いた状態で書かれて
+ * いる（{@link baseAfterDeletions}）。そのまま昇格させることで、問われないまま削除が失われる
+ * 経路が無くなり、未処理の削除は次回の pull で改めてユーザーに提示される。テンプレートの内容で
+ * 置き換えたファイルだけは、書き込んだ内容のハッシュで差し替える（{@link finalizeMergedBase}）。
  *
  * 引数が `MergingLockState` なので、解決待ちでない lock に対しては呼べない。
  */
@@ -977,15 +977,38 @@ async function runContinue(
     });
   }
 
-  if (unmerged.length > 0) {
-    await applyUnmergedChoices(targetDir, lock, unmerged);
-  }
+  const takenFromTemplate =
+    unmerged.length > 0 ? await applyUnmergedChoices(targetDir, lock, unmerged) : {};
 
-  // resolveMerge の戻り値には merge が無いため、確定後に解決待ちの記録が残らない。
-  await saveLock(targetDir, resolveMerge(lock));
+  await saveLock(targetDir, finalizeMergedBase(lock, takenFromTemplate));
 
   log.success("All conflicts resolved");
   outro("Pull complete");
+}
+
+/**
+ * 解決を終えたベースを確定した lock を組み立てる。
+ *
+ * テンプレートの内容で置き換えたファイルは、`nextBase` に記録されたハッシュではなく実際に
+ * 書き込んだ内容のハッシュをベースにする。書き込む内容の取得元が中断時点のツリーである保証は
+ * 無いため（{@link acquireResolutionTemplate}）、`nextBase` をそのまま載せると「ローカルに
+ * ある内容」と「ベースが指す内容」が食い違い、直後から同じファイルが `localOnly` として現れて
+ * 次の push がテンプレートの内容をローカルの変更として送り返す。
+ *
+ * 置き換えたファイルが無ければ到達点は `nextBase` そのものなので、`resolveMerge` で確定する。
+ *
+ * @param takenFromTemplate テンプレートの内容で置き換えたファイルと、書き込んだ内容のハッシュ。
+ */
+function finalizeMergedBase(
+  lock: MergingLockState,
+  takenFromTemplate: HashMap,
+): ResumableLockState {
+  if (Object.keys(takenFromTemplate).length === 0) return resolveMerge(lock);
+
+  return markSynced(lock, {
+    hashes: { ...lock.merge.nextBase.hashes, ...takenFromTemplate },
+    commitSha: lock.merge.nextBase.ref,
+  });
 }
 
 /**
@@ -1044,19 +1067,22 @@ async function findRemainingMarkers(
 /**
  * 自動マージできなかったファイルの扱いをユーザーに選ばせ、選択を適用する。
  *
- * 「テンプレートの内容を取る」を選べる以上、その内容が要る。取り寄せるのはマージを中断した
- * 時点のテンプレート（`merge.nextBase`）で、確定するベースと同じツリーになる。最新を
- * 取り直すと、書き込んだ内容とベースのハッシュが食い違い、次回の pull/push が同じファイルを
- * 変更ありと誤検出する。
+ * 「テンプレートの内容を取る」を選べる以上、その内容が要る。取り寄せ先は中断時点のツリーとは
+ * 限らない（{@link acquireResolutionTemplate}）ので、書き込んだ内容のハッシュを返し、
+ * 呼び出し側がそれをベースとして確定する（{@link finalizeMergedBase}）。ツリーの出所によらず
+ * 「ローカルにある内容」と「ベースが指す内容」が一致するので、次の pull/push が同じファイルを
+ * 変更ありと誤検出しない。
  *
  * テンプレートの取得はどれか 1 つでも「テンプレートを取る」が選ばれたときだけ行う。
  * 全て「ローカルを残す」ならファイルへ触れる必要が無く、ダウンロードは無駄になる。
+ *
+ * @returns テンプレートの内容で置き換えたファイルと、書き込んだ内容のハッシュ。
  */
 async function applyUnmergedChoices(
   targetDir: AbsPath,
   lock: MergingLockState,
   unmerged: readonly UnmergedConflict[],
-): Promise<void> {
+): Promise<HashMap> {
   log.warn(
     `${unmerged.length} file(s) could not be auto-merged. Choose which version to keep for each:`,
   );
@@ -1074,10 +1100,10 @@ async function applyUnmergedChoices(
       .exhaustive();
   }
 
-  if (takingTemplate.length === 0) return;
+  if (takingTemplate.length === 0) return {};
 
-  const template = await acquirePausedTemplate(targetDir, lock);
-  await runCommandEffect(
+  const template = await acquireResolutionTemplate(targetDir, lock);
+  return runCommandEffect(
     copyFromTemplate(takingTemplate, template.dir, targetDir).pipe(
       Effect.ensuring(Effect.sync(template.cleanup)),
     ),
@@ -1085,16 +1111,24 @@ async function applyUnmergedChoices(
 }
 
 /**
- * 中断したマージが対象にしていたテンプレートを取り出す。
+ * 「テンプレートを取る」で書き込む内容の取得元を用意する。
  *
- * GitHub ソースはベースとして確定するコミットへ固定して取り直す。SHA を記録できていない
- * lock（API へ到達できないまま中断した場合）だけは、ソースの ref をそのまま辿るしかない。
- * ローカルソースはディレクトリを直接読むため、取得も後始末も要らない。
+ * 取り出せるのは中断時点のツリーとは限らない。一致するのは、GitHub ソースでベースとして確定する
+ * コミットの SHA を記録できている場合だけで、次の 2 つでは中断後のテンプレートを読むことになる。
+ *
+ * - ローカルソース: ディレクトリを直接読む。過去のツリーを取り直す手段が無い（`SyncBase` が
+ *   ローカルソースでコミット SHA を持たない理由と同じ）。
+ * - GitHub ソースで SHA が未記録: API へ到達できないまま中断した場合で、ソースの ref をそのまま
+ *   辿るしかない。
+ *
+ * ズレたまま整合を保つ仕組みは呼び出し側にある。書き込んだ内容のハッシュをベースへ載せるので
+ * （{@link applyUnmergedChoices} / {@link finalizeMergedBase}）、どのツリーから読んでも
+ * 「ローカルにある内容」と「ベースが指す内容」は一致する。
  *
  * 取得できなければ失敗として返す。ユーザーは接続を直して再開すればよく、その間 lock は
  * 解決待ちのまま残る。
  */
-function acquirePausedTemplate(
+function acquireResolutionTemplate(
   targetDir: AbsPath,
   lock: MergingLockState,
 ): Promise<{ dir: AbsPath; cleanup: () => void }> {
@@ -1124,32 +1158,35 @@ function acquirePausedTemplate(
 }
 
 /**
- * テンプレートの内容でローカルを置き換える。
+ * テンプレートの内容でローカルを置き換え、書き込んだ内容のハッシュを返す。
  *
  * 内容をバイト列のまま運ぶ。バイナリを utf-8 の文字列として読み書きすると、不正バイトが
- * U+FFFD へ置き換わってファイルが壊れる（このカテゴリにはバイナリが含まれる）。
+ * U+FFFD へ置き換わってファイルが壊れる（このカテゴリにはバイナリが含まれる）。ハッシュも
+ * 同じバイト列から計算するので、ディスクを読み直したときの値と一致する。
  *
  * 取り寄せたテンプレートにファイルが無い場合は失敗として返す。書き込む内容が無いまま
  * 進めると、ローカルを残したのにベースだけがテンプレート側へ前進する。
+ *
+ * @returns 置き換えたファイルと、書き込んだ内容のハッシュ。呼び出し側がベースとして確定する。
  */
 function copyFromTemplate(
   files: readonly RepoRelPath[],
   templateDir: AbsPath,
   targetDir: AbsPath,
-): Effect.Effect<void, ZikuFailure> {
-  return Effect.forEach(
-    files,
-    (file) =>
-      Effect.gen(function* () {
-        const bytes = yield* Effect.tryPromise({
-          try: () => readFile(joinAbs(templateDir, file)),
-          catch: (cause) => zikuFailure({ kind: "TemplateFileMissing", path: file }, { cause }),
-        });
-        yield* writeFileEnsureDir(joinAbs(targetDir, file), bytes);
-        log.success(`Took the template version: ${pc.cyan(file)}`);
-      }),
-    { discard: true },
-  );
+): Effect.Effect<HashMap, ZikuFailure> {
+  return Effect.gen(function* () {
+    const written: HashMap = {};
+    for (const file of files) {
+      const bytes = yield* Effect.tryPromise({
+        try: () => readFile(joinAbs(templateDir, file)),
+        catch: (cause) => zikuFailure({ kind: "TemplateFileMissing", path: file }, { cause }),
+      });
+      yield* writeFileEnsureDir(joinAbs(targetDir, file), bytes);
+      written[file] = hashBytes(bytes);
+      log.success(`Took the template version: ${pc.cyan(file)}`);
+    }
+    return written;
+  });
 }
 
 function logPullSummary(classification: {

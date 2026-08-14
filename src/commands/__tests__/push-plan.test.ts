@@ -10,11 +10,19 @@ import { classifyMergeOutcome } from "../../utils/merge/types";
 import type { SyncPlan, ZikuConfigState } from "../../utils/merge/sync-plan";
 import type { ConfigDrift } from "../../utils/config-merge";
 import type { FileDiff, GitHubSource, RepoRelPath } from "../../modules/schemas";
-import { commitSha, globPatterns, repoRelPath, repoRelPaths } from "../../__tests__/brands";
 import {
+  commitSha,
+  globPatterns,
+  hashMap,
+  repoRelPath,
+  repoRelPaths,
+} from "../../__tests__/brands";
+import {
+  alreadySyncedPaths,
   applyPushSelection,
   asDeletablePath,
   asPushContent,
+  baseAfterPush,
   buildPushPayload,
   buildPushSummaryRows,
   collectPushCandidates,
@@ -31,7 +39,19 @@ import {
   selectedUnresolvedConflicts,
   withNewlyTrackedPatterns,
 } from "../push-plan";
-import type { ChangedFileDiff, PushContent } from "../push-plan";
+import type { ChangedFileDiff, DeletablePath, PushContent } from "../push-plan";
+
+/**
+ * 削除として送れるパスを組み立てる。
+ *
+ * `asDeletablePath` は設定ファイルを弾くため `undefined` を返しうる。テストの入力は通常の
+ * 同期ファイルに限るので、弾かれたらフィクスチャの誤りとして落とす。
+ */
+function deletablePath(path: string): DeletablePath {
+  const deletable = asDeletablePath(repoRelPath(path));
+  if (deletable === undefined) throw new Error(`fixture must be deletable: ${path}`);
+  return deletable;
+}
 
 const CONFIG_PATH = repoRelPath(".ziku/ziku.jsonc");
 
@@ -391,6 +411,111 @@ describe("buildPushPayload", () => {
 
     expect(payload.deletions).toEqual([{ path: "gone.txt" }]);
     expect(payload.files).toEqual([]);
+  });
+});
+
+describe("alreadySyncedPaths", () => {
+  it("ローカルとテンプレートが一致するパスを集める", () => {
+    const synced = alreadySyncedPaths({
+      baseHashes: hashMap({ "same.txt": "old", "mine.txt": "old" }),
+      localHashes: hashMap({ "same.txt": "h1", "mine.txt": "local" }),
+      templateHashes: hashMap({ "same.txt": "h1", "mine.txt": "template" }),
+    });
+
+    expect([...synced]).toEqual(["same.txt"]);
+  });
+
+  it("ベースにだけ残ったエントリも一致扱いにする（消すものも送るものも無い）", () => {
+    const synced = alreadySyncedPaths({
+      baseHashes: hashMap({ "gone-everywhere.txt": "old" }),
+      localHashes: hashMap({}),
+      templateHashes: hashMap({}),
+    });
+
+    expect([...synced]).toEqual(["gone-everywhere.txt"]);
+  });
+
+  it("片側にだけあるパスは一致扱いにしない", () => {
+    const synced = alreadySyncedPaths({
+      baseHashes: hashMap({}),
+      localHashes: hashMap({ "local-only.txt": "h1" }),
+      templateHashes: hashMap({ "template-only.txt": "h2" }),
+    });
+
+    expect([...synced]).toEqual([]);
+  });
+});
+
+describe("baseAfterPush", () => {
+  const previousBase = hashMap({
+    "sent.txt": "sent-old",
+    "not-sent.txt": "not-sent-old",
+    "same.txt": "same",
+  });
+
+  /** push 後のテンプレート。送ったファイルは新しい内容、送っていないファイルは元のまま。 */
+  const templateHashes = hashMap({
+    "sent.txt": "sent-new",
+    "not-sent.txt": "template-new",
+    "same.txt": "same",
+  });
+
+  it("送ったパスのベースだけをテンプレート側へ前進させる", () => {
+    const base = baseAfterPush({
+      templateHashes,
+      previousBase,
+      pushed: {
+        files: [{ path: repoRelPath("sent.txt"), content: asPushContent("x") }],
+        deletions: [],
+      },
+      alreadySynced: new Set(repoRelPaths(["same.txt"])),
+    });
+
+    expect(base).toEqual({
+      "sent.txt": "sent-new",
+      // 送っていないので据え置く。前進させると次の分類が localOnly と読み、テンプレートの
+      // 更新が pull で取り込まれなくなる。
+      "not-sent.txt": "not-sent-old",
+      "same.txt": "same",
+    });
+  });
+
+  it("送った削除はベースからエントリを落とす", () => {
+    const base = baseAfterPush({
+      templateHashes: hashMap({ "same.txt": "same" }),
+      previousBase: hashMap({ "gone.txt": "old", "same.txt": "same" }),
+      pushed: { files: [], deletions: [{ path: deletablePath("gone.txt") }] },
+      alreadySynced: new Set(repoRelPaths(["same.txt"])),
+    });
+
+    expect(base).toEqual({ "same.txt": "same" });
+  });
+
+  it("元から一致していたパスは、テンプレートから消えていればエントリを落とす", () => {
+    // ローカル・テンプレートの双方から消えているファイル。据え置くと毎回削除候補として
+    // 報告され続け、status も同期済みにならない。
+    const base = baseAfterPush({
+      templateHashes: hashMap({}),
+      previousBase: hashMap({ "gone-everywhere.txt": "old" }),
+      pushed: { files: [], deletions: [] },
+      alreadySynced: new Set(repoRelPaths(["gone-everywhere.txt"])),
+    });
+
+    expect(base).toEqual({});
+  });
+
+  it("ベースに無かったパスは、送ったときだけエントリが増える", () => {
+    const base = baseAfterPush({
+      templateHashes: hashMap({ "new.txt": "new-hash", "untouched.txt": "template-only" }),
+      previousBase: hashMap({}),
+      pushed: {
+        files: [{ path: repoRelPath("new.txt"), content: asPushContent("x") }],
+        deletions: [],
+      },
+      alreadySynced: new Set(),
+    });
+
+    expect(base).toEqual({ "new.txt": "new-hash" });
   });
 });
 

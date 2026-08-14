@@ -11,13 +11,14 @@
  */
 import { P, match } from "ts-pattern";
 import { z } from "zod/v4";
-import type { FileDiff, GitHubSource, GlobPattern, RepoRelPath } from "../modules/schemas";
+import type { FileDiff, GitHubSource, GlobPattern, HashMap, RepoRelPath } from "../modules/schemas";
 import { repoRelPathSchema } from "../modules/schemas";
 import type { ConfigDrift } from "../utils/config-merge";
 import type { MergedContent } from "../utils/merge";
 import type { SyncPlan } from "../utils/merge/sync-plan";
 import { zikuConfigPushOutcome } from "../utils/merge/sync-plan";
-import { pathAsPattern, repoRelPath } from "../utils/paths";
+import type { SyncHashes } from "../utils/sync-analysis";
+import { pathAsPattern, repoRelPath, repoRelPaths } from "../utils/paths";
 import { ZIKU_CONFIG_FILE, classifySyncPath, isZikuConfigPath } from "../utils/ziku-config";
 
 // ─── テンプレートへ送る内容 ───
@@ -344,6 +345,87 @@ export function buildPushPayload(
         return path === undefined ? [] : [{ path }];
       }),
   };
+}
+
+// ─── push 後の同期ベース ───
+
+/**
+ * push を始める前からローカルとテンプレートが一致していたパス。
+ *
+ * 一致しているファイルは送るものが無く、テンプレート側にも変更が無い。ベースをテンプレート
+ * 側へ揃えても失われる情報が無いので、送信対象でなくてもベースを前進させてよい
+ * （{@link baseAfterPush}）。
+ *
+ * どちらにも存在しないパス（ベースにだけエントリが残っている状態）もここに入る。ベースから
+ * 落とさないと、消すものも送るものも無いまま毎回削除候補として報告され続け、`status` が
+ * 同期済みにならない。
+ */
+export function alreadySyncedPaths(hashes: SyncHashes): ReadonlySet<RepoRelPath> {
+  const scanned = repoRelPaths([
+    ...new Set([
+      ...Object.keys(hashes.baseHashes),
+      ...Object.keys(hashes.localHashes),
+      ...Object.keys(hashes.templateHashes),
+    ]),
+  ]);
+  return new Set(
+    scanned.filter((path) => hashes.localHashes[path] === hashes.templateHashes[path]),
+  );
+}
+
+/**
+ * ローカルテンプレートへ push した後に lock へ書く同期ベースを組み立てる。
+ *
+ * push 後のテンプレートを走査した結果をそのままベースにすると、送っていないファイルの分まで
+ * ベースがテンプレート側へ前進する。テンプレートだけが変えたファイル（`autoUpdate`）を選択から
+ * 外して push すると、base はテンプレートの内容・local は古い内容という組み合わせになり、次の
+ * 分類はそのファイルを `localOnly`（ローカルだけが変えた）と読む。すると `pull` は取り込む
+ * ものが無いと判断してテンプレートの更新を永久に落とし、`push --yes` は既定選択に入る古い
+ * 内容をテンプレートへ書き戻して更新を巻き戻す。自動マージ済みで選択から外した `conflicts`
+ * でも同じことが起きる（マージ結果は捨てられ、テンプレートの変更だけが消える）。
+ *
+ * そこでベースを前進させるのは次のどちらかに当たるパスだけにする。
+ *
+ * 1. 実際にテンプレートへ送ったパス（内容・削除のどちらでも）。テンプレートは送った内容に
+ *    なっているので、走査結果がそのままベースになる。
+ * 2. push 前からローカルとテンプレートが一致していたパス（{@link alreadySyncedPaths}）。
+ *
+ * それ以外は前回のベースを据え置く。据え置いたファイルは次回も同じカテゴリに分類されるので、
+ * テンプレート側の更新は `pull` が取り込むまで残り、push の候補にも上がり続ける。
+ *
+ * ベースを進める規則がこの 1 箇所に閉じるので、送信対象の選び方が増えてもベースの決まり方は
+ * 変わらない。GitHub ソースへの push はベースを動かさない（PR が作られるだけでテンプレートは
+ * まだ変わらない）ため、この関数を通らない。
+ */
+export function baseAfterPush(params: {
+  /** push 後のテンプレートを走査したハッシュ。 */
+  readonly templateHashes: HashMap;
+  /** 今回の比較で共通祖先として使ったベース。 */
+  readonly previousBase: HashMap;
+  /** 実際にテンプレートへ送った内容と削除。 */
+  readonly pushed: PushPayload;
+  /** push 前からローカルとテンプレートが一致していたパス。 */
+  readonly alreadySynced: ReadonlySet<RepoRelPath>;
+}): HashMap {
+  const advanced = new Set<RepoRelPath>([
+    ...params.alreadySynced,
+    ...params.pushed.files.map((file) => file.path),
+    ...params.pushed.deletions.map((deletion) => deletion.path),
+  ]);
+
+  const base: HashMap = {};
+  for (const path of repoRelPaths(Object.keys(params.previousBase))) {
+    if (advanced.has(path)) continue;
+    const previous = params.previousBase[path];
+    if (previous !== undefined) base[path] = previous;
+  }
+  // テンプレートに存在しなくなったパス（送った削除・両側から消えたファイル）はエントリごと
+  // 落とす。前進先が「エントリが無いこと」なので、書かないことがそのまま前進になる。
+  for (const path of advanced) {
+    const advancedHash = params.templateHashes[path];
+    if (advancedHash !== undefined) base[path] = advancedHash;
+  }
+  return base;
 }
 
 // ─── `ziku.jsonc` の伝播 ───

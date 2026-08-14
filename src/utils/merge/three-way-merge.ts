@@ -16,6 +16,12 @@ import { type MergeOutcome, type ThreeWayMergeParams, classifyMergeOutcome } fro
  * 形へ戻す（`src/utils/text-shape.ts`）。ローカルを基準にするのは、ユーザーのワークツリーに
  * あるファイルの形を pull が勝手に書き換えないため。生成するコンフリクトマーカーの行も
  * 同じ経路を通るので、ファイル全体で改行コードが揃う。
+ *
+ * ローカルの内容が空のときだけテンプレート側の形を採る。空になるのは「ローカルで削除され、
+ * テンプレート側が変更した」場合で（`src/utils/merge/conflict-io.ts`）、空文字列からは改行コードも
+ * BOM も読み取れない。読み取れないまま既定の LF・BOM 無しで書き戻すと、CRLF のテンプレート
+ * ファイルが LF へ変わったうえ、その形が次の push でテンプレートへ送られて下流全体の改行コードを
+ * 書き換える。両方が空なら結果も空文字列なので、どちらの形を採っても出力は変わらない。
  */
 export function threeWayMerge({
   base,
@@ -23,7 +29,7 @@ export function threeWayMerge({
   template,
   filePath,
 }: ThreeWayMergeParams): MergeOutcome {
-  const shape = detectTextShape(local);
+  const shape = detectTextShape(local === "" ? template : local);
   const normalizedLocal = normalizeText(local);
   const normalizedTemplate = normalizeText(template);
 
