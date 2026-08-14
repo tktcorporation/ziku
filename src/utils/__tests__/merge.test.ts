@@ -756,6 +756,43 @@ line2`;
       expect(regions).toEqual([]);
     });
 
+    it("閉じ側のマーカーだけを消したブロックは未解決のまま", () => {
+      // 数えないと `pull --continue` が通り、開始マーカーと区切り行が残ったまま
+      // 同期ベースへ載って、以後テンプレートへ送られる。
+      const content = ["<<<<<<< LOCAL", "a", "=======", "b", ""].join("\n");
+
+      const regions = findConflictRegions(content);
+
+      expect(regions.map((r) => r.startLine)).toEqual([1]);
+    });
+
+    it("`|||||||` まで進んで閉じないブロックも未解決のまま", () => {
+      const content = ["<<<<<<< LOCAL", "a", "||||||| BASE", "o", ""].join("\n");
+
+      const regions = findConflictRegions(content);
+
+      expect(regions.map((r) => r.startLine)).toEqual([1]);
+    });
+
+    it("閉じたブロックの後ろに開きかけのブロックが残る場合は両方数える", () => {
+      const content = [
+        "<<<<<<< LOCAL",
+        "a",
+        "=======",
+        "b",
+        ">>>>>>> TEMPLATE",
+        "<<<<<<< LOCAL",
+        "c",
+        "=======",
+        "d",
+        "",
+      ].join("\n");
+
+      const regions = findConflictRegions(content);
+
+      expect(regions.map((r) => r.startLine)).toEqual([1, 6]);
+    });
+
     it("マージ結果に残るブロックだけを数え、内容中の短いマーカーは本文として扱う", () => {
       const withMarkers = ["intro", "<<<<<<< LOCAL", "a", "=======", "b", ">>>>>>> TEMPLATE", ""];
       const base = withMarkers.join("\n");

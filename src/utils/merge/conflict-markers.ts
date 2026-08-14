@@ -168,8 +168,9 @@ function stepScan(state: ScanState, marker: Marker, lineNumber: number): ScanSte
  *
  * 行頭の前方一致だけで判定すると、Markdown の setext 見出し下線や区切り線
  * `========` を未解決と誤検出する。誤検出すると `pull --continue` が永久に通らず、
- * 解決済みのマージを確定できなくなるため、マーカーの出現順序と対応が取れた
- * ブロックだけを未解決とみなす。
+ * 解決済みのマージを確定できなくなるため、開始マーカーから始まる順序の取れたブロックだけを
+ * 未解決とみなす。区切りまで進んだブロックは閉じないまま終わっても未解決に数える。閉じたものだけを
+ * 数えると、閉じ側のマーカーだけを消せば解決したことになってしまう。
  *
  * ブロックの内側では、開始マーカーより短いマーカー行は本文として扱う。マージ結果は
  * 内容中の最長マーカーより長いマーカーで囲まれているので、この長さ比較で
@@ -192,6 +193,16 @@ export function findConflictRegions(content: string): ConflictRegion[] {
     const step = stepScan(state, marker, i + 1);
     state = step.next;
     if (step.closed !== undefined) regions.push({ startLine: step.closed });
+  }
+
+  // 区切りまで進んだまま閉じずに終わったブロックも未解決として数える。閉じ側のマーカーだけを
+  // 消して解決したつもりになると、開始マーカーと区切り行が本文に残ったまま `pull --continue`
+  // が通り、その内容が同期ベースへ載って以後テンプレートへ送られる。
+  //
+  // 開始マーカーしか見ていない場合（`local`）は数えない。単独の `<<<<<<<` は本文にも現れうる
+  // 一方、区切りを伴う並びは本文にはまず現れないので、そこで誤検出と取りこぼしの境目を引く。
+  if (state.phase === "base" || state.phase === "template") {
+    regions.push({ startLine: state.startLine });
   }
 
   return regions;
