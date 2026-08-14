@@ -263,7 +263,7 @@ describe("planLockBaseHashes", () => {
       { action: "copied", path: ".mcp.json" },
     ]);
     expect(result.written[repoRelPath(".mcp.json")]).toBe("template-hash");
-    expect(result.fromLocalFile).toEqual([]);
+    expect(result.fromLocalFile).not.toContain(repoRelPath(".mcp.json"));
   });
 
   it("上書きされたファイルもテンプレートの内容のハッシュをベースにする", () => {
@@ -278,21 +278,21 @@ describe("planLockBaseHashes", () => {
       { action: "skipped", path: ".mcp.json" },
     ]);
     // テンプレートの内容はディスクに載っていないので、ベースとして確定させない
-    expect(result.written).toEqual({});
-    expect(result.fromLocalFile).toEqual([repoRelPath(".mcp.json")]);
+    expect(result.written[repoRelPath(".mcp.json")]).toBeUndefined();
+    expect(result.fromLocalFile).toContain(repoRelPath(".mcp.json"));
   });
 
   it("gitignore 由来のスキップもディスクの実内容を読む対象にする", () => {
     const result = plan(hashMap({ ".mcp.json": "template-hash" }), [
       { action: "skipped_ignored", path: ".mcp.json" },
     ]);
-    expect(result.fromLocalFile).toEqual([repoRelPath(".mcp.json")]);
+    expect(result.fromLocalFile).toContain(repoRelPath(".mcp.json"));
   });
 
   it("操作結果に現れないファイルもディスクの実内容を読む対象にする", () => {
     const result = plan(hashMap({ ".mcp.json": "template-hash" }), []);
     expect(result.written).toEqual({});
-    expect(result.fromLocalFile).toEqual([repoRelPath(".mcp.json")]);
+    expect(result.fromLocalFile).toContain(repoRelPath(".mcp.json"));
   });
 
   it("書き込まれた ziku.jsonc のベースは生成した本文のハッシュ（テンプレ側ではない）", () => {
@@ -322,10 +322,19 @@ describe("planLockBaseHashes", () => {
     expect(result.fromLocalFile).toEqual([CONFIG_PATH]);
   });
 
-  it("テンプレに ziku.jsonc が無ければ base を記録しない（次回 pull の誤削除を防ぐ）", () => {
-    const result = plan(hashMap({ ".mcp.json": "a" }), [{ action: "copied", path: ".mcp.json" }]);
-    expect(result.written[CONFIG_PATH]).toBeUndefined();
-    expect(result.fromLocalFile).not.toContain(CONFIG_PATH);
+  it("テンプレートに無いファイルでも、init が書いたなら本文のハッシュをベースにする", () => {
+    // ベースが付かないと次回の分類が localOnly になり、`push --yes` が ziku 自身の
+    // 生成物をテンプレートへ送って全プロジェクトへ配ってしまう。
+    const envExample = repoRelPath(".devcontainer/devcontainer.env.example");
+    const result = planLockBaseHashes({
+      templateHashes: hashMap({ ".mcp.json": "a" }),
+      generatedContents: new Map([[envExample, "GH_TOKEN=\n"]]),
+      results: [
+        { action: "copied", path: ".mcp.json" },
+        { action: "created", path: envExample },
+      ],
+    });
+    expect(result.written[envExample]).toBe(hashContent("GH_TOKEN=\n"));
   });
 
   it("渡されたハッシュ表を書き換えない", () => {

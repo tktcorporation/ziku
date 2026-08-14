@@ -57,8 +57,8 @@ vi.mock("@octokit/rest", () => ({
 const {
   createPullRequest,
   decideDefaultBranch,
+  fetchDefaultBranch,
   scaffoldTemplateRepo,
-  resolveDefaultBranch,
   resolveLatestCommitSha,
   resolveSourceCommit,
   resolveSourceCommitSha,
@@ -126,7 +126,7 @@ describe("createPullRequest", () => {
     });
 
     mockReposGet.mockResolvedValue({
-      data: { name: "test-repo" },
+      data: { name: "test-repo", fork: true, parent: { full_name: "owner/repo" } },
     });
 
     mockReposGetBranch.mockResolvedValue({
@@ -196,7 +196,7 @@ describe("createPullRequest", () => {
 
   it("既存の fork を使用する", async () => {
     mockReposGet.mockResolvedValue({
-      data: { name: "repo" },
+      data: { name: "repo", fork: true, parent: { full_name: "owner/repo" } },
     });
 
     await createPullRequest("token", {
@@ -426,21 +426,118 @@ describe("createPullRequest", () => {
     );
   });
 
-  it("tree に存在しない削除対象ファイルはスキップする", async () => {
+  it("tree に存在しない削除対象ファイルは、黙って飛ばさず失敗として報告する", async () => {
+    // 飛ばすと「削除する」と見せたファイルが残ったままの PR ができ、成功したように見える。
     mockGitGetTree.mockResolvedValue({
       data: { tree: [], truncated: false },
     });
 
-    await createPullRequest("token", {
+    const thrown = await createPullRequest("token", {
       owner: "owner",
       repo: "repo",
       files: [{ path: repoRelPath("file.txt"), content: "content" }],
       deletions: [{ path: repoRelPath("nonexistent.txt") }],
       title: "Test PR",
       baseBranch: "main",
+    }).then(
+      () => expect.unreachable("PR が作成されてしまった"),
+      (error: unknown) => error,
+    );
+
+    expect(thrown).toBeInstanceOf(ZikuFailure);
+    expect(thrown).toMatchObject({
+      reason: {
+        kind: "PushDeletionTargetMissing",
+        repo: "owner/repo",
+        paths: ["nonexistent.txt"],
+      },
+    });
+    expect(mockReposDeleteFile).not.toHaveBeenCalled();
+    expect(mockPullsCreate).not.toHaveBeenCalled();
+  });
+
+  it("削除対象が 1 件でも欠ければ、他のファイルも書き込まずに止める", async () => {
+    mockGitGetTree.mockResolvedValue({
+      data: {
+        tree: [{ path: "present.txt", type: "blob", sha: "present-sha" }],
+        truncated: false,
+      },
     });
 
+    await createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      deletions: [{ path: repoRelPath("present.txt") }, { path: repoRelPath("gone.txt") }],
+      title: "Test PR",
+      baseBranch: "main",
+    }).catch(() => undefined);
+
+    expect(mockReposCreateOrUpdateFileContents).not.toHaveBeenCalled();
     expect(mockReposDeleteFile).not.toHaveBeenCalled();
+  });
+
+  it("同名だが fork ではないリポジトリは使わず、名前を直す案内で失敗する", async () => {
+    // 無関係なリポジトリへ同期ブランチを作ると、共通の履歴が無い PR として拒まれ、
+    // GitHub のエラーがそのまま出て原因が分からない。
+    mockReposGet.mockResolvedValue({ data: { name: "repo", fork: false } });
+
+    const thrown = await createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      title: "Test PR",
+      baseBranch: "main",
+    }).then(
+      () => expect.unreachable("PR が作成されてしまった"),
+      (error: unknown) => error,
+    );
+
+    expect(thrown).toBeInstanceOf(ZikuFailure);
+    expect(thrown).toMatchObject({
+      reason: { kind: "ForkNameTaken", repo: "owner/repo", existing: "testuser/repo" },
+    });
+    expect(mockGitCreateRef).not.toHaveBeenCalled();
+    expect(mockReposCreateFork).not.toHaveBeenCalled();
+  });
+
+  it("別のリポジトリの fork も使わない", async () => {
+    mockReposGet.mockResolvedValue({
+      data: { name: "repo", fork: true, parent: { full_name: "someone-else/repo" } },
+    });
+
+    const thrown = await createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      title: "Test PR",
+      baseBranch: "main",
+    }).catch((e: unknown) => e);
+
+    expect(thrown).toMatchObject({ reason: { kind: "ForkNameTaken" } });
+  });
+
+  it("fork の fork でも、根が対象リポジトリなら使う", async () => {
+    // 根を共有していれば PR に必要な共通の履歴がある。
+    mockReposGet.mockResolvedValue({
+      data: {
+        name: "repo",
+        fork: true,
+        parent: { full_name: "mirror/repo" },
+        source: { full_name: "owner/repo" },
+      },
+    });
+
+    await createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [{ path: repoRelPath("file.txt"), content: "content" }],
+      title: "Test PR",
+      baseBranch: "main",
+    });
+
+    expect(mockPullsCreate).toHaveBeenCalled();
+    expect(mockReposCreateFork).not.toHaveBeenCalled();
   });
 
   it("ファイル内容を Base64 エンコードする", async () => {
@@ -872,7 +969,7 @@ describe("scaffoldTemplateRepo", () => {
   });
 });
 
-describe("resolveDefaultBranch", () => {
+describe("fetchDefaultBranch", () => {
   const originalEnv = process.env;
 
   beforeEach(() => {
@@ -891,16 +988,29 @@ describe("resolveDefaultBranch", () => {
   it("リポジトリの既定ブランチ名を返す", async () => {
     mockReposGet.mockResolvedValue({ data: { default_branch: "master" } });
 
-    const branch = await resolveDefaultBranch("owner", "repo");
-
-    expect(branch).toBe("master");
+    expect(await fetchDefaultBranch("owner", "repo")).toEqual({
+      _tag: "Resolved",
+      name: "master",
+    });
     expect(mockReposGet).toHaveBeenCalledWith({ owner: "owner", repo: "repo" });
   });
 
-  it("API が失敗した場合は undefined を返す", async () => {
+  it("トークンを拒否された場合は AuthRejected を返す", async () => {
+    mockReposGet.mockRejectedValue(apiError(401, "Bad credentials"));
+
+    expect(await fetchDefaultBranch("owner", "repo")).toEqual({
+      _tag: "AuthRejected",
+      detail: "Bad credentials",
+    });
+  });
+
+  it("待てば直りうる失敗は Unresolved を返す", async () => {
     mockReposGet.mockRejectedValue(new Error("Not Found"));
 
-    expect(await resolveDefaultBranch("owner", "repo")).toBeUndefined();
+    expect(await fetchDefaultBranch("owner", "repo")).toEqual({
+      _tag: "Unresolved",
+      reason: "Not Found",
+    });
   });
 });
 

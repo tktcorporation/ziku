@@ -369,6 +369,13 @@ export interface PushPayload {
  * ディスク上の内容ではなく組み立てた内容を `localContent` に載せて流れてくるため。
  * 経路で決めれば、内容がたまたま一致してもローカルに無い内容を「ある」と読み違えない。
  *
+ * 送るかどうかの判定は {@link effectivePushDiff} に任せる。選択に残るのは「ローカルと
+ * テンプレートで内容が違う」ファイルだが、実際に送る内容はローカルの内容とは限らない
+ * （自動マージの結果・`ziku.jsonc` の和集合）。組み立てた内容がテンプレートと同一になった
+ * ファイルを送ると、差分の無いコミットだけの PR ができて GitHub が PR の作成を拒む。
+ * サマリーの行も同じ関数を通るので、「0 件と表示しながら中身の無い送信をする」組み合わせは
+ * 作れない。
+ *
  * 削除は {@link asDeletablePath} を通ったパスだけが載る。設定ファイルの削除がここへ来ても
  * 落とす理由は {@link DeletablePath} を参照。
  */
@@ -376,25 +383,38 @@ export function buildPushPayload(
   selected: readonly ChangedFileDiff[],
   mergedContents: ReadonlyMap<RepoRelPath, PushContent>,
 ): PushPayload {
+  const files: PushFile[] = [];
+  const deletions: { path: DeletablePath }[] = [];
+
+  for (const diff of selected) {
+    match(diff)
+      .with({ type: "deleted" }, (deleted) => {
+        const path = asDeletablePath(deleted.path);
+        if (path !== undefined) deletions.push({ path });
+      })
+      .with({ type: P.union("added", "modified") }, (changed) => {
+        const file = pushFileOf(changed, mergedContents.get(changed.path));
+        if (file !== undefined) files.push(file);
+      })
+      .exhaustive();
+  }
+
+  return { files, deletions };
+}
+
+/**
+ * 1 ファイル分の送信内容を組み立てる。テンプレートと同一になるなら `undefined`（送らない）。
+ */
+function pushFileOf(
+  diff: Extract<ChangedFileDiff, { type: "added" | "modified" }>,
+  synthesized: PushContent | undefined,
+): PushFile | undefined {
+  const content = synthesized ?? asPushContent(diff.localContent);
+  if (effectivePushDiff(diff, content) === undefined) return undefined;
   return {
-    files: selected
-      .filter((f) => f.type !== "deleted")
-      .map((f): PushFile => {
-        const synthesized = mergedContents.get(f.path);
-        return synthesized === undefined
-          ? {
-              path: f.path,
-              content: asPushContent(f.localContent),
-              origin: { _tag: "LocalContent" },
-            }
-          : { path: f.path, content: synthesized, origin: { _tag: "Synthesized" } };
-      }),
-    deletions: selected
-      .filter((f) => f.type === "deleted")
-      .flatMap((f) => {
-        const path = asDeletablePath(f.path);
-        return path === undefined ? [] : [{ path }];
-      }),
+    path: diff.path,
+    content,
+    origin: synthesized === undefined ? { _tag: "LocalContent" } : { _tag: "Synthesized" },
   };
 }
 
@@ -816,7 +836,7 @@ export function buildPushSummaryRows(params: {
     const isDeletion = params.deletions.some((d) => d.path === file.path);
     if (pushedContent === undefined && !isDeletion) continue;
 
-    const diff = effectiveDiff(file, pushedContent);
+    const diff = effectivePushDiff(file, pushedContent);
     if (diff === undefined) continue;
     rows.push({
       _tag: "Change",
@@ -837,9 +857,13 @@ export function buildPushSummaryRows(params: {
 /**
  * 実際に送る内容で差分を組み直す。送る内容がテンプレートと同一なら `undefined`。
  *
+ * 「テンプレートと内容が違うものだけを送る」という規則をこの 1 本に閉じる。送信ペイロード
+ * （{@link buildPushPayload}）とサマリーの行（{@link buildPushSummaryRows}）がどちらもここを
+ * 通るので、送る集合と見せる集合が食い違わない。
+ *
  * `pushedContent` が無いのは削除を送る場合で、そのときは元の差分をそのまま使う。
  */
-function effectiveDiff(
+function effectivePushDiff(
   original: ChangedFileDiff,
   pushedContent: string | undefined,
 ): ChangedFileDiff | undefined {

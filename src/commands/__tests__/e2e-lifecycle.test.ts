@@ -51,7 +51,6 @@ vi.mock("../../utils/github", async () => {
   const actual = await vi.importActual<typeof import("../../utils/github")>("../../utils/github");
   return {
     resolveLatestCommitSha: vi.fn(() => Promise.resolve("sha-001")),
-    resolveDefaultBranch: vi.fn(() => Promise.resolve("main")),
     fetchDefaultBranch: vi.fn(() => Promise.resolve({ _tag: "Resolved" as const, name: "main" })),
     resolveSourceCommitSha: vi.fn(() => Promise.resolve("sha-001")),
     resolveSourceCommit: vi.fn(() =>

@@ -10,8 +10,8 @@ import {
   checkRepoExists,
   getGitHubToken,
   createPullRequest,
+  fetchDefaultBranch,
   rateLimitedError,
-  resolveDefaultBranch,
   unauthorizedError,
 } from "../utils/github";
 import { detectGitHubOwner, DEFAULT_TEMPLATE_REPO } from "../utils/git-remote";
@@ -271,13 +271,21 @@ async function handleRemoteSetup(
  * 既定ブランチは `main` とは限らない（`master` / `trunk` 等）。名前を仮定すると、
  * 存在しないブランチを宛先にした PR 作成が GitHub API の 404 で落ち、ziku 側の不具合として
  * 表示される。引けなかったときは宛先が定まらないので、仮定せず失敗として報告する。
+ *
+ * 引けなかった理由は潰さずに受け取る（{@link fetchDefaultBranch}）。トークンを拒否された
+ * 場合に取る行動はトークンを入れ直すことで、`DefaultBranchUnresolved` が案内する
+ * `.ziku/lock.json` の `source.ref` は setup の対象リポジトリにまだ存在しない。
  */
 async function resolvePrBaseBranch(owner: string, repo: string): Promise<string> {
-  const branch = await resolveDefaultBranch(owner, repo);
-  if (branch === undefined) {
-    throw zikuFailure({ kind: "DefaultBranchUnresolved", repo: `${owner}/${repo}` });
-  }
-  return branch;
+  return match(await fetchDefaultBranch(owner, repo))
+    .with({ _tag: "Resolved" }, (r) => r.name)
+    .with({ _tag: "AuthRejected" }, (f): never => {
+      throw zikuFailure({ kind: "GitHubAuthRejected", detail: f.detail });
+    })
+    .with({ _tag: "Unresolved" }, (): never => {
+      throw zikuFailure({ kind: "DefaultBranchUnresolved", repo: `${owner}/${repo}` });
+    })
+    .exhaustive();
 }
 
 /**

@@ -269,6 +269,59 @@ export function newIncludePatterns(
 }
 
 /**
+ * 既存の `ziku.jsonc` の include / exclude だけを差し替えた内容を返す。
+ *
+ * jsonc の部分編集（`modify` / `applyEdits`）で行うので、コメントと ziku が読まないキーは
+ * そのまま残る。拡張子が `.jsonc` なのは注釈を書けるようにするためで、{@link generateZikuJsonc}
+ * で作り直すと利用者とテンプレートの注釈が同期のたびに消える。`ziku.jsonc` を書き換える経路
+ * （track の追記・加法 union マージ）はすべてここを通す。
+ *
+ * パターンが元の内容と同じ並びなら編集自体を行わない。同じ値でも `modify` は配列を整形し直す
+ * ので、内容が変わっていないのに利用者の書式だけが書き換わる。
+ *
+ * `exclude` が空なら触らない。加法 union はパターンを消さないため、空になるのはどちらの側にも
+ * exclude が無い場合に限られ、書き足す意味がない。
+ *
+ * 元の内容がオブジェクトとして読めないときは {@link generateZikuJsonc} で作り直す。残すべき
+ * 構造が読み取れず、部分編集を重ねても壊れた JSONC にしかならないため。
+ */
+export function withPatterns(
+  rawContent: string,
+  patterns: { readonly include: readonly GlobPattern[]; readonly exclude: readonly GlobPattern[] },
+): string {
+  const parsed: unknown = parse(rawContent);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return generateZikuJsonc(patterns);
+  }
+
+  const current = parsed as { include?: unknown; exclude?: unknown };
+  const withInclude = replaceArray(rawContent, "include", current.include, patterns.include);
+  return patterns.exclude.length === 0
+    ? withInclude
+    : replaceArray(withInclude, "exclude", current.exclude, patterns.exclude);
+}
+
+/** 配列キー 1 つを差し替える。並びまで一致していれば元の内容をそのまま返す。 */
+function replaceArray(
+  rawContent: string,
+  key: "include" | "exclude",
+  current: unknown,
+  next: readonly GlobPattern[],
+): string {
+  if (
+    Array.isArray(current) &&
+    current.length === next.length &&
+    current.every((v, i) => v === next[i])
+  ) {
+    return rawContent;
+  }
+  const edits = modify(rawContent, [key], next, {
+    formattingOptions: { tabSize: 2, insertSpaces: true },
+  });
+  return applyEdits(rawContent, edits);
+}
+
+/**
  * ziku.jsonc の include にパターンを追加
  * @returns 更新後の JSONC 文字列
  */
@@ -281,10 +334,5 @@ export function addIncludePattern(rawContent: string, patterns: readonly GlobPat
     return rawContent;
   }
 
-  const updatedInclude = [...existing, ...newPatterns];
-  const edits = modify(rawContent, ["include"], updatedInclude, {
-    formattingOptions: { tabSize: 2, insertSpaces: true },
-  });
-
-  return applyEdits(rawContent, edits);
+  return withPatterns(rawContent, { include: [...existing, ...newPatterns], exclude: [] });
 }

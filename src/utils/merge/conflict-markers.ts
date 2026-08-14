@@ -79,6 +79,19 @@ export interface ConflictMarkers {
   readonly template: string;
 }
 
+/**
+ * 1 ブロック分のマーカー行を組み立てる。
+ *
+ * ラベルは側の名前だけで、テンプレートの revision は載せない。git がブランチ名をラベルに
+ * 出すのは、マージする 2 つがどちらも名前を持つコミットで、その名前が「どちらを残すか」の
+ * 判断材料になるため。ziku のマージは片側が利用者の作業ツリー（コミットされていない、
+ * 名前の無い内容）なので、片側にだけ revision を書くと対になっていない情報になり、
+ * 「どちらの版か」を読み取る手がかりも増えない。
+ *
+ * どの revision と突き合わせたかは、マージを実行した時点で伝えている（`conflict-io.ts` の
+ * ベース取得ログと、push が出す `since <sha>`）。確定した値は `.ziku/lock.json` の
+ * `base.ref` が持つので、同じ事実をブロックごとに複製しない。
+ */
 export function conflictMarkers(size: number): ConflictMarkers {
   return {
     local: `${MARKER_CHAR.start.repeat(size)} LOCAL`,

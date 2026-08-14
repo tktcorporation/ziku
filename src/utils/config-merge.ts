@@ -26,7 +26,7 @@ import { parse } from "jsonc-parser";
 import type { AbsPath, GlobPattern, RepoRelPath } from "../modules/schemas";
 import { globPatterns, joinAbs, selectPatternsMatchingPaths } from "./paths";
 import { unionPatterns } from "./patterns";
-import { ZIKU_CONFIG_FILE, generateZikuJsonc } from "./ziku-config";
+import { ZIKU_CONFIG_FILE, generateZikuJsonc, withPatterns } from "./ziku-config";
 
 export interface ConfigPatterns {
   readonly include: GlobPattern[];
@@ -52,19 +52,44 @@ export function mergeConfigPatterns(opts: {
 }
 
 /**
- * 指定ディレクトリの `.ziku/ziku.jsonc` を読み、パターンを抽出する。
+ * ディスク上の `ziku.jsonc` 1 つ分。
+ *
+ * 生の内容も持ち回るのは、union の結果を「新しく生成した内容」ではなく「元の内容の
+ * include / exclude だけを差し替えたもの」として書き出すため（{@link withPatterns}）。
+ * パターンだけを取り出して作り直すと、注釈と ziku が読まないキーが同期のたびに消える。
+ */
+interface ConfigDocument {
+  readonly raw: string;
+  readonly patterns: ConfigPatterns;
+}
+
+/**
+ * 指定ディレクトリの `.ziku/ziku.jsonc` を読む。
  * ファイルが無ければ undefined（base が無いケースの判定に使う）。
  */
-async function readPatternsAt(dir: AbsPath): Promise<ConfigPatterns | undefined> {
+async function readConfigAt(dir: AbsPath): Promise<ConfigDocument | undefined> {
   const path = joinAbs(dir, ZIKU_CONFIG_FILE);
   if (!existsSync(path)) return undefined;
-  const content = await readFile(path, "utf-8");
+  const raw = await readFile(path, "utf-8");
   // ディスク上の JSONC はスキーマを通っていない生の値。ここがパターンの brand 入口になる。
-  const parsed = parse(content) as { include?: string[]; exclude?: string[] } | undefined;
+  const parsed = parse(raw) as { include?: string[]; exclude?: string[] } | undefined;
   return {
-    include: globPatterns(parsed?.include ?? []),
-    exclude: globPatterns(parsed?.exclude ?? []),
+    raw,
+    patterns: {
+      include: globPatterns(parsed?.include ?? []),
+      exclude: globPatterns(parsed?.exclude ?? []),
+    },
   };
+}
+
+/**
+ * union の結果を `ziku.jsonc` の内容として書き出す。
+ *
+ * 元の文書があればその include / exclude だけを差し替え、注釈と他のキーを残す。無い場合
+ * （まだ `ziku.jsonc` が存在しないテンプレート / プロジェクト）だけ新規に生成する。
+ */
+function renderMergedConfig(base: ConfigDocument | undefined, merged: ConfigPatterns): string {
+  return base === undefined ? generateZikuJsonc(merged) : withPatterns(base.raw, merged);
 }
 
 /** 2 つのパターン配列が集合として等しいか（順序・重複を無視）。 */
@@ -99,12 +124,9 @@ export async function analyzeConfigDrift(
   targetDir: AbsPath,
   templateDir: AbsPath,
 ): Promise<ConfigDrift> {
-  const [local, template] = await Promise.all([
-    readPatternsAt(targetDir),
-    readPatternsAt(templateDir),
-  ]);
-  const l = local ?? EMPTY_PATTERNS;
-  const t = template ?? EMPTY_PATTERNS;
+  const [local, template] = await Promise.all([readConfigAt(targetDir), readConfigAt(templateDir)]);
+  const l = local?.patterns ?? EMPTY_PATTERNS;
+  const t = template?.patterns ?? EMPTY_PATTERNS;
   const union = mergeConfigPatterns({ local: l, template: t });
   const eq = (a: ConfigPatterns, b: ConfigPatterns): boolean =>
     sameSet(a.include, b.include) && sameSet(a.exclude, b.exclude);
@@ -127,6 +149,10 @@ export async function analyzeConfigDrift(
  * 読むと新規パターンが union から漏れ、テンプレにファイル本体だけ届いて include が届かない
  * （他プロジェクトの init/pull が拾えるのが 2 回目の push 後になる）。これを防ぐため、
  * 確定した新規追跡パターンをローカル側へ加えてから union を取る（codex P2）。
+ *
+ * 結果はローカルの `ziku.jsonc` を土台に組み立てる（{@link renderMergedConfig}）。この内容は
+ * pull ならローカルへ書き戻され、push ならローカルの `ziku.jsonc` を送ると決めた場面で使われる
+ * ので、どちらもローカルの注釈が残る側が正しい土台になる。
  */
 export async function computeMergedZikuConfig(opts: {
   targetDir: AbsPath;
@@ -134,11 +160,11 @@ export async function computeMergedZikuConfig(opts: {
   extraIncludes?: readonly GlobPattern[];
 }): Promise<string> {
   const [local, template] = await Promise.all([
-    readPatternsAt(opts.targetDir),
-    readPatternsAt(opts.templateDir),
+    readConfigAt(opts.targetDir),
+    readConfigAt(opts.templateDir),
   ]);
 
-  const localBase = local ?? EMPTY_PATTERNS;
+  const localBase = local?.patterns ?? EMPTY_PATTERNS;
   const localWithExtra: ConfigPatterns = {
     include: [...localBase.include, ...(opts.extraIncludes ?? [])],
     exclude: localBase.exclude,
@@ -146,10 +172,10 @@ export async function computeMergedZikuConfig(opts: {
 
   const merged = mergeConfigPatterns({
     local: localWithExtra,
-    template: template ?? EMPTY_PATTERNS,
+    template: template?.patterns ?? EMPTY_PATTERNS,
   });
 
-  return generateZikuJsonc(merged);
+  return renderMergedConfig(local, merged);
 }
 
 /**
@@ -176,12 +202,12 @@ export async function findLocalOnlyPatternsForPaths(opts: {
   if (opts.paths.length === 0) return [];
 
   const [local, template] = await Promise.all([
-    readPatternsAt(opts.targetDir),
-    readPatternsAt(opts.templateDir),
+    readConfigAt(opts.targetDir),
+    readConfigAt(opts.templateDir),
   ]);
 
-  const templateInclude = new Set<string>((template ?? EMPTY_PATTERNS).include);
-  const localOnly = (local ?? EMPTY_PATTERNS).include.filter(
+  const templateInclude = new Set<string>((template?.patterns ?? EMPTY_PATTERNS).include);
+  const localOnly = (local?.patterns ?? EMPTY_PATTERNS).include.filter(
     (pattern) => !templateInclude.has(pattern),
   );
 
@@ -201,15 +227,19 @@ export async function findLocalOnlyPatternsForPaths(opts: {
  * 今回の push と無関係なローカル限定パターンまで一緒にテンプレへ漏れてしまう
  * （issue #90 で懸念されていたリスク）。この関数はテンプレの内容 + 明示的に渡した
  * 追加分だけを union するため、無関係なパターンを一切巻き込まない。
+ *
+ * 結果はテンプレートの `ziku.jsonc` を土台に組み立てる（{@link renderMergedConfig}）。この
+ * 内容はテンプレートへ送るだけでローカルへは書き戻さない（`push-plan.ts` の
+ * `ZikuConfigWriteBack`）ので、残すべき注釈はテンプレート側のもの。
  */
 export async function computeScopedZikuConfig(opts: {
   templateDir: AbsPath;
   additionalIncludes: readonly GlobPattern[];
 }): Promise<string> {
-  const template = (await readPatternsAt(opts.templateDir)) ?? EMPTY_PATTERNS;
+  const template = await readConfigAt(opts.templateDir);
   const merged = mergeConfigPatterns({
     local: { include: [...opts.additionalIncludes], exclude: [] },
-    template,
+    template: template?.patterns ?? EMPTY_PATTERNS,
   });
-  return generateZikuJsonc(merged);
+  return renderMergedConfig(template, merged);
 }

@@ -835,6 +835,16 @@ async function pushProject(params: {
   });
 
   const payload = buildPushPayload(configResult.selected, mergedContents);
+
+  // 選択したファイルが残っていても、送る内容が 1 件も無いことがある。自動マージの結果や
+  // `ziku.jsonc` の和集合がテンプレートと同一になった場合で、送信ペイロードはそれを落とす
+  // （`buildPushPayload`）。そのまま進むと差分の無い PR を作ろうとして GitHub に拒まれ、
+  // ローカルテンプレートへは書くものが無いまま同期ベースだけが進む。
+  if (payload.files.length === 0 && payload.deletions.length === 0) {
+    log.info("Nothing to push — the selected file(s) already match the template.");
+    return;
+  }
+
   const target: PushTarget = {
     ...payload,
     pushableFiles: configResult.selected,

@@ -2167,6 +2167,61 @@ describe("pushCommand", () => {
       );
     });
 
+    it("自動マージの結果がテンプレートと同一なら PR を作らない", async () => {
+      // ベース A / ローカル B / テンプレート B + C。マージはクリーンに B + C へ解決し、
+      // それはテンプレートの内容そのもの。送っても差分が無いので PR 作成が拒まれる。
+      const { effect } = mockContext({
+        lock: lockWith({ hashes: { "file.txt": "abc123" }, commitSha: "abc123def456" }),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      vol.fromJSON({
+        "/test/file.txt": "B\n",
+        "/tmp/template/file.txt": "B\nC\n",
+        "/tmp/base-template/file.txt": "A\n",
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: repoRelPaths(["file.txt"]),
+        newFiles: [],
+        deletedFiles: [],
+        deletedWithLocalEdits: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+      mockDownloadBaseForMerge.mockReturnValueOnce(
+        Effect.succeed({ templateDir: absPath("/tmp/base-template"), cleanup: vi.fn() }),
+      );
+      mockMergeOneFile.mockReturnValueOnce(
+        Effect.succeed({
+          file: repoRelPath("file.txt"),
+          outcome: classifyMergeOutcome("B\nC\n"),
+        }),
+      );
+
+      const pushableFile = {
+        path: repoRelPath("file.txt"),
+        type: "modified" as const,
+        localContent: "B\n",
+        templateContent: "B\nC\n",
+      };
+      mockDetectDiff.mockResolvedValueOnce({ files: [pushableFile] });
+      mockSelectPushFiles.mockResolvedValueOnce([pushableFile]);
+      mockGetGitHubToken.mockReturnValue("ghp_token");
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: false, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+      expect(mockConfirmAction).not.toHaveBeenCalled();
+      expect(mockLog.info).toHaveBeenCalledWith(expect.stringContaining("Nothing to push"));
+    });
+
     it("未解決の衝突があっても PR に載る内容にコンフリクトマーカーが混入しない", async () => {
       // 型では `MergedContent` からしか送信内容を作れないが、送信対象の組み立てには
       // ローカル内容を使う経路もあるため、実際の PR ペイロードでも確認する。

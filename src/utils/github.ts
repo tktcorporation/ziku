@@ -92,7 +92,12 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
     }
   }
 
-  // 7. ファイルを作成または更新
+  // 7. 削除の宛先が揃っているか先に確かめる。1 つでも欠けたまま進むと、サマリで「削除する」と
+  //    見せたファイルが残ったままの PR ができる。ツリー全体が切り詰められた場合と同じく、
+  //    ユーザーが取れる行動（ベースを取り直して push し直す）があるので分類済みの失敗にする。
+  const deletions = resolveDeletions(options.deletions ?? [], shaMap, `${owner}/${repo}`);
+
+  // 8. ファイルを作成または更新
   for (const file of files) {
     await octokit.repos.createOrUpdateFileContents({
       owner: forkOwner,
@@ -107,24 +112,19 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
     });
   }
 
-  // 7b. ファイルを削除
-  if (options.deletions) {
-    for (const file of options.deletions) {
-      const fileSha = shaMap.get(file.path);
-      if (fileSha) {
-        await octokit.repos.deleteFile({
-          owner: forkOwner,
-          repo: forkRepo,
-          path: file.path,
-          message: `Delete ${file.path}`,
-          sha: fileSha,
-          branch: branchName,
-        });
-      }
-    }
+  // 9. ファイルを削除
+  for (const deletion of deletions) {
+    await octokit.repos.deleteFile({
+      owner: forkOwner,
+      repo: forkRepo,
+      path: deletion.path,
+      message: `Delete ${deletion.path}`,
+      sha: deletion.sha,
+      branch: branchName,
+    });
   }
 
-  // 8. PR を作成
+  // 10. PR を作成
   const { data: pr } = await octokit.pulls.create({
     owner,
     repo,
@@ -141,6 +141,33 @@ export async function createPullRequest(token: string, options: PushOptions): Pr
   };
 }
 
+/**
+ * 削除するファイルを、その blob SHA と組にして返す。宛先に無いパスが 1 つでもあれば失敗する。
+ *
+ * `deleteFile` は blob SHA を要求するので、ツリーに無いパスは削除できない。黙って飛ばすと、
+ * サマリで「削除する」と見せたファイルがそのまま残った PR ができ、ユーザーには削除が成功した
+ * ように見える。ツリーが切り詰められたときと同じく、行動（ベースを取り直して push し直す）が
+ * 書ける失敗なので分類して返す。
+ */
+function resolveDeletions(
+  deletions: readonly { readonly path: RepoRelPath }[],
+  shaMap: ReadonlyMap<string, BlobSha>,
+  repo: string,
+): { path: RepoRelPath; sha: BlobSha }[] {
+  const resolved: { path: RepoRelPath; sha: BlobSha }[] = [];
+  const missing: RepoRelPath[] = [];
+  for (const deletion of deletions) {
+    const sha = shaMap.get(deletion.path);
+    if (sha === undefined) missing.push(deletion.path);
+    else resolved.push({ path: deletion.path, sha });
+  }
+
+  if (missing.length > 0) {
+    throw zikuFailure({ kind: "PushDeletionTargetMissing", repo, paths: missing });
+  }
+  return resolved;
+}
+
 /** fork の作成が API から見えるようになるまで待つ時間。直後に問い合わせると 404 が返る。 */
 const FORK_PROPAGATION_WAIT_MS = 3000;
 
@@ -154,6 +181,9 @@ const FORK_PROPAGATION_WAIT_MS = 3000;
  *
  * 既存 fork の問い合わせが失敗したときだけ作成へ倒す。未 fork なら 404 が返るが、それ以外の
  * 理由（トークンの失効等）でも作成が同じ理由で失敗し、そちらの例外が呼び出し側へ届く。
+ *
+ * 同名のリポジトリが見つかっても、対象の fork でなければ使わない（{@link isForkOf}）。
+ * 無関係なリポジトリへ同期ブランチを作ると、GitHub のエラーがそのまま出て原因が分からない。
  */
 async function resolveForkRepo(
   octokit: Octokit,
@@ -161,13 +191,40 @@ async function resolveForkRepo(
 ): Promise<string> {
   const existing = await octokit.repos
     .get({ owner: target.forkOwner, repo: target.repo })
-    .then(({ data }) => data.name)
+    .then(({ data }) => data)
     .catch(() => undefined);
-  if (existing !== undefined) return existing;
+
+  if (existing !== undefined) {
+    if (!isForkOf(existing, target)) {
+      throw zikuFailure({
+        kind: "ForkNameTaken",
+        repo: `${target.owner}/${target.repo}`,
+        existing: `${target.forkOwner}/${target.repo}`,
+      });
+    }
+    return existing.name;
+  }
 
   const { data } = await octokit.repos.createFork({ owner: target.owner, repo: target.repo });
   await sleep(FORK_PROPAGATION_WAIT_MS);
   return data.name;
+}
+
+/**
+ * そのリポジトリから対象リポジトリへ PR を出せるか（共通の履歴を持つ fork か）。
+ *
+ * `parent` は直接の fork 元、`source` は fork の連鎖を辿った根。対象がどちらに当たっても
+ * 履歴を共有するので両方を見る。fork の fork から根へ PR を出す形は GitHub が受け付ける。
+ */
+function isForkOf(
+  repository: { fork: boolean; parent?: { full_name: string }; source?: { full_name: string } },
+  target: { owner: string; repo: string },
+): boolean {
+  if (!repository.fork) return false;
+  const upstream = `${target.owner}/${target.repo}`.toLowerCase();
+  return [repository.parent?.full_name, repository.source?.full_name].some(
+    (name) => name?.toLowerCase() === upstream,
+  );
 }
 
 /**
@@ -797,8 +854,9 @@ function isNetworkFailure(cause: unknown): boolean {
  * ときに `main` を仮定すると、存在しないブランチを見に行くか、別ブランチのコミットを掴む。
  * どちらも 3-way マージのベースを取り違える原因になる。
  *
- * 引けなかった理由で行動を変える呼び出し（トークン拒否なら中断、待てば直る失敗なら控えの
- * ブランチ名へ倒す）は、undefined へ潰す {@link resolveDefaultBranch} ではなくこちらを使う。
+ * 引けなかった理由は潰さずに返す。理由ごとに呼び出し側の行動が変わる（トークン拒否なら
+ * 中断、待てば直る失敗なら控えのブランチ名へ倒す）ので、undefined へ畳むと「待てば直る
+ * 失敗」と「人が直すまで変わらない失敗」が同じ結末になる。
  */
 export function fetchDefaultBranch(owner: string, repo: string): Promise<DefaultBranchResolution> {
   const octokit = new Octokit({ auth: getGitHubToken() });
@@ -815,25 +873,6 @@ export function fetchDefaultBranch(owner: string, repo: string): Promise<Default
       Effect.merge,
     ),
   );
-}
-
-/**
- * リポジトリの既定ブランチ名を取得する。
- *
- * 取得できない場合（リポジトリ不在・認証失敗・ネットワーク断・レート制限）は undefined を
- * 返す。誤ったブランチ名で解決を続けるより、未解決として呼び出し側のフォールバックへ倒す
- * ほうが安全なため。失敗の理由で行動を変える呼び出しは {@link fetchDefaultBranch} を使い、
- * 分類済みの結果を扱うこと。
- */
-export async function resolveDefaultBranch(
-  owner: string,
-  repo: string,
-): Promise<string | undefined> {
-  return match(await fetchDefaultBranch(owner, repo))
-    .with({ _tag: "Resolved" }, (r) => r.name)
-    .with({ _tag: "AuthRejected" }, () => undefined)
-    .with({ _tag: "Unresolved" }, () => undefined)
-    .exhaustive();
 }
 
 /**

@@ -89,6 +89,27 @@ export type FailureReason =
    * `GitHubPermissionDenied` 等と違いトークンや接続では変わらず、リポジトリの中身の話。
    */
   | { readonly kind: "RepoTreeTooLarge"; readonly repo: string }
+  /**
+   * 削除として送ると示したファイルが、PR の宛先ブランチに存在しない。
+   *
+   * 取る行動は `ziku pull` で同期ベースを取り直してから push し直すこと。削除は ziku が
+   * 控えたベースから導くので、上流で既に消えたファイルは送信の直前に初めて食い違いとして
+   * 現れる。`RepoTreeTooLarge` と違い一覧そのものは取れていて、欠けているのは対象のパス。
+   */
+  | {
+      readonly kind: "PushDeletionTargetMissing";
+      readonly repo: string;
+      readonly paths: readonly string[];
+    }
+  /**
+   * PR の head に使う名前のリポジトリが認証ユーザー配下に既にあるが、対象の fork ではない。
+   *
+   * 取る行動はそのリポジトリを改名するか消すこと。ziku は対象リポジトリと同じ名前で fork を
+   * 作って PR の head にするので、無関係な同名リポジトリがあると、そこへ同期ブランチを作る
+   * ことになり、共通の履歴が無い PR として GitHub に拒まれる。`GitHubPermissionDenied` と
+   * 違いトークンの権限では変わらず、直す先は GitHub 上のリポジトリ名。
+   */
+  | { readonly kind: "ForkNameTaken"; readonly repo: string; readonly existing: string }
   /** CLI 引数の値が受け付けられない。 */
   | {
       readonly kind: "InvalidArgument";
@@ -249,6 +270,14 @@ export function describeFailure(reason: FailureReason): FailureDisplay {
     .with({ kind: "RepoTreeTooLarge" }, (r) => ({
       message: `GitHub could not list every file in ${r.repo}: the repository tree is too large`,
       hint: `ziku needs the full listing to tell which files it must update. Reduce the number of files in ${r.repo} — narrowing the include patterns in \`.ziku/ziku.jsonc\` keeps fewer files in sync — then run the command again.`,
+    }))
+    .with({ kind: "PushDeletionTargetMissing" }, (r) => ({
+      message: `${r.repo} has no such file to delete: ${r.paths.join(", ")}`,
+      hint: `ziku derives deletions from the sync base recorded in \`.ziku/lock.json\`, and these files are already gone from the branch the pull request targets. Run \`ziku pull\` to bring the base up to date, then push again.`,
+    }))
+    .with({ kind: "ForkNameTaken" }, (r) => ({
+      message: `${r.existing} already exists and is not a fork of ${r.repo}`,
+      hint: `ziku opens the pull request from a fork of ${r.repo} under your account, and a fork keeps the upstream repository name. Rename or delete ${r.existing} on GitHub, then run the command again.`,
     }))
     .with({ kind: "InvalidArgument" }, (r) => ({
       message: `Invalid ${r.argument}: "${r.value}"`,

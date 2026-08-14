@@ -146,7 +146,6 @@ vi.mock("../../utils/github", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../utils/github")>();
   return {
     resolveLatestCommitSha: vi.fn(() => Promise.resolve("latest123")),
-    resolveDefaultBranch: vi.fn(() => Promise.resolve<string | undefined>("main")),
     fetchDefaultBranch: vi.fn(() => Promise.resolve({ _tag: "Resolved" as const, name: "main" })),
     // 既定ブランチの控えへ倒す規則は実装を通す（コマンドの挙動そのものなのでモックしない）
     decideDefaultBranch: actual.decideDefaultBranch,

@@ -58,7 +58,6 @@ vi.mock("../../utils/github", async () => {
     resolveSourceCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
     checkRepoExists: vi.fn(() => Promise.resolve({ _tag: "Exists" as const })),
     checkRepoSetup: vi.fn(() => Promise.resolve(true)),
-    resolveDefaultBranch: vi.fn(() => Promise.resolve<string | undefined>("main")),
     fetchDefaultBranch: vi.fn(() => Promise.resolve({ _tag: "Resolved" as const, name: "main" })),
     getGitHubToken: vi.fn(() => {}),
     getAuthenticatedUserLogin: vi.fn(() => Promise.resolve()),
@@ -167,8 +166,8 @@ const {
   checkRepoSetup,
   createPullRequest,
   getAuthenticatedUserLogin,
+  fetchDefaultBranch,
   getGitHubToken,
-  resolveDefaultBranch,
   scaffoldTemplateRepo,
 } = await import("../../utils/github");
 const { loadTemplateConfig } = await import("../../utils/template-config");
@@ -192,7 +191,7 @@ const mockGetGitHubToken = vi.mocked(getGitHubToken);
 const mockScaffoldTemplateRepo = vi.mocked(scaffoldTemplateRepo);
 const mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
 const mockCreatePullRequest = vi.mocked(createPullRequest);
-const mockResolveDefaultBranch = vi.mocked(resolveDefaultBranch);
+const mockFetchDefaultBranch = vi.mocked(fetchDefaultBranch);
 const mockConfirmAction = vi.mocked(confirmAction);
 const mockOutro = vi.mocked(outro);
 const mockLog = vi.mocked(log);
@@ -642,7 +641,7 @@ describe("setup: セットアップ UX", () => {
     mockDetectGitHubOwner.mockReturnValue("detected-org");
     mockCheckRepoExists.mockResolvedValue({ _tag: "Exists" });
     mockGetGitHubToken.mockReturnValue("ghp_test_token");
-    mockResolveDefaultBranch.mockResolvedValue("main");
+    mockFetchDefaultBranch.mockResolvedValue({ _tag: "Resolved", name: "main" });
     mockConfirmAction.mockResolvedValue(true);
     mockCreatePullRequest.mockResolvedValue({
       url: "https://github.com/org/repo/pull/1",
@@ -722,7 +721,7 @@ describe("setup: セットアップ UX", () => {
 
     it("--yes でも既定ブランチを取得できなければ PR を作らない", async () => {
       // --yes は対話の省略であって、宛先が定まらないまま作成へ進む指定ではない。
-      mockResolveDefaultBranch.mockResolvedValue(undefined);
+      mockFetchDefaultBranch.mockResolvedValue({ _tag: "Unresolved", reason: "HTTP 503" });
 
       await expect(
         runSetup(["--remote", "--from", "my-org/my-templates", "--yes"]),
@@ -733,7 +732,7 @@ describe("setup: セットアップ UX", () => {
     it("PR はリポジトリの既定ブランチへ向ける", async () => {
       // 既定が master のテンプレートで main を宛先にすると、GitHub API が存在しない
       // ブランチとして 404 を返し、原因の分からない失敗になる。
-      mockResolveDefaultBranch.mockResolvedValue("master");
+      mockFetchDefaultBranch.mockResolvedValue({ _tag: "Resolved", name: "master" });
 
       await runSetup(["--remote", "--from", "my-org/my-templates"]);
 
@@ -744,11 +743,27 @@ describe("setup: セットアップ UX", () => {
     });
 
     it("既定ブランチを取得できなければ main を仮定せず失敗する", async () => {
-      mockResolveDefaultBranch.mockResolvedValue(undefined);
+      mockFetchDefaultBranch.mockResolvedValue({ _tag: "Unresolved", reason: "HTTP 503" });
 
       await expect(runSetup(["--remote", "--from", "my-org/my-templates"])).rejects.toThrow(
         "Cannot determine the default branch of my-org/my-templates",
       );
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
+    it("トークンを拒否されたときは、トークンを直す案内で失敗する", async () => {
+      // setup にはまだ lock ファイルが無いので、`source.ref` を書き換える案内
+      // （DefaultBranchUnresolved）は実行できない。取る行動はトークンの入れ直し。
+      mockFetchDefaultBranch.mockResolvedValue({ _tag: "AuthRejected", detail: "Bad credentials" });
+
+      const thrown = await runSetup(["--remote", "--from", "my-org/my-templates"]).then(
+        () => expect.unreachable("PR が作成されてしまった"),
+        (error: unknown) => error,
+      );
+
+      expect(thrown).toMatchObject({
+        reason: { kind: "GitHubAuthRejected", detail: "Bad credentials" },
+      });
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
     });
 

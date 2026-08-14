@@ -9,6 +9,7 @@ import type { FileClassification } from "../../utils/merge";
 import { classifyFiles } from "../../utils/merge";
 import { classifyMergeOutcome } from "../../utils/merge/types";
 import type { SyncPlan, ZikuConfigState } from "../../utils/merge/sync-plan";
+import { partitionSyncPlan } from "../../utils/merge/sync-plan";
 import type { ConfigDrift } from "../../utils/config-merge";
 import type { DefaultBranchResolution } from "../../utils/github";
 import type { FileDiff, GitHubSource, RepoRelPath } from "../../modules/schemas";
@@ -191,6 +192,23 @@ describe("planPushCandidates", () => {
 
     expect([...plan.pushablePaths]).toEqual([]);
     expect(plan.skippedTemplateOnly).toEqual([]);
+  });
+
+  it("init が生成したファイルは、ベースに載っているので送信候補に上がらない", () => {
+    // `.devcontainer/devcontainer.env.example` は init が組み立てて書くファイルで、
+    // テンプレートには無い。ベースに載らないと localOnly になり、`push --yes` が
+    // ziku 自身の生成物をテンプレートへ送って全プロジェクトへ配ってしまう。
+    const envExample = ".devcontainer/devcontainer.env.example";
+    const classification = classifyFiles({
+      baseHashes: hashMap({ [envExample]: "generated" }),
+      localHashes: hashMap({ [envExample]: "generated" }),
+      templateHashes: hashMap({}),
+    });
+
+    expect(classification.localOnly).not.toContain(envExample);
+    expect([
+      ...planPushCandidates(partitionSyncPlan(classification), driftBothWays).pushablePaths,
+    ]).toEqual([]);
   });
 
   it("テンプレートが削除したファイルの push は削除の取り消しとして印を付ける", () => {
@@ -505,6 +523,47 @@ describe("buildPushPayload", () => {
 
     expect(payload.deletions).toEqual([{ path: "gone.txt" }]);
     expect(payload.files).toEqual([]);
+  });
+
+  it("送る内容がテンプレートと同一になったファイルは送らない", () => {
+    // ベースが A、ローカルが B、テンプレートが B + C の衝突。自動マージはクリーンに
+    // B + C へ解決し、それはテンプレートの内容そのもの。差分の無い PR を作りにいくと
+    // GitHub が拒み、その状態はどの分類にも無いので ziku の不具合として表示される。
+    const merged = classifyMergeOutcome("B\nC\n");
+    if (merged._tag !== "Clean") throw new Error("fixture must merge cleanly");
+    const mergedContents = new Map<RepoRelPath, PushContent>([
+      [repoRelPath("a.txt"), mergedAsPushContent(merged.content)],
+    ]);
+
+    const payload = buildPushPayload([modified("a.txt", "B\n", "B\nC\n")], mergedContents);
+
+    expect(payload.files).toEqual([]);
+    expect(payload.deletions).toEqual([]);
+  });
+
+  it("送信ペイロードとサマリーの行は同じ集合になる", () => {
+    // 片方だけが「テンプレートと同一」を落とすと、0 件と表示しながら中身の無い送信をする。
+    const mergedContents = new Map<RepoRelPath, PushContent>([
+      [repoRelPath("same.txt"), asPushContent("template")],
+      [repoRelPath("differs.txt"), asPushContent("sent")],
+    ]);
+    const pushableFiles = [
+      modified("same.txt", "local", "template"),
+      modified("differs.txt", "local", "template"),
+    ];
+
+    const payload = buildPushPayload(pushableFiles, mergedContents);
+    const rows = buildPushSummaryRows({
+      pushableFiles,
+      files: payload.files,
+      deletions: payload.deletions,
+      restoresTemplateDeletion: pathSet(),
+    });
+
+    expect(payload.files.map((f) => f.path)).toEqual(["differs.txt"]);
+    expect(rows.map((row) => (row._tag === "Change" ? row.diff.path : row.path))).toEqual([
+      "differs.txt",
+    ]);
   });
 });
 

@@ -8,9 +8,11 @@ const { absPath, globPatterns, repoRelPaths } = await import("../../__tests__/br
 const {
   mergeConfigPatterns,
   computeMergedZikuConfig,
+  computeScopedZikuConfig,
   analyzeConfigDrift,
   findLocalOnlyPatternsForPaths,
 } = await import("../config-merge");
+const { parse: parseJsonc } = await import("jsonc-parser");
 
 describe("mergeConfigPatterns（要素レベル加法マージ＝和集合）", () => {
   it("ローカルとテンプレ双方の追加を保持する", () => {
@@ -115,6 +117,74 @@ describe("computeMergedZikuConfig（ファイル読み込み + 和集合マー�
     });
     const parsed = JSON.parse(merged);
     expect(parsed.include).toEqual([".claude/**"]);
+  });
+
+  it("ローカルのコメントと ziku が読まないキーを残す", async () => {
+    // 拡張子が .jsonc なのは注釈を書けるようにするため。作り直すと同期のたびに消える。
+    vol.fromJSON({
+      "/local/.ziku/ziku.jsonc": [
+        "{",
+        "  // ルールだけ同期する",
+        '  "include": [".claude/**"],',
+        '  "$comment": "keep me"',
+        "}",
+        "",
+      ].join("\n"),
+      "/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".github/**"] }, null, 2),
+    });
+
+    const merged = await computeMergedZikuConfig({
+      targetDir: absPath("/local"),
+      templateDir: absPath("/template"),
+    });
+
+    expect(merged).toContain("// ルールだけ同期する");
+    expect(merged).toContain('"$comment": "keep me"');
+    expect(parseJsonc(merged).include).toEqual([".claude/**", ".github/**"]);
+  });
+
+  it("取り込むパターンが無ければ元の内容をそのまま返す", async () => {
+    // 同じ値でも書き直すと利用者の書式が同期のたびに変わる。
+    const raw = ["{", "  // keep", '  "include": [".claude/**"]', "}", ""].join("\n");
+    vol.fromJSON({
+      "/local/.ziku/ziku.jsonc": raw,
+      "/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".claude/**"] }, null, 2),
+    });
+
+    expect(
+      await computeMergedZikuConfig({
+        targetDir: absPath("/local"),
+        templateDir: absPath("/template"),
+      }),
+    ).toBe(raw);
+  });
+});
+
+describe("computeScopedZikuConfig（テンプレ側の内容 + 明示した追加分だけ）", () => {
+  beforeEach(() => {
+    vol.reset();
+  });
+
+  it("テンプレートのコメントを残したままパターンを足す", async () => {
+    // 送り先はテンプレートで、ローカルへは書き戻さない。作り直すと 1 回の push で
+    // そのテンプレートを使う全利用者から注釈が消える。
+    vol.fromJSON({
+      "/template/.ziku/ziku.jsonc": [
+        "{",
+        "  // 共通ルール",
+        '  "include": [".claude/**"]',
+        "}",
+        "",
+      ].join("\n"),
+    });
+
+    const merged = await computeScopedZikuConfig({
+      templateDir: absPath("/template"),
+      additionalIncludes: globPatterns([".mcp.json"]),
+    });
+
+    expect(merged).toContain("// 共通ルール");
+    expect(parseJsonc(merged).include).toEqual([".mcp.json", ".claude/**"]);
   });
 });
 

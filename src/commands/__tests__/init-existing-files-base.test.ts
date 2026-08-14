@@ -65,7 +65,6 @@ vi.mock("../../utils/github", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../utils/github")>();
   return {
     resolveLatestCommitSha: vi.fn(),
-    resolveDefaultBranch: vi.fn(),
     fetchDefaultBranch: vi.fn(),
     resolveSourceCommitSha: vi.fn(),
     resolveSourceCommit: vi.fn(),

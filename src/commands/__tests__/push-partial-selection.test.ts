@@ -61,7 +61,6 @@ vi.mock("../../utils/github", async (importOriginal) => {
   return {
     ...actual,
     resolveLatestCommitSha: vi.fn(),
-    resolveDefaultBranch: vi.fn(),
     resolveSourceCommitSha: vi.fn(),
     getGitHubToken: vi.fn(() => ""),
     createPullRequest: vi.fn(),

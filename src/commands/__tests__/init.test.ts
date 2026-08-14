@@ -49,7 +49,6 @@ vi.mock("../../utils/github", async () => {
   return {
     resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
     resolveSourceCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
-    resolveDefaultBranch: vi.fn(() => Promise.resolve<string | undefined>("main")),
     fetchDefaultBranch: vi.fn(() => Promise.resolve({ _tag: "Resolved" as const, name: "main" })),
     checkRepoExists: vi.fn(() => Promise.resolve({ _tag: "Exists" as const })),
     checkRepoSetup: vi.fn(() => Promise.resolve(true)),
@@ -818,7 +817,31 @@ describe("initCommand", () => {
       const lockContent = lockSchema.parse(
         JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string),
       );
-      expect(baseHashesOf(lockContent)).toEqual(expectedHashes);
+      // テンプレート由来のファイルに加え、init 自身が書いたファイルもベースに載る。
+      expect(baseHashesOf(lockContent)).toMatchObject(expectedHashes);
+    });
+
+    it("init が生成したファイルもテンプレート由来と同じくベースに載る", async () => {
+      vol.fromJSON({ "/test": null });
+
+      // テンプレートには devcontainer.env.example が無い（init が組み立てて書く）。
+      mockHashFiles.mockResolvedValueOnce(hashMap({ ".mcp.json": "abc123hash" }));
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      const lockContent = lockSchema.parse(
+        JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string),
+      );
+      // ベースに載らないと次回の分類が localOnly になり、`push --yes` が ziku 自身の
+      // 生成物をテンプレートへ送って全プロジェクトへ配ってしまう。
+      expect(
+        baseHashesOf(lockContent)[repoRelPath(".devcontainer/devcontainer.env.example")],
+      ).toEqual(expect.any(String));
     });
 
     it("テンプレに ziku.jsonc があれば同期ベースに ziku.jsonc の base が記録される", async () => {
@@ -851,7 +874,7 @@ describe("initCommand", () => {
       );
     });
 
-    it("テンプレに ziku.jsonc が無ければ同期ベースに ziku.jsonc を記録しない（誤削除防止 / codex P1）", async () => {
+    it("テンプレに ziku.jsonc が無くても、init が書いた本文をベースにする", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -870,8 +893,11 @@ describe("initCommand", () => {
       const lockContent = lockSchema.parse(
         JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string),
       );
-      // base を記録しない（記録すると次回 pull で deletedFiles 判定→制御ファイル削除になる）
-      expect(baseHashesOf(lockContent)[repoRelPath(".ziku/ziku.jsonc")]).toBeUndefined();
+      // 設定ファイルの削除は方向を問わず伝播しない（`sync-plan.ts` の `zikuConfigActions`）ので、
+      // ベースに載せても pull がローカルの制御ファイルを消すことはない。
+      expect(baseHashesOf(lockContent)[repoRelPath(".ziku/ziku.jsonc")]).toEqual(
+        expect.any(String),
+      );
     });
   });
 

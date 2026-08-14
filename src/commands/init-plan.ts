@@ -257,13 +257,21 @@ export interface LockBaseHashPlan {
  * 既存ファイルを失う承認を含まない（戦略は `skip` に解決される —
  * {@link planOverwriteStrategy}）ので、この食い違いは非対話実行のたびに起きる。
  *
+ * ## 走査するのはテンプレートと生成物の両方
+ * init が書くファイルはテンプレート由来のものだけではない（`.devcontainer/devcontainer.env.example`
+ * のように init 自身が組み立てるものがある）。テンプレートのハッシュ表だけを走査すると、
+ * そうしたファイルにベースのエントリが付かず、次回の分類は {base 無・local 有・template 無} を
+ * `localOnly`（ローカルだけが作った）と読む。すると `push --yes` が ziku 自身の生成物を
+ * テンプレートへ送り、そこから pull で全プロジェクトへ配られる。
+ *
+ * ベースへ載せると、そのファイルは次回以降 {base 有・local 有・template 無} になり、pull からは
+ * テンプレート側の削除候補に見える（対話なら選択、`--force` なら削除）。載せない側の帰結が
+ * 「テンプレートへ送って全プロジェクトへ配る」で取り消せないのに対し、こちらは 1 つの
+ * プロジェクトの中で完結し、利用者が残す側を選べる。
+ *
  * ## 判断とディスク読み取りの分離
  * ここはどのファイルをどちらの内容から取るかだけを決め、ディスクは読まない。`fromLocalFile`
  * のファイルを読んでハッシュを取るのは呼び出し側の役目。
- *
- * テンプレートのハッシュ表に無いパスはベースにも載らない。テンプレートに無いのに載せると、
- * 次回 pull が {base 有・local 有・template 無} を削除と判定してローカルのファイルを
- * 消してしまう。
  *
  * @param params.templateHashes    テンプレートを走査して得たハッシュ表
  * @param params.generatedContents init が自分で組み立てて書く本文（パス → 本文）。テンプレートに
@@ -283,14 +291,20 @@ export function planLockBaseHashes(params: {
 }): LockBaseHashPlan {
   const actions = new Map<string, FileAction>(params.results.map((r) => [r.path, r.action]));
 
+  // init が書き込んだ場合にベースへ載る内容。生成物はその本文から、それ以外はテンプレートの
+  // 走査結果から取る。テンプレートに無いパスもここで揃うので、以降は出所を意識せず扱える。
+  const ifWritten: HashMap = { ...params.templateHashes };
+  for (const [path, content] of params.generatedContents) {
+    ifWritten[path] = hashContent(content);
+  }
+
   const written: HashMap = {};
   const fromLocalFile: RepoRelPath[] = [];
-  for (const [rawPath, templateHash] of Object.entries(params.templateHashes)) {
+  for (const [rawPath, hash] of Object.entries(ifWritten)) {
     const path = repoRelPath(rawPath);
-    const generated = params.generatedContents.get(path);
     match(baseHashOrigin(actions.get(rawPath)))
       .with({ _tag: "Written" }, () => {
-        written[path] = generated === undefined ? templateHash : hashContent(generated);
+        written[path] = hash;
       })
       .with({ _tag: "LocalFile" }, () => {
         fromLocalFile.push(path);

@@ -17,7 +17,11 @@ import { join } from "pathe";
 import { afterEach, describe, expect, it } from "vitest";
 import { absPath, globPatterns, repoRelPath, syncScope } from "../../__tests__/brands";
 import type { AbsPath } from "../../modules/schemas";
-import { analyzeConfigDrift, computeMergedZikuConfig } from "../config-merge";
+import {
+  analyzeConfigDrift,
+  computeMergedZikuConfig,
+  computeScopedZikuConfig,
+} from "../config-merge";
 import { hashContent, hashFiles } from "../hash";
 import { classifyFiles } from "../merge";
 import type { ZikuConfigStatusCategory } from "../merge/sync-plan";
@@ -98,6 +102,50 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
     expect(classification.localOnly).toContain(ZIKU_CONFIG_FILE);
     // 新規追跡ファイルもローカルのみに存在 → localOnly
     expect(classification.localOnly).toContain(".eslintrc.json");
+  });
+
+  it("pull と push を往復しても、両側の ziku.jsonc の注釈が残る", async () => {
+    const templateDir = await createTempDir("comments-tpl");
+    const projectDir = await createTempDir("comments-prj");
+    tempDirs.push(templateDir, projectDir);
+
+    await writeFiles(templateDir, {
+      ".ziku/ziku.jsonc": ["{", "  // 共通ルール", '  "include": [".claude/**"]', "}", ""].join(
+        "\n",
+      ),
+    });
+    await writeFiles(projectDir, {
+      ".ziku/ziku.jsonc": [
+        "{",
+        "  // このプロジェクトは mcp だけ足している",
+        '  "include": [".mcp.json"]',
+        "}",
+        "",
+      ].join("\n"),
+    });
+
+    // pull: union をローカルへ書き戻す
+    const pulled = await computeMergedZikuConfig({ targetDir: projectDir, templateDir });
+    await writeFiles(projectDir, { ".ziku/ziku.jsonc": pulled });
+    expect(pulled).toContain("// このプロジェクトは mcp だけ足している");
+
+    // push: 今回の push に関係するパターンだけをテンプレートの内容へ足して送る
+    const pushed = await computeScopedZikuConfig({
+      templateDir,
+      additionalIncludes: globPatterns([".mcp.json"]),
+    });
+    await writeFiles(templateDir, { ".ziku/ziku.jsonc": pushed });
+    expect(pushed).toContain("// 共通ルール");
+
+    // 往復後もパターンは両側に揃い、注釈はそれぞれの側に残っている
+    const localAfter = await readFile(join(projectDir, ZIKU_CONFIG_FILE), "utf-8");
+    const templateAfter = await readFile(join(templateDir, ZIKU_CONFIG_FILE), "utf-8");
+    expect(localAfter).toContain("// このプロジェクトは mcp だけ足している");
+    expect(templateAfter).toContain("// 共通ルール");
+    expect(await analyzeConfigDrift(projectDir, templateDir)).toEqual({
+      pullRelevant: false,
+      pushRelevant: false,
+    });
   });
 
   it("テンプレ側でパターンが追加された場合は ziku.jsonc を autoUpdate（pull 候補）にする", async () => {
