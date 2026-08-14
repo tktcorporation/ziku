@@ -212,6 +212,13 @@ const cases: FailureCases = {
       hint: /\u2022 \.mcp\.json[\s\S]*\u2022 AGENTS\.md[\s\S]*/,
     },
   ],
+  NoMergePaused: [
+    {
+      reason: { kind: "NoMergePaused" },
+      message: "No pending merge found",
+      hint: /Run `ziku pull` first/,
+    },
+  ],
   ConflictsUnresolved: [
     {
       reason: {
