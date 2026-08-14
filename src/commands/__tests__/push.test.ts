@@ -343,6 +343,7 @@ function mockContext(overrides?: {
       }),
       templateDir,
       cleanup,
+      lockRefreshed: false,
       resolveBaseRef: Effect.succeed(Option.none<CommitSha>()),
     }),
     cleanup,

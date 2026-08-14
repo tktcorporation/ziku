@@ -41,6 +41,15 @@ export interface CommandContextShape {
    * lock を書き出すコマンドはこれを起点に次の状態を作ること。
    */
   readonly lock: LockState;
+  /**
+   * {@link lock} がディスク上の内容と違うか。
+   *
+   * 控え直した既定ブランチは lock を書き出したときだけ残る。書くものが無いと判断して早期に
+   * 戻る経路がこれを見ないと、GitHub 側でブランチが改名された直後の実行（内容は同じなので
+   * 取り込む変更が 0 件）で控えが古いまま残り、次に GitHub へ問い合わせられないときの
+   * 取得先が存在しないブランチを指す。
+   */
+  readonly lockRefreshed: boolean;
   /** テンプレートの取得元（lock.source のエイリアス） */
   readonly source: TemplateSource;
   /**
@@ -184,6 +193,8 @@ export function loadCommandContext(
     return {
       config,
       lock,
+      // 同一なら控えは変わっていない（`withRecordedDefaultBranch` は値が同じなら元を返す）。
+      lockRefreshed: lock !== loadedLock,
       source: lock.source,
       resolved: template,
       templateDir: template.dir,

@@ -113,6 +113,7 @@ function mockContext(
       resolved: resolvedTemplate({ source, dir: templateDir }),
       templateDir,
       cleanup,
+      lockRefreshed: false,
       resolveBaseRef: Effect.succeed(Option.none<CommitSha>()),
     }),
     cleanup,

@@ -501,7 +501,12 @@ export function withRecordedDefaultBranch(
     .with({ source: { kind: "local" } }, (l): LockState => l)
     .with(
       { source: { kind: "github" } },
-      (l): LockState => ({ ...l, source: { ...l.source, defaultBranch } }),
+      (l): LockState =>
+        // 同じ値なら元の値をそのまま返す。呼び出し側は同一性で「控えが変わったか」を判断でき、
+        // 変わっていない実行で lock を書き直さずに済む。
+        l.source.defaultBranch === defaultBranch
+          ? l
+          : { ...l, source: { ...l.source, defaultBranch } },
     )
     .exhaustive();
 }

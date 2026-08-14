@@ -314,6 +314,7 @@ function mockContext(overrides?: {
   lock?: LockState;
   source?: TemplateSource;
   templateDir?: AbsPath;
+  lockRefreshed?: boolean;
   resolveBaseRef?: Effect.Effect<Option.Option<CommitSha>, ZikuFailure>;
 }) {
   const cleanup = vi.fn();
@@ -327,6 +328,7 @@ function mockContext(overrides?: {
       resolved: resolvedTemplate({ source, dir: templateDir }),
       templateDir,
       cleanup,
+      lockRefreshed: overrides?.lockRefreshed ?? false,
       resolveBaseRef: overrides?.resolveBaseRef ?? Effect.succeed(Option.none<CommitSha>()),
     }),
     cleanup,
@@ -445,6 +447,35 @@ describe("pullCommand", () => {
       });
 
       expect(mockLog.success).toHaveBeenCalledWith("Already up to date");
+    });
+
+    it("変更が無くても、控え直した既定ブランチは lock へ書き出す", async () => {
+      // 既定ブランチが改名されただけの実行は取り込む変更が 0 件になる。ここで書き出さないと、
+      // 次に GitHub へ問い合わせられないときの取得先が存在しないブランチを指す。
+      vol.fromJSON({ "/test": null });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedWithLocalEdits: [],
+        deletedLocally: [],
+        unchanged: repoRelPaths([".mcp.json"]),
+      });
+
+      const { effect } = mockContext({ lockRefreshed: true });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockLog.success).toHaveBeenCalledWith("Already up to date");
+      expect(mockSaveLock).toHaveBeenCalled();
     });
 
     it("テンプレが新パターンを追加 → ziku.jsonc が union マージで同期され lock が更新される", async () => {

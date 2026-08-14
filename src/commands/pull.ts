@@ -230,6 +230,10 @@ export const pullCommand = defineCommand({
           const changes = planPullChanges({ files: plan.files, hashes, configSync });
 
           if (changes.totalChanges === 0 && !changes.rewriteLock) {
+            // 取り込む変更が無くても、控え直した既定ブランチは書き出す。ここで捨てると、
+            // GitHub 側の改名に追随した値がディスクへ残らず、次に問い合わせられないときの
+            // 取得先が存在しないブランチを指す。ベースは動かさないので lock をそのまま書く。
+            if (ctx.lockRefreshed && !args.dryRun) await saveLock(targetDir, lock);
             log.success("Already up to date");
             outro("No changes needed");
             return;
