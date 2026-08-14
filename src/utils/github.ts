@@ -1,6 +1,6 @@
 import { Octokit } from "@octokit/rest";
 import { Effect, Option } from "effect";
-import { ZikuError } from "../errors";
+import { GitHubApiError, ZikuError } from "../errors";
 import type { PrResult } from "../modules/schemas";
 
 export interface PushOptions {
@@ -456,5 +456,315 @@ export async function resolveLatestCommitSha(
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
+  });
+}
+
+// ────────────────────────────────────────────────────────────────
+// owner 横断探索ユーティリティ (ziku aggregate 用)
+//
+// 背景: ここから下は GitHubApiError を Effect のエラーチャネルに載せる書き方に
+// 統一する。この上のセクションの fetch 系関数（checkRepoExists 等）は Promise を
+// 返し、内部で Effect.runPromise して Option や独自タグ付き Union に丸めているが、
+// 404/403 を "not found" と "権限・レート制限エラー" として型で区別したまま
+// 呼び出し元（aggregate の集約ロジック）に伝える必要があるため、内部で
+// runPromise せず Effect をそのまま返す（`.claude/rules/project/effect-ts.md` の
+// 「ユーティリティ関数は Effect<A, E, R> を返す」に従う）。
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * 認証ヘッダ。トークンが無ければ空オブジェクト（public リポジトリは未認証でも読める）。
+ */
+function githubAuthHeaders(): Record<string, string> {
+  const token = getGitHubToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+/**
+ * GitHub REST API への fetch ラッパー。ネットワークエラー（DNS 解決失敗など）だけを
+ * GitHubApiError に変換する。HTTP ステータス（404/403 等）は呼び出し側が
+ * レスポンスを見て意味づけする（"not found" なのか "エラー" なのかは
+ * エンドポイントごとに異なるため、ここでは判定しない）。
+ */
+function githubFetch(url: string, init?: RequestInit): Effect.Effect<Response, GitHubApiError> {
+  return Effect.tryPromise({
+    try: () =>
+      fetch(url, {
+        ...init,
+        headers: {
+          // API のバージョンを明示しない場合、GitHub 側の既定バージョンが変わると
+          // レスポンス形状も変わりうる。明示して形状を固定する。
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+          ...githubAuthHeaders(),
+          ...(init?.headers as Record<string, string>),
+        },
+      }),
+    catch: (cause) =>
+      new GitHubApiError({ message: cause instanceof Error ? cause.message : String(cause) }),
+  });
+}
+
+/**
+ * 2xx 以外のレスポンスを GitHubApiError に変換する。
+ */
+function githubResponseError(res: Response): GitHubApiError {
+  return new GitHubApiError({
+    message: res.statusText || `HTTP ${res.status}`,
+    status: res.status,
+  });
+}
+
+/**
+ * レスポンスボディを JSON としてパースする。GitHub がステータス 200 で
+ * 不正な JSON を返すことは通常無いが、fetch の `.json()` 自体は reject しうるため
+ * Effect.tryPromise で包んで GitHubApiError に正規化する。
+ */
+function parseGitHubJson<T>(res: Response): Effect.Effect<T, GitHubApiError> {
+  return Effect.tryPromise({
+    try: () => res.json() as Promise<T>,
+    catch: (cause) =>
+      new GitHubApiError({ message: cause instanceof Error ? cause.message : String(cause) }),
+  });
+}
+
+/** GitHub Repos API (`/orgs/{owner}/repos` `/users/{owner}/repos`) の 1 要素。必要フィールドのみ */
+interface GitHubRepoListItem {
+  readonly name: string;
+  readonly owner: { readonly login: string };
+  readonly default_branch: string;
+  readonly archived: boolean;
+  readonly pushed_at: string | null;
+  readonly private: boolean;
+}
+
+/**
+ * owner が Organization かどうかを判定する。
+ *
+ * `GET /orgs/{owner}` が 200 なら org、404 なら Personal アカウントとして user 扱いにする。
+ *
+ * 404 以外の失敗（レート制限・認証エラー）を user 扱いへ丸めてはいけない。
+ * `/users/{org}/repos` は Organization に対しても public リポジトリだけを返すため、
+ * 丸めるとエラーが表面化しないまま「private リポジトリが 1 つも無い owner」に見える。
+ * 取りこぼしを黙って返すより失敗させる。
+ */
+function isOrganization(owner: string): Effect.Effect<boolean, GitHubApiError> {
+  return githubFetch(`https://api.github.com/orgs/${encodeURIComponent(owner)}`, {
+    method: "HEAD",
+  }).pipe(
+    Effect.flatMap((res) => {
+      if (res.ok) return Effect.succeed(true);
+      if (res.status === 404) return Effect.succeed(false);
+      return Effect.fail(githubResponseError(res));
+    }),
+  );
+}
+
+/**
+ * リポジトリ一覧 API をページネーションしながら全件取得する。
+ *
+ * `per_page=100` で取得し、返却件数が `per_page` 未満になったページを最後と判定する
+ * （GitHub の Link ヘッダをパースする方法もあるが、この用途では単純な件数判定で十分）。
+ */
+function fetchAllRepoPages(
+  baseUrl: string,
+): Effect.Effect<readonly GitHubRepoListItem[], GitHubApiError> {
+  const perPage = 100;
+  const loop = (
+    page: number,
+    acc: readonly GitHubRepoListItem[],
+  ): Effect.Effect<readonly GitHubRepoListItem[], GitHubApiError> =>
+    Effect.gen(function* () {
+      const res = yield* githubFetch(`${baseUrl}?per_page=${perPage}&page=${page}`);
+      if (!res.ok) return yield* Effect.fail(githubResponseError(res));
+      const items = yield* parseGitHubJson<readonly GitHubRepoListItem[]>(res);
+      const combined = [...acc, ...items];
+      if (items.length < perPage) return combined;
+      return yield* loop(page + 1, combined);
+    });
+  return loop(1, []);
+}
+
+/** `listOwnerRepos` が返すリポジトリ 1 件分の情報 */
+export interface OwnerRepoInfo {
+  readonly owner: string;
+  readonly repo: string;
+  readonly defaultBranch: string;
+  readonly archived: boolean;
+  /** ISO 8601 文字列。push 履歴が無い空リポジトリでは null */
+  readonly pushedAt: string | null;
+  readonly isPrivate: boolean;
+}
+
+export interface ListOwnerReposOptions {
+  /** true の場合アーカイブ済みリポジトリも含める。既定は false（除外） */
+  readonly includeArchived?: boolean;
+}
+
+/**
+ * owner（Organization または User）配下の全リポジトリを列挙する。
+ *
+ * 背景: `ziku aggregate` がテンプレート利用リポジトリの候補を洗い出すために使う、
+ * owner 横断探索の入口。
+ *
+ * - owner が Organization か User かを `isOrganization` で判定し、
+ *   `/orgs/{owner}/repos` または `/users/{owner}/repos` を使い分ける。
+ * - ページネーションを最後まで辿るため、リポジトリ数が多い owner でも全件返る
+ *   （1 ページ目だけで打ち切らない）。
+ * - `includeArchived` が false（既定）の場合、アーカイブ済みリポジトリは結果から除く。
+ * - 認証は `getGitHubToken()` に委ねる。トークンが無くても public リポジトリの
+ *   一覧は取得できるため、トークン必須にはしていない（ただし未認証は 60req/h に
+ *   制限されるため、レート制限に達すると GitHubApiError で失敗する）。
+ */
+export function listOwnerRepos(
+  owner: string,
+  options?: ListOwnerReposOptions,
+): Effect.Effect<OwnerRepoInfo[], GitHubApiError> {
+  const includeArchived = options?.includeArchived ?? false;
+  return Effect.gen(function* () {
+    const isOrg = yield* isOrganization(owner);
+    const kind = isOrg ? "orgs" : "users";
+    const items = yield* fetchAllRepoPages(
+      `https://api.github.com/${kind}/${encodeURIComponent(owner)}/repos`,
+    );
+    return items
+      .filter((item) => includeArchived || !item.archived)
+      .map(
+        (item): OwnerRepoInfo => ({
+          owner: item.owner.login,
+          repo: item.name,
+          defaultBranch: item.default_branch,
+          archived: item.archived,
+          pushedAt: item.pushed_at,
+          isPrivate: item.private,
+        }),
+      );
+  });
+}
+
+/** GitHub Contents API (`/repos/{owner}/{repo}/contents/{path}`) のレスポンス。ファイル 1 件分 */
+interface GitHubContentFile {
+  readonly type: "file" | "dir" | "symlink" | "submodule";
+  /** base64 エンコードされた内容。1MB を超えるファイルでは省略される */
+  readonly content?: string;
+  readonly encoding?: string;
+  readonly size: number;
+}
+
+/**
+ * Contents API の URL を組み立てる。path はセグメントごとに encodeURIComponent する
+ * （`/` 自体はパス区切りとして残し、ファイル名中の空白や記号だけをエスケープするため）。
+ */
+function buildContentsUrl(owner: string, repo: string, path: string, ref?: string): string {
+  const encodedPath = path
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  const url = new URL(
+    `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}`,
+  );
+  if (ref) url.searchParams.set("ref", ref);
+  return url.toString();
+}
+
+/**
+ * リポジトリ内のテキストファイルを取得する。
+ *
+ * 背景: `ziku aggregate` が各プロジェクトリポジトリの設定ファイルをテンプレートと
+ * 比較し、未同期差分を洗い出すために使う。
+ *
+ * - ファイルが存在しない（404）場合は `Option.none()` を返す。これは
+ *   「そのプロジェクトがそのファイルを未導入」という正常系であり、エラーではない。
+ * - path がディレクトリを指していた場合（Contents API は配列を返す）も、
+ *   テキストファイルとしては取得不可能なので `Option.none()` として扱う。
+ * - ファイルが 1MB を超え `content` フィールドが省略されるケースは、
+ *   空文字列を返すと「ファイルが空」と区別が付かなくなるため GitHubApiError として失敗させる。
+ * - 404 以外の失敗（403 のレート制限、401 の認証エラーなど）は GitHubApiError で返す。
+ *   404 と混同しないよう、ステータスコードでの分岐は 404 を最初に判定する。
+ */
+export function fetchRepoTextFile(
+  owner: string,
+  repo: string,
+  path: string,
+  ref?: string,
+): Effect.Effect<Option.Option<string>, GitHubApiError> {
+  return Effect.gen(function* () {
+    const res = yield* githubFetch(buildContentsUrl(owner, repo, path, ref));
+    if (res.status === 404) return Option.none<string>();
+    if (!res.ok) return yield* Effect.fail(githubResponseError(res));
+
+    const data = yield* parseGitHubJson<GitHubContentFile | GitHubContentFile[]>(res);
+    if (Array.isArray(data)) {
+      // ディレクトリを指定した場合。テキストファイルとしては存在しないものとして扱う。
+      return Option.none<string>();
+    }
+    if (data.content === undefined || data.encoding !== "base64") {
+      return yield* Effect.fail(
+        new GitHubApiError({
+          message: `File content unavailable (size=${data.size} bytes; likely exceeds the Contents API's 1MB limit): ${owner}/${repo}/${path}`,
+        }),
+      );
+    }
+    // Option.some(...) は unicorn/no-array-callback-reference が Array.prototype.some
+    // との名前衝突で誤検知するため、fromNullable で同じ意味を表現する
+    // (decoded は常に非 null/undefined の string なので Some(decoded) と等価)。
+    const decoded = Buffer.from(data.content, "base64").toString("utf-8");
+    return Option.fromNullable(decoded);
+  });
+}
+
+/** GitHub Commits API (`/repos/{owner}/{repo}/commits`) のレスポンス。1 件分の必要フィールドのみ */
+interface GitHubCommitListItem {
+  readonly commit: {
+    // GitHub App によるコミットなど、committer/author が無いレスポンスも存在するため null 許容
+    readonly committer: { readonly date: string } | null;
+    readonly author: { readonly date: string } | null;
+  };
+}
+
+/**
+ * リポジトリ内の指定パスに対する最終コミット日時を取得する。
+ *
+ * 背景: `ziku aggregate` が「テンプレート側の更新に対して、各プロジェクトの
+ * 該当ファイルがどのくらい前から追随できていないか」を判定するために使う。
+ *
+ * - 該当パスへのコミット履歴が無い（0 件）場合は `Option.none()` を返す。
+ *   これは「そのファイルがまだ存在しない／変更されたことがない」という正常系。
+ * - コミットが見つかった場合は最新 1 件の commit.committer.date（無ければ
+ *   commit.author.date）を ISO 8601 文字列で返す。
+ * - リポジトリ自体が存在しない、レート制限、認証エラーなどは GitHubApiError で返す。
+ */
+export function getLastCommitDate(
+  owner: string,
+  repo: string,
+  path: string,
+  ref?: string,
+): Effect.Effect<Option.Option<string>, GitHubApiError> {
+  return Effect.gen(function* () {
+    const url = new URL(
+      `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits`,
+    );
+    url.searchParams.set("path", path);
+    url.searchParams.set("per_page", "1");
+    if (ref) url.searchParams.set("sha", ref);
+
+    const res = yield* githubFetch(url.toString());
+    if (!res.ok) return yield* Effect.fail(githubResponseError(res));
+
+    const commits = yield* parseGitHubJson<readonly GitHubCommitListItem[]>(res);
+    if (commits.length === 0) return Option.none<string>();
+
+    const first = commits[0];
+    const date = first?.commit.committer?.date ?? first?.commit.author?.date;
+    if (!date) {
+      return yield* Effect.fail(
+        new GitHubApiError({
+          message: `Commit date unavailable for ${owner}/${repo}/${path}`,
+        }),
+      );
+    }
+    // Option.some(...) は unicorn/no-array-callback-reference が Array.prototype.some
+    // との名前衝突で誤検知するため、fromNullable で同じ意味を表現する
+    // (date は直前の !date チェックで非 null/undefined が確定している)。
+    return Option.fromNullable(date);
   });
 }

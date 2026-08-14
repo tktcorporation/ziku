@@ -1,9 +1,13 @@
+import { Effect, Option } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   checkRepoExists,
   checkRepoSetup,
+  fetchRepoTextFile,
   getGhCliToken,
   getGitHubToken,
+  getLastCommitDate,
+  listOwnerRepos,
   rateLimitedError,
   unauthorizedError,
 } from "../github";
@@ -662,5 +666,295 @@ describe("scaffoldTemplateRepo", () => {
     );
     // createInOrg は呼ばれない
     expect(mockReposCreateInOrg).not.toHaveBeenCalled();
+  });
+});
+
+/** JSON ボディを返す fetch レスポンスの簡易ビルダ（listOwnerRepos 系のテスト用） */
+function jsonResponse(status: number, body: unknown, statusText = "") {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText,
+    json: () => Promise.resolve(body),
+  };
+}
+
+type RepoListItemFixture = {
+  name: string;
+  owner: { login: string };
+  default_branch: string;
+  archived: boolean;
+  pushed_at: string | null;
+  private: boolean;
+};
+
+function repoFixture(overrides: Partial<RepoListItemFixture> = {}): RepoListItemFixture {
+  return {
+    name: "repo",
+    owner: { login: "acme" },
+    default_branch: "main",
+    archived: false,
+    pushed_at: "2024-01-01T00:00:00Z",
+    private: false,
+    ...overrides,
+  };
+}
+
+describe("listOwnerRepos", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("2ページ以上のページネーションを最後まで辿る", async () => {
+    // per_page=100 ちょうどの1ページ目 + 1件だけの2ページ目。
+    // 2ページ目が per_page 未満で返ることで「これが最後のページ」と判定される。
+    const page1 = Array.from({ length: 100 }, (_, i) => repoFixture({ name: `repo-${i}` }));
+    const page2 = [repoFixture({ name: "repo-100" })];
+
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(jsonResponse(200, undefined));
+      }
+      // "per_page=100" 自体に "page=1" が部分文字列として含まれるため、
+      // includes() ではなく searchParams で page の値を正確に読み取る。
+      const page = new URL(url).searchParams.get("page");
+      if (page === "1") return Promise.resolve(jsonResponse(200, page1));
+      if (page === "2") return Promise.resolve(jsonResponse(200, page2));
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    globalThis.fetch = fetchMock;
+
+    const result = await Effect.runPromise(listOwnerRepos("acme"));
+
+    expect(result).toHaveLength(101);
+    expect(result[0]).toEqual({
+      owner: "acme",
+      repo: "repo-0",
+      defaultBranch: "main",
+      archived: false,
+      pushedAt: "2024-01-01T00:00:00Z",
+      isPrivate: false,
+    });
+    // 2ページ目が per_page(100) 未満だったので3ページ目は取得しない
+    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining("page=3"), undefined);
+  });
+
+  it("includeArchived: false（既定）ではアーカイブ済みリポジトリを除外する", async () => {
+    const items = [
+      repoFixture({ name: "active" }),
+      repoFixture({ name: "archived", archived: true }),
+    ];
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme")
+        return Promise.resolve(jsonResponse(200, undefined));
+      return Promise.resolve(jsonResponse(200, items));
+    });
+
+    const result = await Effect.runPromise(listOwnerRepos("acme"));
+
+    expect(result.map((r) => r.repo)).toEqual(["active"]);
+  });
+
+  it("includeArchived: true を指定するとアーカイブ済みも含める", async () => {
+    const items = [
+      repoFixture({ name: "active" }),
+      repoFixture({ name: "archived", archived: true }),
+    ];
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme")
+        return Promise.resolve(jsonResponse(200, undefined));
+      return Promise.resolve(jsonResponse(200, items));
+    });
+
+    const result = await Effect.runPromise(listOwnerRepos("acme", { includeArchived: true }));
+
+    expect(result.map((r) => r.repo).toSorted()).toEqual(["active", "archived"]);
+  });
+
+  it("owner が Organization でない場合 (/orgs/{owner} が 404) は /users/{owner}/repos を使う", async () => {
+    const items = [repoFixture({ name: "personal-repo", owner: { login: "someone" } })];
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/someone") {
+        return Promise.resolve(jsonResponse(404, undefined));
+      }
+      expect(url).toContain("https://api.github.com/users/someone/repos");
+      return Promise.resolve(jsonResponse(200, items));
+    });
+
+    const result = await Effect.runPromise(listOwnerRepos("someone"));
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.owner).toBe("someone");
+  });
+
+  it("/orgs/{owner} が 404 以外で失敗した場合は user へフォールバックせずエラーにする", async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(jsonResponse(403, undefined, "rate limit exceeded"));
+      }
+      return Promise.resolve(jsonResponse(200, []));
+    });
+    globalThis.fetch = fetchMock;
+
+    const error = await Effect.runPromise(listOwnerRepos("acme").pipe(Effect.flip));
+
+    expect(error._tag).toBe("GitHubApiError");
+    expect(error.status).toBe(403);
+    // /users/{owner}/repos は Organization でも public リポジトリしか返さないため、
+    // ここでフォールバックすると private の取りこぼしが黙って起きる。
+    expect(fetchMock.mock.calls.every(([url]) => !String(url).includes("/users/"))).toBe(true);
+  });
+
+  it("403 レート制限はエラーとして返す", async () => {
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme")
+        return Promise.resolve(jsonResponse(200, undefined));
+      return Promise.resolve(jsonResponse(403, undefined, "rate limit exceeded"));
+    });
+
+    const error = await Effect.runPromise(listOwnerRepos("acme").pipe(Effect.flip));
+
+    expect(error._tag).toBe("GitHubApiError");
+    expect(error.status).toBe(403);
+  });
+});
+
+describe("fetchRepoTextFile", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("ファイルが存在しない場合 (404) は Option.none を返す", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse(404, undefined, "Not Found"));
+
+    const result = await Effect.runPromise(fetchRepoTextFile("acme", "repo", ".ziku/ziku.jsonc"));
+
+    expect(Option.isNone(result)).toBe(true);
+  });
+
+  it("403 (レート制限) はエラーとして返し、404 の Option.none と混同しない", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(403, undefined, "rate limit exceeded"));
+
+    const error = await Effect.runPromise(
+      fetchRepoTextFile("acme", "repo", ".ziku/ziku.jsonc").pipe(Effect.flip),
+    );
+
+    expect(error._tag).toBe("GitHubApiError");
+    expect(error.status).toBe(403);
+  });
+
+  it("401 (認証エラー) もエラーとして返す", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse(401, undefined, "Bad credentials"));
+
+    const error = await Effect.runPromise(
+      fetchRepoTextFile("acme", "repo", ".ziku/ziku.jsonc").pipe(Effect.flip),
+    );
+
+    expect(error._tag).toBe("GitHubApiError");
+    expect(error.status).toBe(401);
+  });
+
+  it("base64 エンコードされた内容を UTF-8 文字列にデコードして返す", async () => {
+    const content = Buffer.from("hello world", "utf-8").toString("base64");
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse(200, { type: "file", content, encoding: "base64", size: 11 }),
+      );
+
+    const result = await Effect.runPromise(fetchRepoTextFile("acme", "repo", "README.md"));
+
+    expect(Option.getOrUndefined(result)).toBe("hello world");
+  });
+
+  it("ディレクトリを指定した場合 (レスポンスが配列) は Option.none を返す", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, [{ type: "dir", name: "src", size: 0 }]));
+
+    const result = await Effect.runPromise(fetchRepoTextFile("acme", "repo", "src"));
+
+    expect(Option.isNone(result)).toBe(true);
+  });
+
+  it("1MB 超で content が省略された場合はエラーとして返す", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { type: "file", size: 2_000_000 }));
+
+    const error = await Effect.runPromise(
+      fetchRepoTextFile("acme", "repo", "big.bin").pipe(Effect.flip),
+    );
+
+    expect(error._tag).toBe("GitHubApiError");
+  });
+});
+
+describe("getLastCommitDate", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("該当パスへのコミットが 0 件の場合は Option.none を返す", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse(200, []));
+
+    const result = await Effect.runPromise(getLastCommitDate("acme", "repo", ".ziku/ziku.jsonc"));
+
+    expect(Option.isNone(result)).toBe(true);
+  });
+
+  it("最新コミットの committer.date を ISO 8601 文字列で返す", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      jsonResponse(200, [
+        {
+          commit: {
+            committer: { date: "2024-05-01T00:00:00Z" },
+            author: { date: "2024-04-30T00:00:00Z" },
+          },
+        },
+      ]),
+    );
+
+    const result = await Effect.runPromise(getLastCommitDate("acme", "repo", ".ziku/ziku.jsonc"));
+
+    expect(Option.getOrUndefined(result)).toBe("2024-05-01T00:00:00Z");
+  });
+
+  it("committer が無い場合は author.date にフォールバックする", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      jsonResponse(200, [
+        {
+          commit: {
+            committer: null,
+            author: { date: "2024-04-30T00:00:00Z" },
+          },
+        },
+      ]),
+    );
+
+    const result = await Effect.runPromise(getLastCommitDate("acme", "repo", ".ziku/ziku.jsonc"));
+
+    expect(Option.getOrUndefined(result)).toBe("2024-04-30T00:00:00Z");
+  });
+
+  it("403 レート制限はエラーとして返す", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(403, undefined, "rate limit exceeded"));
+
+    const error = await Effect.runPromise(
+      getLastCommitDate("acme", "repo", ".ziku/ziku.jsonc").pipe(Effect.flip),
+    );
+
+    expect(error._tag).toBe("GitHubApiError");
+    expect(error.status).toBe(403);
   });
 });
