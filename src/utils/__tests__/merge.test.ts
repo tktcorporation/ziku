@@ -746,10 +746,10 @@ line2`;
       expect(regions).toEqual([]);
     });
 
-    it("対応する `=======` / `>>>>>>>` が無い `<<<<<<<` は未解決とみなさない", () => {
+    it("ラベルの無い `<<<<<<<` は、対応する `=======` / `>>>>>>>` が無ければ未解決とみなさない", () => {
       // 誤検出すると `pull --continue` が永久に通らず、lock を手編集する以外に
-      // 復旧手段が無くなる。対応の取れたブロックだけを未解決として扱う。
-      const content = "line1\n<<<<<<< LOCAL\nsome content\n";
+      // 復旧手段が無くなる。ziku のラベルも並びも無い行は本文として扱う。
+      const content = "line1\n<<<<<<<\nsome content\n";
 
       const regions = findConflictRegions(content);
 
@@ -823,9 +823,52 @@ line2`;
       expect(regions.map((r) => r.startLine)).toEqual([1, 5]);
     });
 
-    it("`<<<<<<<` と `>>>>>>>` だけの並びは本文として扱う", () => {
-      // 区切りも base マーカーも無い並びは、コンフリクトの残骸と言い切れない。
+    it("`<<<<<<< LOCAL` と `>>>>>>> TEMPLATE` だけが残った並びを未解決として数える", () => {
+      // ziku が書いたラベルが残っている以上、並びが崩れていても残骸である。
       const content = ["<<<<<<< LOCAL", "a", ">>>>>>> TEMPLATE", ""].join("\n");
+
+      const regions = findConflictRegions(content);
+
+      expect(regions.map((r) => r.startLine)).toEqual([1]);
+    });
+
+    it("ラベルの無い `<<<<<<<` と `>>>>>>>` だけの並びは本文として扱う", () => {
+      // ラベルが無く、区切りも base マーカーも無い並びは、コンフリクトの残骸と言い切れない。
+      const content = ["<<<<<<<", "a", ">>>>>>>", ""].join("\n");
+
+      const regions = findConflictRegions(content);
+
+      expect(regions).toEqual([]);
+    });
+
+    it("`||||||| BASE` だけが残った場合を数える", () => {
+      const content = ["a", "||||||| BASE", "b", ""].join("\n");
+
+      const regions = findConflictRegions(content);
+
+      expect(regions.map((r) => r.startLine)).toEqual([2]);
+    });
+
+    it("`>>>>>>> TEMPLATE` だけが残った場合を数える", () => {
+      const content = ["a", ">>>>>>> TEMPLATE", "b", ""].join("\n");
+
+      const regions = findConflictRegions(content);
+
+      expect(regions.map((r) => r.startLine)).toEqual([2]);
+    });
+
+    it("ラベルの付かない `>>>>>>>`（深い引用）を未解決とみなさない", () => {
+      const content = ["本文", ">>>>>>> some quoted text", "本文", ""].join("\n");
+
+      const regions = findConflictRegions(content);
+
+      expect(regions).toEqual([]);
+    });
+
+    it("git が書いたマーカー（ブランチ名ラベル）だけの行を未解決とみなさない", () => {
+      // ziku のラベルは側の名前だけで、git はブランチ名を載せる。ラベルを根拠に数えるのは
+      // ziku 自身が書いた行に限る。
+      const content = ["本文", ">>>>>>> feature/my-branch", "本文", ""].join("\n");
 
       const regions = findConflictRegions(content);
 
@@ -886,6 +929,26 @@ line2`;
 
       // 生成された 8 文字ブロック（1 行目）と、未解決のまま残る 7 文字ブロックの両方
       expect(regions.map((r) => r.startLine)).toEqual([1, 8]);
+    });
+
+    it("4 本のマーカーをどう消しても、ラベル付きの行が 1 本でも残れば数える", () => {
+      // 崩れ方を 1 つずつ列挙して塞ぐと、列挙から漏れた形で取りこぼす。消し方の全組み合わせで
+      // 判定を固定する。
+      const block = ["<<<<<<< LOCAL", "a", "||||||| BASE", "o", "=======", "b", ">>>>>>> TEMPLATE"];
+      const markerLines = [0, 2, 4, 6];
+      const labeledLines = [0, 2, 6];
+
+      for (let mask = 0; mask < 2 ** markerLines.length; mask++) {
+        const removed = new Set(markerLines.filter((_, k) => (mask >> k) % 2 === 1));
+        const kept = block.filter((_, i) => !removed.has(i));
+        const remainsLabeled = labeledLines.some((i) => !removed.has(i));
+
+        const regions = findConflictRegions(kept.join("\n"));
+
+        // ラベル付きの行が 1 本も残らないのは、`=======` だけが残る形と全部消した形。
+        // 前者は setext 見出しの下線と区別できないので数えない。
+        expect({ mask, detected: regions.length > 0 }).toEqual({ mask, detected: remainsLabeled });
+      }
     });
   });
 

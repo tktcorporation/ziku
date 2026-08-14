@@ -224,6 +224,39 @@ node_modules/
       expect(ig.ignores(repoRelPath(".claude/sub/cache/a.json"))).toBe(true);
     });
 
+    it("バックスラッシュでエスケープした末尾の空白を規則の一部として残す", async () => {
+      // `secret\ ` は末尾に空白を持つ名前の規則。空白を落とすと、git が無視するファイルを
+      // 同期の対象として扱ってしまう。
+      vol.fromJSON({
+        "/project/.claude/.gitignore": "secret\\ ",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([".claude/**"]));
+
+      expect(ig.ignores(repoRelPath(".claude/secret "))).toBe(true);
+      expect(ig.ignores(repoRelPath(".claude/secret"))).toBe(false);
+    });
+
+    it("エスケープされていない末尾の空白は規則に含めない", async () => {
+      vol.fromJSON({
+        "/project/.claude/.gitignore": "foo   ",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([".claude/**"]));
+
+      expect(ig.ignores(repoRelPath(".claude/foo"))).toBe(true);
+    });
+
+    it("行頭の空白は規則に含めない", async () => {
+      vol.fromJSON({
+        "/project/.claude/.gitignore": "   *.pem",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([".claude/**"]));
+
+      expect(ig.ignores(repoRelPath(".claude/key.pem"))).toBe(true);
+    });
+
     it("否定パターンも元の適用範囲を保つ", async () => {
       vol.fromJSON({
         "/project/.claude/.gitignore": "*.pem\n!keep.pem",

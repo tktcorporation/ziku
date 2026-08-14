@@ -147,13 +147,24 @@ function prefixRules(content: string, dir: string): string {
   return content
     .split("\n")
     .map((line) => {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) return line;
-      const negated = trimmed.startsWith("!");
-      const pattern = negated ? trimmed.slice(1) : trimmed;
+      const rule = ruleBody(line);
+      if (rule === "" || rule.startsWith("#")) return line;
+      const negated = rule.startsWith("!");
+      const pattern = negated ? rule.slice(1) : rule;
       return `${negated ? "!" : ""}${scopeToDir(pattern, dir)}`;
     })
     .join("\n");
+}
+
+/**
+ * 1 行から、git が規則として読む部分を取り出す。規則でない行（空行）は空文字列。
+ *
+ * 行末の空白は、バックスラッシュでエスケープされていれば規則の一部で、`secret\ ` は末尾に
+ * 空白を持つ名前を指す。行全体を trim するとこの空白が落ち、git が無視するファイルを ziku は
+ * 同期の対象として扱い、pull が上書きし push が送る。
+ */
+function ruleBody(line: string): string {
+  return line.replace(/^\s+/, "").replace(/(?<!\\)\s+$/, "");
 }
 
 /**

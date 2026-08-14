@@ -25,16 +25,40 @@ const MARKER_CHAR: Record<MarkerKind, string> = {
 
 const MARKER_KINDS: readonly MarkerKind[] = ["start", "base", "separator", "end"];
 
+/**
+ * ziku が自分のマーカーに書くラベル。生成（{@link conflictMarkers}）と検出
+ * （{@link parseMarkerLine}）が同じ値を読むので、片方だけが変わることはない。
+ *
+ * 側の名前だけを載せるのは ziku 固有で、git はここにブランチ名を書く。この違いが
+ * 「ziku が書いた行か」の判断材料になる（{@link findConflictRegions}）ので、ラベルを
+ * 変えると既にファイルへ書き込まれたマーカーが残骸として検出されなくなる。
+ *
+ * 区切り（`=======`）にラベルが無いのは git の形式に合わせているため。ラベルの無い行は
+ * 本文の記号列と見分けが付かず、それだけでは残骸と判定できない。
+ */
+const MARKER_LABEL = {
+  start: "LOCAL",
+  base: "BASE",
+  separator: undefined,
+  end: "TEMPLATE",
+} as const satisfies Record<MarkerKind, string | undefined>;
+
 interface Marker {
   readonly kind: MarkerKind;
   readonly length: number;
+  /** ziku が書いたラベルが付いているか。付いていれば内容ではなく生成された行と分かる。 */
+  readonly labeled: boolean;
 }
 
 /**
- * 行がコンフリクトマーカーなら種類と長さを返す。
+ * 行がコンフリクトマーカーなら種類と長さ、ziku のラベルの有無を返す。
  *
  * マーカー行は「同じ記号が 7 文字以上連続し、その後は行末または空白区切りのラベル」。
  * 記号の直後に別の文字が続く行（`=======>` など）は本文として扱う。
+ *
+ * ラベル付きと認めるのは、記号列の直後が「空白 1 つ + ラベル」で行が終わる形だけ。
+ * 緩めると `>>>>>>> TEMPLATE_DIR の説明` のような本文まで生成行と見なし、解決済みの
+ * ファイルで `pull --continue` が通らなくなる。
  */
 function parseMarkerLine(line: string): Marker | undefined {
   for (const kind of MARKER_KINDS) {
@@ -43,7 +67,9 @@ function parseMarkerLine(line: string): Marker | undefined {
     while (length < line.length && line[length] === char) length++;
     if (length < MIN_MARKER_LENGTH) continue;
     const rest = line.slice(length);
-    if (rest === "" || /^\s/.test(rest)) return { kind, length };
+    if (rest !== "" && !/^\s/.test(rest)) continue;
+    const label = MARKER_LABEL[kind];
+    return { kind, length, labeled: label !== undefined && rest === ` ${label}` };
   }
   return undefined;
 }
@@ -94,11 +120,18 @@ export interface ConflictMarkers {
  */
 export function conflictMarkers(size: number): ConflictMarkers {
   return {
-    local: `${MARKER_CHAR.start.repeat(size)} LOCAL`,
-    base: `${MARKER_CHAR.base.repeat(size)} BASE`,
-    separator: MARKER_CHAR.separator.repeat(size),
-    template: `${MARKER_CHAR.end.repeat(size)} TEMPLATE`,
+    local: markerLine("start", size),
+    base: markerLine("base", size),
+    separator: markerLine("separator", size),
+    template: markerLine("end", size),
   };
+}
+
+/** マーカー行 1 本を組み立てる。ラベルを持つ種類だけ空白区切りで後置する。 */
+function markerLine(kind: MarkerKind, size: number): string {
+  const symbols = MARKER_CHAR[kind].repeat(size);
+  const label = MARKER_LABEL[kind];
+  return label === undefined ? symbols : `${symbols} ${label}`;
 }
 
 // ---- 未解決コンフリクトの検出 ----
@@ -161,12 +194,14 @@ interface ScanStep {
 type BlockEnding = "closed" | "cutOff";
 
 /**
- * 終わったブロックのうち、未解決として数えるものの開始行。
+ * 終わったブロックのうち、並びを根拠に未解決として数えるものの開始行。
  *
- * 数える条件は 2 つある。どちらも区切り（`=======`）か base マーカー（`|||||||`）まで
- * 進んでいることを求める。単独の `<<<<<<<` は本文にも現れうる一方、複数のマーカーが順序どおり
- * 並ぶ形は本文にはまず現れないので、そこに誤検出と取りこぼしの境目を引く。誤検出すると
- * `pull --continue` が永久に通らず、lock を手で直す以外の復旧手段が無くなる。
+ * ラベルを持たない `=======` だけが残った形は、ラベル一致では拾えない
+ * （{@link findConflictRegions}）。それを補うのがこの判定で、根拠はマーカーの並びしかない。
+ * 並びは利用者の編集で崩れるため、条件はどちらも区切り（`=======`）か base マーカー
+ * （`|||||||`）まで進んでいることを求める。単独の `<<<<<<<` は本文にも現れうる一方、複数の
+ * マーカーが順序どおり並ぶ形は本文にはまず現れないので、そこに誤検出と取りこぼしの境目を引く。
+ * 誤検出すると `pull --continue` が永久に通らず、lock を手で直す以外の復旧手段が無くなる。
  *
  * - 開始マーカーから始まったブロックは、閉じても打ち切られても数える。閉じたものだけを
  *   数えると、`>>>>>>>` を消せば解決したことになってしまう。
@@ -245,25 +280,48 @@ function stepScan(state: ScanState, marker: Marker, lineNumber: number): ScanSte
 }
 
 /**
+ * ラベル付きマーカー行が属するブロックの開始行。
+ *
+ * 1 つのブロックに複数のラベル行が残っていても、報告するのはそのブロックが最初に現れた行
+ * 1 つにする。開いているブロックの中に現れたラベル行はその先頭へ、外に現れたラベル行は
+ * その行自身へ寄せる。開始マーカーは、開いているブロックの中に現れてもそこから新しい
+ * ブロックを開く（{@link stepScan}）ので、常に自分の行が先頭になる。
+ */
+function markerBlockStart(state: ScanState, kind: MarkerKind, lineNumber: number): number {
+  if (kind === "start" || state.phase === "outside") return lineNumber;
+  return state.startLine;
+}
+
+/**
  * ファイル内容に残っている未解決のコンフリクトブロックを列挙する。
  *
- * 行頭の前方一致だけで判定すると、Markdown の setext 見出し下線や区切り線
- * `========` を未解決と誤検出する。誤検出すると `pull --continue` が永久に通らず、
- * 解決済みのマージを確定できなくなるため、マーカーが順序どおり並ぶブロックだけを未解決と
- * みなす。開始マーカーが消えていても、閉じ側の並びが揃っていれば数える
- * （{@link unresolvedStart}）。数える条件を開始マーカーで定義すると、それを消しただけの
- * 残骸が未解決 0 件になり、マーカー断片を載せたまま同期ベースが確定する。
+ * 未解決と数える根拠は 2 つあり、どちらかが当たれば数える。
+ *
+ * 1. ziku が書いたラベル（{@link MARKER_LABEL}）付きのマーカー行が 1 本でも残っている。
+ *    利用者が解決の途中でどのマーカーを消しても、残った 1 本が根拠になる。ラベルは ziku
+ *    固有で、git のマーカーはブランチ名を載せ、setext 見出し・空セルのテーブル行・深い引用は
+ *    ラベルを持たないので、本文と取り違えない。
+ * 2. ラベルを持たない `=======` だけが残った並びは 1 で拾えないので、マーカーが順序どおり
+ *    並ぶ形を並びから判定する（{@link unresolvedStart}）。
+ *
+ * 行頭の前方一致だけで数えると、Markdown の setext 見出し下線や区切り線 `========` を
+ * 未解決と誤検出する。誤検出すると `pull --continue` が永久に通らず、解決済みのマージを
+ * 確定できなくなる。逆に取りこぼすと、マーカー断片を載せたまま同期ベースが確定し、以後
+ * テンプレートへ送られる。
  *
  * ブロックの内側では、開始マーカーより短いマーカー行は本文として扱う。マージ結果は
  * 内容中の最長マーカーより長いマーカーで囲まれているので、この長さ比較で
- * 「内容として書かれたマーカー」と「ziku が生成したマーカー」を区別できる。
+ * 「内容として書かれたマーカー」と「ziku が生成したマーカー」を区別できる。ラベル一致も
+ * この比較の後に行う。マーカーの書き方を説明する文書を同期すると、生成されたブロックの中に
+ * ラベル付きの本文行が入るため。
  *
  * 先頭の BOM はエンコーディングの目印であって 1 行目の内容ではないので、走査前に取り除く。
  * 残したまま比べると、1 行目から始まるブロックの開始マーカーが本文として読まれ、未解決の
  * ファイルが解決済みとして通ってしまう。
  */
 export function findConflictRegions(content: string): ConflictRegion[] {
-  const regions: ConflictRegion[] = [];
+  // 2 つの根拠が同じブロックを指すことがあるので、開始行の集合として持つ。
+  const startLines = new Set<number>();
   let state: ScanState = OUTSIDE;
 
   const contentLines = stripBom(content).split("\n");
@@ -272,14 +330,17 @@ export function findConflictRegions(content: string): ConflictRegion[] {
     if (marker === undefined) continue;
     if (state.phase !== "outside" && marker.length < state.size) continue;
 
-    const step = stepScan(state, marker, i + 1);
+    const lineNumber = i + 1;
+    if (marker.labeled) startLines.add(markerBlockStart(state, marker.kind, lineNumber));
+
+    const step = stepScan(state, marker, lineNumber);
     state = step.next;
-    if (step.unresolved !== undefined) regions.push({ startLine: step.unresolved });
+    if (step.unresolved !== undefined) startLines.add(step.unresolved);
   }
 
   // ファイル末尾も打ち切りの一種。走査の途中で起きる打ち切りと同じ規則で数える。
   const trailing = unresolvedStart(state, "cutOff");
-  if (trailing !== undefined) regions.push({ startLine: trailing });
+  if (trailing !== undefined) startLines.add(trailing);
 
-  return regions;
+  return [...startLines].toSorted((a, b) => a - b).map((startLine) => ({ startLine }));
 }
