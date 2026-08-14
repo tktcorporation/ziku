@@ -25,14 +25,14 @@ const mockListOwnerRepos = vi.fn();
 const mockFetchRepoTextFile = vi.fn();
 const mockGetLastCommitDate = vi.fn();
 const mockResolveLatestCommitSha = vi.fn();
-const mockGetRepoDefaultBranch = vi.fn();
+const mockGetRepoIdentity = vi.fn();
 
 vi.mock("../github", () => ({
   listOwnerRepos: (...args: unknown[]) => mockListOwnerRepos(...args),
   fetchRepoTextFile: (...args: unknown[]) => mockFetchRepoTextFile(...args),
   getLastCommitDate: (...args: unknown[]) => mockGetLastCommitDate(...args),
   resolveLatestCommitSha: (...args: unknown[]) => mockResolveLatestCommitSha(...args),
-  getRepoDefaultBranch: (...args: unknown[]) => mockGetRepoDefaultBranch(...args),
+  getRepoIdentity: (...args: unknown[]) => mockGetRepoIdentity(...args),
 }));
 
 const mockAcquireTempTemplate = vi.fn();
@@ -149,9 +149,13 @@ describe("aggregateTemplateUsage", () => {
       return Effect.succeed(dir);
     });
     mockGetLastCommitDate.mockImplementation(() => Effect.succeed(Option.none()));
-    // ほとんどのテストは template.ref を明示指定するため呼ばれないが、既定値も
-    // 用意しておく（呼ばれるテストは個別に上書きする）。
-    mockGetRepoDefaultBranch.mockReturnValue(Effect.succeed("main"));
+    // 既定では「リネームされていない」（owner/repo をそのまま正規名として返す）状態にする。
+    // ほとんどのテストは template.ref を明示指定するため呼ばれないが、lock.source が
+    // テンプレートと owner/repo 文字列で一致しない候補（#11 の canonical 解決）や、
+    // template.ref 省略時の既定ブランチ解決から呼ばれる。個別に上書きする場合はそちらが優先される。
+    mockGetRepoIdentity.mockImplementation((owner: string, repo: string) =>
+      Effect.succeed({ owner, repo, defaultBranch: "main" }),
+    );
   });
 
   it("`.ziku/lock.json` が無いリポジトリは skipped に入らず黙って除外される", async () => {
@@ -337,6 +341,143 @@ describe("aggregateTemplateUsage", () => {
 
     expect(report.repositories).toEqual([]);
     expect(report.skipped).toEqual([]);
+  });
+
+  // テンプレートリポジトリがリネーム・移管されると、それ以前に init された利用リポジトリの
+  // lock.source には旧名が残る。文字列比較だけでは無関係なリポジトリと誤判定して
+  // 黙って除外してしまうため、正規名（GitHub のリダイレクト後の full_name）へ解決してから
+  // 比べ直す。
+  describe("テンプレートのリネーム・移管（lock.source の正規名解決）", () => {
+    it("lock.source が旧名のままでも、正規名の解決を経てレポートに含める", async () => {
+      mockListOwnerRepos.mockReturnValue(
+        Effect.succeed([repoInfo({ owner: "acme", repo: "renamed-consumer" })]),
+      );
+      setLockFixture(
+        lockFixtures,
+        "acme",
+        "renamed-consumer",
+        Effect.succeed(
+          Option.some(lockJson({ source: { owner: "old-owner", repo: "old-template" } })),
+        ),
+      );
+      // lock.source (old-owner/old-template) は GitHub 上のリダイレクトで
+      // 現在のテンプレート (acme/template) を指す。
+      mockGetRepoIdentity.mockImplementation((owner: string, repo: string) =>
+        owner === "old-owner" && repo === "old-template"
+          ? Effect.succeed({ owner: "acme", repo: "template", defaultBranch: "main" })
+          : Effect.succeed({ owner, repo, defaultBranch: "main" }),
+      );
+      shaFixtures.set("acme/renamed-consumer", "renamed-consumer-sha");
+      dirsBySource.set("gh:acme/renamed-consumer#renamed-consumer-sha", "/renamed-consumer-dir");
+      dirsBySource.set("gh:acme/template#tmpl-sha", "/renamed-consumer-tmpl-dir");
+      vol.fromJSON({
+        "/renamed-consumer-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["**"] }),
+        "/renamed-consumer-tmpl-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["**"] }),
+      });
+      queueGlobResults([], []);
+
+      const report = await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+          tmpBaseDir: "/tmp-base",
+        }),
+      );
+
+      expect(report.skipped).toEqual([]);
+      expect(report.repositories.map((r) => r.repo)).toEqual(["renamed-consumer"]);
+    });
+
+    it("正規名の解決が 404 だったリポジトリは skipped に積まず静かに除外する", async () => {
+      mockListOwnerRepos.mockReturnValue(
+        Effect.succeed([repoInfo({ owner: "acme", repo: "unrelated-repo" })]),
+      );
+      setLockFixture(
+        lockFixtures,
+        "acme",
+        "unrelated-repo",
+        Effect.succeed(
+          Option.some(lockJson({ source: { owner: "gone-owner", repo: "gone-template" } })),
+        ),
+      );
+      mockGetRepoIdentity.mockImplementation((owner: string, repo: string) =>
+        owner === "gone-owner" && repo === "gone-template"
+          ? Effect.fail(new GitHubApiError({ message: "Not Found", status: 404 }))
+          : Effect.succeed({ owner, repo, defaultBranch: "main" }),
+      );
+
+      const report = await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+          tmpBaseDir: "/tmp-base",
+        }),
+      );
+
+      expect(report.repositories).toEqual([]);
+      expect(report.skipped).toEqual([]);
+    });
+
+    it("正規名の解決が 403 など判定不能な失敗をしたリポジトリは、理由付きで skipped に残す", async () => {
+      mockListOwnerRepos.mockReturnValue(
+        Effect.succeed([repoInfo({ owner: "acme", repo: "rate-limited-consumer" })]),
+      );
+      setLockFixture(
+        lockFixtures,
+        "acme",
+        "rate-limited-consumer",
+        Effect.succeed(
+          Option.some(lockJson({ source: { owner: "maybe-renamed", repo: "maybe-template" } })),
+        ),
+      );
+      mockGetRepoIdentity.mockImplementation((owner: string, repo: string) =>
+        owner === "maybe-renamed" && repo === "maybe-template"
+          ? Effect.fail(new GitHubApiError({ message: "rate limit exceeded", status: 403 }))
+          : Effect.succeed({ owner, repo, defaultBranch: "main" }),
+      );
+
+      const report = await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+          tmpBaseDir: "/tmp-base",
+        }),
+      );
+
+      expect(report.repositories).toEqual([]);
+      expect(report.skipped).toHaveLength(1);
+      expect(report.skipped[0]).toMatchObject({ owner: "acme", repo: "rate-limited-consumer" });
+      expect(report.skipped[0]?.reason).toContain("rate limit exceeded");
+    });
+
+    it("lock.source が文字列としてテンプレートと一致する場合は正規名解決 API を呼ばない", async () => {
+      mockListOwnerRepos.mockReturnValue(
+        Effect.succeed([repoInfo({ owner: "acme", repo: "exact-match" })]),
+      );
+      setLockFixture(
+        lockFixtures,
+        "acme",
+        "exact-match",
+        Effect.succeed(Option.some(lockJson())), // source: { owner: "acme", repo: "template" }
+      );
+      shaFixtures.set("acme/exact-match", "exact-match-sha");
+      dirsBySource.set("gh:acme/exact-match#exact-match-sha", "/exact-match-dir");
+      dirsBySource.set("gh:acme/template#tmpl-sha", "/exact-match-tmpl-dir");
+      vol.fromJSON({
+        "/exact-match-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["**"] }),
+        "/exact-match-tmpl-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["**"] }),
+      });
+      queueGlobResults([], []);
+
+      const report = await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+          tmpBaseDir: "/tmp-base",
+        }),
+      );
+
+      expect(report.repositories.map((r) => r.repo)).toEqual(["exact-match"]);
+      // template.ref を明示指定しているため resolveTemplateRef 経由でも呼ばれず、
+      // lock.source が文字列一致するため canonical 解決経由でも呼ばれない。
+      expect(mockGetRepoIdentity).not.toHaveBeenCalled();
+    });
   });
 
   it("lock.json が壊れているリポジトリは skipped に理由付きで入り、他のリポジトリの結果は返る", async () => {
@@ -927,7 +1068,9 @@ describe("aggregateTemplateUsage", () => {
     // searchOwner がテンプレートと別 owner のため、listOwnerRepos の列挙結果に
     // テンプレート自身が含まれない状況を再現する。
     mockListOwnerRepos.mockReturnValue(Effect.succeed([]));
-    mockGetRepoDefaultBranch.mockReturnValue(Effect.succeed("develop"));
+    mockGetRepoIdentity.mockReturnValue(
+      Effect.succeed({ owner: "acme", repo: "template", defaultBranch: "develop" }),
+    );
     mockResolveLatestCommitSha.mockImplementation(
       async (_owner: string, _repo: string, ref?: string) => {
         expect(ref).toBe("develop");
@@ -943,7 +1086,7 @@ describe("aggregateTemplateUsage", () => {
       }),
     );
 
-    expect(mockGetRepoDefaultBranch).toHaveBeenCalledWith("acme", "template");
+    expect(mockGetRepoIdentity).toHaveBeenCalledWith("acme", "template");
     expect(report.template.ref).toBe("resolved-sha");
   });
 

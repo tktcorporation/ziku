@@ -11,7 +11,7 @@
  * （owner が存在しない・認証エラー）だけは全体の失敗として返る。
  */
 import { tmpdir } from "node:os";
-import { Effect, Either, Option } from "effect";
+import { Effect, Either, Equivalence, Option } from "effect";
 import type { Scope } from "effect";
 import { join } from "pathe";
 import { GitHubApiError, TemplateError } from "../errors";
@@ -28,11 +28,11 @@ import { isGitHubSource, lockSchema } from "../modules/schemas";
 import {
   fetchRepoTextFile,
   getLastCommitDate,
-  getRepoDefaultBranch,
+  getRepoIdentity,
   listOwnerRepos,
   resolveLatestCommitSha,
 } from "./github";
-import type { OwnerRepoInfo } from "./github";
+import type { OwnerRepoInfo, RepoIdentity } from "./github";
 import { LOCK_FILE } from "./lock";
 import type { FileClassification } from "./merge/types";
 import { analyzeConfigDrift, applyConfigDrift } from "./config-merge";
@@ -126,13 +126,21 @@ export function aggregateTemplateUsage(
 
       const allRepos = yield* listOwnerRepos(searchOwner, { includeArchived });
 
-      const templateRef = template.ref ?? (yield* resolveTemplateRef(template));
+      // owner/repo の正規名解決（GitHub のリネーム・移管リダイレクト経由）をキャッシュする。
+      // 同じ owner/repo への同時・重複呼び出しを 1 回の GitHub API 呼び出しにまとめる
+      // （{@link resolveTemplateRef} と {@link resolveCanonicalMatch} の双方から使う）。
+      const resolveIdentity: ResolveRepoIdentity = yield* Effect.cachedFunction(
+        ([owner, repo]: readonly [string, string]) => getRepoIdentity(owner, repo),
+        Equivalence.tuple(Equivalence.string, Equivalence.string),
+      );
+
+      const templateRef = template.ref ?? (yield* resolveTemplateRef(template, resolveIdentity));
 
       const candidates = allRepos.filter((r) => !isSameRepo(r, template));
 
       const evaluations = yield* Effect.forEach(
         candidates,
-        (candidate) => evaluateCandidate(template, templateRef, candidate),
+        (candidate) => evaluateCandidate(template, templateRef, candidate, resolveIdentity),
         { concurrency },
       );
 
@@ -223,9 +231,20 @@ function toMessage(e: unknown): string {
 }
 
 /**
+ * owner/repo の正規名（GitHub 上のリネーム・移管リダイレクト後の表記）と既定ブランチを
+ * 解決する関数の型。`aggregateTemplateUsage` が `Effect.cachedFunction` で 1 度だけ作り、
+ * {@link resolveTemplateRef} と {@link resolveCanonicalMatch} の両方に渡す。
+ * `Effect.cachedFunction` は同じキー（owner/repo の組）への同時呼び出しを 1 回の
+ * 実行にまとめるため、同じ owner/repo を重複して GitHub API へ問い合わせない。
+ */
+type ResolveRepoIdentity = (
+  key: readonly [owner: string, repo: string],
+) => Effect.Effect<RepoIdentity, GitHubApiError>;
+
+/**
  * テンプレートリポジトリ自身の比較用 commit SHA を解決する。
  *
- * 既定ブランチは `getRepoDefaultBranch` で直接取得する（`GET /repos/{owner}/{repo}`）。
+ * 既定ブランチは `resolveIdentity` 経由で直接取得する（`GET /repos/{owner}/{repo}`）。
  * `listOwnerRepos` の列挙結果から owner/repo 一致で defaultBranch を引く方法だと、
  * `--owner`（searchOwner）がテンプレートと別 owner を指す場合や、テンプレートが
  * アーカイブ済みで列挙結果に含まれない場合に defaultBranch が引けず、
@@ -237,14 +256,19 @@ function toMessage(e: unknown): string {
  * テンプレート側の基準 commit が定まらないとレポート全体の `template.ref` が
  * 埋められず後段のエージェントが決定的にファイルを取得できないため、ここでは
  * 個別リポジトリと違って fatal 扱いにし、aggregate 全体を失敗させる。
+ *
+ * `resolveIdentity` はキャッシュ経由なので、この呼び出しでテンプレートの正規名
+ * （owner/repo）もキャッシュへ積まれる。この後 {@link resolveCanonicalMatch} が
+ * テンプレートの正規名を必要とした場合、追加の GitHub API 呼び出しなしで再利用できる。
  */
 function resolveTemplateRef(
   template: AggregateTemplateRepo,
+  resolveIdentity: ResolveRepoIdentity,
 ): Effect.Effect<string, GitHubApiError> {
   return Effect.gen(function* () {
-    const defaultBranch = yield* getRepoDefaultBranch(template.owner, template.repo);
+    const identity = yield* resolveIdentity([template.owner, template.repo]);
     const ref = yield* Effect.tryPromise({
-      try: () => resolveLatestCommitSha(template.owner, template.repo, defaultBranch),
+      try: () => resolveLatestCommitSha(template.owner, template.repo, identity.defaultBranch),
       catch: (e) => new GitHubApiError({ message: toMessage(e) }),
     });
     if (ref === undefined) {
@@ -372,9 +396,16 @@ function evaluateCandidate(
   template: AggregateTemplateRepo,
   templateRef: string,
   candidate: OwnerRepoInfo,
+  resolveIdentity: ResolveRepoIdentity,
 ): Effect.Effect<CandidateEvaluation> {
   return Effect.gen(function* () {
-    const screening = yield* readCandidateLock(template, templateRef, candidate, undefined);
+    const screening = yield* readCandidateLock(
+      template,
+      templateRef,
+      candidate,
+      undefined,
+      resolveIdentity,
+    );
     if (screening._tag !== "usable") return screening;
 
     const refResolution = yield* resolveCandidateRef(candidate);
@@ -385,7 +416,7 @@ function evaluateCandidate(
 
     // 固定した ref で読み直したものを採用する。ふるい用の読み取りとの間に
     // 対象リポジトリが ziku を外した場合は、そのコミット時点では利用リポジトリではない。
-    const pinned = yield* readCandidateLock(template, templateRef, candidate, ref);
+    const pinned = yield* readCandidateLock(template, templateRef, candidate, ref, resolveIdentity);
     if (pinned._tag !== "usable") return pinned;
 
     return {
@@ -431,6 +462,57 @@ type LockReadResult =
   | { readonly _tag: "excluded" }
   | { readonly _tag: "skipped"; readonly skip: SkippedRepository };
 
+/** {@link resolveCanonicalMatch} の結果を表す判別 union */
+type CanonicalMatchResult =
+  | { readonly _tag: "matched" }
+  | { readonly _tag: "excluded" }
+  | { readonly _tag: "skipped"; readonly reason: string };
+
+/**
+ * `lock.source` の owner/repo が文字列としてテンプレートと一致しない場合に、両者を
+ * 正規名（GitHub 上のリネーム・移管リダイレクト後の表記）へ解決してから比べ直す。
+ *
+ * テンプレートリポジトリがリネーム・移管されると、それ以前に `ziku init` された
+ * 利用リポジトリの `lock.source` には旧名が残る。GitHub は旧名でのアクセスを新名へ
+ * リダイレクトするため `ziku pull` は動き続けるが、文字列比較だけでは「無関係な
+ * リポジトリ」と誤判定して黙って除外してしまう。
+ *
+ * - `lock.source` 側の解決が 404 → 別テンプレートを指している、またはテンプレートが
+ *   削除済み。`excluded` として静かに除外する（対象外であって処理の失敗ではない）
+ * - `lock.source` 側・テンプレート側いずれかの解決が 404 以外で失敗（レート制限・
+ *   認証エラー等）→ 判定不能。`excluded` に丸めると取りこぼしが黙って報告から消えるため
+ *   `skipped` に理由付きで残す
+ * - 両者が解決でき、正規名が一致する → `matched`。一致しない → 別テンプレートなので `excluded`
+ */
+function resolveCanonicalMatch(
+  template: AggregateTemplateRepo,
+  source: { readonly owner: string; readonly repo: string },
+  resolveIdentity: ResolveRepoIdentity,
+): Effect.Effect<CanonicalMatchResult> {
+  return Effect.gen(function* () {
+    const sourceIdentity = yield* Effect.either(resolveIdentity([source.owner, source.repo]));
+    if (Either.isLeft(sourceIdentity)) {
+      if (sourceIdentity.left.status === 404) return { _tag: "excluded" as const };
+      return {
+        _tag: "skipped" as const,
+        reason: `Could not resolve the canonical name of lock.json's template source "${source.owner}/${source.repo}" (it may have been renamed or transferred): ${sourceIdentity.left.message}`,
+      };
+    }
+
+    const templateIdentity = yield* Effect.either(resolveIdentity([template.owner, template.repo]));
+    if (Either.isLeft(templateIdentity)) {
+      return {
+        _tag: "skipped" as const,
+        reason: `Could not resolve the canonical name of the template repository "${template.owner}/${template.repo}": ${templateIdentity.left.message}`,
+      };
+    }
+
+    return isSameRepo(sourceIdentity.right, templateIdentity.right)
+      ? { _tag: "matched" as const }
+      : { _tag: "excluded" as const };
+  });
+}
+
 /**
  * 候補リポジトリの `.ziku/lock.json` を取得・検証し、対象テンプレートを指しているか判定する。
  * `ref` を省略すると既定ブランチの先頭を読む。
@@ -440,6 +522,7 @@ function readCandidateLock(
   templateRef: string,
   candidate: OwnerRepoInfo,
   ref: string | undefined,
+  resolveIdentity: ResolveRepoIdentity,
 ): Effect.Effect<LockReadResult> {
   return Effect.gen(function* () {
     const fetched = yield* Effect.either(
@@ -471,9 +554,21 @@ function readCandidateLock(
 
     const lock = parsedLock.data;
     // ローカルパス source（`{ path }`）は owner 配下探索の対象外。
-    // 別のテンプレートを指しているものも対象外。
-    if (!isGitHubSource(lock.source) || !isSameRepo(lock.source, template)) {
+    if (!isGitHubSource(lock.source)) {
       return { _tag: "excluded" as const };
+    }
+    // 文字列としては一致しなくても、テンプレートがリネーム・移管されていて
+    // `lock.source` に旧名が残っているだけの可能性がある。正規名へ解決してから
+    // 判定し直す（`resolveIdentity` はキャッシュ済みなので、一致する候補が多数
+    // あっても GitHub API 呼び出しは owner/repo の組ごとに 1 回で済む）。
+    if (!isSameRepo(lock.source, template)) {
+      const canonicalMatch = yield* resolveCanonicalMatch(template, lock.source, resolveIdentity);
+      if (canonicalMatch._tag === "excluded") return { _tag: "excluded" as const };
+      if (canonicalMatch._tag === "skipped") {
+        return skippedEvaluation(candidate, canonicalMatch.reason);
+      }
+      // "matched": lock.source はテンプレートの旧名で、リネーム・移管を跨いで同一リポジトリ
+      // を指している。以降はテンプレートの利用リポジトリとして扱う。
     }
 
     // テンプレートの特定リビジョンに固定している利用リポジトリは、このスキャンの

@@ -7,7 +7,7 @@ import {
   getGhCliToken,
   getGitHubToken,
   getLastCommitDate,
-  getRepoDefaultBranch,
+  getRepoIdentity,
   listOwnerRepos,
   rateLimitedError,
   resetGhCliTokenCache,
@@ -729,6 +729,34 @@ describe("resolveLatestCommitSha", () => {
     const headers = (call?.[1] as { headers?: Record<string, string> } | undefined)?.headers;
     expect(headers).not.toHaveProperty("Authorization");
   });
+
+  it("`/` を含むブランチ名 (release/2026) でも、スラッシュをパス区切りのまま URL を組み立てる", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: true, text: () => Promise.resolve("shaForRelease\n") });
+
+    const sha = await resolveLatestCommitSha("owner", "repo", "release/2026");
+
+    expect(sha).toBe("shaForRelease");
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "https://api.github.com/repos/owner/repo/commits/release/2026",
+      expect.anything(),
+    );
+  });
+
+  it("owner/repo に記号が含まれる場合はエスケープする", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: true, text: () => Promise.resolve("shaForSpecial\n") });
+
+    const sha = await resolveLatestCommitSha("my org", "repo#1", "main");
+
+    expect(sha).toBe("shaForSpecial");
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "https://api.github.com/repos/my%20org/repo%231/commits/main",
+      expect.anything(),
+    );
+  });
 });
 
 describe("scaffoldTemplateRepo", () => {
@@ -1052,7 +1080,7 @@ describe("listOwnerRepos", () => {
   });
 });
 
-describe("getRepoDefaultBranch", () => {
+describe("getRepoIdentity", () => {
   const originalFetch = globalThis.fetch;
 
   afterEach(() => {
@@ -1060,27 +1088,53 @@ describe("getRepoDefaultBranch", () => {
   });
 
   it("GET /repos/{owner}/{repo} の default_branch を返す（main 決め打ちにならない・#6）", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { default_branch: "develop" }));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse(200, { default_branch: "develop", full_name: "acme/template" }),
+      );
     globalThis.fetch = fetchMock;
 
-    const branch = await Effect.runPromise(getRepoDefaultBranch("acme", "template"));
+    const identity = await Effect.runPromise(getRepoIdentity("acme", "template"));
 
-    expect(branch).toBe("develop");
+    expect(identity).toEqual({ owner: "acme", repo: "template", defaultBranch: "develop" });
     expect(fetchMock).toHaveBeenCalledWith(
       "https://api.github.com/repos/acme/template",
       expect.anything(),
     );
   });
 
+  it("旧名でアクセスしてもリダイレクト後の full_name を正規名として返す（リネーム・移管の解決）", async () => {
+    // 旧名 (acme/old-template) でアクセスしたが、GitHub がリダイレクトし
+    // レスポンスの full_name には新名 (acme/new-template) が入っているケース。
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse(200, { default_branch: "main", full_name: "acme/new-template" }),
+      );
+
+    const identity = await Effect.runPromise(getRepoIdentity("acme", "old-template"));
+
+    expect(identity).toEqual({ owner: "acme", repo: "new-template", defaultBranch: "main" });
+  });
+
   it("404 等の失敗は GitHubApiError として返す", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse(404, undefined, "Not Found"));
 
-    const error = await Effect.runPromise(
-      getRepoDefaultBranch("acme", "missing").pipe(Effect.flip),
-    );
+    const error = await Effect.runPromise(getRepoIdentity("acme", "missing").pipe(Effect.flip));
 
     expect(error._tag).toBe("GitHubApiError");
     expect(error.status).toBe(404);
+  });
+
+  it("full_name が owner/repo 形式でない不正なレスポンスは GitHubApiError として返す", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { default_branch: "main", full_name: "malformed" }));
+
+    const error = await Effect.runPromise(getRepoIdentity("acme", "template").pipe(Effect.flip));
+
+    expect(error._tag).toBe("GitHubApiError");
   });
 });
 

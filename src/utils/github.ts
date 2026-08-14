@@ -451,6 +451,21 @@ export async function scaffoldTemplateRepo(
 }
 
 /**
+ * GitHub API の URL パスセグメントを `/` 区切りで個別に `encodeURIComponent` する。
+ *
+ * 背景: owner/repo 名や ref（ブランチ名・タグ名）は `/` を含みうる
+ * （例: `release/2026` のようなブランチ名）。単純に文字列全体へ `encodeURIComponent`
+ * を適用すると `/` 自体も `%2F` にエスケープされ、GitHub 側が別のパスセグメント数として
+ * 解釈してしまう。`/` はパス区切りとして残し、セグメント内の空白や記号だけをエスケープする。
+ */
+function encodeGitHubPathSegments(path: string): string {
+  return path
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+}
+
+/**
  * テンプレートリポジトリの最新コミット SHA を取得する。
  *
  * 背景: init/pull 時に baseRef として保存し、後で 3-way マージのベース取得に使用する。
@@ -459,6 +474,9 @@ export async function scaffoldTemplateRepo(
  * トークンがあれば付与する（`githubAuthHeaders()`）。プライベートリポジトリは未認証だと
  * 404 扱いになり解決不能になるため。トークンが無くても public リポジトリの解決は
  * 引き続き動作する（未認証 60req/h の制限を受けるだけ）。
+ *
+ * owner/repo/ref は `encodeGitHubPathSegments` でエスケープする。ref は `release/2026` の
+ * ような `/` を含むブランチ名でも、`/` をパス区切りとして残したまま安全に URL 化する。
  */
 export async function resolveLatestCommitSha(
   owner: string,
@@ -468,7 +486,7 @@ export async function resolveLatestCommitSha(
   return Option.getOrUndefined(
     await Effect.runPromise(
       Effect.tryPromise(async () => {
-        const url = `https://api.github.com/repos/${owner}/${repo}/commits/${ref}`;
+        const url = `https://api.github.com/repos/${encodeGitHubPathSegments(owner)}/${encodeGitHubPathSegments(repo)}/commits/${encodeGitHubPathSegments(ref)}`;
         const res = await fetch(url, {
           headers: { Accept: "application/vnd.github.sha", ...githubAuthHeaders() },
         });
@@ -752,28 +770,53 @@ export function listOwnerRepos(
 /** GitHub Repos API (`/repos/{owner}/{repo}`) の必要フィールドのみ */
 interface GitHubRepoDetail {
   readonly default_branch: string;
+  /** `owner/repo` 形式の正規表記。リネーム・移管後の旧名アクセスではリダイレクト後の値が入る */
+  readonly full_name: string;
+}
+
+/** {@link getRepoIdentity} が返す、正規化された owner/repo と既定ブランチ */
+export interface RepoIdentity {
+  /** GitHub 側の正規表記の owner。リネーム・移管後は追随した値になる */
+  readonly owner: string;
+  /** GitHub 側の正規表記の repo。リネーム・移管後は追随した値になる */
+  readonly repo: string;
+  readonly defaultBranch: string;
 }
 
 /**
- * 単一リポジトリの既定ブランチ名を取得する。
+ * 単一リポジトリの正規名（owner/repo）と既定ブランチ名を取得する。
  *
  * 背景: `listOwnerRepos` の列挙結果から owner/repo 一致で defaultBranch を引く方法は、
  * 探索対象の owner（`ziku aggregate` の `--owner`）がリポジトリ自身の owner と異なる
  * 場合や、リポジトリがアーカイブ済みで列挙結果に含まれない場合に defaultBranch を
  * 解決できない。`GET /repos/{owner}/{repo}` は列挙に依存せず単一リポジトリの既定
  * ブランチを直接返すため、そのようなケースでも解決できる。
+ *
+ * `GET /repos/{owner}/{repo}` はリポジトリがリネーム・移管された後も旧名でアクセスすると
+ * リダイレクトされ、レスポンスの `full_name` には正規名が入る。`ziku aggregate` は
+ * `.ziku/lock.json` に残った旧テンプレート名を正規名へ解決してテンプレートと突き合わせる
+ * ためにこの `full_name` を利用する。
  */
-export function getRepoDefaultBranch(
+export function getRepoIdentity(
   owner: string,
   repo: string,
-): Effect.Effect<string, GitHubApiError> {
+): Effect.Effect<RepoIdentity, GitHubApiError> {
   return Effect.gen(function* () {
     const res = yield* githubFetch(
       `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
     );
     if (!res.ok) return yield* Effect.fail(githubResponseError(res));
     const data = yield* parseGitHubJson<GitHubRepoDetail>(res);
-    return data.default_branch;
+    const segments = data.full_name.split("/");
+    const [canonicalOwner, canonicalRepo] = segments;
+    if (segments.length !== 2 || !canonicalOwner || !canonicalRepo) {
+      return yield* Effect.fail(
+        new GitHubApiError({
+          message: `Unexpected "full_name" in GitHub API response for ${owner}/${repo}: ${data.full_name}`,
+        }),
+      );
+    }
+    return { owner: canonicalOwner, repo: canonicalRepo, defaultBranch: data.default_branch };
   });
 }
 
@@ -787,16 +830,12 @@ interface GitHubContentFile {
 }
 
 /**
- * Contents API の URL を組み立てる。path はセグメントごとに encodeURIComponent する
- * （`/` 自体はパス区切りとして残し、ファイル名中の空白や記号だけをエスケープするため）。
+ * Contents API の URL を組み立てる。path は `encodeGitHubPathSegments` でセグメントごとに
+ * エスケープする（`/` 自体はパス区切りとして残し、ファイル名中の空白や記号だけをエスケープするため）。
  */
 function buildContentsUrl(owner: string, repo: string, path: string, ref?: string): string {
-  const encodedPath = path
-    .split("/")
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
   const url = new URL(
-    `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}`,
+    `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodeGitHubPathSegments(path)}`,
   );
   if (ref) url.searchParams.set("ref", ref);
   return url.toString();
