@@ -8,7 +8,6 @@
  * 削除条件: ziku が別の UI フレームワーク（ink 等）に移行する場合。
  */
 import * as p from "@clack/prompts";
-import { Effect } from "effect";
 import { match } from "ts-pattern";
 import pc from "picocolors";
 import type { FileDiff, FileOperationResult } from "../modules/schemas";
@@ -50,7 +49,14 @@ export const log = {
   message: (message: string) => p.log.message(message),
 };
 
-/** スピナー付きで非同期タスクを実行 */
+/**
+ * スピナー付きで非同期タスクを実行する。
+ *
+ * 失敗はそのまま投げ直す。`Effect.runPromise` で包むと、reject される値が FiberFailure に
+ * 置き換わって元の型もプロパティも失われる。呼び出し側は投げられた値を見て失敗を分類する
+ * （`push` の `pushFailure`、`createPullRequest` が投げる `ZikuFailure`）ので、表示のための
+ * 中間層が値を包み直すと、対処できる失敗がすべて「原因不明」へ落ちる。
+ */
 export function withSpinner<T>(message: string, task: () => Promise<T>): Promise<T> {
   // 非 TTY（パイプ・ログリダイレクト・--yes での非対話実行）ではスピナーの
   // アニメーションを使わない。@clack の spinner は `process.env.CI === "true"`
@@ -64,11 +70,15 @@ export function withSpinner<T>(message: string, task: () => Promise<T>): Promise
 
   const s = p.spinner();
   s.start(message);
-  return Effect.runPromise(
-    Effect.tryPromise({ try: () => task(), catch: (e) => e }).pipe(
-      Effect.tap(() => Effect.sync(() => s.stop(message))),
-      Effect.tapError(() => Effect.sync(() => s.stop(pc.red(`Failed: ${message}`)))),
-    ),
+  return task().then(
+    (value) => {
+      s.stop(message);
+      return value;
+    },
+    (cause: unknown): never => {
+      s.stop(pc.red(`Failed: ${message}`));
+      throw cause;
+    },
   );
 }
 
@@ -81,10 +91,12 @@ export function withSpinner<T>(message: string, task: () => Promise<T>): Promise
  */
 function runWithoutSpinner<T>(message: string, task: () => Promise<T>): Promise<T> {
   log.step(message);
-  return Effect.runPromise(
-    Effect.tryPromise({ try: () => task(), catch: (e) => e }).pipe(
-      Effect.tapError(() => Effect.sync(() => log.error(`Failed: ${message}`))),
-    ),
+  return task().then(
+    (value) => value,
+    (cause: unknown): never => {
+      log.error(`Failed: ${message}`);
+      throw cause;
+    },
   );
 }
 

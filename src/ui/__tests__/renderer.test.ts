@@ -141,6 +141,45 @@ describe("renderer", () => {
       expect(mockSpinner.stop).toHaveBeenCalled();
     });
 
+    it("投げられた値をそのまま伝える（TTY）", async () => {
+      // 呼び出し側は投げられた値を見て失敗を分類する。包み直すと、対処できる失敗が
+      // すべて「原因不明」へ落ちる。メッセージの部分一致では包み直しを検出できないので、
+      // 同一性で見る。
+      setIsTTY(true);
+      const mockSpinner = {
+        start: vi.fn(),
+        stop: vi.fn(),
+        cancel: vi.fn(),
+        error: vi.fn(),
+        message: vi.fn(),
+        clear: vi.fn(),
+        isCancelled: false,
+      };
+      vi.mocked(p.spinner).mockReturnValue(mockSpinner);
+
+      class Marker extends Error {}
+      const original = new Marker("boom");
+      const thrown = await withSpinner("loading...", async () => {
+        throw original;
+      }).catch((e: unknown) => e);
+
+      expect(thrown).toBe(original);
+      expect(thrown).toBeInstanceOf(Marker);
+    });
+
+    it("投げられた値をそのまま伝える（非 TTY）", async () => {
+      setIsTTY(false);
+
+      class Marker extends Error {}
+      const original = new Marker("boom");
+      const thrown = await withSpinner("loading...", async () => {
+        throw original;
+      }).catch((e: unknown) => e);
+
+      expect(thrown).toBe(original);
+      expect(thrown).toBeInstanceOf(Marker);
+    });
+
     it("非 TTY ではスピナーを使わず単一行で開始メッセージを出す", async () => {
       setIsTTY(false);
 
