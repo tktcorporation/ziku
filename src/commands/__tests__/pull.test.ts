@@ -5,9 +5,9 @@ import { FileNotFoundError, ZikuFailure } from "../../errors";
 import type {
   AbsPath,
   CommitSha,
-  ConflictPaths,
   GlobPattern,
   LockState,
+  PendingConflicts,
   ResumableLockState,
   SyncPoint,
   TemplateSource,
@@ -40,6 +40,10 @@ vi.mock("../../utils/template", () => ({
   downloadTemplateToTemp: vi.fn(),
   buildTemplateSource: vi.fn(
     (source: { owner: string; repo: string }) => `gh:${source.owner}/${source.repo}`,
+  ),
+  buildCommitPinnedSource: vi.fn(
+    (source: { owner: string; repo: string }, sha: string) =>
+      `gh:${source.owner}/${source.repo}#${sha}`,
   ),
 }));
 
@@ -99,7 +103,7 @@ vi.mock("../../utils/merge", async () => {
     // 後処理（書き込むか / 何もしないか）を検証するために代替側でも同じにしておく。
     mergeConflictFiles: vi.fn((input: MergeConflictFilesInput) =>
       effectMod.Effect.gen(function* () {
-        const unresolved: string[] = [];
+        const unresolved: Array<{ path: string; reason: "markers" | "noBase" | "binary" }> = [];
         if (input.conflicts.length === 0) return unresolved;
 
         const downloaded = yield* downloadBaseForMerge({
@@ -117,7 +121,8 @@ vi.mock("../../utils/merge", async () => {
                   base: { kind: "with-base", dir: downloaded.templateDir },
                 })).outcome;
           yield* input.onFileResult({ file, outcome });
-          if (outcome._tag !== "Clean") unresolved.push(file);
+          if (outcome._tag === "Conflicted") unresolved.push({ path: file, reason: "markers" });
+          if (outcome._tag === "NoBase") unresolved.push({ path: file, reason: "noBase" });
         }
         downloaded?.cleanup();
         return unresolved;
@@ -146,6 +151,7 @@ vi.mock("../../utils/template-config", async () => {
 vi.mock("../../ui/prompts", () => ({
   selectDeletedFiles: vi.fn(),
   selectDeletedFilesWithLocalEdits: vi.fn(() => Promise.resolve([])),
+  selectUnmergedResolution: vi.fn(() => Promise.resolve("keepLocal")),
 }));
 
 vi.mock("../../ui/renderer", () => ({
@@ -173,10 +179,12 @@ vi.mock("../../ui/renderer", () => ({
 // モック後にインポート
 const { pullCommand } = await import("../pull");
 const { loadCommandContext } = await import("../../services/command-context");
-const { selectDeletedFiles, selectDeletedFilesWithLocalEdits } = await import("../../ui/prompts");
+const { selectDeletedFiles, selectDeletedFilesWithLocalEdits, selectUnmergedResolution } =
+  await import("../../ui/prompts");
 const mockSelectDeletedFiles = vi.mocked(selectDeletedFiles);
 const mockSelectDeletedFilesWithLocalEdits = vi.mocked(selectDeletedFilesWithLocalEdits);
-const { downloadTemplateToTemp } = await import("../../utils/template");
+const mockSelectUnmergedResolution = vi.mocked(selectUnmergedResolution);
+const { downloadTemplateToTemp, buildCommitPinnedSource } = await import("../../utils/template");
 const { zikuConfigExists } = await import("../../utils/ziku-config");
 const { loadLock, saveLock } = await import("../../utils/lock");
 const { loadTemplateConfig } = await import("../../utils/template-config");
@@ -187,7 +195,7 @@ const { classifyFiles, mergeOneFile, writeFileEnsureDir, downloadBaseForMerge } 
 // 置き換えるので、実装モジュールを直接読み込めば素の関数が得られる）。
 const { classifyMergeOutcome } = await import("../../utils/merge/types");
 const { log } = await import("../../ui/renderer");
-const { absPath, commitSha, globPatterns, hashMap, repoRelPath, repoRelPaths } =
+const { absPath, commitSha, globPatterns, hashMap, pendingConflict, repoRelPath, repoRelPaths } =
   await import("../../__tests__/brands");
 
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
@@ -249,7 +257,7 @@ async function captureFailure(run: () => Promise<unknown>): Promise<ZikuFailure>
 }
 
 /** コンフリクト解決待ちのロックを作る。 */
-function mergingLock(conflicts: ConflictPaths, next: SyncPoint): LockState {
+function mergingLock(conflicts: PendingConflicts, next: SyncPoint): LockState {
   return markMerging(baseLock, next, conflicts);
 }
 
@@ -674,7 +682,10 @@ describe("pullCommand", () => {
         expect.any(String),
         expect.objectContaining({
           sync: "merging",
-          merge: expect.objectContaining({ conflicts: [".mcp.json"] }),
+          // ベース不在は経路まで記録する。--continue はマーカーの消滅では確定できない。
+          merge: expect.objectContaining({
+            conflicts: [{ path: ".mcp.json", reason: "noBase" }],
+          }),
         }),
       );
     });
@@ -1131,7 +1142,7 @@ describe("pullCommand", () => {
         expect.objectContaining({
           sync: "merging",
           merge: expect.objectContaining({
-            conflicts: repoRelPaths([".mcp.json"]),
+            conflicts: [pendingConflict(".mcp.json")],
           }),
         }),
       );
@@ -1148,7 +1159,7 @@ describe("pullCommand", () => {
       });
 
       const { effect, cleanup } = mockContext({
-        lock: mergingLock([repoRelPath(".mcp.json")], {
+        lock: mergingLock([pendingConflict(".mcp.json")], {
           hashes: hashMap({ ".mcp.json": "hash123" }),
         }),
       });
@@ -1214,7 +1225,7 @@ describe("pullCommand", () => {
 
       mockLoadLock.mockReturnValueOnce(
         Effect.succeed(
-          mergingLock([repoRelPath(".mcp.json")], {
+          mergingLock([pendingConflict(".mcp.json")], {
             hashes: hashMap({ ".mcp.json": "hash123" }),
             commitSha: commitSha("latest123"),
           }),
@@ -1246,7 +1257,7 @@ describe("pullCommand", () => {
 
       mockLoadLock.mockReturnValueOnce(
         Effect.succeed(
-          mergingLock([repoRelPath(".mcp.json")], {
+          mergingLock([pendingConflict(".mcp.json")], {
             hashes: hashMap({ ".mcp.json": "newhash" }),
             commitSha: commitSha("newref123"),
           }),
@@ -1279,7 +1290,7 @@ describe("pullCommand", () => {
 
       mockLoadLock.mockReturnValueOnce(
         Effect.succeed(
-          mergingLock([repoRelPath(".mcp.json")], {
+          mergingLock([pendingConflict(".mcp.json")], {
             hashes: hashMap({ ".mcp.json": "newhash" }),
             commitSha: commitSha("newref123"),
           }),
@@ -1294,6 +1305,205 @@ describe("pullCommand", () => {
 
       expect(mockSaveLock).not.toHaveBeenCalled();
       expect(mockLog.info).toHaveBeenCalledWith("Dry run mode");
+    });
+
+    it("--continue: 自動マージを試みていないファイルは、マーカーが無くても完了扱いにしない", async () => {
+      // ベース不在で未解決になったファイルは ziku が何も書いていない。マーカーが無いことを
+      // 解決の証拠にすると、テンプレートの変更を取り込まないままベースだけが前進する。
+      vol.fromJSON({ "/test/.mcp.json": "local content (never touched by ziku)" });
+
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(
+          mergingLock([pendingConflict(".mcp.json", "noBase")], {
+            hashes: hashMap({ ".mcp.json": "newhash" }),
+            commitSha: commitSha("newref123"),
+          }),
+        ),
+      );
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false, continue: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockSelectUnmergedResolution).toHaveBeenCalledWith({
+        path: ".mcp.json",
+        reason: "noBase",
+      });
+    });
+
+    it("--continue: バイナリで未解決になったファイルも選択を求める", async () => {
+      vol.fromJSON({ "/test/icon.png": "local bytes" });
+
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(
+          mergingLock([pendingConflict("icon.png", "binary")], {
+            hashes: hashMap({ "icon.png": "newhash" }),
+            commitSha: commitSha("newref123"),
+          }),
+        ),
+      );
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false, continue: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(mockSelectUnmergedResolution).toHaveBeenCalledWith({
+        path: "icon.png",
+        reason: "binary",
+      });
+    });
+
+    it("--continue: ローカルを残す選択でも、ベースはテンプレート側へ前進する", async () => {
+      // 「ローカルを残す」はテンプレートの変更を意図して拒否したという意思表示なので、
+      // 次回以降その差分を蒸し返さない。
+      vol.fromJSON({ "/test/.mcp.json": "local content" });
+
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(
+          mergingLock([pendingConflict(".mcp.json", "noBase")], {
+            hashes: hashMap({ ".mcp.json": "newhash" }),
+            commitSha: commitSha("newref123"),
+          }),
+        ),
+      );
+      mockSelectUnmergedResolution.mockResolvedValueOnce("keepLocal");
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false, continue: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(lastSavedLock()).toEqual({
+        version: baseLock.version,
+        installedAt: baseLock.installedAt,
+        source: baseSource,
+        sync: "synced",
+        base: { hashes: { ".mcp.json": "newhash" }, ref: "newref123" },
+      });
+      // ローカルには触れない
+      expect(mockWriteFileEnsureDir).not.toHaveBeenCalled();
+    });
+
+    it("--continue: テンプレートを取る選択は、中断時点のテンプレートの内容で上書きする", async () => {
+      vol.fromJSON({
+        "/test/.mcp.json": "local content",
+        "/tmp/paused-template/.mcp.json": "template content",
+      });
+
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(
+          mergingLock([pendingConflict(".mcp.json", "noBase")], {
+            hashes: hashMap({ ".mcp.json": "newhash" }),
+            commitSha: commitSha("newref123"),
+          }),
+        ),
+      );
+      mockSelectUnmergedResolution.mockResolvedValueOnce("takeTemplate");
+      const cleanup = vi.fn();
+      mockDownloadTemplateToTemp.mockResolvedValueOnce({
+        templateDir: absPath("/tmp/paused-template"),
+        cleanup,
+      });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false, continue: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      // 取り寄せるのは最新ではなく、確定するベースと同じコミット
+      expect(buildCommitPinnedSource).toHaveBeenCalledWith(baseSource, "newref123");
+      const written = mockWriteFileEnsureDir.mock.calls.find(([p]) => p === "/test/.mcp.json");
+      expect(written?.[1]?.toString()).toBe("template content");
+      expect(cleanup).toHaveBeenCalled();
+      expect(lastSavedLock()).toMatchObject({ sync: "synced" });
+    });
+
+    it("--continue: テンプレートを取り寄せられなければベースを前進させない", async () => {
+      // 取り込めていないのにベースだけ進むと、テンプレートの変更が消えたまま解決済みになる。
+      vol.fromJSON({ "/test/.mcp.json": "local content" });
+
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(
+          mergingLock([pendingConflict(".mcp.json", "noBase")], {
+            hashes: hashMap({ ".mcp.json": "newhash" }),
+            commitSha: commitSha("newref123"),
+          }),
+        ),
+      );
+      mockSelectUnmergedResolution.mockResolvedValueOnce("takeTemplate");
+      mockDownloadTemplateToTemp.mockRejectedValueOnce(new Error("network down"));
+
+      const failure = await captureFailure(() =>
+        (pullCommand.run as any)({
+          args: { dir: "/test", force: false, yes: false, continue: true },
+          rawArgs: [],
+          cmd: pullCommand,
+        }),
+      );
+
+      expect(failure.reason).toMatchObject({ kind: "TemplateUnavailable" });
+      expect(mockSaveLock).not.toHaveBeenCalled();
+    });
+
+    it("--continue --yes: 選ばせずに中断し、対話でのやり直しを案内する", async () => {
+      vol.fromJSON({ "/test/.mcp.json": "local content" });
+
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(
+          mergingLock([pendingConflict(".mcp.json", "binary")], {
+            hashes: hashMap({ ".mcp.json": "newhash" }),
+          }),
+        ),
+      );
+
+      const failure = await captureFailure(() =>
+        (pullCommand.run as any)({
+          args: { dir: "/test", force: false, yes: true, continue: true },
+          rawArgs: [],
+          cmd: pullCommand,
+        }),
+      );
+
+      expect(failure.reason).toEqual({
+        kind: "UnmergedChoiceRequired",
+        files: [".mcp.json"],
+      });
+      expect(failure.hint).toContain(".mcp.json");
+      expect(mockSelectUnmergedResolution).not.toHaveBeenCalled();
+      // 中断したので確定もしない
+      expect(mockSaveLock).not.toHaveBeenCalled();
+    });
+
+    it("--continue: マーカーが残っていれば、選択を求める前に編集を促して中断する", async () => {
+      vol.fromJSON({
+        "/test/marked.txt": "<<<<<<< LOCAL\nlocal\n=======\ntemplate\n>>>>>>> TEMPLATE",
+        "/test/binary.bin": "local bytes",
+      });
+
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(
+          mergingLock([pendingConflict("marked.txt"), pendingConflict("binary.bin", "binary")], {
+            hashes: hashMap({ "marked.txt": "newhash" }),
+          }),
+        ),
+      );
+
+      const failure = await captureFailure(() =>
+        (pullCommand.run as any)({
+          args: { dir: "/test", force: false, yes: false, continue: true },
+          rawArgs: [],
+          cmd: pullCommand,
+        }),
+      );
+
+      expect(failure.reason).toMatchObject({ kind: "ConflictsUnresolved" });
+      expect(mockSelectUnmergedResolution).not.toHaveBeenCalled();
     });
 
     it("downloadBaseForMerge がベースのコミット SHA 付きで呼ばれる", async () => {
@@ -1445,7 +1655,7 @@ describe("pullCommand", () => {
         expect.objectContaining({
           sync: "merging",
           merge: expect.objectContaining({
-            conflicts: repoRelPaths(["b.txt"]),
+            conflicts: [pendingConflict("b.txt")],
           }),
         }),
       );

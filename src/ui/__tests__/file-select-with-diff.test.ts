@@ -7,6 +7,7 @@ import {
   buildColoredDiffLines,
   buildFileItems,
   computeListWindow,
+  isPreselectedByDefault,
   computeScreenLayout,
   getDiffPreviewHeight,
   render,
@@ -274,12 +275,26 @@ describe("file-select-with-diff", () => {
           templateContent: "old\n",
         },
       ];
-      const items = buildFileItems(files, new Set(["bad.ts"]));
+      const items = buildFileItems(files, { conflictedPaths: new Set(["bad.ts"]) });
       const okHint = stripCsi(items[0].hint);
       const badHint = stripCsi(items[1].hint);
       // 衝突ファイルだけ conflict 表示、それ以外は通常の統計 hint
       expect(badHint).toContain("conflict");
       expect(okHint).not.toContain("conflict");
+    });
+
+    it("テンプレートの削除を取り消すファイルは hint でそれと分かる", () => {
+      const files: FileDiff[] = [
+        { path: repoRelPath("added.ts"), type: "added", localContent: "new\n" },
+        { path: repoRelPath("restored.ts"), type: "added", localContent: "new\n" },
+      ];
+      const items = buildFileItems(files, {
+        restoresTemplateDeletion: new Set(["restored.ts"]),
+      });
+
+      // 種別アイコンはどちらも `+` なので、注記だけが両者を見分ける手掛かりになる
+      expect(stripCsi(items[0].hint)).not.toContain("restores file deleted in template");
+      expect(stripCsi(items[1].hint)).toContain("restores file deleted in template");
     });
 
     it("should show modified icon for modified files", () => {
@@ -782,5 +797,39 @@ describe("file-select-with-diff", () => {
 
       expect(item.hint).toBe("");
     });
+  });
+});
+
+describe("isPreselectedByDefault", () => {
+  const added = (path: string): FileDiff => ({
+    path: repoRelPath(path),
+    type: "added",
+    localContent: "x\n",
+  });
+  const deleted = (path: string): FileDiff => ({
+    path: repoRelPath(path),
+    type: "deleted",
+    templateContent: "x\n",
+  });
+
+  it("既定でチェックが入るのは、衝突でも削除でも削除の取り消しでもないファイル", () => {
+    expect(isPreselectedByDefault(added("a.ts"), {})).toBe(true);
+  });
+
+  it("未解決の衝突は既定で外す（選ぶと push が中断する）", () => {
+    expect(isPreselectedByDefault(added("a.ts"), { conflictedPaths: new Set(["a.ts"]) })).toBe(
+      false,
+    );
+  });
+
+  it("テンプレートの削除を取り消すファイルは既定で外す", () => {
+    expect(
+      isPreselectedByDefault(added("a.ts"), { restoresTemplateDeletion: new Set(["a.ts"]) }),
+    ).toBe(false);
+  });
+
+  it("削除は --include-deletions のときだけ既定に入る", () => {
+    expect(isPreselectedByDefault(deleted("gone.ts"), {})).toBe(false);
+    expect(isPreselectedByDefault(deleted("gone.ts"), { preselectDeletions: true })).toBe(true);
   });
 });

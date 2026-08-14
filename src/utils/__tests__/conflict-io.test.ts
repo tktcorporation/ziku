@@ -305,7 +305,12 @@ describe("conflict-io", () => {
         }),
       );
 
-      expect(unresolved).toEqual(["a.txt", "b.txt"]);
+      // 経路まで残す: ベース不在は「ローカルに何も書いていない」ので、再開時に
+      // マーカーの有無で解決を判定できない側になる。
+      expect(unresolved).toEqual([
+        { path: "a.txt", reason: "noBase" },
+        { path: "b.txt", reason: "noBase" },
+      ]);
       expect(seen.map((r) => r.outcome)).toEqual([{ _tag: "NoBase" }, { _tag: "NoBase" }]);
     });
 
@@ -348,7 +353,7 @@ describe("conflict-io", () => {
       );
 
       expect(pullUnresolved).toEqual(pushUnresolved);
-      expect(pullUnresolved).toEqual(["a.txt"]);
+      expect(pullUnresolved).toEqual([{ path: "a.txt", reason: "noBase" }]);
       // どちらの側にもマージ結果は渡らない
       expect(writtenByPull).toEqual([]);
       expect(keptByPush.size).toBe(0);
@@ -377,7 +382,10 @@ describe("conflict-io", () => {
         }),
       );
 
-      expect(unresolved).toEqual(["icon.png", "a.txt"]);
+      expect(unresolved).toEqual([
+        { path: "icon.png", reason: "binary" },
+        { path: "a.txt", reason: "noBase" },
+      ]);
       // バイナリはマージ経路に入らないので結末が作られない（テキストは NoBase として渡る）
       expect(seen.map((r) => r.file)).toEqual(["a.txt"]);
       // ローカルのバイト列は 1 バイトも変わらない

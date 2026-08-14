@@ -114,23 +114,65 @@ export interface FileItem {
   readonly diffLines: string[];
 }
 
-export function buildFileItems(files: FileDiff[], conflictedPaths?: Set<string>): FileItem[] {
-  const conflicted = conflictedPaths ?? new Set<string>();
-  return files.map((file) => {
-    const icon = getTypeIcon(file.type);
+/**
+ * 一覧に出す 1 行の見え方と既定チェックを決める材料。
+ *
+ * 選択画面の 2 実装（TTY のプレビュー付きセレクタと非 TTY のフォールバック）が同じ型を
+ * 受け取り、同じ関数（{@link fileSelectionHint} / {@link isPreselectedByDefault}）で
+ * 判断する。片方だけが注記や既定チェックを持つと、端末の種類で挙動が変わる。
+ */
+export interface FileSelectionMarks {
+  /** 削除ファイルをデフォルトで選択するか */
+  readonly preselectDeletions?: boolean;
+  /** 未解決の衝突ファイル。マーク表示し、デフォルト未選択にする。 */
+  readonly conflictedPaths?: ReadonlySet<string>;
+  /**
+   * 送るとテンプレート側の削除を取り消すファイル。マーク表示し、デフォルト未選択にする。
+   *
+   * 見た目は新規追加と同じ `+` なので、注記が無いと「テンプレートが消したファイルを
+   * 復活させる」操作だと画面から分からない。
+   */
+  readonly restoresTemplateDeletion?: ReadonlySet<string>;
+}
 
-    // 未解決の衝突は hint で明示する。選ぶと push が中断する（要 ziku pull）ことを伝える。
-    const hint = conflicted.has(file.path)
-      ? pc.red("conflict — resolve with ziku pull")
-      : formatStatHint(file);
+/**
+ * 行に添える注記。
+ *
+ * 未解決の衝突を先に見せる。選ぶと push そのものが中断するので、他の注記より
+ * 行動への影響が大きい。
+ */
+export function fileSelectionHint(file: FileDiff, marks: FileSelectionMarks): string {
+  if (marks.conflictedPaths?.has(file.path) === true) {
+    return pc.red("conflict — resolve with ziku pull");
+  }
+  if (marks.restoresTemplateDeletion?.has(file.path) === true) {
+    return pc.yellow("restores file deleted in template");
+  }
+  return formatStatHint(file);
+}
 
-    return {
-      file,
-      label: `${icon} ${file.path}`,
-      hint,
-      diffLines: buildColoredDiffLines(file),
-    };
-  });
+/**
+ * 既定でチェックを入れるか。
+ *
+ * 外すのは、選ぶと push が中断する未解決の衝突、`--include-deletions` でない削除、
+ * テンプレート側の削除を取り消すファイル。理由は `defaultPushSelection`（非対話実行の
+ * 既定集合）と同じで、対話実行だけが既定で送ってしまうことのないよう揃える。
+ */
+export function isPreselectedByDefault(file: FileDiff, marks: FileSelectionMarks): boolean {
+  return (
+    marks.conflictedPaths?.has(file.path) !== true &&
+    marks.restoresTemplateDeletion?.has(file.path) !== true &&
+    (marks.preselectDeletions === true || file.type !== "deleted")
+  );
+}
+
+export function buildFileItems(files: FileDiff[], marks?: FileSelectionMarks): FileItem[] {
+  return files.map((file) => ({
+    file,
+    label: `${getTypeIcon(file.type)} ${file.path}`,
+    hint: fileSelectionHint(file, marks ?? {}),
+    diffLines: buildColoredDiffLines(file),
+  }));
 }
 
 // ─── レンダリング ──────────────────────────────────────────────
@@ -507,12 +549,7 @@ export function applyAction(state: RenderState, action: KeyAction, termRows: num
 
 // ─── メインプロンプト ──────────────────────────────────────────
 
-export interface FileSelectWithDiffOptions {
-  /** 削除ファイルをデフォルトで選択するか */
-  preselectDeletions?: boolean;
-  /** 未解決の衝突ファイル。マーク表示し、デフォルト未選択にする。 */
-  conflictedPaths?: Set<string>;
-}
+export type FileSelectWithDiffOptions = FileSelectionMarks;
 
 /**
  * Diff プレビュー付きファイル選択プロンプト。
@@ -529,18 +566,11 @@ export function selectFilesWithDiffPreview(
 ): Promise<FileDiff[]> {
   if (files.length === 0) return Promise.resolve([]);
 
-  const conflicted = options?.conflictedPaths ?? new Set<string>();
-  const items = buildFileItems(files, conflicted);
+  const marks = options ?? {};
+  const items = buildFileItems(files, marks);
 
-  // 既定で未選択にするもの: 削除ファイル（--include-deletions で全選択）と
-  // 未解決の衝突ファイル（選ぶと push が中断するため、誤って既定で含めない）。
   const initialSelected = new Set<string>(
-    files
-      .filter(
-        (f) =>
-          !conflicted.has(f.path) && (options?.preselectDeletions === true || f.type !== "deleted"),
-      )
-      .map((f) => f.path),
+    files.filter((f) => isPreselectedByDefault(f, marks)).map((f) => f.path),
   );
 
   const state: RenderState = {

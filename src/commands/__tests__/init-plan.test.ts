@@ -30,6 +30,7 @@ import {
   planOverwriteStrategy,
   preferReadyCandidate,
   requiresDevcontainerEnvExample,
+  resolveConfigBaseContent,
   resolveConfigBaseHash,
   resolveTargetDirArg,
   selectedFlatPatterns,
@@ -239,11 +240,46 @@ describe("planOverwriteStrategy", () => {
   });
 });
 
+describe("resolveConfigBaseContent（ディスクに実在する本文を選ぶ）", () => {
+  const generatedContent = generateZikuJsonc({
+    include: globPatterns([".claude/**", ".mcp.json"]),
+    exclude: [],
+  });
+  const existingContent = generateZikuJsonc({
+    include: globPatterns([".mcp.json"]),
+    exclude: [],
+  });
+
+  it("新規作成なら生成した本文を採る", () => {
+    expect(
+      resolveConfigBaseContent({ action: "created", generatedContent, existingContent: undefined }),
+    ).toBe(generatedContent);
+  });
+
+  it("上書きなら生成した本文を採る", () => {
+    expect(
+      resolveConfigBaseContent({ action: "overwritten", generatedContent, existingContent }),
+    ).toBe(generatedContent);
+  });
+
+  it("スキップなら既存ファイルの本文を採る（生成した本文はディスクに無い）", () => {
+    expect(resolveConfigBaseContent({ action: "skipped", generatedContent, existingContent })).toBe(
+      existingContent,
+    );
+  });
+
+  it("gitignore 由来のスキップでも既存ファイルの本文を採る", () => {
+    expect(
+      resolveConfigBaseContent({ action: "skipped_ignored", generatedContent, existingContent }),
+    ).toBe(existingContent);
+  });
+});
+
 describe("resolveConfigBaseHash（テンプレ保護の安全装置）", () => {
   it("ローカル(部分集合) の内容ハッシュを base にする（テンプレを削らないため）", () => {
     const localContent = generateZikuJsonc({ include: globPatterns([".claude/**"]), exclude: [] });
     const result = resolveConfigBaseHash({
-      localConfigContent: localContent,
+      persistedConfigContent: localContent,
       templateConfigHash: hashContent("different-template-content"),
     });
     // base = ローカル内容のハッシュ（テンプレ側のハッシュではない）
@@ -253,7 +289,7 @@ describe("resolveConfigBaseHash（テンプレ保護の安全装置）", () => {
   it("テンプレ側ハッシュが undefined でもローカル内容から base を決められる", () => {
     const localContent = generateZikuJsonc({ include: globPatterns([".mcp.json"]), exclude: [] });
     const result = resolveConfigBaseHash({
-      localConfigContent: localContent,
+      persistedConfigContent: localContent,
       templateConfigHash: undefined,
     });
     expect(result).toBe(hashContent(localContent));
@@ -266,7 +302,7 @@ describe("resolveConfigBaseHash（テンプレ保護の安全装置）", () => {
     });
     const templateHash = hashContent(content);
     const result = resolveConfigBaseHash({
-      localConfigContent: content,
+      persistedConfigContent: content,
       templateConfigHash: templateHash,
     });
     // local == template のときは base も一致 → push/pull とも no-op
@@ -275,31 +311,31 @@ describe("resolveConfigBaseHash（テンプレ保護の安全装置）", () => {
 });
 
 describe("planLockBaseHashes", () => {
-  const localConfigContent = generateZikuJsonc({
+  const persistedConfigContent = generateZikuJsonc({
     include: globPatterns([".mcp.json"]),
     exclude: [],
   });
 
-  it("テンプレに ziku.jsonc があれば base をローカル内容のハッシュへ差し替える", () => {
+  it("テンプレに ziku.jsonc があれば base をディスク上の本文のハッシュへ差し替える", () => {
     const result = planLockBaseHashes({
       templateHashes: hashMap({ ".mcp.json": "a", ".ziku/ziku.jsonc": "template-hash" }),
-      localConfigContent,
+      persistedConfigContent,
     });
-    expect(result[CONFIG_PATH]).toBe(hashContent(localConfigContent));
+    expect(result[CONFIG_PATH]).toBe(hashContent(persistedConfigContent));
     expect(result[repoRelPath(".mcp.json")]).toBe("a");
   });
 
   it("テンプレに ziku.jsonc が無ければ base を記録しない（次回 pull の誤削除を防ぐ）", () => {
     const result = planLockBaseHashes({
       templateHashes: hashMap({ ".mcp.json": "a" }),
-      localConfigContent,
+      persistedConfigContent,
     });
     expect(result[CONFIG_PATH]).toBeUndefined();
   });
 
   it("渡されたハッシュ表を書き換えない", () => {
     const templateHashes = hashMap({ ".ziku/ziku.jsonc": "template-hash" });
-    planLockBaseHashes({ templateHashes, localConfigContent });
+    planLockBaseHashes({ templateHashes, persistedConfigContent });
     expect(templateHashes[CONFIG_PATH]).toBe("template-hash");
   });
 });

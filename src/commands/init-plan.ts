@@ -13,6 +13,7 @@ import { P, match } from "ts-pattern";
 import type {
   CommitSha,
   ContentHash,
+  FileAction,
   GlobPattern,
   HashMap,
   LockState,
@@ -224,6 +225,43 @@ export function planOverwriteStrategy(opts: {
 // ─── lock の初期状態 ───
 
 /**
+ * 書き込みを終えた時点で `.ziku/ziku.jsonc` の中身になっている本文を選ぶ。
+ *
+ * init が組み立てた本文が必ずディスクへ載るとは限らない。上書き戦略が `skip` なら既存の
+ * `ziku.jsonc` はそのまま残り（`--yes` はプロンプトを省くだけで既存ファイルを失う承認を
+ * 含まないので、戦略は `skip` に解決される — {@link planOverwriteStrategy}）、書き出した
+ * つもりの本文はどこにも存在しない。lock のベースに載せる本文をここで選び直すことで、
+ * {@link resolveConfigBaseHash} は実在する本文だけを受け取る。
+ *
+ * ファイルを読むのは呼び出し側の役目で、この関数はどちらの本文を採るかだけを決める。
+ *
+ * @param params.action           `ziku.jsonc` への書き込み結果のアクション
+ * @param params.generatedContent init が組み立てた `ziku.jsonc` の本文
+ * @param params.existingContent  書き込み前にディスクにあった本文（無ければ undefined）
+ */
+export function resolveConfigBaseContent(params: {
+  readonly action: FileAction;
+  readonly generatedContent: string;
+  readonly existingContent: string | undefined;
+}): string {
+  return (
+    match(params.action)
+      .with("created", "overwritten", () => params.generatedContent)
+      // 既存ファイルが残った場合、ディスクの中身は書き込み前の本文のまま。`copied` は
+      // テンプレートからのコピーを表すアクションで、生成した本文を書く経路からは返らない
+      // が、生成した本文がディスクに載っていないのは同じなので同じ側へ倒す。
+      // 既存の本文が無ければ書き込みは必ず起きるため、`??` は到達しない既定値。
+      .with(
+        "copied",
+        "skipped",
+        "skipped_ignored",
+        () => params.existingContent ?? params.generatedContent,
+      )
+      .exhaustive()
+  );
+}
+
+/**
  * init 時に lock の同期ベースへ `.ziku/ziku.jsonc` のハッシュとして記録する値を決める。
  *
  * ## なぜ専用ロジックが必要か
@@ -240,17 +278,24 @@ export function planOverwriteStrategy(opts: {
  *     local == base → push 対象外（テンプレート安全）。
  *     pull 時は template != base==local → autoUpdate でテンプレの full 設定が降りてくる。
  *
- * @param opts.localConfigContent  init で書き出すローカル ziku.jsonc の中身
+ * ## 渡す本文はディスクに実在するものに限る
+ * lock のベースは「次回の pull / push が差分を測る基準」なので、ディスクにもテンプレートにも
+ * 無い本文をベースにすると、誰も編集していないのに 3-way 比較が「ローカルもテンプレートも
+ * ベースから変わった」と読み、`.ziku/ziku.jsonc` を conflicts に入れる。init が組み立てた
+ * 本文と実際に書かれた本文は上書き戦略しだいで食い違うので、呼び出し側は
+ * {@link resolveConfigBaseContent} で解決した本文を渡す。
+ *
+ * @param opts.persistedConfigContent  書き込み後にディスク上の ziku.jsonc が持つ本文
  * @param opts.templateConfigHash  テンプレートの ziku.jsonc のハッシュ（無い場合 undefined）
  * @returns 同期ベースの `.ziku/ziku.jsonc` に入れるハッシュ値
  */
 export function resolveConfigBaseHash(opts: {
-  localConfigContent: string;
+  persistedConfigContent: string;
   templateConfigHash: ContentHash | undefined;
 }): ContentHash {
   // テンプレート保護のため base はローカル（部分集合）側に置く。
   // これにより local == base となり、初回 push でテンプレのパターンを削らない。
-  return hashContent(opts.localConfigContent);
+  return hashContent(opts.persistedConfigContent);
 }
 
 /**
@@ -260,10 +305,14 @@ export function resolveConfigBaseHash(opts: {
  * {@link resolveConfigBaseHash} の値へ差し替える。テンプレートに無いのに base を記録すると、
  * 次回 pull が {base 有・local 有・template 無} を削除と判定し、ローカルの制御ファイルを
  * 消してしまう。
+ *
+ * `persistedConfigContent` には、init が組み立てた本文ではなく **書き込み後にディスクへ
+ * 載っている本文** を渡す（選び方は {@link resolveConfigBaseContent}）。実在しない本文を
+ * ベースに記録すると次回の差分が嘘になる理由は {@link resolveConfigBaseHash} を参照。
  */
 export function planLockBaseHashes(params: {
   readonly templateHashes: HashMap;
-  readonly localConfigContent: string;
+  readonly persistedConfigContent: string;
 }): HashMap {
   const templateConfigHash = params.templateHashes[ZIKU_CONFIG_FILE];
   if (templateConfigHash === undefined) return { ...params.templateHashes };
@@ -271,7 +320,7 @@ export function planLockBaseHashes(params: {
   return {
     ...params.templateHashes,
     [ZIKU_CONFIG_FILE]: resolveConfigBaseHash({
-      localConfigContent: params.localConfigContent,
+      persistedConfigContent: params.persistedConfigContent,
       templateConfigHash,
     }),
   };

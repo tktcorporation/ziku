@@ -1,19 +1,21 @@
 import { readFile, rm } from "node:fs/promises";
 import { defineCommand } from "citty";
 import { Effect, Option } from "effect";
-import { match } from "ts-pattern";
+import { P, match } from "ts-pattern";
 import { withCleanup } from "../effect-helpers";
 import type { ZikuFailure } from "../errors";
 import { describeConflictLines, zikuFailure } from "../errors";
 import type {
   AbsPath,
-  ConflictPaths,
   ContentHash,
   GlobPattern,
   HashMap,
   MergingLockState,
+  PendingConflict,
+  PendingConflicts,
   RepoRelPath,
   ResumableLockState,
+  UnmergedConflict,
 } from "../modules/schemas";
 import {
   baseCommitSha,
@@ -22,9 +24,19 @@ import {
   markSynced,
   resolveMerge,
 } from "../modules/schemas";
-import { selectDeletedFiles, selectDeletedFilesWithLocalEdits } from "../ui/prompts";
+import type { UnmergedResolution } from "../ui/prompts";
+import {
+  selectDeletedFiles,
+  selectDeletedFilesWithLocalEdits,
+  selectUnmergedResolution,
+} from "../ui/prompts";
 import { intro, log, outro, pc } from "../ui/renderer";
 import { LOCK_FILE, loadLock, saveLock } from "../utils/lock";
+import {
+  buildCommitPinnedSource,
+  buildTemplateSource,
+  downloadTemplateToTemp,
+} from "../utils/template";
 import { ZIKU_CONFIG_FILE, withConfigTracked, zikuConfigExists } from "../utils/ziku-config";
 import { loadCommandContext, runCommandEffect, toZikuFailure } from "../services/command-context";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
@@ -82,6 +94,7 @@ export const pullLifecycle: CommandLifecycle = {
   notes: [
     "`ziku.jsonc` 自体が追跡ファイルとして加法 union マージされる。テンプレ側で追加されたパターンはユーザーの `ziku.jsonc` へ取り込まれる（push と双方向に同期）。パターンの削除は自動伝播しない（安全側）。",
     "テンプレートで削除されたファイルは、対話実行ではユーザーが選択的に削除できる。`--force` は削除の承認なので全て削除し、`--yes` はプロンプトを省くだけなので全て残す。ローカルに編集があるものはどちらのフラグでも削除せず、対話実行で明示的に選んだものだけを削除する。",
+    "自動マージを試みなかったファイル（共通祖先を取得できない / バイナリ）は、`--continue` がローカルとテンプレートのどちらを残すか尋ねる。ziku がそれらのファイルへ何も書いていないため、コンフリクトマーカーの有無では解決を判定できない。`--yes` / `--force` を付けた実行では代わりに決めず中断する。",
   ],
 };
 
@@ -110,7 +123,8 @@ export const pullCommand = defineCommand({
     },
     continue: {
       type: "boolean",
-      description: "Continue after resolving merge conflicts",
+      description:
+        "Continue a paused merge (asks which version to keep for files that could not be auto-merged)",
       default: false,
     },
     dryRun: {
@@ -131,7 +145,10 @@ export const pullCommand = defineCommand({
     // --continue モードは lock.json のみ必要（テンプレート不要）
     if (args.continue) {
       const lock = await runCommandEffect(loadPausedMerge(targetDir));
-      await runContinue(targetDir, lock, args.dryRun as boolean);
+      await runContinue(targetDir, lock, {
+        dryRun: args.dryRun as boolean,
+        flags: approvalFlags,
+      });
       return;
     }
 
@@ -268,7 +285,7 @@ export const pullCommand = defineCommand({
 
           const [firstConflict, ...restConflicts] = unresolvedConflicts;
           if (firstConflict !== undefined) {
-            const pendingConflicts: ConflictPaths = [firstConflict, ...restConflicts];
+            const pendingConflicts: PendingConflicts = [firstConflict, ...restConflicts];
             const latestRefOption = await Effect.runPromise(resolveBaseRef);
             await saveLock(
               targetDir,
@@ -426,7 +443,7 @@ async function previewPull(params: {
   if (params.deletedWithLocalEdits.length > 0) {
     const count = params.deletedWithLocalEdits.length;
     log.warn(
-      keepsLocalEditsWithoutAsking(params.flags)
+      isNonInteractive(params.flags)
         ? `${count} file(s) removed from the template have local edits — pull would keep them (local edits are never discarded automatically).`
         : `${count} file(s) removed from the template have local edits — pull would ask you to pick which to delete (never deleted automatically).`,
     );
@@ -470,7 +487,7 @@ async function applyFiles(
 }
 
 /**
- * コンフリクトファイルのマージを試み、未解決のパスを返す。
+ * コンフリクトファイルのマージを試み、未解決のものを経路付きで返す。
  *
  * ループとベース取得は `mergeConflictFiles` が持つ。ここが担うのは pull 固有の後処理、
  * つまり「マージできた内容をローカルへ書き戻し、結末をユーザーへ伝える」ことだけ。
@@ -483,7 +500,7 @@ async function resolveConflicts(
     lock: ResumableLockState;
     dryRun?: boolean;
   },
-): Promise<readonly RepoRelPath[]> {
+): Promise<readonly PendingConflict[]> {
   const dryRun = ctx.dryRun ?? false;
 
   const unresolvedConflicts = await Effect.runPromise(
@@ -585,12 +602,13 @@ function resolveDeletionPolicy(flags: PullApprovalFlags): DeletionPolicy {
 }
 
 /**
- * ローカルに編集があるファイルを、選択を求めずに残すか。
+ * プロンプトを出さずに進める実行か。
  *
- * どちらのフラグも非対話実行を意図する指定なので、プロンプトを出さずに残す側へ倒す。
- * 削除するかどうかの判断そのものは `handleDeletedWithLocalEdits` の JSDoc を参照。
+ * `--yes` は対話の省略、`--force` は破壊的操作の承認で、どちらも対話端末を前提にしない
+ * 実行を意図する指定。選択を求める処理はこの判定で分岐し、入力待ちで止まらないようにする。
+ * 選択できないときに何をするかは処理ごとに違う（削除候補は残し、マージの選択は中断する）。
  */
-function keepsLocalEditsWithoutAsking(flags: PullApprovalFlags): boolean {
+function isNonInteractive(flags: PullApprovalFlags): boolean {
   return flags.force || flags.yes;
 }
 
@@ -631,7 +649,7 @@ async function handleDeletedWithLocalEdits(
   targetDir: AbsPath,
   flags: PullApprovalFlags,
 ): Promise<void> {
-  if (keepsLocalEditsWithoutAsking(flags)) {
+  if (isNonInteractive(flags)) {
     log.warn(
       `Kept ${files.length} file(s) removed from the template because they have local edits. Run 'ziku pull' without --force / --yes to choose which to delete.`,
     );
@@ -678,7 +696,7 @@ async function deleteSelectedFiles(
  * 解決の続きは `--continue` へ誘導する。
  */
 function pausedMergeFailure(lock: MergingLockState): ZikuFailure {
-  return zikuFailure({ kind: "MergePaused", conflicts: lock.merge.conflicts });
+  return zikuFailure({ kind: "MergePaused", conflicts: lock.merge.conflicts.map((c) => c.path) });
 }
 
 /**
@@ -706,27 +724,28 @@ function loadPausedMerge(targetDir: AbsPath): Effect.Effect<MergingLockState, Zi
 /**
  * コンフリクト解決後に同期ベースを確定する。
  *
+ * 解決待ちの確かめ方は経路ごとに違う（`PendingConflict` を参照）。マーカーを書き出した
+ * ファイルはマーカーが消えたことが解決の証拠になるが、自動マージを試みなかったファイル
+ * （`noBase` / `binary`）はローカルに何も書かれていないため、マーカーが無いことは何も
+ * 意味しない。後者はどちらの内容を残すかをユーザーに選ばせてから確定する。
+ *
+ * どちらを選んでもベースはテンプレート側へ前進する。「ローカルを残す」は git の `--ours`
+ * と同じく、テンプレートの変更を意図して拒否したという意思表示なので、次回以降その差分を
+ * 蒸し返さない。
+ *
  * 引数が `MergingLockState` なので、解決待ちでない lock に対しては呼べない。
  */
 async function runContinue(
   targetDir: AbsPath,
   lock: MergingLockState,
-  dryRun: boolean,
+  opts: { dryRun: boolean; flags: PullApprovalFlags },
 ): Promise<void> {
-  const conflicts = lock.merge.conflicts;
+  const unmerged = lock.merge.conflicts.filter(isUnmergedConflict);
 
-  // 解決済みかどうかはディスクの現在の内容だけが決める。ユーザーが手で編集した後なので、
-  // マージ時点で得た位置情報は既にずれている。読み直して今のブロック位置を提示する。
-  const stillConflicted: Array<{ file: RepoRelPath; regions: readonly ConflictRegion[] }> = [];
-  for (const file of conflicts) {
-    const contentOption = await Effect.runPromise(
-      readFileSafe(joinAbs(targetDir, file)).pipe(Effect.option),
-    );
-    if (Option.isNone(contentOption)) continue;
-    const regions = findConflictRegions(contentOption.value);
-    if (regions.length > 0) stillConflicted.push({ file, regions });
-  }
-
+  const stillConflicted = await findRemainingMarkers(
+    targetDir,
+    lock.merge.conflicts.filter(hasReadableText),
+  );
   if (stillConflicted.length > 0) {
     throw zikuFailure({
       kind: "ConflictsUnresolved",
@@ -737,13 +756,37 @@ async function runContinue(
     });
   }
 
+  // 非対話を意図する実行で選択を代行しない。どちらを選んでも片側の変更が消えるため、
+  // ツールが黙って決めてよい判断ではない。
+  if (unmerged.length > 0 && isNonInteractive(opts.flags)) {
+    throw zikuFailure({
+      kind: "UnmergedChoiceRequired",
+      files: unmerged.map((c) => c.path),
+    });
+  }
+
   // dryRun: --continue は同期ベースの確定（lock 更新）が本体の副作用なので、書き込みだけ
-  // 省略する。conflict マーカーの残存チェックは読み取りのみなので dryRun でも実行してよい
-  // （他の dryRun 分岐と同じくプレビュー精度を保つため）。
-  if (dryRun) {
+  // 省略する。マーカーの残存チェックは読み取りのみなので dryRun でも実行してよい
+  // （他の dryRun 分岐と同じくプレビュー精度を保つため）。選択を伴う問い合わせは、
+  // プレビューが入力待ちで止まらないよう予告に留める。
+  if (opts.dryRun) {
     log.info("Dry run mode");
-    outro("Dry run complete — no changes were made. Conflicts are resolved and ready to finalize.");
+    if (unmerged.length > 0) {
+      log.warn(
+        `${unmerged.length} file(s) could not be auto-merged — continue would ask whether to keep your local version or take the template's:`,
+      );
+      for (const conflict of unmerged) log.message(`  ${pc.yellow("!")} ${conflict.path}`);
+    }
+    outro(
+      unmerged.length > 0
+        ? "Dry run complete — no changes were made."
+        : "Dry run complete — no changes were made. Conflicts are resolved and ready to finalize.",
+    );
     return;
+  }
+
+  if (unmerged.length > 0) {
+    await applyUnmergedChoices(targetDir, lock, unmerged);
   }
 
   // resolveMerge の戻り値には merge が無いため、確定後に解決待ちの記録が残らない。
@@ -751,6 +794,158 @@ async function runContinue(
 
   log.success("All conflicts resolved");
   outro("Pull complete");
+}
+
+/** 自動マージを試みなかった経路か。マーカーの有無では解決を判定できない側。 */
+function isUnmergedConflict(conflict: PendingConflict): conflict is UnmergedConflict {
+  return match(conflict)
+    .with({ reason: "markers" }, () => false)
+    .with({ reason: P.union("noBase", "binary") }, () => true)
+    .exhaustive();
+}
+
+/** テキストとして読めるか。バイナリの中からマーカーを探しても意味を持たない。 */
+function hasReadableText(conflict: PendingConflict): boolean {
+  return match(conflict)
+    .with({ reason: P.union("markers", "noBase") }, () => true)
+    .with({ reason: "binary" }, () => false)
+    .exhaustive();
+}
+
+/**
+ * ローカルに残っているコンフリクトマーカーを探す。
+ *
+ * 解決済みかどうかはディスクの現在の内容だけが決める。ユーザーが手で編集した後なので、
+ * マージ時点で得た位置情報は既にずれている。読み直して今のブロック位置を提示する。
+ *
+ * ziku がマーカーを書いていない `noBase` も走査する。ユーザーが自分でマーカーを書いた
+ * まま再開することがあり、そのままテンプレートへ送らせないため。
+ */
+async function findRemainingMarkers(
+  targetDir: AbsPath,
+  conflicts: readonly PendingConflict[],
+): Promise<Array<{ file: RepoRelPath; regions: readonly ConflictRegion[] }>> {
+  const stillConflicted: Array<{ file: RepoRelPath; regions: readonly ConflictRegion[] }> = [];
+  for (const { path } of conflicts) {
+    const contentOption = await Effect.runPromise(
+      readFileSafe(joinAbs(targetDir, path)).pipe(Effect.option),
+    );
+    if (Option.isNone(contentOption)) continue;
+    const regions = findConflictRegions(contentOption.value);
+    if (regions.length > 0) stillConflicted.push({ file: path, regions });
+  }
+  return stillConflicted;
+}
+
+/**
+ * 自動マージできなかったファイルの扱いをユーザーに選ばせ、選択を適用する。
+ *
+ * 「テンプレートの内容を取る」を選べる以上、その内容が要る。取り寄せるのはマージを中断した
+ * 時点のテンプレート（`merge.nextBase`）で、確定するベースと同じツリーになる。最新を
+ * 取り直すと、書き込んだ内容とベースのハッシュが食い違い、次回の pull/push が同じファイルを
+ * 変更ありと誤検出する。
+ *
+ * テンプレートの取得はどれか 1 つでも「テンプレートを取る」が選ばれたときだけ行う。
+ * 全て「ローカルを残す」ならファイルへ触れる必要が無く、ダウンロードは無駄になる。
+ */
+async function applyUnmergedChoices(
+  targetDir: AbsPath,
+  lock: MergingLockState,
+  unmerged: readonly UnmergedConflict[],
+): Promise<void> {
+  log.warn(
+    `${unmerged.length} file(s) could not be auto-merged. Choose which version to keep for each:`,
+  );
+
+  const takingTemplate: RepoRelPath[] = [];
+  for (const conflict of unmerged) {
+    const resolution: UnmergedResolution = await selectUnmergedResolution(conflict);
+    match(resolution)
+      .with("keepLocal", () => {
+        log.info(`Kept your local version: ${pc.cyan(conflict.path)}`);
+      })
+      .with("takeTemplate", () => {
+        takingTemplate.push(conflict.path);
+      })
+      .exhaustive();
+  }
+
+  if (takingTemplate.length === 0) return;
+
+  const template = await acquirePausedTemplate(targetDir, lock);
+  await runCommandEffect(
+    copyFromTemplate(takingTemplate, template.dir, targetDir).pipe(
+      Effect.ensuring(Effect.sync(template.cleanup)),
+    ),
+  );
+}
+
+/**
+ * 中断したマージが対象にしていたテンプレートを取り出す。
+ *
+ * GitHub ソースはベースとして確定するコミットへ固定して取り直す。SHA を記録できていない
+ * lock（API へ到達できないまま中断した場合）だけは、ソースの ref をそのまま辿るしかない。
+ * ローカルソースはディレクトリを直接読むため、取得も後始末も要らない。
+ *
+ * 取得できなければ失敗として返す。ユーザーは接続を直して再開すればよく、その間 lock は
+ * 解決待ちのまま残る。
+ */
+function acquirePausedTemplate(
+  targetDir: AbsPath,
+  lock: MergingLockState,
+): Promise<{ dir: AbsPath; cleanup: () => void }> {
+  return match(lock)
+    .with({ source: { kind: "local" } }, (l) =>
+      Promise.resolve({ dir: l.source.path, cleanup: () => {} }),
+    )
+    .with({ source: { kind: "github" } }, (l) => {
+      const ref = l.merge.nextBase.ref;
+      const source =
+        ref === undefined ? buildTemplateSource(l.source) : buildCommitPinnedSource(l.source, ref);
+      return runCommandEffect(
+        Effect.tryPromise({
+          try: () => downloadTemplateToTemp(targetDir, source, "continue"),
+          catch: (cause) =>
+            zikuFailure(
+              {
+                kind: "TemplateUnavailable",
+                detail: `Could not download the template version being merged (${source}): ${String(cause)}`,
+              },
+              { cause },
+            ),
+        }).pipe(Effect.map(({ templateDir, cleanup }) => ({ dir: templateDir, cleanup }))),
+      );
+    })
+    .exhaustive();
+}
+
+/**
+ * テンプレートの内容でローカルを置き換える。
+ *
+ * 内容をバイト列のまま運ぶ。バイナリを utf-8 の文字列として読み書きすると、不正バイトが
+ * U+FFFD へ置き換わってファイルが壊れる（このカテゴリにはバイナリが含まれる）。
+ *
+ * 取り寄せたテンプレートにファイルが無い場合は失敗として返す。書き込む内容が無いまま
+ * 進めると、ローカルを残したのにベースだけがテンプレート側へ前進する。
+ */
+function copyFromTemplate(
+  files: readonly RepoRelPath[],
+  templateDir: AbsPath,
+  targetDir: AbsPath,
+): Effect.Effect<void, ZikuFailure> {
+  return Effect.forEach(
+    files,
+    (file) =>
+      Effect.gen(function* () {
+        const bytes = yield* Effect.tryPromise({
+          try: () => readFile(joinAbs(templateDir, file)),
+          catch: (cause) => zikuFailure({ kind: "TemplateFileMissing", path: file }, { cause }),
+        });
+        yield* writeFileEnsureDir(joinAbs(targetDir, file), bytes);
+        log.success(`Took the template version: ${pc.cyan(file)}`);
+      }),
+    { discard: true },
+  );
 }
 
 function logPullSummary(classification: {

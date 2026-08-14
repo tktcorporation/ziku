@@ -417,7 +417,7 @@ describe("loadLock", () => {
       sync: "merging",
       base: { hashes: {}, ref: "abc123" },
       merge: {
-        conflicts: ["file1.txt"],
+        conflicts: [{ path: "file1.txt", reason: "markers" }],
         nextBase: { hashes: { "file1.txt": "hash1" }, ref: "def456" },
       },
     };
@@ -429,7 +429,7 @@ describe("loadLock", () => {
     const result = await runLoad("/project");
     expect(result.sync).toBe("merging");
     if (result.sync !== "merging") throw new Error("expected merging lock");
-    expect(result.merge.conflicts).toEqual(["file1.txt"]);
+    expect(result.merge.conflicts).toEqual([{ path: "file1.txt", reason: "markers" }]);
     expect(result.merge.nextBase.hashes).toEqual({ "file1.txt": "hash1" });
   });
 

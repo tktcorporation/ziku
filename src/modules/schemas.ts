@@ -206,13 +206,44 @@ const hashMapSchema = z.record(repoRelPathSchema, contentHashSchema);
 export type HashMap = z.infer<typeof hashMapSchema>;
 
 /**
- * コンフリクト解決待ちのファイルパス。
+ * 解決待ちのコンフリクト 1 件。
+ *
+ * `reason` は自動マージがそのファイルを確定できなかった経路で、`pull --continue` が
+ * 「解決したか」を何で確かめるかを決める。
+ *
+ * | reason     | 自動マージの結末                       | ローカルのファイル       | 解決の確かめ方             |
+ * | ---------- | -------------------------------------- | ------------------------ | -------------------------- |
+ * | `markers`  | 3-way マージが衝突した                 | マーカー入りで書かれた   | マーカーが消えたか         |
+ * | `noBase`   | 共通祖先が無く自動マージを試みていない | 触れていない             | ユーザーがどちらを残すか   |
+ * | `binary`   | 行という単位が無く比べていない         | 触れていない             | ユーザーがどちらを残すか   |
+ *
+ * `noBase` と `binary` はローカルに何も書いていないため、マーカーが無いことは解決の証拠に
+ * ならない。マーカーの有無だけで確定させると、テンプレート側の変更を取り込まないまま
+ * ベースだけが前進し、テンプレートの変更が黙って消える。
+ */
+const pendingConflictSchema = z.discriminatedUnion("reason", [
+  z.object({ path: repoRelPathSchema, reason: z.literal("markers") }),
+  z.object({ path: repoRelPathSchema, reason: z.literal("noBase") }),
+  z.object({ path: repoRelPathSchema, reason: z.literal("binary") }),
+]);
+export type PendingConflict = z.infer<typeof pendingConflictSchema>;
+
+/**
+ * 自動マージを試みなかったために解決待ちになったもの。
+ *
+ * ローカルのファイルには何も書かれていないので、ディスクを読んでも解決したかどうかは
+ * 判定できない。`pull --continue` はこの集合についてユーザーへ問い合わせる。
+ */
+export type UnmergedConflict = Extract<PendingConflict, { reason: "noBase" | "binary" }>;
+
+/**
+ * コンフリクト解決待ちの一覧。
  *
  * 空配列は「解決待ちだが対象がゼロ」という、先へ進めようのない状態を意味してしまう。
  * 非空タプルで表現して型として作れなくする。
  */
-const conflictPathsSchema = z.tuple([repoRelPathSchema], repoRelPathSchema);
-export type ConflictPaths = z.infer<typeof conflictPathsSchema>;
+const pendingConflictsSchema = z.tuple([pendingConflictSchema], pendingConflictSchema);
+export type PendingConflicts = z.infer<typeof pendingConflictsSchema>;
 
 /**
  * GitHub ソースの同期ベース。
@@ -247,14 +278,14 @@ export type LocalSyncBase = z.infer<typeof localSyncBaseSchema>;
 export type SyncBase = GitHubSyncBase | LocalSyncBase;
 
 const gitHubPendingMergeSchema = z.object({
-  /** コンフリクトマーカーの解消を確認すべきファイル。 */
-  conflicts: conflictPathsSchema,
+  /** 解決待ちのファイルと、自動マージが確定できなかった経路。 */
+  conflicts: pendingConflictsSchema,
   /** 全解決後にベースとして確定する到達点。 */
   nextBase: gitHubSyncBaseSchema,
 });
 
 const localPendingMergeSchema = z.object({
-  conflicts: conflictPathsSchema,
+  conflicts: pendingConflictsSchema,
   nextBase: localSyncBaseSchema,
 });
 
@@ -435,7 +466,7 @@ export function markSynced(lock: LockState, at: SyncPoint): ResumableLockState {
 export function markMerging(
   lock: ResumableLockState,
   next: SyncPoint,
-  conflicts: ConflictPaths,
+  conflicts: PendingConflicts,
 ): MergingLockState {
   return match(lock)
     .with({ source: { kind: "github" } }, (l) => ({

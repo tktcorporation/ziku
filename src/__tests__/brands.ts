@@ -9,7 +9,7 @@
  * 「リテラルのオブジェクトをハッシュマップにする」ような、テスト側にしか現れない形の
  * 組み立てだけにする。
  */
-import type { BlobSha, CommitSha, ContentHash, HashMap } from "../modules/schemas";
+import type { BlobSha, CommitSha, ContentHash, HashMap, PendingConflict } from "../modules/schemas";
 import { blobShaSchema, commitShaSchema, contentHashSchema } from "../modules/schemas";
 import { repoRelPath } from "../utils/paths";
 
@@ -35,6 +35,19 @@ export function commitSha(value: string): CommitSha {
 /** 固定値の blob SHA をテストで使うための変換。 */
 export function blobSha(value: string): BlobSha {
   return blobShaSchema.parse(value);
+}
+
+/**
+ * 解決待ちのコンフリクト 1 件を組み立てる。
+ *
+ * 経路を省いたときはマーカー入りで書き出された側にする。ziku が実際に書き込むのはこの
+ * 経路だけなので、経路そのものが主題ではないテストの既定として扱いやすい。
+ */
+export function pendingConflict(
+  path: string,
+  reason: PendingConflict["reason"] = "markers",
+): PendingConflict {
+  return { path: repoRelPath(path), reason };
 }
 
 /**

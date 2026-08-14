@@ -11,7 +11,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { Effect } from "effect";
 import { dirname } from "pathe";
 import { match, P } from "ts-pattern";
-import type { AbsPath, LockState, RepoRelPath } from "../../modules/schemas";
+import type { AbsPath, LockState, PendingConflict, RepoRelPath } from "../../modules/schemas";
 import { FileNotFoundError } from "../../errors";
 import { buildCommitPinnedSource, downloadTemplateToTemp } from "../template";
 import type { FileContent } from "../file-content";
@@ -214,7 +214,7 @@ export interface MergeConflictFilesInput {
 }
 
 /**
- * コンフリクトと判定されたファイルを 1 つずつマージし、未解決のパスを返す。
+ * コンフリクトと判定されたファイルを 1 つずつマージし、未解決のものを経路付きで返す。
  *
  * 呼び出し側が前提にしてよいこと:
  * - ベースツリーの取得は全体で 1 回だけ行い、ループが途中で失敗しても必ず破棄される。
@@ -226,12 +226,14 @@ export interface MergeConflictFilesInput {
  * - ローカルかテンプレートがバイナリのファイルはマージを試みずに未解決になる。行という
  *   単位が無く、マージ結果に相当する内容を作れないため、`onFileResult` も呼ばない。
  *   ユーザーへの案内はここで出す。
+ * - 未解決の `reason` は、ローカルのファイルに何が書かれたかまで表す
+ *   （`PendingConflict` を参照）。呼び出し側は再開時の確かめ方をこの値で選べる。
  *
  * 戻り値の順序は `conflicts` の順序を保つ。
  */
 export const mergeConflictFiles = (
   input: MergeConflictFilesInput,
-): Effect.Effect<readonly RepoRelPath[]> =>
+): Effect.Effect<readonly PendingConflict[]> =>
   Effect.gen(function* () {
     if (input.conflicts.length === 0) return [];
 
@@ -245,14 +247,14 @@ export const mergeConflictFiles = (
         : { kind: "with-base", dir: downloaded.templateDir };
 
     return yield* Effect.gen(function* () {
-      const unresolved: RepoRelPath[] = [];
+      const unresolved: PendingConflict[] = [];
       for (const file of input.conflicts) {
         if (yield* isBinaryConflict(input, file)) {
           log.warn(
             `Cannot auto-merge ${pc.cyan(file)} — binary files have no lines to merge. ` +
               `Keep the local file or copy the template version over it.`,
           );
-          unresolved.push(file);
+          unresolved.push({ path: file, reason: "binary" });
           continue;
         }
         const result = yield* mergeOneFile({
@@ -262,7 +264,8 @@ export const mergeConflictFiles = (
           base,
         });
         yield* input.onFileResult(result);
-        if (!isResolved(result.outcome)) unresolved.push(file);
+        const reason = unresolvedReasonOf(result.outcome);
+        if (reason !== undefined) unresolved.push({ path: file, reason });
       }
       return unresolved;
     }).pipe(Effect.ensuring(Effect.sync(() => downloaded?.cleanup())));
@@ -285,10 +288,17 @@ const isBinaryConflict = (
     return local.kind === "binary" || template.kind === "binary";
   });
 
-/** 自動マージだけで確定したか。マーカーが残った結果とベース不在は解決していない。 */
-function isResolved(outcome: FileMergeOutcome): boolean {
+/**
+ * 自動マージで確定しなかった経路。クリーンに終わったなら undefined。
+ *
+ * 結末をそのまま持ち回らず `PendingConflict` の語彙へ落とすのは、この値が lock に残って
+ * 再開時まで生き延びるため。マージ結果の内容（`Conflicted` が抱えるマーカー入りテキスト）は
+ * 再開時には既に古く、残すべきなのは「ローカルに何が書かれたか」だけになる。
+ */
+function unresolvedReasonOf(outcome: FileMergeOutcome): PendingConflict["reason"] | undefined {
   return match(outcome)
-    .with({ _tag: "Clean" }, () => true)
-    .with({ _tag: P.union("Conflicted", "NoBase") }, () => false)
+    .with({ _tag: "Clean" }, () => undefined)
+    .with({ _tag: "Conflicted" }, () => "markers" as const)
+    .with({ _tag: "NoBase" }, () => "noBase" as const)
     .exhaustive();
 }

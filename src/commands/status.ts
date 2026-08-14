@@ -104,7 +104,7 @@ export const statusCommand = defineCommand({
         };
         log.message(
           `${pc.yellow("⚠")} Merge paused. Conflicts to resolve:\n${conflicts
-            .map((p) => `  ${pc.dim("•")} ${p}`)
+            .map((c) => `  ${pc.dim("•")} ${c.path}`)
             .join("\n")}`,
         );
         outro(recommendationLine(recommendation));

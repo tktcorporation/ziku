@@ -5,6 +5,7 @@ import {
   contentHash,
   globPattern,
   hashMap,
+  pendingConflict,
   repoRelPath,
 } from "../../__tests__/brands";
 import type { FileDiff, LockState, SyncPoint } from "../schemas";
@@ -210,11 +211,24 @@ describe("lockSchema", () => {
       sync: "merging",
       base: { hashes: {} },
       merge: {
-        conflicts: [".mcp.json"],
+        conflicts: [{ path: ".mcp.json", reason: "markers" }],
         nextBase: { hashes: { ".mcp.json": "abc123" }, ref: "def456" },
       },
     };
     expect(lockSchema.parse(lock)).toEqual(lock);
+  });
+
+  it("未解決の経路が不明なコンフリクトは拒否する", () => {
+    // 経路が無いと `--continue` が「マーカーの消滅で確定してよいか」を決められない。
+    expect(() =>
+      lockSchema.parse({
+        ...identity,
+        source: githubSource,
+        sync: "merging",
+        base: { hashes: {} },
+        merge: { conflicts: [".mcp.json"], nextBase: { hashes: {} } },
+      }),
+    ).toThrow();
   });
 
   it("解決待ちのコンフリクトが空配列の lock は拒否する", () => {
@@ -306,13 +320,16 @@ describe("lock の状態遷移", () => {
 
   it("markMerging: ベース未確定から入ると空のベースを記録する", () => {
     const merging = markMerging(githubLock, { hashes: hashMap({ "a.txt": "h" }) }, [
-      repoRelPath("a.txt"),
+      pendingConflict("a.txt"),
     ]);
     expect(merging).toEqual({
       ...githubLock,
       sync: "merging",
       base: { hashes: {} },
-      merge: { conflicts: ["a.txt"], nextBase: { hashes: { "a.txt": "h" } } },
+      merge: {
+        conflicts: [{ path: "a.txt", reason: "markers" }],
+        nextBase: { hashes: { "a.txt": "h" } },
+      },
     });
   });
 
@@ -324,7 +341,7 @@ describe("lock の状態遷移", () => {
     const merging = markMerging(
       synced,
       { hashes: hashMap({ "a.txt": "new" }), commitSha: commitSha("sha1") },
-      [repoRelPath("a.txt")],
+      [pendingConflict("a.txt")],
     );
     expect(merging).toMatchObject({
       sync: "merging",
@@ -354,7 +371,7 @@ describe("lock の状態遷移", () => {
     const merging = markMerging(
       githubLock,
       { hashes: hashMap({ "a.txt": "h" }), commitSha: commitSha("sha1") },
-      [repoRelPath("a.txt")],
+      [pendingConflict("a.txt")],
     );
     if (merging.sync !== "merging") throw new Error("expected merging lock");
     const resolved = resolveMerge(merging);

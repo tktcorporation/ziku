@@ -467,18 +467,35 @@ export function patternsToPersist(
 /** PR の宛先。ブランチへ向けられない参照は送信自体を成立させない。 */
 export type PrBaseBranch =
   | { readonly _tag: "Branch"; readonly name: string }
-  | { readonly _tag: "UnsupportedRef"; readonly kind: "tag" | "commit" };
+  | { readonly _tag: "UnsupportedRef"; readonly kind: "tag" | "commit" }
+  /** ref を持たないソースで、リポジトリの既定ブランチも分からなかった。 */
+  | { readonly _tag: "DefaultBranchUnresolved" };
 
 /**
  * PR のベースブランチを決める。
  *
  * GitHub の PR はブランチにしか向けられない（ベースの解決に使う `repos.getBranch` は
- * タグやコミット SHA で 404 になる）。ref を持たないソースは既定ブランチ名を使い、
- * タグ・コミットへ固定されたソースは宛先が定まらないので `UnsupportedRef` を返す。
+ * タグやコミット SHA で 404 になる）。ref を持たないソースの宛先はリポジトリの既定
+ * ブランチで、タグ・コミットへ固定されたソースは宛先が定まらないので `UnsupportedRef`
+ * を返す。
+ *
+ * @param defaultBranch リポジトリの既定ブランチ名。解決できなかったときは undefined を渡す。
+ *   既定ブランチは `main` とは限らず（`master` / `trunk` 等）、名前を仮定すると存在しない
+ *   ブランチを宛先にした PR 作成が 404 になり、原因の分からない失敗として出る。分からない
+ *   ことを `DefaultBranchUnresolved` として返し、呼び出し側が失敗として報告する。
  */
-export function resolvePrBaseBranch(source: GitHubSource): PrBaseBranch {
+export function resolvePrBaseBranch(
+  source: GitHubSource,
+  defaultBranch: string | undefined,
+): PrBaseBranch {
   return match(source.ref)
-    .with(undefined, (): PrBaseBranch => ({ _tag: "Branch", name: "main" }))
+    .with(
+      undefined,
+      (): PrBaseBranch =>
+        defaultBranch === undefined
+          ? { _tag: "DefaultBranchUnresolved" }
+          : { _tag: "Branch", name: defaultBranch },
+    )
     .with({ kind: "branch" }, (branch): PrBaseBranch => ({ _tag: "Branch", name: branch.name }))
     .with(
       { kind: P.union("tag", "commit") },

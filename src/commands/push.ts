@@ -14,6 +14,7 @@ import type {
   GlobPattern,
   LocalSource,
   LockState,
+  PendingConflict,
   RepoRelPath,
 } from "../modules/schemas";
 import { baseCommitSha, baseHashesOf, markSynced } from "../modules/schemas";
@@ -54,7 +55,7 @@ import {
 import { calculateDiffStats, formatStats } from "../ui/diff-view";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
 import { detectDiff } from "../utils/diff";
-import { createPullRequest, getGitHubToken } from "../utils/github";
+import { createPullRequest, getGitHubToken, resolveDefaultBranch } from "../utils/github";
 import { hashFiles } from "../utils/hash";
 import { detectAndUpdateReadme } from "../utils/readme";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked";
@@ -138,16 +139,35 @@ interface PushTarget extends PushPayload {
 /**
  * PR の宛先ブランチを決め、ブランチへ向けられないソースは失敗として返す。
  *
- * タグ・コミットへ固定されたテンプレートは PR の宛先が定まらない。lock を直せば解決する
- * ので、直し方を失敗理由に載せる。
+ * 宛先が定まらない 2 通りは、ユーザーが取る行動が違うので別の失敗にする。タグ・コミットへ
+ * 固定されたテンプレートは lock を直せば解決し、既定ブランチを引けなかった場合は
+ * 到達性（ネットワーク・トークン）を疑うか宛先を明示することになる。
+ *
+ * 既定ブランチの問い合わせは ref を持たないソースだけに要る。ブランチ指定済み・タグ /
+ * コミット固定のソースでは結果を使わないので、API を呼ばない。
  */
 function prBaseBranch(source: GitHubSource): Effect.Effect<string, ZikuFailure> {
-  return match(resolvePrBaseBranch(source))
-    .with({ _tag: "Branch" }, ({ name }) => Effect.succeed(name))
-    .with({ _tag: "UnsupportedRef" }, ({ kind }) =>
-      Effect.fail(zikuFailure({ kind: "TemplateRefNotBranch", refKind: kind })),
-    )
-    .exhaustive();
+  return Effect.gen(function* () {
+    const defaultBranch =
+      source.ref === undefined
+        ? yield* Effect.promise(() => resolveDefaultBranch(source.owner, source.repo))
+        : undefined;
+
+    return yield* match(resolvePrBaseBranch(source, defaultBranch))
+      .with({ _tag: "Branch" }, ({ name }) => Effect.succeed(name))
+      .with({ _tag: "UnsupportedRef" }, ({ kind }) =>
+        Effect.fail(zikuFailure({ kind: "TemplateRefNotBranch", refKind: kind })),
+      )
+      .with({ _tag: "DefaultBranchUnresolved" }, () =>
+        Effect.fail(
+          zikuFailure({
+            kind: "DefaultBranchUnresolved",
+            repo: `${source.owner}/${source.repo}`,
+          }),
+        ),
+      )
+      .exhaustive();
+  });
 }
 
 /**
@@ -493,7 +513,10 @@ export const pushCommand = defineCommand({
     // 解くことなので、pull が同じ状態で出すのと同じ理由で報告する。
     if (lock.sync === "merging") {
       await cleanup();
-      throw zikuFailure({ kind: "MergePaused", conflicts: lock.merge.conflicts });
+      throw zikuFailure({
+        kind: "MergePaused",
+        conflicts: lock.merge.conflicts.map((c) => c.path),
+      });
     }
 
     const patterns = {
@@ -973,9 +996,13 @@ async function chooseSelection(
   }
 
   log.step("Selecting files...");
+  // 既定から外す集合は非対話実行（`defaultPushSelection`）と揃える。対話実行だけが
+  // テンプレート側の削除の取り消しを既定で選んでしまうと、一覧を読み飛ばした利用者が
+  // テンプレートの削除を黙って巻き戻す PR を出すことになる。
   const chosen = await selectPushFiles([...candidates], {
     preselectDeletions: opts.includeDeletions,
     conflictedPaths: opts.conflictedPaths,
+    restoresTemplateDeletion: opts.restoresTemplateDeletion,
   });
   return { _tag: "Chosen", paths: chosen.map((f) => f.path) };
 }
@@ -1038,7 +1065,7 @@ async function analyzePushTargets(params: {
       lock: params.lock,
       mergedContents,
     });
-    for (const file of unresolved) unresolvedConflicts.add(file);
+    for (const conflict of unresolved) unresolvedConflicts.add(conflict.path);
   }
 
   return { candidatePlan, mergedContents, unresolvedConflicts };
@@ -1059,7 +1086,7 @@ async function analyzePushTargets(params: {
  * 選ばれた場合だけ中断する（呼び出し側の責務）。これによりローカル内容での暗黙の上書きを
  * 防ぎつつ、衝突に巻き込まれない変更まで止めてしまう問題を回避する。
  *
- * @returns auto-merge できなかった未解決ファイルのパス一覧。
+ * @returns auto-merge できなかった未解決ファイルの一覧。
  */
 async function resolveConflicts(
   conflicts: readonly RepoRelPath[],
@@ -1069,7 +1096,7 @@ async function resolveConflicts(
     lock: LockState;
     mergedContents: Map<RepoRelPath, PushContent>;
   },
-): Promise<readonly RepoRelPath[]> {
+): Promise<readonly PendingConflict[]> {
   const baseSha = baseCommitSha(ctx.lock);
   const baseInfo = baseSha
     ? `since ${pc.bold(baseSha.slice(0, 7))} (your last sync)`

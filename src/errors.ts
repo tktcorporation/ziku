@@ -85,6 +85,28 @@ export type FailureReason =
       readonly files: readonly { readonly path: string; readonly lines: readonly number[] }[];
     }
   /**
+   * 自動マージできなかったファイルの扱いが決まっていないまま、対話を省く実行で再開しようとした。
+   *
+   * 取る行動は「対話実行で再開し、ファイルごとにどちらの内容を残すか選ぶ」。どちらを選んでも
+   * 片側の変更が失われるため、ツールが代わりに決められる判断ではない。
+   */
+  | { readonly kind: "UnmergedChoiceRequired"; readonly files: readonly string[] }
+  /**
+   * 取り寄せたテンプレートに、内容を取ると決めたファイルが無い。
+   *
+   * 取る行動は「そのファイルはローカルを残す側で再開する」。テンプレート側で消えている
+   * ファイルなので、待っても取れるようにはならない。
+   */
+  | { readonly kind: "TemplateFileMissing"; readonly path: string }
+  /**
+   * PR の宛先にするリポジトリの既定ブランチを引けなかった。
+   *
+   * 取る行動は 2 つ。GitHub へ到達できているか（ネットワーク・トークン）を確かめるか、
+   * lock の `source.ref` で宛先ブランチを明示する。`TemplateRefNotBranch` と違い、
+   * lock の記述自体は正しい。
+   */
+  | { readonly kind: "DefaultBranchUnresolved"; readonly repo: string }
+  /**
    * 自動マージできなかったファイルを push 対象に選んだ。
    *
    * 取る行動は「`ziku pull` でテンプレートの変更を取り込み、衝突を解いてから push し直す」。
@@ -185,7 +207,7 @@ export function describeFailure(reason: FailureReason): FailureDisplay {
     }))
     .with({ kind: "MergePaused" }, (r) => ({
       message: "Merge already in progress from a previous `ziku pull`",
-      hint: `Resolve the conflict markers in these files, then run \`ziku pull --continue\`:\n${bulletList(r.conflicts)}`,
+      hint: `Resolve the pending conflicts in these files, then run \`ziku pull --continue\`:\n${bulletList(r.conflicts)}`,
     }))
     .with({ kind: "NoMergePaused" }, () => ({
       message: "No pending merge found",
@@ -196,6 +218,20 @@ export function describeFailure(reason: FailureReason): FailureDisplay {
       hint: `Remove the conflict markers from these files, then run \`ziku pull --continue\` again:\n${bulletList(
         r.files.map((f) => `${f.path} ${describeConflictLines(f.lines)}`),
       )}`,
+    }))
+    .with({ kind: "UnmergedChoiceRequired" }, (r) => ({
+      message: `${r.files.length} file(s) could not be auto-merged and need your decision`,
+      hint: `Run \`ziku pull --continue\` without --yes / --force to choose, for each file, whether to keep your local version or take the template's:\n${bulletList(
+        r.files,
+      )}`,
+    }))
+    .with({ kind: "TemplateFileMissing" }, (r) => ({
+      message: `${r.path} is not in the template being merged`,
+      hint: "Run `ziku pull --continue` again and keep your local version for that file.",
+    }))
+    .with({ kind: "DefaultBranchUnresolved" }, (r) => ({
+      message: `Cannot determine the default branch of ${r.repo}`,
+      hint: `Check that GitHub is reachable (network, GITHUB_TOKEN / GH_TOKEN), or name the target branch in .ziku/lock.json's source.ref (for example { "kind": "branch", "name": "main" }).`,
     }))
     .with({ kind: "PushBlockedByConflicts" }, (r) => ({
       message: `${r.files.length} selected file(s) have conflicts that couldn't be auto-merged`,

@@ -90,6 +90,21 @@ describe("describeFailure", () => {
       hint: /\.mcp\.json \(lines 3, 12\)/,
     },
     {
+      reason: { kind: "UnmergedChoiceRequired", files: [".mcp.json", "icon.png"] },
+      message: "2 file(s) could not be auto-merged and need your decision",
+      hint: /without --yes \/ --force[\s\S]*• \.mcp\.json[\s\S]*• icon\.png/,
+    },
+    {
+      reason: { kind: "TemplateFileMissing", path: "icon.png" },
+      message: "icon.png is not in the template being merged",
+      hint: /keep your local version/,
+    },
+    {
+      reason: { kind: "DefaultBranchUnresolved", repo: "owner/repo" },
+      message: "Cannot determine the default branch of owner/repo",
+      hint: /source\.ref/,
+    },
+    {
       reason: { kind: "PushBlockedByConflicts", files: [".mcp.json", "AGENTS.md"] },
       message: "2 selected file(s) have conflicts that couldn't be auto-merged",
       hint: /• \.mcp\.json[\s\S]*• AGENTS\.md[\s\S]*ziku pull/,

@@ -5,7 +5,7 @@ import { FileNotFoundError, ZikuFailure } from "../../errors";
 import type { FileClassification } from "../../utils/merge/types";
 import type { SyncPlan } from "../../utils/merge/sync-plan";
 import type {
-  ConflictPaths,
+  PendingConflicts,
   LockState,
   ResumableLockState,
   TemplateSource,
@@ -13,7 +13,13 @@ import type {
   GlobPattern,
 } from "../../modules/schemas";
 import { markMerging } from "../../modules/schemas";
-import { absPath, globPatterns, repoRelPath, repoRelPaths } from "../../__tests__/brands";
+import {
+  absPath,
+  globPatterns,
+  pendingConflict,
+  repoRelPath,
+  repoRelPaths,
+} from "../../__tests__/brands";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -163,7 +169,7 @@ async function captureFailure(run: () => Promise<unknown>): Promise<ZikuFailure>
 }
 
 /** コンフリクト解決待ちのロックを作る。 */
-function mergingLock(conflicts: ConflictPaths): LockState {
+function mergingLock(conflicts: PendingConflicts): LockState {
   return markMerging(pendingLock, { hashes: {} }, conflicts);
 }
 
@@ -233,7 +239,7 @@ describe("statusCommand", () => {
       mockZikuConfigExists.mockReturnValue(true);
       mockLoadLock.mockReturnValueOnce(
         Effect.succeed(
-          mergingLock([repoRelPath(".claude/settings.json"), repoRelPath(".mcp.json")]),
+          mergingLock([pendingConflict(".claude/settings.json"), pendingConflict(".mcp.json")]),
         ),
       );
       // loadCommandContext は失敗するように設定 (template 取得不可をシミュレート)
@@ -268,7 +274,7 @@ describe("statusCommand", () => {
       // "Not initialized" を出して失敗する。動かない命令を出さないために、
       // fast-path 内でも config 存在を前提条件として確認する。
       mockZikuConfigExists.mockReturnValue(false);
-      mockLoadLock.mockReturnValueOnce(Effect.succeed(mergingLock([repoRelPath("foo.txt")])));
+      mockLoadLock.mockReturnValueOnce(Effect.succeed(mergingLock([pendingConflict("foo.txt")])));
       mockLoadCommandContext.mockReturnValue(
         Effect.fail(new FileNotFoundError({ path: ".ziku/ziku.jsonc" })),
       );
@@ -389,7 +395,7 @@ describe("statusCommand", () => {
       // nextBase の中身は decideRecommendation の分岐に影響しないため空で十分。
       // 解決待ちであること自体が continueMerge を発火させる。
       const { effect } = mockContext({
-        lock: mergingLock([repoRelPath("c.txt")]),
+        lock: mergingLock([pendingConflict("c.txt")]),
       });
       mockLoadCommandContext.mockReturnValue(effect);
       mockAnalyzeSync.mockResolvedValueOnce({

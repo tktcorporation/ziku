@@ -1,9 +1,13 @@
 import { vol } from "memfs";
 import { Effect } from "effect";
+import { dirname } from "pathe";
+import { match } from "ts-pattern";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { baseHashesOf, lockSchema } from "../../modules/schemas";
 import { absPath, globPatterns, hashMap, repoRelPath } from "../../__tests__/brands";
 import type { AbsPath } from "../../modules/schemas";
+import { classifyFiles } from "../../utils/merge";
+import { partitionSyncPlan, zikuConfigPushAction } from "../../utils/merge/sync-plan";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -127,7 +131,7 @@ const { detectGitHubOwner, detectGitHubRepo } = await import("../../utils/git-re
 const { selectDirectories, selectOverwriteStrategy, selectTemplateCandidate } =
   await import("../../ui/prompts");
 const { log, outro } = await import("../../ui/renderer");
-const { hashFiles } = await import("../../utils/hash");
+const { hashFiles, hashContent } = await import("../../utils/hash");
 const { loadTemplateConfig } = await import("../../utils/template-config");
 const { checkRepoExists, checkRepoSetup } = await import("../../utils/github");
 
@@ -833,6 +837,130 @@ describe("initCommand", () => {
       );
       // base を記録しない（記録すると次回 pull で deletedFiles 判定→制御ファイル削除になる）
       expect(baseHashesOf(lockContent)[repoRelPath(".ziku/ziku.jsonc")]).toBeUndefined();
+    });
+  });
+
+  describe("同期ベースの ziku.jsonc はディスクの実内容から取る", () => {
+    /**
+     * テンプレート側の `ziku.jsonc`。init が組み立てる本文とは書式が異なる（コメント付き）。
+     *
+     * 生成した本文とテンプレートの本文を別物にしておかないと、ベースを取り違えても
+     * 3-way 比較の結果が変わらず、取り違え自体をテストが見逃す。
+     */
+    const templateConfigContent = [
+      "{",
+      "  // テンプレート側の同期対象",
+      '  "include": [".claude/**", ".mcp.json"],',
+      '  "exclude": []',
+      "}",
+      "",
+    ].join("\n");
+
+    /** 既に初期化済みのプロジェクトが持つ `ziku.jsonc`（テンプレより少ないパターン）。 */
+    const existingConfigContent = generateZikuJsonc({
+      include: globPatterns([".mcp.json"]),
+      exclude: [],
+    });
+
+    const configPath = "/test/.ziku/ziku.jsonc";
+    const readDisk = (): string => vol.readFileSync(configPath, "utf-8") as string;
+    const readLockBase = (): string | undefined =>
+      baseHashesOf(
+        lockSchema.parse(JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string)),
+      )[repoRelPath(".ziku/ziku.jsonc")];
+
+    beforeEach(() => {
+      // 実装と同じ判定（新規作成 / 上書き / スキップ）を memfs 上で再現する。既定のモックは
+      // 常に created を返すため、既存ファイルを保持する経路がこのテストでは動かない。
+      mockWriteFileWithStrategy.mockImplementation(
+        ({ destPath, content, strategy, relativePath, dryRun }) => {
+          const write = (): void => {
+            if (dryRun === true) return;
+            vol.mkdirSync(dirname(destPath), { recursive: true });
+            vol.writeFileSync(destPath, content);
+          };
+          if (!vol.existsSync(destPath)) {
+            write();
+            return Promise.resolve({ action: "created" as const, path: relativePath });
+          }
+          return Promise.resolve(
+            match(strategy)
+              .with("overwrite", () => {
+                write();
+                return { action: "overwritten" as const, path: relativePath };
+              })
+              .with("skip", "prompt", () => ({ action: "skipped" as const, path: relativePath }))
+              .exhaustive(),
+          );
+        },
+      );
+      mockFetchTemplates.mockResolvedValue([]);
+      mockHashFiles.mockResolvedValue(
+        hashMap({ ".ziku/ziku.jsonc": hashContent(templateConfigContent) }),
+      );
+    });
+
+    it("--yes で既存 ziku.jsonc を保持したら、ベースは保持された内容のハッシュになる", async () => {
+      vol.fromJSON({ [configPath]: existingConfigContent });
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      // --yes は既存ファイルを上書きしない
+      expect(readDisk()).toBe(existingConfigContent);
+      expect(readLockBase()).toBe(hashContent(existingConfigContent));
+    });
+
+    it("--force で上書きしたら、ベースは書いた内容のハッシュになる", async () => {
+      vol.fromJSON({ [configPath]: existingConfigContent });
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: true, yes: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(readDisk()).not.toBe(existingConfigContent);
+      expect(readLockBase()).toBe(hashContent(readDisk()));
+    });
+
+    it("未初期化なら、ベースは生成した本文のハッシュになる", async () => {
+      vol.fromJSON({ "/test": null });
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(readLockBase()).toBe(hashContent(readDisk()));
+    });
+
+    it("初期化済みへの --yes の直後、ziku.jsonc は 3-way 比較で conflicts に入らない", async () => {
+      vol.fromJSON({ [configPath]: existingConfigContent });
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      // status / push が使う 3-way 比較へ、書き込まれた lock のベースをそのまま渡す。
+      const plan = partitionSyncPlan(
+        classifyFiles({
+          baseHashes: hashMap({ ".ziku/ziku.jsonc": readLockBase() ?? "" }),
+          localHashes: hashMap({ ".ziku/ziku.jsonc": hashContent(readDisk()) }),
+          templateHashes: hashMap({ ".ziku/ziku.jsonc": hashContent(templateConfigContent) }),
+        }),
+      );
+
+      // 誰も編集していないので、テンプレート側の更新を取り込むだけ（コンフリクトではない）。
+      expect(plan.config).toEqual({ _tag: "Tracked", category: "autoUpdate" });
+      // ローカル発の変更は無いので push は何も送らない。
+      expect(zikuConfigPushAction(plan.config)).toEqual({ _tag: "TemplateOnly" });
     });
   });
 

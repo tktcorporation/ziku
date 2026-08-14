@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, rmdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmdirSync } from "node:fs";
 import { defineCommand } from "citty";
 import { Effect } from "effect";
 import { dirname } from "pathe";
@@ -73,6 +73,7 @@ import {
   planOverwriteStrategy,
   preferReadyCandidate,
   requiresDevcontainerEnvExample,
+  resolveConfigBaseContent,
   resolveTargetDirArg,
   selectedFlatPatterns,
   splitOwnerRepo,
@@ -362,11 +363,34 @@ async function applyTemplate(
     withConfigTracked(flatPatterns.include),
     flatPatterns.exclude,
   );
-  const localConfigContent = generateZikuJsonc({
+  const generatedConfigContent = generateZikuJsonc({
     include: flatPatterns.include,
     exclude: flatPatterns.exclude,
   });
-  const baseHashes = planLockBaseHashes({ templateHashes, localConfigContent });
+
+  // .ziku/ziku.jsonc を書き出し（パターン定義のみ、source なし）。
+  // lock のベースには書き込み後の中身が要るので、lock より先に書く。
+  const configPath = joinAbs(targetDir, ZIKU_CONFIG_FILE);
+  const existingConfigContent = existsSync(configPath)
+    ? readFileSync(configPath, "utf-8")
+    : undefined;
+  const configResult = await writeFileWithStrategy({
+    destPath: configPath,
+    content: generatedConfigContent,
+    strategy,
+    relativePath: ZIKU_CONFIG_FILE,
+    dryRun: args.dryRun,
+  });
+  allResults.push(configResult);
+
+  const baseHashes = planLockBaseHashes({
+    templateHashes,
+    persistedConfigContent: resolveConfigBaseContent({
+      action: configResult.action,
+      generatedContent: generatedConfigContent,
+      existingContent: existingConfigContent,
+    }),
+  });
 
   // ベースのコミット SHA: GitHub ソースの場合のみ取得。
   // テンプレートを取得した ref とベースの SHA が食い違うと、3-way マージのベースが
@@ -375,17 +399,6 @@ async function applyTemplate(
     .with({ kind: "github" }, (s) => resolveSourceCommitSha(s.owner, s.repo, s.ref))
     .with({ kind: "local" }, () => Promise.resolve(undefined))
     .exhaustive();
-
-  // .ziku/ziku.jsonc を書き出し（パターン定義のみ、source なし）
-  allResults.push(
-    await writeFileWithStrategy({
-      destPath: joinAbs(targetDir, ZIKU_CONFIG_FILE),
-      content: localConfigContent,
-      strategy,
-      relativePath: ZIKU_CONFIG_FILE,
-      dryRun: args.dryRun,
-    }),
-  );
 
   // .ziku/lock.json を書き出し（source + 同期状態）
   allResults.push(

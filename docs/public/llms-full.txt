@@ -249,7 +249,7 @@ OPTIONS
 
    -f, --force    Approve deleting local files that were removed from the template (Default: false)
      -y, --yes    Skip prompts (files removed from the template are kept, not deleted) (Default: false)
-    --continue    Continue after resolving merge conflicts (Default: false)
+    --continue    Continue a paused merge (asks which version to keep for files that could not be auto-merged) (Default: false)
   -n, --dryRun    Preview changes without applying them (Default: false)
 ```
 

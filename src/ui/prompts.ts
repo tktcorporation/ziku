@@ -12,10 +12,20 @@ import { Effect } from "effect";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { match } from "ts-pattern";
-import type { GlobPattern, FileDiff, OverwriteStrategy, RepoRelPath } from "../modules/schemas";
+import type {
+  GlobPattern,
+  FileDiff,
+  OverwriteStrategy,
+  RepoRelPath,
+  UnmergedConflict,
+} from "../modules/schemas";
 import type { UntrackedFilesByFolder } from "../utils/untracked";
-import { formatStatHint } from "./diff-view";
-import { selectFilesWithDiffPreview } from "./file-select-with-diff";
+import type { FileSelectionMarks } from "./file-select-with-diff";
+import {
+  fileSelectionHint,
+  isPreselectedByDefault,
+  selectFilesWithDiffPreview,
+} from "./file-select-with-diff";
 
 /** ユーザーが Ctrl+C でキャンセルした場合の統一処理 */
 function handleCancel(value: unknown): void {
@@ -197,17 +207,14 @@ export async function inputTemplateSource(defaultValue?: string): Promise<string
  */
 export function selectPushFiles(
   files: FileDiff[],
-  options?: { preselectDeletions?: boolean; conflictedPaths?: Set<string> },
+  options?: FileSelectionMarks,
 ): Promise<FileDiff[]> {
   // TTY: diff プレビュー付きカスタムセレクタ
   // stdin と stdout の両方が TTY であることを確認する。
   // stdout がリダイレクトされている場合（例: ziku push > out.txt）、
   // ANSI 制御シーケンスが非対話ストリームに出力され操作不能になる。
   if (process.stdin.isTTY && process.stdout.isTTY) {
-    return selectFilesWithDiffPreview(files, {
-      preselectDeletions: options?.preselectDeletions,
-      conflictedPaths: options?.conflictedPaths,
-    });
+    return selectFilesWithDiffPreview(files, options);
   }
 
   // 非 TTY フォールバック: @clack/prompts multiselect
@@ -221,9 +228,9 @@ export function selectPushFiles(
  */
 export async function selectPushFilesFallback(
   files: FileDiff[],
-  options?: { preselectDeletions?: boolean; conflictedPaths?: Set<string> },
+  options?: FileSelectionMarks,
 ): Promise<FileDiff[]> {
-  const conflicted = options?.conflictedPaths ?? new Set<string>();
+  const marks = options ?? {};
   const typeIcon = (type: string) =>
     match(type)
       .with("added", () => pc.green("+"))
@@ -233,23 +240,12 @@ export async function selectPushFilesFallback(
 
   const selected = await p.multiselect({
     message: "Select files to include in PR",
-    options: files.map((f) => {
-      const hint = conflicted.has(f.path)
-        ? pc.red("conflict — resolve with ziku pull")
-        : formatStatHint(f);
-      return {
-        value: f.path,
-        label: `${typeIcon(f.type)} ${f.path}`,
-        hint: hint || undefined,
-      };
-    }),
-    // 既定で未選択にするもの: 削除ファイル（安全側、--include-deletions で全選択）と
-    // 未解決の衝突ファイル（選ぶと push が中断するため、誤って既定で含めない）。
-    initialValues: files
-      .filter(
-        (f) => !conflicted.has(f.path) && (options?.preselectDeletions || f.type !== "deleted"),
-      )
-      .map((f) => f.path),
+    options: files.map((f) => ({
+      value: f.path,
+      label: `${typeIcon(f.type)} ${f.path}`,
+      hint: fileSelectionHint(f, marks) || undefined,
+    })),
+    initialValues: files.filter((f) => isPreselectedByDefault(f, marks)).map((f) => f.path),
     required: false,
   });
   handleCancel(selected);
@@ -520,6 +516,52 @@ export function selectDeletedFilesWithLocalEdits(
     "These files were deleted in template but you edited them locally. Select to delete (your edits will be lost):",
     files.map((f) => ({ value: f, label: f, hint: "locally edited" })),
   );
+}
+
+/**
+ * 自動マージできなかったファイルについて、どちらの内容を残すか。
+ *
+ * どちらを選んでも同期ベースはテンプレート側へ前進する。`keepLocal` は git の `--ours` と
+ * 同じく「テンプレートの変更を意図して拒否した」という意思表示になる。
+ */
+export type UnmergedResolution = "keepLocal" | "takeTemplate";
+
+/**
+ * 自動マージできなかった 1 ファイルの扱いを選ばせる。
+ *
+ * ziku がこのファイルに何も書いていないため、ローカルの内容だけでは「解決済みか」を
+ * 判定できない。既定はローカル維持で、テンプレートの内容を取る側だけがファイルを
+ * 上書きする（失って困るのはユーザーが書いた内容のほう）。
+ */
+export async function selectUnmergedResolution(
+  conflict: UnmergedConflict,
+): Promise<UnmergedResolution> {
+  const why = match(conflict.reason)
+    .with(
+      "noBase",
+      () => "the base version is unavailable, so local and template changes can't be told apart",
+    )
+    .with("binary", () => "binary files have no lines to merge")
+    .exhaustive();
+
+  const resolution = await p.select({
+    message: `${pc.cyan(conflict.path)} — ${why}. Which version should stay?`,
+    initialValue: "keepLocal" as UnmergedResolution,
+    options: [
+      {
+        value: "keepLocal" as const,
+        label: "Keep my local version",
+        hint: "rejects the template's change for this file",
+      },
+      {
+        value: "takeTemplate" as const,
+        label: "Take the template version",
+        hint: "overwrites your local file",
+      },
+    ],
+  });
+  handleCancel(resolution);
+  return resolution as UnmergedResolution;
 }
 
 /**

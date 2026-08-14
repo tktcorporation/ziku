@@ -500,25 +500,29 @@ describe("patternsToPersist", () => {
 });
 
 describe("resolvePrBaseBranch", () => {
-  it("ref を持たないソースは既定ブランチへ向ける", () => {
-    expect(resolvePrBaseBranch(source())).toEqual({ _tag: "Branch", name: "main" });
+  it("ref を持たないソースは渡された既定ブランチへ向ける", () => {
+    expect(resolvePrBaseBranch(source(), "master")).toEqual({ _tag: "Branch", name: "master" });
   });
 
-  it("ブランチ指定はそのブランチへ向ける", () => {
-    expect(resolvePrBaseBranch(source({ kind: "branch", name: "develop" }))).toEqual({
+  it("既定ブランチが分からなければ宛先を決めない（main を仮定しない）", () => {
+    expect(resolvePrBaseBranch(source(), undefined)).toEqual({ _tag: "DefaultBranchUnresolved" });
+  });
+
+  it("ブランチ指定は既定ブランチより優先される", () => {
+    expect(resolvePrBaseBranch(source({ kind: "branch", name: "develop" }), "master")).toEqual({
       _tag: "Branch",
       name: "develop",
     });
   });
 
   it("タグ・コミット固定は PR の宛先にできない", () => {
-    expect(resolvePrBaseBranch(source({ kind: "tag", name: "v1.0.0" }))).toEqual({
+    expect(resolvePrBaseBranch(source({ kind: "tag", name: "v1.0.0" }), "main")).toEqual({
       _tag: "UnsupportedRef",
       kind: "tag",
     });
-    expect(resolvePrBaseBranch(source({ kind: "commit", sha: commitSha("a".repeat(40)) }))).toEqual(
-      { _tag: "UnsupportedRef", kind: "commit" },
-    );
+    expect(
+      resolvePrBaseBranch(source({ kind: "commit", sha: commitSha("a".repeat(40)) }), "main"),
+    ).toEqual({ _tag: "UnsupportedRef", kind: "commit" });
   });
 });
 

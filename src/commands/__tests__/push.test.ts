@@ -50,6 +50,7 @@ vi.mock("../../utils/diff", () => ({
 vi.mock("../../utils/github", () => ({
   getGitHubToken: vi.fn(),
   createPullRequest: vi.fn(),
+  resolveDefaultBranch: vi.fn(() => Promise.resolve("main")),
 }));
 
 // utils/readme をモック
@@ -102,7 +103,7 @@ vi.mock("../../utils/merge", async () => {
     // 後処理（送る内容に採用するか / 除外するか）を検証するために代替側でも同じにしておく。
     mergeConflictFiles: vi.fn((input: MergeConflictFilesInput) =>
       effectMod.Effect.gen(function* () {
-        const unresolved: string[] = [];
+        const unresolved: Array<{ path: string; reason: "markers" | "noBase" | "binary" }> = [];
         if (input.conflicts.length === 0) return unresolved;
 
         const downloaded = yield* downloadBaseForMerge({
@@ -120,7 +121,8 @@ vi.mock("../../utils/merge", async () => {
                   base: { kind: "with-base", dir: downloaded.templateDir },
                 })).outcome;
           yield* input.onFileResult({ file, outcome });
-          if (outcome._tag !== "Clean") unresolved.push(file);
+          if (outcome._tag === "Conflicted") unresolved.push({ path: file, reason: "markers" });
+          if (outcome._tag === "NoBase") unresolved.push({ path: file, reason: "noBase" });
         }
         downloaded?.cleanup();
         return unresolved;
@@ -184,7 +186,8 @@ vi.mock("../../ui/renderer", () => ({
 const { pushCommand } = await import("../push");
 const { loadCommandContext } = await import("../../services/command-context");
 const { detectDiff } = await import("../../utils/diff");
-const { getGitHubToken, createPullRequest } = await import("../../utils/github");
+const { getGitHubToken, createPullRequest, resolveDefaultBranch } =
+  await import("../../utils/github");
 const {
   confirmAction,
   inputGitHubToken,
@@ -201,12 +204,13 @@ const { classifyFiles, mergeOneFile, downloadBaseForMerge } = await import("../.
 // マージ結果の判定は本物を使う（"../../utils/merge" のモックは index 経由の import だけを
 // 置き換えるので、実装モジュールを直接読み込めば素の関数が得られる）。
 const { classifyMergeOutcome } = await import("../../utils/merge/types");
-const { absPath, commitSha, globPatterns, hashMap, repoRelPath, repoRelPaths } =
+const { absPath, commitSha, globPatterns, hashMap, pendingConflict, repoRelPath, repoRelPaths } =
   await import("../../__tests__/brands");
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
 const mockDetectDiff = vi.mocked(detectDiff);
 const mockGetGitHubToken = vi.mocked(getGitHubToken);
 const mockCreatePullRequest = vi.mocked(createPullRequest);
+const mockResolveDefaultBranch = vi.mocked(resolveDefaultBranch);
 const mockConfirmAction = vi.mocked(confirmAction);
 const mockInputGitHubToken = vi.mocked(inputGitHubToken);
 const mockInputPrTitle = vi.mocked(inputPrTitle);
@@ -777,6 +781,112 @@ describe("pushCommand", () => {
       );
     });
 
+    it("対話の一覧では、削除の取り消しを既定で選ばずそれと分かる印を付ける", async () => {
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: repoRelPaths(["plain.txt"]),
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedWithLocalEdits: repoRelPaths(["edited.md"]),
+        deletedLocally: [],
+        unchanged: [],
+      });
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [
+          { path: repoRelPath("edited.md"), type: "added", localContent: "local edits" },
+          { path: repoRelPath("plain.txt"), type: "added", localContent: "plain" },
+        ],
+      });
+      mockSelectPushFiles.mockResolvedValueOnce([]);
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: false, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      // 選択画面は「送ると削除が取り消される」ファイルを知らないと、既定チェックのまま
+      // 送られる。集合を渡すことで既定から外れ、行にも注記が付く。
+      const selectOptions = mockSelectPushFiles.mock.calls[0]?.[1];
+      expect([...(selectOptions?.restoresTemplateDeletion ?? [])]).toEqual(["edited.md"]);
+    });
+
+    it("既定ブランチが master のテンプレートには master 宛の PR を出す", async () => {
+      setupPushableFiles([
+        { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
+      ]);
+      mockGetGitHubToken.mockReturnValue("ghp_token");
+      mockResolveDefaultBranch.mockResolvedValueOnce("master");
+      mockCreatePullRequest.mockResolvedValueOnce({
+        url: "https://github.com/owner/repo/pull/1",
+        branch: "update-template-123",
+        number: 1,
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: true, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      expect(mockCreatePullRequest.mock.calls[0]?.[1]).toMatchObject({ baseBranch: "master" });
+    });
+
+    it("既定ブランチを引けなければ PR を作らず、宛先の決め方を案内する", async () => {
+      setupPushableFiles([
+        { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
+      ]);
+      mockGetGitHubToken.mockReturnValue("ghp_token");
+      mockResolveDefaultBranch.mockResolvedValueOnce(undefined);
+
+      await expect(
+        (pushCommand.run as any)({
+          args: { dir: "/test", dryRun: false, yes: true, edit: false },
+          rawArgs: [],
+          cmd: pushCommand,
+        }),
+      ).rejects.toMatchObject({
+        reason: { kind: "DefaultBranchUnresolved", repo: "tktcorporation/.github" },
+      });
+
+      // main を仮定して 404 を踏ませない
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
+    it("ブランチ指定済みのソースでは既定ブランチを問い合わせない", async () => {
+      const branchSource: TemplateSource = {
+        kind: "github",
+        owner: "tktcorporation",
+        repo: ".github",
+        ref: { kind: "branch", name: "develop" },
+      };
+      const { effect } = mockContext({
+        source: branchSource,
+        lock: lockWith({ source: branchSource }),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      setupPushableFiles([
+        { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
+      ]);
+      mockGetGitHubToken.mockReturnValue("ghp_token");
+      mockCreatePullRequest.mockResolvedValueOnce({
+        url: "https://github.com/owner/repo/pull/1",
+        branch: "update-template-123",
+        number: 1,
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: true, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      expect(mockResolveDefaultBranch).not.toHaveBeenCalled();
+      expect(mockCreatePullRequest.mock.calls[0]?.[1]).toMatchObject({ baseBranch: "develop" });
+    });
+
     it("タグに固定されたテンプレートへは PR を出さず、lock の直し方を案内する", async () => {
       const taggedSource: TemplateSource = {
         kind: "github",
@@ -1207,7 +1317,7 @@ describe("pushCommand", () => {
 
     it("コンフリクト解決待ちの場合は、解決待ちのファイルを挙げて pull の再開へ誘導する", async () => {
       const { effect } = mockContext({
-        lock: markMerging(validLock, { hashes: {} }, [repoRelPath(".mcp.json")]),
+        lock: markMerging(validLock, { hashes: {} }, [pendingConflict(".mcp.json")]),
       });
       mockLoadCommandContext.mockReturnValue(effect);
 

@@ -159,6 +159,28 @@ describe("prompts", () => {
       expect(badOption?.hint).toContain("conflict");
     });
 
+    it("テンプレートの削除を取り消すファイルは初期選択から除外され、その旨が表示される", async () => {
+      // 見た目は新規追加と同じ `+` なので、注記が無いと「テンプレートが消したファイルを
+      // 復活させる」操作だと一覧から分からない。
+      const files = [
+        { path: repoRelPath("a.ts"), type: "added" as const, localContent: "local" },
+        { path: repoRelPath("restored.ts"), type: "added" as const, localContent: "local" },
+      ];
+      vi.mocked(p.multiselect).mockResolvedValue([]);
+      await selectPushFiles(files, {
+        restoresTemplateDeletion: new Set(["restored.ts"]),
+      });
+
+      const callArg = vi.mocked(p.multiselect).mock.calls[0][0] as {
+        initialValues: string[];
+        options: Array<{ value: string; hint?: string }>;
+      };
+      expect(callArg.initialValues).toContain("a.ts");
+      expect(callArg.initialValues).not.toContain("restored.ts");
+      const restoredOption = callArg.options.find((o) => o.value === "restored.ts");
+      expect(restoredOption?.hint).toContain("restores file deleted in template");
+    });
+
     it("バイナリの hint は行数ではなく (binary) を出す", async () => {
       const files: FileDiff[] = [
         {

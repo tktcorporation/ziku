@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { absPath, repoRelPath, repoRelPaths } from "../../__tests__/brands";
+import { absPath, pendingConflict, repoRelPath, repoRelPaths } from "../../__tests__/brands";
 import type { LockState } from "../../modules/schemas";
 import type { FileClassification } from "../merge/types";
 import {
@@ -304,7 +304,7 @@ describe("status", () => {
         sync: "merging",
         base: { hashes: {} },
         merge: {
-          conflicts: [repoRelPath("a.txt"), repoRelPath("b.txt")],
+          conflicts: [pendingConflict("a.txt"), pendingConflict("b.txt")],
           nextBase: { hashes: {} },
         },
       };
