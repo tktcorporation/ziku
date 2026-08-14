@@ -11,17 +11,25 @@
  * memfs では動かない。よってここでは実際の一時ディレクトリを使う。
  */
 import { existsSync } from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "pathe";
 import { afterEach, describe, expect, it } from "vitest";
 import { absPath, globPatterns, repoRelPath } from "../../__tests__/brands";
 import type { AbsPath } from "../../modules/schemas";
-import { hashFiles } from "../hash";
+import { analyzeConfigDrift, computeMergedZikuConfig } from "../config-merge";
+import { hashContent, hashFiles } from "../hash";
 import { classifyFiles } from "../merge";
+import type { ZikuConfigStatusCategory } from "../merge/sync-plan";
+import { partitionSyncPlan, zikuConfigActions, zikuConfigStatusCategory } from "../merge/sync-plan";
 import { detectDiff } from "../diff";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../untracked";
-import { ZIKU_CONFIG_FILE, withConfigTracked, withoutConfigTracked } from "../ziku-config";
+import {
+  ZIKU_CONFIG_FILE,
+  generateZikuJsonc,
+  withConfigTracked,
+  withoutConfigTracked,
+} from "../ziku-config";
 
 async function createTempDir(label: string): Promise<AbsPath> {
   const dir = absPath(
@@ -206,5 +214,167 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
     expect(paths).not.toContain(".ziku/lock.json");
     expect(paths).not.toContain(ZIKU_CONFIG_FILE);
     expect(getTotalUntrackedCount(untracked)).toBe(0);
+  });
+});
+
+/** パターン集合から、init / pull が書くのと同じ `ziku.jsonc` の本文を作る。 */
+function configText(include: readonly string[]): string {
+  return generateZikuJsonc({ include: globPatterns([...include]), exclude: [] });
+}
+
+interface DriftScenario {
+  readonly name: string;
+  /** 前回同期時点の include（lock の base に相当）。 */
+  readonly base: readonly string[];
+  readonly local: readonly string[];
+  /** テンプレートの include。undefined はテンプレートから `ziku.jsonc` が消えた状態。 */
+  readonly template: readonly string[] | undefined;
+  readonly expected: ZikuConfigStatusCategory;
+}
+
+/**
+ * base / local / template のパターン集合が作りうる形の一覧。
+ *
+ * 加法 union で意味を持つ操作は「追加」だけなので、各側について「変えていない / 足した /
+ * 消した」の組み合わせと、テンプレートからファイルごと消えた場合を並べる。
+ */
+const DRIFT_SCENARIOS: readonly DriftScenario[] = [
+  {
+    name: "双方とも変えていない",
+    base: ["a/**"],
+    local: ["a/**"],
+    template: ["a/**"],
+    expected: "unchanged",
+  },
+  {
+    name: "テンプレートがパターンを追加した",
+    base: ["a/**"],
+    local: ["a/**"],
+    template: ["a/**", "b/**"],
+    expected: "autoUpdate",
+  },
+  {
+    name: "テンプレートがパターンを削除し、ローカルは変えていない",
+    base: ["a/**", "b/**"],
+    local: ["a/**", "b/**"],
+    template: ["a/**"],
+    expected: "unchanged",
+  },
+  {
+    name: "ローカルがパターンを追加した",
+    base: ["a/**"],
+    local: ["a/**", "c/**"],
+    template: ["a/**"],
+    expected: "localOnly",
+  },
+  {
+    name: "ローカルがパターンを削除し、テンプレートは変えていない",
+    base: ["a/**", "b/**"],
+    local: ["a/**"],
+    template: ["a/**", "b/**"],
+    expected: "unchanged",
+  },
+  {
+    name: "双方が別のパターンを追加した",
+    base: ["a/**"],
+    local: ["a/**", "c/**"],
+    template: ["a/**", "b/**"],
+    expected: "conflicts",
+  },
+  {
+    name: "ローカルが追加し、テンプレートは削除した",
+    base: ["a/**"],
+    local: ["a/**", "c/**"],
+    template: [],
+    expected: "localOnly",
+  },
+  {
+    name: "ローカルが削除し、テンプレートは追加した",
+    base: ["a/**"],
+    local: [],
+    template: ["a/**", "b/**"],
+    expected: "autoUpdate",
+  },
+  {
+    name: "双方が同じパターンを削除した",
+    base: ["a/**", "b/**"],
+    local: ["a/**"],
+    template: ["a/**"],
+    expected: "unchanged",
+  },
+  {
+    name: "テンプレートから ziku.jsonc が消え、ローカルは変えていない",
+    base: ["a/**"],
+    local: ["a/**"],
+    template: undefined,
+    expected: "unchanged",
+  },
+  {
+    name: "テンプレートから ziku.jsonc が消え、ローカルはパターンを追加した",
+    base: ["a/**"],
+    local: ["a/**", "c/**"],
+    template: undefined,
+    expected: "localOnly",
+  },
+];
+
+/**
+ * status が見せる方向と、pull / push が `ziku.jsonc` に対して実際に行う書き換えを突き合わせる。
+ *
+ * 加法 union では「片側だけのパターン削除」が相手側への操作にならないため、ハッシュ差分の
+ * カテゴリだけを見ると status が勧めた操作が何もしないことがある。個別のケースを 1 つずつ
+ * 確かめても組み合わせの取りこぼしに気付けないので、drift を作る形を並べて一括で検査する。
+ *
+ * ローカルに `ziku.jsonc` がある状態だけを扱う。status はローカルの設定を読めることを前提に
+ * 動く（`loadCommandContext`）ため、ローカルに設定が無い状態は status の観測対象にならない。
+ */
+describe("status の推奨と pull / push の実動作の一致（実ファイル I/O）", () => {
+  const tempDirs: AbsPath[] = [];
+
+  afterEach(async () => {
+    for (const dir of tempDirs) {
+      await rm(dir, { recursive: true, force: true });
+    }
+    tempDirs.length = 0;
+  });
+
+  it.each(DRIFT_SCENARIOS)("$name", async ({ base, local, template, expected }) => {
+    const templateDir = await createTempDir("drift-tpl");
+    const projectDir = await createTempDir("drift-prj");
+    tempDirs.push(templateDir, projectDir);
+
+    await writeFiles(projectDir, { [ZIKU_CONFIG_FILE]: configText(local) });
+    if (template !== undefined) {
+      await writeFiles(templateDir, { [ZIKU_CONFIG_FILE]: configText(template) });
+    }
+
+    const tracked = withConfigTracked(globPatterns([]));
+    const localHashes = await hashFiles(projectDir, tracked);
+    const templateHashes = await hashFiles(templateDir, tracked);
+    const baseHashes = { [ZIKU_CONFIG_FILE]: hashContent(configText(base)) };
+
+    const plan = partitionSyncPlan(classifyFiles({ baseHashes, localHashes, templateHashes }));
+    const drift = await analyzeConfigDrift(projectDir, templateDir);
+    const category = zikuConfigStatusCategory(plan.config, drift);
+
+    expect(category).toBe(expected);
+
+    // 実際に書き換えが起きるか。union の計算と、書き込む / 送る前の比較は pull の
+    // resolveConfigMerge・push の送信内容の組み立てと同じ手順を踏む。
+    const union = await computeMergedZikuConfig({ targetDir: projectDir, templateDir });
+    const localContent = await readFile(join(projectDir, ZIKU_CONFIG_FILE), "utf-8");
+    const templateContent = template === undefined ? undefined : configText(template);
+    const { pull, push } = zikuConfigActions(plan.config);
+    const changes = {
+      pull: pull._tag === "UnionMerge" && union !== localContent,
+      push: push._tag === "SendUnion" && union !== templateContent,
+    };
+
+    const shown = {
+      pull: category === "autoUpdate" || category === "conflicts",
+      push: category === "localOnly" || category === "conflicts",
+    };
+
+    expect(shown).toEqual(changes);
   });
 });

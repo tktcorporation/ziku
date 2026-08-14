@@ -68,23 +68,20 @@ function renderSection(
 export function recommendationLine(rec: Recommendation): string {
   return match(rec)
     .with({ kind: "inSync" }, () => `${pc.green("✓")} In sync — nothing to do.`)
-    .with({ kind: "pullOnly" }, ({ pullCount }) =>
-      pullCount === 0
-        ? // patternsUpdated 由来 (テンプレが新パターン追加、ファイル差分はゼロ)。
-          // 「0 incoming change(s)」と書くと無意味な操作に見えるので別文言にする。
-          `${pc.cyan("→")} Run ${pc.cyan("`ziku pull`")} to sync new template patterns into your config.`
-        : `${pc.cyan("→")} Run ${pc.cyan("`ziku pull`")} to apply ${pullCount} incoming change(s).`,
+    .with(
+      { kind: "pullOnly" },
+      ({ pullCount }) =>
+        `${pc.cyan("→")} Run ${pc.cyan("`ziku pull`")} to apply ${pullCount} incoming change(s).`,
     )
     .with(
       { kind: "pushOnly" },
       ({ pushCount }) =>
         `${pc.green("→")} Run ${pc.green("`ziku push`")} to send ${pushCount} local change(s) to the template.`,
     )
-    .with({ kind: "pullThenPush" }, ({ pullCount, pushCount }) =>
-      pullCount === 0
-        ? // 同上: ファイル差分ゼロでもパターンの取り込みが必要。
-          `${pc.yellow("→")} Run ${pc.cyan("`ziku pull`")} to sync new template patterns, then ${pc.green("`ziku push`")} (${pushCount}).`
-        : `${pc.yellow("→")} Run ${pc.cyan("`ziku pull`")} (${pullCount}), then ${pc.green("`ziku push`")} (${pushCount}).`,
+    .with(
+      { kind: "pullThenPush" },
+      ({ pullCount, pushCount }) =>
+        `${pc.yellow("→")} Run ${pc.cyan("`ziku pull`")} (${pullCount}), then ${pc.green("`ziku push`")} (${pushCount}).`,
     )
     .with(
       { kind: "resolveConflict" },
@@ -132,13 +129,10 @@ export function renderStatusLong(model: StatusViewModel): string {
 
   // isClean は decideRecommendation の結論をそのまま尊重する SSOT 設計。
   //
-  // recommendation.kind === "inSync" はすでに「全バケツ空 + 解決待ち無し +
-  // patternsUpdated 無し」を意味する (decideRecommendation 側で集約済み)。
-  // ここで bucket や untracked を再評価すると、新しい pull-pending 信号
-  // (例: patternsUpdated, コンフリクト解決待ち) を decideRecommendation に追加するたびに
-  // この条件式も同期更新する必要が出てしまい、矛盾の温床になる
-  // (codex review #71 — 解決待ち中の "in sync" 矛盾、pattern-only pull の
-  //  "in sync" 矛盾、いずれも本質はビューが SSOT を信用していなかったこと)。
+  // recommendation.kind === "inSync" はすでに「全バケツ空 + 解決待ち無し」を意味する
+  // (decideRecommendation 側で集約済み)。ここで bucket や untracked を再評価すると、
+  // 新しい pull-pending 信号 (例: コンフリクト解決待ち) を decideRecommendation に
+  // 追加するたびにこの条件式も同期更新する必要が出てしまい、矛盾の温床になる。
   //
   // untracked は「Tracked files are in sync」というメッセージとは独立。
   // 「追跡対象は in sync、それ以外は別途」という直交した情報なので、両方表示してよい。

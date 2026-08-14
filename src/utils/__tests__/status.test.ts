@@ -334,38 +334,9 @@ describe("status", () => {
       });
     });
 
-    it("patternsUpdated=true + 全バケツ空 → pullOnly (ファイル差分ゼロでもパターン取り込み必須)", () => {
-      // codex review #71 P1: テンプレが新パターン追加、ファイル差分ゼロのケース。
-      // inSync を返すと、ユーザーが push しても push は raw config.include しか見ないので
-      // 何も起きず「次操作が no-op」という UX 事故になる。pull を必ず推奨する。
-      const buckets = emptyBuckets();
-      expect(decideRecommendation(buckets, syncedLock, true)).toEqual({
-        kind: "pullOnly",
-        pullCount: 0,
-      });
-    });
-
-    it("patternsUpdated=true + push のみ → pullThenPush (push 単独だと patterns が反映されない)", () => {
-      const buckets: StatusBuckets = {
-        ...emptyBuckets(),
-        push: [
-          {
-            path: repoRelPath("x"),
-            direction: "push",
-            category: "localOnly",
-            isDestructive: false,
-          },
-        ],
-      };
-      expect(decideRecommendation(buckets, syncedLock, true)).toEqual({
-        kind: "pullThenPush",
-        pullCount: 0,
-        pushCount: 1,
-      });
-    });
-
-    it("patternsUpdated=false + 全バケツ空 → inSync (regression: デフォルト挙動を維持)", () => {
-      // patternsUpdated 引数追加で既存呼び出しが壊れないことを保証
+    it("全バケツ空 → inSync（バケツに現れない差分を推奨に足さない）", () => {
+      // テンプレ側のパターン追加は ziku.jsonc 自体が pull バケツへ入ることで現れる。
+      // バケツと別軸の信号を足すと、pull が何も書き換えない状態でも pull を勧めてしまう。
       const buckets = emptyBuckets();
       expect(decideRecommendation(buckets, syncedLock)).toEqual({ kind: "inSync" });
     });

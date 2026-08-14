@@ -89,22 +89,6 @@ describe("status-view", () => {
       expect(line).toContain("2");
     });
 
-    it("pullOnly with pullCount=0 は patterns sync 用文言になる (no-op 防止)", () => {
-      const line = strip(recommendationLine({ kind: "pullOnly", pullCount: 0 }));
-      expect(line).toContain("ziku pull");
-      expect(line).toContain("template patterns");
-      // "0 incoming change(s)" のような無意味な数字を出さない
-      expect(line).not.toMatch(/\b0 incoming/);
-    });
-
-    it("pullThenPush with pullCount=0 は patterns sync 文言 + push 案内", () => {
-      const line = strip(recommendationLine({ kind: "pullThenPush", pullCount: 0, pushCount: 2 }));
-      expect(line).toContain("ziku pull");
-      expect(line).toContain("template patterns");
-      expect(line).toContain("ziku push");
-      expect(line).toContain("2");
-    });
-
     it("continueMerge は解決すべき件数と `pull --continue` を案内する", () => {
       // 件数が 0 の縮退状態は lock の型が排除するので、分岐は 1 本だけになる。
       const line = strip(recommendationLine({ kind: "continueMerge", conflictCount: 3 }));
@@ -201,37 +185,6 @@ describe("status-view", () => {
       );
       expect(out).toContain("start a 3-way merge");
       expect(out).not.toContain("--continue");
-    });
-
-    it("pattern-only pull (recommendation=pullOnly with pullCount=0) のとき in sync バナーを出さない (codex P2 #2)", () => {
-      // codex review #71 のさらなる P2: テンプレが新パターンを追加して
-      // ファイル差分はゼロ。decideRecommendation は pullOnly with pullCount=0 を返すが、
-      // 旧 isClean は「全バケツ空 + untracked 空 + continueMerge でない」なので true になり、
-      // 「Tracked files are in sync」を出してしまっていた。
-      // recommendation.kind === "inSync" を SSOT として参照すれば矛盾しない。
-      const out = strip(
-        renderStatusLong(
-          model({ buckets: buckets({ inSyncCount: 5 }) }, { kind: "pullOnly", pullCount: 0 }),
-        ),
-      );
-      expect(out).not.toContain("Tracked files are in sync");
-    });
-
-    it("pattern-only pull + push (pullThenPush with pullCount=0) でも in sync バナーを出さない", () => {
-      const out = strip(
-        renderStatusLong(
-          model(
-            {
-              buckets: buckets({
-                push: [entry("local.txt", "push", "localOnly")],
-                inSyncCount: 5,
-              }),
-            },
-            { kind: "pullThenPush", pullCount: 0, pushCount: 1 },
-          ),
-        ),
-      );
-      expect(out).not.toContain("Tracked files are in sync");
     });
 
     it("untracked のみ存在しても recommendation=inSync なら in sync バナーは出る (新仕様)", () => {

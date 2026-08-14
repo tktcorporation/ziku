@@ -192,19 +192,14 @@ export function categorizeForStatus(classification: FileClassification): StatusB
  *   5. push だけ → pushOnly
  *   6. 何もない → inSync
  *
- * `patternsUpdated`: テンプレ側で include/exclude が追加された状態。
- * バケツが「ファイル差分」の集計なのに対し、これは「パターン定義の差分」という別軸の
- * pull-pending 信号。push は raw `config.include` を読むため、パターン追加を反映するには
- * 必ず先に `pull` で `ziku.jsonc` を更新する必要がある。これを忘れて pushOnly や inSync を
- * 推奨すると「次の操作が no-op」という UX 事故になる (codex review #71)。
+ * 判断材料はバケツと lock だけにする。テンプレート側のパターン追加は、`ziku.jsonc` 自体が
+ * pull のバケツへ入ることで現れる（`src/utils/merge/sync-plan.ts` の
+ * `zikuConfigStatusCategory`）。パターンの差分をバケツと別軸の信号として足すと、
+ * `pull` が何も書き換えない状態でも pull を勧めてしまう。
  *
  * 参考: schemas.ts の lockSchema — `merging` の間は push がブロックされる仕様。
  */
-export function decideRecommendation(
-  buckets: StatusBuckets,
-  lock: LockState,
-  patternsUpdated = false,
-): Recommendation {
+export function decideRecommendation(buckets: StatusBuckets, lock: LockState): Recommendation {
   if (lock.sync === "merging") {
     return {
       kind: "continueMerge",
@@ -220,14 +215,10 @@ export function decideRecommendation(
     return { kind: "resolveConflict", conflictCount, pullCount, pushCount };
   }
 
-  // patternsUpdated は「ファイル差分は無いがパターンの取り込みが必要」を意味する
-  // 別軸の pull-pending 信号。pullCount > 0 と同列に扱う。
-  const needsPull = pullCount > 0 || patternsUpdated;
-
-  if (needsPull && pushCount > 0) {
+  if (pullCount > 0 && pushCount > 0) {
     return { kind: "pullThenPush", pullCount, pushCount };
   }
-  if (needsPull) {
+  if (pullCount > 0) {
     return { kind: "pullOnly", pullCount };
   }
   if (pushCount > 0) {

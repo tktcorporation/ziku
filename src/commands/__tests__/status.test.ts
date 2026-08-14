@@ -2,7 +2,7 @@ import { vol } from "memfs";
 import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FileNotFoundError, ZikuFailure } from "../../errors";
-import type { FileClassification } from "../../utils/merge/types";
+import type { FileCategory, FileClassification } from "../../utils/merge/types";
 import type { SyncPlan } from "../../utils/merge/sync-plan";
 import type {
   PendingConflicts,
@@ -127,6 +127,22 @@ const mockOutro = vi.mocked(outro);
  */
 function syncPlanOf(files: FileClassification): SyncPlan {
   return { files, config: { _tag: "Untracked" } };
+}
+
+/**
+ * ziku.jsonc だけが分類に現れた SyncPlan。ファイル差分はゼロなので、status の推奨は
+ * ziku.jsonc の扱いだけで決まる。
+ */
+function trackedConfigPlan(category: FileCategory): SyncPlan {
+  return { files: emptyClassification(), config: { _tag: "Tracked", category } };
+}
+
+/** drift 判定が読むローカル / テンプレートの ziku.jsonc を置く。 */
+function writeConfigs(patterns: { local: string[]; template: string[] }): void {
+  vol.fromJSON({
+    "/test/.ziku/ziku.jsonc": JSON.stringify({ include: patterns.local }, null, 2),
+    "/tmp/template/.ziku/ziku.jsonc": JSON.stringify({ include: patterns.template }, null, 2),
+  });
 }
 
 /** テスト用の空 FileClassification */
@@ -458,9 +474,10 @@ describe("statusCommand", () => {
       expect(outroArg).toContain("merge");
     });
 
-    it("patternsUpdated + ファイル差分ゼロのとき outro は pull (push を no-op で誤推奨しない, codex P1 #2)", async () => {
+    it("テンプレートがパターンを追加したとき outro は pull（ファイル差分がゼロでも ziku.jsonc を数える）", async () => {
       const { effect } = mockContext();
       mockLoadCommandContext.mockReturnValue(effect);
+      // 新パターンに該当するファイルは無く、差分は ziku.jsonc 自体だけ。
       mockMergeTemplatePatterns.mockResolvedValueOnce({
         mergedInclude: globPatterns([".claude/**", ".new-pattern/**"]),
         mergedExclude: [],
@@ -468,9 +485,9 @@ describe("statusCommand", () => {
         newExclude: [],
         patternsUpdated: true,
       });
+      writeConfigs({ local: [".claude/**"], template: [".claude/**", ".new-pattern/**"] });
       mockAnalyzeSync.mockResolvedValueOnce({
-        // 新パターンに該当するファイルが無い（テンプレも local も空）
-        plan: syncPlanOf(emptyClassification()),
+        plan: trackedConfigPlan("autoUpdate"),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
       });
 
@@ -482,10 +499,52 @@ describe("statusCommand", () => {
       });
 
       const outroArg = mockOutro.mock.calls.at(-1)?.[0] ?? "";
-      // pull を強制推奨する（in sync や push にならない）
+      // pull を推奨する（in sync や push にならない）。pull は union をローカルへ書き込む。
       expect(outroArg).toContain("ziku pull");
-      expect(outroArg).toContain("template patterns");
+      expect(outroArg).toContain("1 incoming change");
       expect(outroArg).not.toContain("In sync");
+    });
+
+    it("テンプレートがパターンを削除しローカルが未変更なら outro は in sync（push も pull も送るものが無い）", async () => {
+      const { effect } = mockContext();
+      mockLoadCommandContext.mockReturnValue(effect);
+      // テンプレートが `.old/**` を削除。ローカルは保持したまま。
+      writeConfigs({ local: [".claude/**", ".old/**"], template: [".claude/**"] });
+      mockAnalyzeSync.mockResolvedValueOnce({
+        plan: trackedConfigPlan("autoUpdate"),
+        hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
+      });
+
+      // biome-ignore lint/suspicious/noExplicitAny: citty run signature
+      await (statusCommand.run as any)({
+        args: { dir: "/test" },
+        rawArgs: [],
+        cmd: statusCommand,
+      });
+
+      const outroArg = mockOutro.mock.calls.at(-1)?.[0] ?? "";
+      expect(outroArg).toContain("In sync");
+    });
+
+    it("ローカルがパターンを削除しテンプレートが未変更でも outro は in sync（pull は削除を巻き戻さない）", async () => {
+      const { effect } = mockContext();
+      mockLoadCommandContext.mockReturnValue(effect);
+      // ローカルが `.old/**` を削除。テンプレートは保持したまま。
+      writeConfigs({ local: [".claude/**"], template: [".claude/**", ".old/**"] });
+      mockAnalyzeSync.mockResolvedValueOnce({
+        plan: trackedConfigPlan("localOnly"),
+        hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
+      });
+
+      // biome-ignore lint/suspicious/noExplicitAny: citty run signature
+      await (statusCommand.run as any)({
+        args: { dir: "/test" },
+        rawArgs: [],
+        cmd: statusCommand,
+      });
+
+      const outroArg = mockOutro.mock.calls.at(-1)?.[0] ?? "";
+      expect(outroArg).toContain("In sync");
     });
 
     it("テンプレ側で新規 include が追加されているとマージ済みパターンで analyzeSync を呼ぶ (codex P1)", async () => {
