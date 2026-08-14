@@ -70,7 +70,8 @@ export function classifyBytes(bytes: Buffer): FileContent {
   if (isBinaryBytes(bytes)) return { kind: "binary", bytes };
 
   const content = bytes.toString("utf-8");
-  return Buffer.from(content, "utf-8").equals(bytes)
+  const roundTrips = Buffer.from(content, "utf-8").equals(bytes);
+  return roundTrips && !collidesWithTransportMarker(content)
     ? { kind: "text", content }
     : { kind: "binary", bytes };
 }
@@ -100,9 +101,23 @@ const BINARY_TRANSPORT_ENCODING = "latin1";
  * 読む形にすれば、判定はエンコードとデコードで必ず一致する。
  *
  * U+FFFF を使うのは、latin1 で載せた内容が U+0000-U+00FF にしか収まらず目印と衝突しない
- * （剥がす位置が一意に決まる）ため。Unicode の noncharacter なのでテキストの先頭にも現れない。
+ * （剥がす位置が一意に決まる）ため。Unicode の noncharacter なので実在のテキストがこの文字で
+ * 始まることはまず無いが、「まず無い」は不変条件にならないので
+ * {@link collidesWithTransportMarker} が衝突する内容をテキストから外す。
  */
 const BINARY_TRANSPORT_MARKER = "\uFFFF";
+
+/**
+ * その内容をテキストとして載せると、受け側がバイナリの目印と読んでしまうか。
+ *
+ * 目印は内容の外にある種別を運ぶためのものなので、内容自体が目印で始まると種別が曖昧になる。
+ * 曖昧なまま載せると、受け側（{@link transportTextToBytes}）が先頭 1 文字を剥がして残りを
+ * latin1 として解釈し、ファイルが壊れる。衝突する内容はバイト列として運べば内容が保たれる
+ * （行単位の差分は出せなくなるが、内容を壊すよりよい）。
+ */
+function collidesWithTransportMarker(content: string): boolean {
+  return content.startsWith(BINARY_TRANSPORT_MARKER);
+}
 
 /**
  * 内容を string 型のチャネル（`FileDiff` の内容、push するファイル内容）へ載せる。

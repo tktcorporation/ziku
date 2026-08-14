@@ -145,6 +145,14 @@ describe("file-content", () => {
       expect(a).not.toBe(b);
     });
 
+    it("目印と同じ文字で始まるテキストもバイト列のまま戻る", () => {
+      // U+FFFF はバイナリを載せるときの目印。内容がこの文字で始まると種別が曖昧になるので、
+      // classifyBytes がバイト列として運ぶ側へ倒す。
+      const bytes = Buffer.from("￿title\n", "utf-8");
+      const restored = transportTextToBytes(toTransportText(classifyBytes(bytes)));
+      expect(restored.equals(bytes)).toBe(true);
+    });
+
     it("チャネル上の内容からバイナリかどうかを判別できる", () => {
       expect(isBinaryTransportText(toTransportText({ kind: "text", content: "hello" }))).toBe(
         false,
