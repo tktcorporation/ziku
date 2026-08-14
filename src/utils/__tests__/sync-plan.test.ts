@@ -15,6 +15,7 @@ import {
   zikuConfigActions,
   zikuConfigPullAction,
   zikuConfigPushAction,
+  zikuConfigPushOutcome,
   zikuConfigStatusCategory,
 } from "../merge/sync-plan";
 import type { ConfigDrift } from "../config-merge";
@@ -133,7 +134,7 @@ describe("zikuConfigPullAction", () => {
 });
 
 describe("zikuConfigPushAction", () => {
-  it.each(["localOnly", "conflicts", "deletedLocally"] as const)(
+  it.each(["localOnly", "conflicts"] as const)(
     "ローカル側に伝えるものがある %s では union を送る",
     (category) => {
       expect(zikuConfigPushAction({ _tag: "Tracked", category })).toEqual({
@@ -163,8 +164,49 @@ describe("zikuConfigPushAction", () => {
     },
   );
 
+  it("ローカルで設定ファイルが消えていても、削除もパターンもテンプレートへ送らない", () => {
+    // union はテンプレートの内容と一致する（ローカルに足せるパターンが無い）。テンプレートの
+    // 設定ファイルが消えると、そのテンプレートを使う全プロジェクトが同期できなくなる。
+    expect(zikuConfigPushAction({ _tag: "Tracked", category: "deletedLocally" })).toEqual({
+      _tag: "Skip",
+    });
+  });
+
   it("分類に現れなければ何もしない", () => {
     expect(zikuConfigPushAction({ _tag: "Untracked" })).toEqual({ _tag: "Skip" });
+  });
+});
+
+describe("zikuConfigPushOutcome", () => {
+  it("テンプレート側の追加を pull が取り込めるときは pull を案内する", () => {
+    expect(
+      zikuConfigPushOutcome(
+        { _tag: "Tracked", category: "autoUpdate" },
+        { pullRelevant: true, pushRelevant: false },
+      ),
+    ).toEqual({ _tag: "PullToSync" });
+  });
+
+  it("テンプレートがパターンを削除しローカルが未変更なら pull を案内しない", () => {
+    // union はローカルの内容と一致するので pull は何も書き換えない。案内すると、実行しても
+    // 何も起きない操作を勧めることになる。
+    expect(
+      zikuConfigPushOutcome(
+        { _tag: "Tracked", category: "autoUpdate" },
+        { pullRelevant: false, pushRelevant: true },
+      ),
+    ).toEqual({ _tag: "Skip" });
+  });
+
+  it.each(ALL_DRIFTS)("送る判断は drift で変わらない（%o）", (drift) => {
+    expect(zikuConfigPushOutcome({ _tag: "Tracked", category: "localOnly" }, drift)).toEqual({
+      _tag: "SendUnion",
+      restoresTemplateDeletion: false,
+    });
+    expect(
+      zikuConfigPushOutcome({ _tag: "Tracked", category: "deletedWithLocalEdits" }, drift),
+    ).toEqual({ _tag: "SendUnion", restoresTemplateDeletion: true });
+    expect(zikuConfigPushOutcome({ _tag: "Untracked" }, drift)).toEqual({ _tag: "Skip" });
   });
 });
 

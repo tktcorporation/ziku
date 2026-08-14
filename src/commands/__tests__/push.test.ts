@@ -1471,6 +1471,108 @@ describe("pushCommand", () => {
       expect(localWritten.include).toEqual(expectedUnion);
     });
 
+    it("テンプレートが ziku.jsonc のパターンを削除しただけなら pull を案内しない", async () => {
+      // pull は削除を伝播しないので、この状態で pull を勧めても何も起きない。
+      const { effect } = mockContext({
+        lock: lockWith({
+          hashes: { ".ziku/ziku.jsonc": "oldhash" },
+        }),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      const localConfig = JSON.stringify({ include: [".claude/**", ".github/**"] }, null, 2);
+      const templateConfig = JSON.stringify({ include: [".claude/**"] }, null, 2);
+      vol.fromJSON({
+        "/test/.ziku/ziku.jsonc": localConfig,
+        "/tmp/template/.ziku/ziku.jsonc": templateConfig,
+      });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: repoRelPaths([".ziku/ziku.jsonc"]),
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedWithLocalEdits: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [
+          {
+            path: repoRelPath(".ziku/ziku.jsonc"),
+            type: "modified" as const,
+            localContent: localConfig,
+            templateContent: templateConfig,
+          },
+        ],
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: true, edit: false },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      expect(mockLog.info).not.toHaveBeenCalledWith(
+        expect.stringContaining("only changed in template"),
+      );
+      expect(mockLog.info).toHaveBeenCalledWith("No changes to push");
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
+    it("ローカルの ziku.jsonc が消えていても --include-deletions でテンプレートの ziku.jsonc を消さない", async () => {
+      // テンプレートの設定ファイルが消えると、そのテンプレートを使う全プロジェクトの
+      // init / pull が同期対象パターンを引けなくなる。
+      const { effect } = mockContext({
+        lock: lockWith({
+          hashes: { ".ziku/ziku.jsonc": "oldhash", "gone.txt": "g" },
+        }),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      const templateConfig = JSON.stringify({ include: [".claude/**"] }, null, 2);
+      vol.fromJSON({ "/tmp/template/.ziku/ziku.jsonc": templateConfig });
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: [],
+        deletedWithLocalEdits: [],
+        deletedLocally: repoRelPaths([".ziku/ziku.jsonc", "gone.txt"]),
+        unchanged: [],
+      });
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [
+          {
+            path: repoRelPath(".ziku/ziku.jsonc"),
+            type: "deleted" as const,
+            templateContent: templateConfig,
+          },
+          { path: repoRelPath("gone.txt"), type: "deleted" as const, templateContent: "g" },
+        ],
+      });
+      mockGetGitHubToken.mockReturnValue("ghp_token");
+      mockCreatePullRequest.mockResolvedValueOnce({
+        url: "https://github.com/owner/repo/pull/1",
+        branch: "b",
+        number: 1,
+      });
+
+      await (pushCommand.run as any)({
+        args: { dir: "/test", dryRun: false, yes: true, edit: false, includeDeletions: true },
+        rawArgs: [],
+        cmd: pushCommand,
+      });
+
+      const prArg = mockCreatePullRequest.mock.calls[0]?.[1];
+      // 通常ファイルの削除は従来どおり送られる
+      expect(prArg?.deletions?.map((d) => d.path)).toEqual(["gone.txt"]);
+      expect(prArg?.files.map((f) => f.path)).not.toContain(".ziku/ziku.jsonc");
+    });
+
     it("未解決の衝突は既定では push されず警告のみ（巻き添えで中断しない）", async () => {
       const { effect } = mockContext({
         lock: lockWith({

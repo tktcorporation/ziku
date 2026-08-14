@@ -8,10 +8,12 @@ import { describe, expect, it } from "vitest";
 import type { FileClassification } from "../../utils/merge";
 import { classifyMergeOutcome } from "../../utils/merge/types";
 import type { SyncPlan, ZikuConfigState } from "../../utils/merge/sync-plan";
+import type { ConfigDrift } from "../../utils/config-merge";
 import type { FileDiff, GitHubSource, RepoRelPath } from "../../modules/schemas";
 import { commitSha, globPatterns, repoRelPath, repoRelPaths } from "../../__tests__/brands";
 import {
   applyPushSelection,
+  asDeletablePath,
   asPushContent,
   buildPushPayload,
   buildPushSummaryRows,
@@ -45,6 +47,9 @@ const emptyClassification: FileClassification = {
 };
 
 const untrackedConfig: ZikuConfigState = { _tag: "Untracked" };
+
+/** 双方に取り込めるパターンがある状態。分類だけで結論が出るケースの既定値として使う。 */
+const driftBothWays: ConfigDrift = { pullRelevant: true, pushRelevant: true };
 
 function syncPlan(files: Partial<FileClassification>, config?: ZikuConfigState): SyncPlan {
   return { files: { ...emptyClassification, ...files }, config: config ?? untrackedConfig };
@@ -84,13 +89,17 @@ describe("planPushCandidates", () => {
         deletedLocally: repoRelPaths(["c.txt"]),
         deletedWithLocalEdits: repoRelPaths(["d.txt"]),
       }),
+      driftBothWays,
     );
 
     expect([...plan.pushablePaths].toSorted()).toEqual(["a.txt", "b.txt", "c.txt", "d.txt"]);
   });
 
   it("テンプレートだけが変えたファイルは送らず、スキップとして数える", () => {
-    const plan = planPushCandidates(syncPlan({ autoUpdate: repoRelPaths(["a.txt"]) }));
+    const plan = planPushCandidates(
+      syncPlan({ autoUpdate: repoRelPaths(["a.txt"]) }),
+      driftBothWays,
+    );
 
     expect(plan.pushablePaths.has(repoRelPath("a.txt"))).toBe(false);
     expect(plan.skippedTemplateOnly).toEqual(["a.txt"]);
@@ -103,6 +112,7 @@ describe("planPushCandidates", () => {
         newFiles: repoRelPaths(["b.txt"]),
         deletedFiles: repoRelPaths(["c.txt"]),
       }),
+      driftBothWays,
     );
 
     expect([...plan.pushablePaths]).toEqual([]);
@@ -115,13 +125,17 @@ describe("planPushCandidates", () => {
         localOnly: repoRelPaths(["a.txt"]),
         deletedWithLocalEdits: repoRelPaths(["d.txt"]),
       }),
+      driftBothWays,
     );
 
     expect([...plan.restoresTemplateDeletion]).toEqual(["d.txt"]);
   });
 
   it("ziku.jsonc がローカル側の変更を持つなら union を送る候補にする", () => {
-    const plan = planPushCandidates(syncPlan({}, { _tag: "Tracked", category: "localOnly" }));
+    const plan = planPushCandidates(
+      syncPlan({}, { _tag: "Tracked", category: "localOnly" }),
+      driftBothWays,
+    );
 
     expect(plan.sendsConfigUnion).toBe(true);
     expect(plan.pushablePaths.has(CONFIG_PATH)).toBe(true);
@@ -131,6 +145,7 @@ describe("planPushCandidates", () => {
   it("テンプレートが削除した ziku.jsonc を送る場合は削除の取り消しとして印を付ける", () => {
     const plan = planPushCandidates(
       syncPlan({}, { _tag: "Tracked", category: "deletedWithLocalEdits" }),
+      driftBothWays,
     );
 
     expect(plan.sendsConfigUnion).toBe(true);
@@ -138,15 +153,44 @@ describe("planPushCandidates", () => {
   });
 
   it("ziku.jsonc がテンプレート側だけ変わっているならスキップとして数える", () => {
-    const plan = planPushCandidates(syncPlan({}, { _tag: "Tracked", category: "autoUpdate" }));
+    const plan = planPushCandidates(syncPlan({}, { _tag: "Tracked", category: "autoUpdate" }), {
+      pullRelevant: true,
+      pushRelevant: false,
+    });
 
     expect(plan.sendsConfigUnion).toBe(false);
     expect(plan.pushablePaths.has(CONFIG_PATH)).toBe(false);
     expect(plan.skippedTemplateOnly).toEqual([CONFIG_PATH]);
   });
 
+  it("テンプレートが ziku.jsonc のパターンを削除しただけなら pull を案内しない", () => {
+    // pull は削除を伝播しないので、案内どおり実行しても何も起きない。
+    const plan = planPushCandidates(syncPlan({}, { _tag: "Tracked", category: "autoUpdate" }), {
+      pullRelevant: false,
+      pushRelevant: true,
+    });
+
+    expect(plan.skippedTemplateOnly).toEqual([]);
+    expect(plan.sendsConfigUnion).toBe(false);
+    expect(plan.pushablePaths.has(CONFIG_PATH)).toBe(false);
+  });
+
+  it("ローカルで ziku.jsonc が消えていても送信候補にしない", () => {
+    const plan = planPushCandidates(
+      syncPlan({}, { _tag: "Tracked", category: "deletedLocally" }),
+      driftBothWays,
+    );
+
+    expect(plan.sendsConfigUnion).toBe(false);
+    expect(plan.pushablePaths.has(CONFIG_PATH)).toBe(false);
+    expect(plan.skippedTemplateOnly).toEqual([]);
+  });
+
   it("ziku.jsonc が追跡対象外なら触らない", () => {
-    const plan = planPushCandidates(syncPlan({ localOnly: repoRelPaths(["a.txt"]) }));
+    const plan = planPushCandidates(
+      syncPlan({ localOnly: repoRelPaths(["a.txt"]) }),
+      driftBothWays,
+    );
 
     expect(plan.sendsConfigUnion).toBe(false);
     expect(plan.pushablePaths.has(CONFIG_PATH)).toBe(false);
@@ -338,6 +382,25 @@ describe("buildPushPayload", () => {
     const payload = buildPushPayload([added("a.txt", "local a")], new Map());
 
     expect(payload.files).toEqual([{ path: "a.txt", content: "local a" }]);
+  });
+
+  it("ziku.jsonc の削除は送らない（通常ファイルの削除は送る）", () => {
+    // テンプレートの ziku.jsonc が消えると、そのテンプレートを使う全プロジェクトの
+    // init / pull が同期対象パターンを引けなくなる。
+    const payload = buildPushPayload([deleted(".ziku/ziku.jsonc"), deleted("gone.txt")], new Map());
+
+    expect(payload.deletions).toEqual([{ path: "gone.txt" }]);
+    expect(payload.files).toEqual([]);
+  });
+});
+
+describe("asDeletablePath", () => {
+  it("通常の同期ファイルは削除として送れる", () => {
+    expect(asDeletablePath(repoRelPath("a.txt"))).toBe("a.txt");
+  });
+
+  it("ziku 自身の設定ファイルは削除として送れない", () => {
+    expect(asDeletablePath(CONFIG_PATH)).toBeUndefined();
   });
 });
 

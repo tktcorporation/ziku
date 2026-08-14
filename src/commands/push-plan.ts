@@ -12,11 +12,13 @@
 import { P, match } from "ts-pattern";
 import { z } from "zod/v4";
 import type { FileDiff, GitHubSource, GlobPattern, RepoRelPath } from "../modules/schemas";
+import { repoRelPathSchema } from "../modules/schemas";
+import type { ConfigDrift } from "../utils/config-merge";
 import type { MergedContent } from "../utils/merge";
 import type { SyncPlan } from "../utils/merge/sync-plan";
-import { zikuConfigPushAction } from "../utils/merge/sync-plan";
+import { zikuConfigPushOutcome } from "../utils/merge/sync-plan";
 import { pathAsPattern, repoRelPath } from "../utils/paths";
-import { ZIKU_CONFIG_FILE, isZikuConfigPath } from "../utils/ziku-config";
+import { ZIKU_CONFIG_FILE, classifySyncPath, isZikuConfigPath } from "../utils/ziku-config";
 
 // ─── テンプレートへ送る内容 ───
 
@@ -46,6 +48,37 @@ export function mergedAsPushContent(content: MergedContent): PushContent {
   return PushContentSchema.parse(content);
 }
 
+// ─── テンプレートから消してよいパス ───
+
+/**
+ * テンプレートから削除してよいパス。
+ *
+ * ziku 自身の設定ファイルはこの型を作れない。テンプレートの `ziku.jsonc` が消えると、その
+ * テンプレートを使う全プロジェクトが同期対象パターンを引けなくなり、`init` / `pull` が壊れる。
+ * 送信ペイロードの削除欄（{@link PushPayload}）がこの型しか受け取らないので、削除を積む
+ * 経路が増えても {@link asDeletablePath} を通らずに設定ファイルを載せることはできない。
+ *
+ * ローカルで設定ファイルが消えている状態は push の計画に届かない。ローカルの `ziku.jsonc` は
+ * コマンドの前提（`loadCommandContext` がパターンを読む）で、読めなければ push は分類より前に
+ * 「設定ファイルが無い」と報告して終わる。届いたとしても送るものは無い（`sync-plan.ts` の
+ * `zikuConfigActions`）ので、ここで落とす削除に利用者への通知は要らない。
+ */
+const deletablePathSchema = repoRelPathSchema.brand<"DeletablePath">();
+export type DeletablePath = z.infer<typeof deletablePathSchema>;
+
+/**
+ * 削除としてテンプレートへ送ってよいパスか判定する。設定ファイルなら `undefined`。
+ *
+ * 判定はパスの種別（`src/utils/ziku-config.ts` の `SyncPath`）から導く。種別が増えたときは
+ * 網羅性検査がここを止めるので、新しい特別扱いのファイルを削除対象に紛れ込ませない。
+ */
+export function asDeletablePath(path: RepoRelPath): DeletablePath | undefined {
+  return match(classifySyncPath(path))
+    .with({ kind: "syncedFile" }, (synced) => deletablePathSchema.parse(synced.path))
+    .with({ kind: "zikuConfig" }, () => undefined)
+    .exhaustive();
+}
+
 /**
  * テンプレートへ送りうる差分。`unchanged` を除いた 3 種別だけを持つ。
  *
@@ -67,7 +100,12 @@ export interface PushCandidatePlan {
    * {@link defaultPushSelection} はこの集合を既定から外す。
    */
   readonly restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
-  /** テンプレート側だけが変えたので送らないパス。pull を促す対象として見せる。 */
+  /**
+   * テンプレート側だけが変えたので送らないパス。pull を促す対象として見せる。
+   *
+   * `ziku.jsonc` が入るのは pull が実際にローカルを書き換えるときだけ（`sync-plan.ts` の
+   * {@link zikuConfigPushOutcome}）。
+   */
   readonly skippedTemplateOnly: readonly RepoRelPath[];
   /**
    * `ziku.jsonc` を加法 union の内容で送るか。true なら呼び出し側が union を計算して
@@ -86,8 +124,12 @@ export interface PushCandidatePlan {
  *   送る内容はローカルの生の内容ではなく加法 union で、その計算は呼び出し側が行う。
  *   生の内容を送ると、ローカルがパターンを削除していた場合にテンプレート側のパターンまで
  *   消えてしまう。
+ *
+ * @param drift `ziku.jsonc` のパターン集合が、どちら向きに同期アクションを必要としているか。
+ *   分類カテゴリだけでは「テンプレートがパターンを削除した」状態と「pull で取り込める追加が
+ *   ある」状態を区別できず、pull しても何も起きない案内を出すことになる。
  */
-export function planPushCandidates(plan: SyncPlan): PushCandidatePlan {
+export function planPushCandidates(plan: SyncPlan, drift: ConfigDrift): PushCandidatePlan {
   const classification = plan.files;
   const pushablePaths = new Set<RepoRelPath>([
     ...classification.localOnly,
@@ -101,9 +143,9 @@ export function planPushCandidates(plan: SyncPlan): PushCandidatePlan {
   const skippedTemplateOnly: RepoRelPath[] = [...classification.autoUpdate];
 
   // 設定ファイルの扱いは分類カテゴリではなく sync-plan の判断に従う。
-  const sendsConfigUnion = match(zikuConfigPushAction(plan.config))
+  const sendsConfigUnion = match(zikuConfigPushOutcome(plan.config, drift))
     .with({ _tag: "Skip" }, () => false)
-    .with({ _tag: "TemplateOnly" }, () => {
+    .with({ _tag: "PullToSync" }, () => {
       skippedTemplateOnly.push(ZIKU_CONFIG_FILE);
       return false;
     })
@@ -271,7 +313,7 @@ export function selectedUnresolvedConflicts(
 /** テンプレートへ実際に送る内容。GitHub / ローカルテンプレートのどちらの経路も同じ形を受け取る。 */
 export interface PushPayload {
   readonly files: readonly { readonly path: RepoRelPath; readonly content: PushContent }[];
-  readonly deletions: readonly { readonly path: RepoRelPath }[];
+  readonly deletions: readonly { readonly path: DeletablePath }[];
 }
 
 /**
@@ -280,6 +322,9 @@ export interface PushPayload {
  * 内容は自動マージ済みならその結果を、それ以外はローカルの内容をそのまま採用する。
  * `mergedContents` に載っているのはクリーンにマージできた内容と ziku が組み立てた
  * `ziku.jsonc` だけなので、未解決の衝突内容がここから送信対象へ入ることはない。
+ *
+ * 削除は {@link asDeletablePath} を通ったパスだけが載る。設定ファイルの削除がここへ来ても
+ * 落とす理由は {@link DeletablePath} を参照。
  */
 export function buildPushPayload(
   selected: readonly ChangedFileDiff[],
@@ -292,7 +337,12 @@ export function buildPushPayload(
         path: f.path,
         content: mergedContents.get(f.path) ?? asPushContent(f.localContent),
       })),
-    deletions: selected.filter((f) => f.type === "deleted").map((f) => ({ path: f.path })),
+    deletions: selected
+      .filter((f) => f.type === "deleted")
+      .flatMap((f) => {
+        const path = asDeletablePath(f.path);
+        return path === undefined ? [] : [{ path }];
+      }),
   };
 }
 

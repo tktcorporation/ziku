@@ -10,9 +10,10 @@
  * 処理されない」が起きる。{@link partitionSyncPlan} が仕分けの唯一の場所で、以降
  * `SyncPlan.files` には設定ファイルが入らない。
  *
- * 扱いの決定は「分類 → pull / push のアクション → status の表示カテゴリ」の一方向で流す。
- * status が独自にカテゴリを決めると、勧めた操作を実行しても何も起きない案内になりうるため、
- * 表示は {@link zikuConfigActions} が返すアクションからしか導かない。
+ * 扱いの決定は「分類 → pull / push のアクション → 利用者へ見せる結論」の一方向で流す。
+ * 表示や案内が独自にカテゴリを決めると、勧めた操作を実行しても何も起きない案内になりうるため、
+ * status の表示カテゴリ（{@link zikuConfigStatusCategory}）も push の案内
+ * （{@link zikuConfigPushOutcome}）も {@link zikuConfigActions} が返すアクションからしか導かない。
  */
 import { match } from "ts-pattern";
 import type { RepoRelPath } from "../../modules/schemas";
@@ -139,6 +140,11 @@ const SKIP_BOTH: ZikuConfigActions = { pull: { _tag: "Skip" }, push: { _tag: "Sk
  * パターンを削除していた場合にテンプレート側のパターンまで消え、全下流のプロジェクトへ
  * 波及する。テンプレートだけが変えた状態（autoUpdate）で送らないのも同じ理由で、送れば
  * テンプレートが削除したパターンを復活させてしまう。
+ *
+ * ローカルに設定ファイルが無いカテゴリ（newFiles / deletedLocally）で push が `Skip` を
+ * 返すのは、送る内容である加法 union がテンプレートの内容と必ず一致するため。ローカルの
+ * 削除そのものも送らない（削除は方向を問わず伝播しない）。テンプレートの設定ファイルが
+ * 消えると、そのテンプレートを使う全プロジェクトが同期対象パターンを引けなくなる。
  */
 export function zikuConfigActions(state: ZikuConfigState): ZikuConfigActions {
   return match(state)
@@ -163,7 +169,6 @@ export function zikuConfigActions(state: ZikuConfigState): ZikuConfigActions {
           )
           .with(
             "localOnly",
-            "deletedLocally",
             (): ZikuConfigActions => ({
               pull: { _tag: "Skip" },
               push: { _tag: "SendUnion", restoresTemplateDeletion: false },
@@ -176,7 +181,13 @@ export function zikuConfigActions(state: ZikuConfigState): ZikuConfigActions {
               push: { _tag: "SendUnion", restoresTemplateDeletion: true },
             }),
           )
-          .with("newFiles", "deletedFiles", "unchanged", (): ZikuConfigActions => SKIP_BOTH)
+          .with(
+            "newFiles",
+            "deletedFiles",
+            "deletedLocally",
+            "unchanged",
+            (): ZikuConfigActions => SKIP_BOTH,
+          )
           .exhaustive(),
     )
     .exhaustive();
@@ -190,6 +201,50 @@ export function zikuConfigPullAction(state: ZikuConfigState): ZikuConfigPullActi
 /** push が設定ファイルに対して何をするかを取り出す。 */
 export function zikuConfigPushAction(state: ZikuConfigState): ZikuConfigPushAction {
   return zikuConfigActions(state).push;
+}
+
+/**
+ * push が設定ファイルに対して取る結論。分類上の位置づけ（{@link ZikuConfigPushAction}）に
+ * パターン集合の実差分を突き合わせて導く。
+ */
+export type ZikuConfigPushOutcome =
+  /** 送らず、案内も出さない。 */
+  | { readonly _tag: "Skip" }
+  /** 送らないが、pull が取り込める追加がテンプレート側にある。 */
+  | { readonly _tag: "PullToSync" }
+  /** 加法 union を計算してテンプレートへ送る。 */
+  | { readonly _tag: "SendUnion"; readonly restoresTemplateDeletion: boolean };
+
+/**
+ * push が設定ファイルに対して取る結論を、drift まで見て決める。
+ *
+ * `TemplateOnly` が表すのは「テンプレート側だけがファイルを変えた」ことだけで、pull が
+ * 取り込むものを持つかまでは決まらない。テンプレートがパターンを削除した場合、加法 union は
+ * ローカルの内容と一致し、pull は何も書き換えない。この状態を push が pull の対象として
+ * 見せると、実行しても何も起きない操作を勧めることになる。案内を出すのは pull が実際に
+ * ローカルを書き換えるときだけにし、それ以外は status と同じく終端（同期済み）として扱う
+ * （{@link zikuConfigStatusCategory}）。
+ */
+export function zikuConfigPushOutcome(
+  state: ZikuConfigState,
+  drift: ConfigDrift,
+): ZikuConfigPushOutcome {
+  const actions = zikuConfigActions(state);
+  return match(actions.push)
+    .with({ _tag: "Skip" }, (): ZikuConfigPushOutcome => ({ _tag: "Skip" }))
+    .with(
+      { _tag: "TemplateOnly" },
+      (): ZikuConfigPushOutcome =>
+        pullWritesLocal(actions.pull, drift) ? { _tag: "PullToSync" } : { _tag: "Skip" },
+    )
+    .with(
+      { _tag: "SendUnion" },
+      ({ restoresTemplateDeletion }): ZikuConfigPushOutcome => ({
+        _tag: "SendUnion",
+        restoresTemplateDeletion,
+      }),
+    )
+    .exhaustive();
 }
 
 /**

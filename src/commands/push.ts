@@ -34,6 +34,7 @@ import { analyzeSync } from "../utils/sync-analysis";
 import { transportTextToBytes } from "../utils/file-content";
 import { absPath, joinAbs, repoRelPath } from "../utils/paths";
 import {
+  analyzeConfigDrift,
   computeMergedZikuConfig,
   computeScopedZikuConfig,
   findLocalOnlyPatternsForPaths,
@@ -1035,7 +1036,11 @@ async function analyzePushTargets(params: {
     exclude: params.patterns.exclude,
   });
 
-  const candidatePlan = planPushCandidates(plan);
+  // 設定ファイルの案内はパターン集合の実差分まで見て決める。ハッシュ差分だけを見ると、
+  // テンプレートがパターンを削除しただけの状態を「pull で取り込める更新」として案内し、
+  // 実行しても何も起きない操作を勧めることになる（`planPushCandidates` の drift 引数）。
+  const drift = await analyzeConfigDrift(params.targetDir, params.templateDir);
+  const candidatePlan = planPushCandidates(plan, drift);
   const mergedContents = new Map<RepoRelPath, PushContent>();
 
   // 送る場合も生のローカル内容ではなく加法 union を送る。union 内容を mergedContents に
