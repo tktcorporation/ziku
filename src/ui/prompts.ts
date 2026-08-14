@@ -1,11 +1,9 @@
 /**
- * CLI プロンプト — @clack/prompts ベース
+ * CLI のプロンプトを一箇所に集める。
  *
- * 背景: prompts/init.ts + prompts/push.ts を統合。
- * @inquirer/prompts の checkbox/select/confirm/input/password を
- * @clack/prompts の multiselect/select/confirm/text/password に置き換え。
- *
- * 全プロンプトは Ctrl+C でキャンセル可能。handleCancel() で統一処理。
+ * どのコマンドから呼ばれても Ctrl+C の扱いと表示の作法が揃うようにするため、
+ * 対話の入口はここだけにする。全プロンプトは handleCancel() を通り、
+ * キャンセルされたらその場でプロセスを終える。
  */
 import { execFileSync } from "node:child_process";
 import { Effect } from "effect";
@@ -20,6 +18,7 @@ import type {
   UnmergedConflict,
 } from "../modules/schemas";
 import type { UntrackedFilesByFolder } from "../utils/untracked";
+import { getTypeIcon } from "./diff-view";
 import type { FileSelectionMarks } from "./file-select-with-diff";
 import {
   fileSelectionHint,
@@ -27,8 +26,15 @@ import {
   selectFilesWithDiffPreview,
 } from "./file-select-with-diff";
 
-/** ユーザーが Ctrl+C でキャンセルした場合の統一処理 */
-function handleCancel(value: unknown): void {
+/**
+ * ユーザーが Ctrl+C でキャンセルした場合の統一処理。
+ *
+ * clack のプロンプトはキャンセルを戻り値の symbol で表すため、戻り値の型は
+ * 常に「本来の値 | symbol」になる。この関数を通した後は symbol であれば
+ * プロセスが終わっているので、呼び出し側は本来の値だけを扱えばよい。それを
+ * 型アサーションではなく assertion signature で表し、絞り込みを型に担保させる。
+ */
+function handleCancel<T>(value: T | symbol): asserts value is T {
   if (p.isCancel(value)) {
     p.cancel("Cancelled.");
     process.exit(0);
@@ -81,7 +87,7 @@ export async function selectOverwriteStrategy(options?: {
     ],
   });
   handleCancel(strategy);
-  return strategy as OverwriteStrategy;
+  return strategy;
 }
 
 // ─── init (template resolution) ──────────────────────────────
@@ -173,7 +179,7 @@ export async function selectMissingTemplateAction(
     ],
   });
   handleCancel(action);
-  return action as MissingTemplateAction;
+  return action;
 }
 
 /**
@@ -231,18 +237,12 @@ export async function selectPushFilesFallback(
   options?: FileSelectionMarks,
 ): Promise<FileDiff[]> {
   const marks = options ?? {};
-  const typeIcon = (type: string) =>
-    match(type)
-      .with("added", () => pc.green("+"))
-      .with("modified", () => pc.yellow("~"))
-      .with("deleted", () => pc.red("-"))
-      .otherwise(() => " ");
 
   const selected = await p.multiselect({
     message: "Select files to include in PR",
     options: files.map((f) => ({
       value: f.path,
-      label: `${typeIcon(f.type)} ${f.path}`,
+      label: `${getTypeIcon(f.type)} ${f.path}`,
       hint: fileSelectionHint(f, marks) || undefined,
     })),
     initialValues: files.filter((f) => isPreselectedByDefault(f, marks)).map((f) => f.path),
@@ -281,7 +281,7 @@ export async function selectUntrackedToTrack(
     required: false,
   });
   handleCancel(selected);
-  return selected as RepoRelPath[];
+  return selected;
 }
 
 /**
@@ -561,7 +561,7 @@ export async function selectUnmergedResolution(
     ],
   });
   handleCancel(resolution);
-  return resolution as UnmergedResolution;
+  return resolution;
 }
 
 /**

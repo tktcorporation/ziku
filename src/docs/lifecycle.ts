@@ -197,8 +197,8 @@ function generateCommandTables(): string {
 /**
  * 各コマンドの notes フィールドから「補足」セクションを自動生成する。
  *
- * 背景: 以前はハードコードされた散文だったが、コマンド実装と乖離するリスクがあった。
- * notes をコマンドファイルにコロケーションすることで、動作変更時に更新漏れを防ぐ。
+ * notes をコマンドの実装ファイルへ置くことで、挙動を変えたときに説明も同じ差分に
+ * 現れる。ドキュメント側に散文で持つと、実装だけが変わって説明が嘘になる。
  */
 function generateNotesSection(): string {
   const commandsWithNotes = lifecycle.filter((cmd) => cmd.notes && cmd.notes.length > 0);
