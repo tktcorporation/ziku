@@ -5,16 +5,34 @@ import type { AbsPath, RepoRelPath } from "../modules/schemas";
 import { joinAbs } from "./paths";
 
 /**
- * 複数リポジトリの `.gitignore` をマージして読み込む。
+ * 複数リポジトリの無視判定をまとめたもの。
+ *
+ * 表す規則は「どれか 1 つのリポジトリが無視すると決めたら無視する」。判定の結果だけを見せて
+ * 規則の集合を見せないのは、規則を連結して 1 つの matcher にすると別の演算になるため
+ * （{@link loadMergedGitignore}）。
+ */
+export interface IgnoreDecision {
+  readonly ignores: (path: RepoRelPath) => boolean;
+}
+
+/**
+ * 複数リポジトリの `.gitignore` を読み、無視判定をまとめる。
  *
  * ローカルとテンプレートの両方を読むのは、どちら側が無視すると決めたファイルも同期の対象から
  * 外すため。片側だけを読むと、無視されているはずのマシン固有の内容がもう一方へ流れる。
  *
- * `nestedDirs` 配下の `.gitignore` も同じ Ignore へ畳み込む。git は各ディレクトリの
- * `.gitignore` をそのディレクトリ起点で解釈するので、規則をルート起点へ読み替えてから足す
- * （{@link scopeToDir}）。これを省くと、`.claude/.gitignore` のようにネストして置かれた
- * 無視規則だけが判定から漏れ、リポジトリの他の場所にある同名のファイルまで巻き込んで
- * 無視する規則になる。
+ * 判定はリポジトリごとに独立して行い、結果を論理和で束ねる。全リポジトリの規則を 1 つの
+ * Ignore へ連結すると、gitignore の「後の規則が勝つ」順序が働いて、片方の否定規則
+ * （`!secret.env`）がもう片方の無視を打ち消す。ローカルが無視すると決めた資格情報が、
+ * テンプレート側の否定規則によって同期対象へ戻る。否定規則が効くのは、それが書かれた
+ * リポジトリの中だけでよい。
+ *
+ * `nestedDirs` 配下の `.gitignore` は、そのリポジトリの Ignore へ畳み込む。git は各
+ * ディレクトリの `.gitignore` をそのディレクトリ起点で解釈するので、規則をルート起点へ
+ * 読み替えてから足す（{@link scopeToDir}）。これを省くと、`.claude/.gitignore` のように
+ * ネストして置かれた無視規則だけが判定から漏れ、リポジトリの他の場所にある同名のファイルまで
+ * 巻き込んで無視する規則になる。同一リポジトリ内では深い側の規則が後に来るので、そこでの
+ * 否定は意図どおり効く。
  *
  * @param dirs `.gitignore` の探索起点（ローカル・テンプレートのリポジトリルート）。
  * @param nestedDirs 各起点の配下で `.gitignore` を追加で読むディレクトリ（起点からの相対）。
@@ -22,9 +40,11 @@ import { joinAbs } from "./paths";
 export async function loadMergedGitignore(
   dirs: readonly AbsPath[],
   nestedDirs: readonly string[],
-): Promise<Ignore> {
-  const ig = ignore();
+): Promise<IgnoreDecision> {
+  const perRepository: Ignore[] = [];
+
   for (const dir of dirs) {
+    const ig = ignore();
     const rootRules = await readGitignore(joinAbs(dir, ".gitignore"));
     if (rootRules !== undefined) ig.add(rootRules);
 
@@ -32,8 +52,10 @@ export async function loadMergedGitignore(
       const nestedRules = await readGitignore(joinAbs(dir, nested, ".gitignore"));
       if (nestedRules !== undefined) ig.add(prefixRules(nestedRules, nested));
     }
+    perRepository.push(ig);
   }
-  return ig;
+
+  return { ignores: (path) => perRepository.some((ig) => ig.ignores(path)) };
 }
 
 /** `.gitignore` の中身を読む。無ければ undefined（規則ゼロと区別する必要はない）。 */
@@ -84,7 +106,10 @@ export interface SeparatedFiles {
   ignored: RepoRelPath[];
 }
 
-export function separateByGitignore(files: readonly RepoRelPath[], ig: Ignore): SeparatedFiles {
+export function separateByGitignore(
+  files: readonly RepoRelPath[],
+  ig: IgnoreDecision,
+): SeparatedFiles {
   const tracked: RepoRelPath[] = [];
   const ignored: RepoRelPath[] = [];
 

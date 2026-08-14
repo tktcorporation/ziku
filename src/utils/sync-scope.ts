@@ -1,6 +1,6 @@
-import type { Ignore } from "ignore";
 import type { AbsPath, GlobPattern, RepoRelPath } from "../modules/schemas";
 import { loadMergedGitignore } from "./gitignore";
+import type { IgnoreDecision } from "./gitignore";
 import { getBaseDirsFromPatterns } from "./patterns";
 import { mergeTemplatePatterns } from "./template-patterns";
 import { alwaysTrackedPathsIn, withConfigTracked } from "./ziku-config";
@@ -75,7 +75,7 @@ export interface SyncScope {
    * 参照は {@link isExcludedFromScope} 経由に閉じる。ここから直接 `ignores()` を呼ぶと
    * `alwaysTracked` の例外が抜け落ちる。
    */
-  readonly gitignore: Ignore;
+  readonly gitignore: IgnoreDecision;
   /**
    * gitignore や exclude に関わらず走査へ戻すパス。
    *
