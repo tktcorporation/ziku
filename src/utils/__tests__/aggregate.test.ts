@@ -336,6 +336,50 @@ describe("aggregateTemplateUsage", () => {
     expect(result?.conflicts).toEqual([{ path: "docs/local.md" }]);
   });
 
+  // ziku.jsonc は加法 union で同期されるため、片側だけのパターン削除はアクション不要。
+  // 生の 3-way 分類のままだと localOnly → pendingPush となり、レポートを読んだエージェントが
+  // テンプレートからそのパターンを消して全利用リポジトリへ波及させうる。
+  it("利用リポジトリ側だけが ziku.jsonc のパターンを削除した場合、pendingPush に出さない", async () => {
+    mockListOwnerRepos.mockReturnValue(Effect.succeed([repoInfo({ owner: "acme", repo: "proj" })]));
+    // テンプレートは 2 パターン、利用リポジトリは 1 つ削って 1 パターンだけ持つ。
+    const templateZikuJsonc = JSON.stringify({ include: ["a.txt", "b.txt"] });
+    const repoZikuJsonc = JSON.stringify({ include: ["a.txt"] });
+    setLockFixture(
+      lockFixtures,
+      "acme",
+      "proj",
+      Effect.succeed(
+        Option.some(
+          lockJson({ baseHashes: { [ZIKU_CONFIG_FILE]: hashContent(templateZikuJsonc) } }),
+        ),
+      ),
+    );
+    shaFixtures.set("acme/proj", "proj-sha");
+    dirsBySource.set("gh:acme/proj#proj-sha", "/drift-repo-dir");
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/drift-tmpl-dir");
+
+    vol.fromJSON({
+      "/drift-repo-dir/.ziku/ziku.jsonc": repoZikuJsonc,
+      "/drift-tmpl-dir/.ziku/ziku.jsonc": templateZikuJsonc,
+    });
+    queueGlobResults([], []);
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        tmpBaseDir: "/tmp-base",
+      }),
+    );
+
+    const [result] = report.repositories;
+    // union == テンプレート側なので push すべき差分は無い
+    expect(result?.pendingPush.some((e) => e.path === ZIKU_CONFIG_FILE)).toBe(false);
+    // union == ローカルではない（テンプレートにしか無い b.txt がある）ので pull 側に出る
+    expect(result?.pendingPull).toEqual(
+      expect.arrayContaining([{ path: ZIKU_CONFIG_FILE, reason: "autoUpdate" }]),
+    );
+  });
+
   // classifyFiles の deletedFiles 分岐は base/template の有無だけで判定し local を見ない。
   // 切り分けずに pendingPull へ流すと、利用リポジトリ側の編集が「削除を配布せよ」と
   // 読めてしまい、そのリポジトリにしか無い変更が捨てられる。

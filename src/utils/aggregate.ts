@@ -35,6 +35,7 @@ import {
 import type { OwnerRepoInfo } from "./github";
 import { LOCK_FILE } from "./lock";
 import type { FileClassification } from "./merge/types";
+import { analyzeConfigDrift, applyConfigDrift } from "./config-merge";
 import { mergePatterns } from "./patterns";
 import { analyzeSync } from "./sync-analysis";
 import type { SyncHashes } from "./sync-analysis";
@@ -559,7 +560,16 @@ function classifyAgainstTemplate(
       catch: toMessage,
     });
 
-    return refineDeletedFiles(classification, hashes);
+    // `ziku.jsonc` は加法 union で同期されるため、生の 3-way 分類のままだと
+    // 「利用側がパターンを 1 つ削っただけ」が push 相当の差分に見える。レポートを読んだ
+    // エージェントがテンプレートからそのパターンを消すと、全利用リポジトリへ波及する。
+    // status と同じ補正を通す。
+    const drift = yield* Effect.tryPromise({
+      try: () => analyzeConfigDrift(repoDir, templateDir),
+      catch: toMessage,
+    });
+
+    return refineDeletedFiles(applyConfigDrift(classification, drift), hashes);
   });
 }
 

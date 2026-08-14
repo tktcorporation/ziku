@@ -25,6 +25,7 @@ import { readFile } from "node:fs/promises";
 import { parse } from "jsonc-parser";
 import { join } from "pathe";
 import type { ZikuConfig } from "../modules/schemas";
+import type { FileClassification } from "./merge/types";
 import { ZIKU_CONFIG_FILE, generateZikuJsonc } from "./ziku-config";
 
 export interface ConfigPatterns {
@@ -118,6 +119,44 @@ export async function analyzeConfigDrift(
     pullRelevant: !eq(union, l),
     pushRelevant: !eq(union, t),
   };
+}
+
+/**
+ * `classifyFiles` の結果に含まれる `ziku.jsonc` を、union 観点の実差分（drift）で再分類する。
+ *
+ * 生の 3-way 比較は `ziku.jsonc` を autoUpdate / localOnly 等へ振り分けるが、`ziku.jsonc` は
+ * 加法 union で同期されるため「片側だけがパターンを削除した」状態はアクション不要になる。
+ * 補正せずに生の分類を使うと、利用側がパターンを 1 つ削っただけで push 相当の差分として
+ * 扱われ、テンプレート側からそのパターンが消える（全利用リポジトリへ波及する）。
+ *
+ * `analyzeConfigDrift` の結果を渡すこと。両者を分けているのは、drift の算出が I/O を伴う
+ * 一方で再分類が純粋関数のため。
+ */
+export function applyConfigDrift(
+  classification: FileClassification,
+  drift: { pullRelevant: boolean; pushRelevant: boolean },
+): FileClassification {
+  const strip = (arr: string[]): string[] => arr.filter((f) => f !== ZIKU_CONFIG_FILE);
+  const adjusted: FileClassification = {
+    autoUpdate: strip(classification.autoUpdate),
+    localOnly: strip(classification.localOnly),
+    conflicts: strip(classification.conflicts),
+    newFiles: strip(classification.newFiles),
+    deletedFiles: strip(classification.deletedFiles),
+    deletedLocally: strip(classification.deletedLocally),
+    unchanged: strip(classification.unchanged),
+  };
+
+  if (drift.pullRelevant && drift.pushRelevant) {
+    adjusted.conflicts.push(ZIKU_CONFIG_FILE);
+  } else if (drift.pullRelevant) {
+    adjusted.autoUpdate.push(ZIKU_CONFIG_FILE);
+  } else if (drift.pushRelevant) {
+    adjusted.localOnly.push(ZIKU_CONFIG_FILE);
+  } else {
+    adjusted.unchanged.push(ZIKU_CONFIG_FILE);
+  }
+  return adjusted;
 }
 
 /**
