@@ -1837,6 +1837,199 @@ describe("pullCommand", () => {
     });
   });
 
+  describe("テンプレート削除を残したときの同期ベース", () => {
+    /** 「テンプレートから消えたがローカルに残っている」状態を作る。 */
+    function setupKeptDeletion(opts: {
+      localHash: string;
+      category: "deletedFiles" | "deletedWithLocalEdits";
+    }) {
+      vol.fromJSON({ "/test/old-file.txt": "old content" });
+
+      const { effect } = mockContext({
+        lock: lockWithBase({ ".mcp.json": "hash-mcp", "old-file.txt": "hash-old" }),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      // template（削除済み） → local（残っている）の順で hashFiles が呼ばれる
+      mockHashFiles
+        .mockResolvedValueOnce(hashMap({ ".mcp.json": "hash-mcp" }))
+        .mockResolvedValueOnce(
+          hashMap({ ".mcp.json": "hash-mcp", "old-file.txt": opts.localHash }),
+        );
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: opts.category === "deletedFiles" ? repoRelPaths(["old-file.txt"]) : [],
+        deletedWithLocalEdits:
+          opts.category === "deletedWithLocalEdits" ? repoRelPaths(["old-file.txt"]) : [],
+        deletedLocally: [],
+        unchanged: repoRelPaths([".mcp.json"]),
+      });
+    }
+
+    it("--yes で残したファイルは、ベースのエントリが据え置かれる", async () => {
+      // ベースを進めると次回 localOnly に化け、push がテンプレートの削除を巻き戻す。
+      setupKeptDeletion({ localHash: "hash-old", category: "deletedFiles" });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(vol.existsSync("/test/old-file.txt")).toBe(true);
+      expect(baseHashesOf(lastSavedLock())).toEqual({
+        ".mcp.json": "hash-mcp",
+        "old-file.txt": "hash-old",
+      });
+    });
+
+    it("ローカル編集があるまま残したファイルも、ベースは以前の値のまま", async () => {
+      // ローカルの内容ではなく共通祖先を据え置く。ローカルの値を書くと、次回は
+      // 「テンプレートが削除した」ではなく「ローカルが追加した」に見えてしまう。
+      setupKeptDeletion({ localHash: "hash-edited", category: "deletedWithLocalEdits" });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(baseHashesOf(lastSavedLock())).toEqual({
+        ".mcp.json": "hash-mcp",
+        "old-file.txt": "hash-old",
+      });
+    });
+
+    it("--force で削除したファイルは、ベースからも消える", async () => {
+      setupKeptDeletion({ localHash: "hash-old", category: "deletedFiles" });
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: true, yes: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(vol.existsSync("/test/old-file.txt")).toBe(false);
+      expect(baseHashesOf(lastSavedLock())).toEqual({ ".mcp.json": "hash-mcp" });
+    });
+
+    it("対話で選ばなかったファイルだけベースに残る", async () => {
+      vol.fromJSON({
+        "/test/deleted.txt": "aaa",
+        "/test/kept.txt": "bbb",
+      });
+
+      const { effect } = mockContext({
+        lock: lockWithBase({ "deleted.txt": "hash-a", "kept.txt": "hash-b" }),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      mockHashFiles
+        .mockResolvedValueOnce(hashMap({}))
+        .mockResolvedValueOnce(hashMap({ "deleted.txt": "hash-a", "kept.txt": "hash-b" }));
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: [],
+        newFiles: [],
+        deletedFiles: repoRelPaths(["deleted.txt", "kept.txt"]),
+        deletedWithLocalEdits: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+      mockSelectDeletedFiles.mockResolvedValueOnce(repoRelPaths(["deleted.txt"]));
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(baseHashesOf(lastSavedLock())).toEqual({ "kept.txt": "hash-b" });
+    });
+
+    it("コンフリクトで中断したとき、未処理の削除は nextBase に据え置かれる", async () => {
+      // 中断は削除の問い合わせより手前で起きる。ここでベースを進めると、削除は一度も
+      // 問われないまま --continue で確定してしまう。
+      vol.fromJSON({
+        "/test/conflict.md": "local",
+        "/test/old-file.txt": "old content",
+        "/tmp/template/conflict.md": "template",
+      });
+
+      const { effect } = mockContext({
+        lock: lockWithBase({ "conflict.md": "hash-base", "old-file.txt": "hash-old" }),
+      });
+      mockLoadCommandContext.mockReturnValue(effect);
+
+      mockHashFiles
+        .mockResolvedValueOnce(hashMap({ "conflict.md": "hash-template" }))
+        .mockResolvedValueOnce(
+          hashMap({ "conflict.md": "hash-local", "old-file.txt": "hash-old" }),
+        );
+
+      mockClassifyFiles.mockReturnValueOnce({
+        autoUpdate: [],
+        localOnly: [],
+        conflicts: repoRelPaths(["conflict.md"]),
+        newFiles: [],
+        deletedFiles: repoRelPaths(["old-file.txt"]),
+        deletedWithLocalEdits: [],
+        deletedLocally: [],
+        unchanged: [],
+      });
+      mockBaseAvailable();
+      mockMergeResult("conflict.md", "<<<<<<< LOCAL\nlocal\n=======\ntemplate\n>>>>>>> TEMPLATE\n");
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      const saved = lastSavedLock();
+      expect(saved.sync).toBe("merging");
+      // 削除の可否を問う前に抜けたので、ローカルにはファイルが残っている
+      expect(vol.existsSync("/test/old-file.txt")).toBe(true);
+      expect(saved.sync === "merging" ? saved.merge.nextBase.hashes : undefined).toEqual({
+        "conflict.md": "hash-template",
+        "old-file.txt": "hash-old",
+      });
+    });
+
+    it("--continue で確定したベースにも未処理の削除が残る", async () => {
+      // nextBase をそのまま昇格させるので、中断時に据え置いたエントリが確定後も残り、
+      // 次回の pull で改めてユーザーに問われる。
+      vol.fromJSON({ "/test/old-file.txt": "old content" });
+
+      mockLoadLock.mockReturnValueOnce(
+        Effect.succeed(
+          mergingLock([pendingConflict("conflict.md", "markers")], {
+            hashes: hashMap({ "conflict.md": "hash-template", "old-file.txt": "hash-old" }),
+            commitSha: commitSha("newref123"),
+          }),
+        ),
+      );
+
+      await (pullCommand.run as any)({
+        args: { dir: "/test", force: false, yes: false, continue: true },
+        rawArgs: [],
+        cmd: pullCommand,
+      });
+
+      expect(baseHashesOf(lastSavedLock())).toEqual({
+        "conflict.md": "hash-template",
+        "old-file.txt": "hash-old",
+      });
+      expect(vol.existsSync("/test/old-file.txt")).toBe(true);
+    });
+  });
+
   describe("dry run (--dryRun)", () => {
     it("dryRun 引数のデフォルト値は false", () => {
       const args = pullCommand.args as { dryRun: { default: boolean } };

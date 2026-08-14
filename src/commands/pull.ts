@@ -94,6 +94,7 @@ export const pullLifecycle: CommandLifecycle = {
   notes: [
     "`ziku.jsonc` 自体が追跡ファイルとして加法 union マージされる。テンプレ側で追加されたパターンはユーザーの `ziku.jsonc` へ取り込まれる（push と双方向に同期）。パターンの削除は自動伝播しない（安全側）。",
     "テンプレートで削除されたファイルは、対話実行ではユーザーが選択的に削除できる。`--force` は削除の承認なので全て削除し、`--yes` はプロンプトを省くだけなので全て残す。ローカルに編集があるものはどちらのフラグでも削除せず、対話実行で明示的に選んだものだけを削除する。",
+    "削除せずに残したファイルは同期ベースを据え置くため、次回の `pull` でも同じ削除候補として提示される。ベースを進めるとローカルにしかないファイルと区別できなくなり、続く `push` がテンプレート側の削除を巻き戻してしまう。",
     "自動マージを試みなかったファイル（共通祖先を取得できない / バイナリ）は、`--continue` がローカルとテンプレートのどちらを残すか尋ねる。ziku がそれらのファイルへ何も書いていないため、コンフリクトマーカーの有無では解決を判定できない。`--yes` / `--force` を付けた実行では代わりに決めず中断する。",
   ],
 };
@@ -220,6 +221,14 @@ export const pullCommand = defineCommand({
           );
           const { autoUpdate, conflicts, deletedFiles, deletedWithLocalEdits } = plan.files;
 
+          // テンプレートが削除したファイルは、どちらのカテゴリでも「削除するか残すか」が
+          // 実行時に決まる。ベースの確定にはその結果が要るので、候補を 1 本にまとめて
+          // 通常フローと中断の両方から同じ集合を渡す。
+          const deletionCandidates: readonly RepoRelPath[] = [
+            ...deletedFiles,
+            ...deletedWithLocalEdits,
+          ];
+
           // union マージを行ったときは lock の base[ziku.jsonc] をローカル最終内容（union）に
           // 揃える。templateHashes 側に寄せると、テンプレが削除したパターンを後続 push が
           // localOnly として再追加してしまう。
@@ -292,7 +301,13 @@ export const pullCommand = defineCommand({
               markMerging(
                 lock,
                 {
-                  hashes: baseHashesForLock,
+                  // 解決待ちで抜けるこの経路は、削除の問い合わせより手前にある。削除は
+                  // 1 件も適用していないので、候補すべてのベースを据え置く。
+                  hashes: baseAfterDeletions({
+                    advancedBase: baseHashesForLock,
+                    previousBase: hashes.baseHashes,
+                    deletions: { candidates: deletionCandidates, applied: new Set() },
+                  }),
                   // SHA を解決できなかった場合は既存のベース SHA を引き継ぐ。ハッシュだけ
                   // 前進させて SHA を落とすと、次回のマージがベースツリーを取り直せなくなる。
                   commitSha: Option.getOrUndefined(latestRefOption) ?? baseCommitSha(lock),
@@ -305,12 +320,21 @@ export const pullCommand = defineCommand({
           }
 
           // 削除されたファイルを処理（plan.files に ziku.jsonc は入らない）
+          const appliedDeletions = new Set<RepoRelPath>();
           if (deletedFiles.length > 0) {
-            await handleDeletedFiles(deletedFiles, targetDir, approvalFlags);
+            for (const path of await handleDeletedFiles(deletedFiles, targetDir, approvalFlags)) {
+              appliedDeletions.add(path);
+            }
           }
 
           if (deletedWithLocalEdits.length > 0) {
-            await handleDeletedWithLocalEdits(deletedWithLocalEdits, targetDir, approvalFlags);
+            for (const path of await handleDeletedWithLocalEdits(
+              deletedWithLocalEdits,
+              targetDir,
+              approvalFlags,
+            )) {
+              appliedDeletions.add(path);
+            }
           }
 
           const latestRefOption = await Effect.runPromise(resolveBaseRef);
@@ -320,7 +344,11 @@ export const pullCommand = defineCommand({
           await saveLock(
             targetDir,
             markSynced(lock, {
-              hashes: baseHashesForLock,
+              hashes: baseAfterDeletions({
+                advancedBase: baseHashesForLock,
+                previousBase: hashes.baseHashes,
+                deletions: { candidates: deletionCandidates, applied: appliedDeletions },
+              }),
               commitSha: Option.getOrUndefined(latestRefOption) ?? baseCommitSha(lock),
             }),
           );
@@ -612,12 +640,72 @@ function isNonInteractive(flags: PullApprovalFlags): boolean {
   return flags.force || flags.yes;
 }
 
-/** テンプレートで削除され、ローカルも base のままのファイルを処理する。 */
+/**
+ * テンプレート側の削除候補と、そのうち実際にローカルから消したもの。
+ *
+ * 候補と適用結果を 1 つの値で運ぶことで、{@link baseAfterDeletions} が「残ったのはどれか」を
+ * 自分で導ける。呼び出し側が差を計算して渡す形にすると、経路ごとに引き算が散る。
+ */
+interface DeletionOutcome {
+  /** テンプレートから消えたファイル。`deletedFiles` と `deletedWithLocalEdits` の合計。 */
+  readonly candidates: readonly RepoRelPath[];
+  /** そのうちローカルからも消したファイル。 */
+  readonly applied: ReadonlySet<RepoRelPath>;
+}
+
+/**
+ * lock に書き込む同期ベースを、適用された削除だけ反映した形で組み立てる。
+ *
+ * pull は分類に使ったテンプレート側のハッシュをそのまま次のベースにする。テンプレートから
+ * 消えたファイルはそこにエントリを持たないので、ローカルに残したファイルまでベースを進めると
+ * 「base に無い・template に無い・local にある」＝ `localOnly` に化ける。`localOnly` は
+ * push の既定送信集合であり、`restoresTemplateDeletion`（テンプレートの削除を取り消す操作
+ * だと識別するための集合）にも入らない。結果として、次の `ziku push --yes` がテンプレートの
+ * 削除を黙って巻き戻す。
+ *
+ * そこで削除を適用しなかったファイルだけ、ベースのエントリを据え置く。次回の pull でも
+ * 「テンプレートが削除した」状態として同じカテゴリに分類され、ユーザーは削除するか残すかを
+ * 再び問われる。テンプレートとの差異が解消していない以上、問われ続けるのが正しい。
+ * 黙ってテンプレートへ送り返すより、毎回目に入るほうが失うものが小さい。
+ *
+ * lock を書く経路は 3 つある（通常フローの確定・解決待ちでの中断・`pull --continue` の確定）。
+ * 前 2 つはこの関数を通し、`--continue` は中断時に書いた `merge.nextBase` をそのまま昇格
+ * させるので、ベースの決め方はこの 1 箇所に閉じる。
+ */
+function baseAfterDeletions(params: {
+  /** テンプレート側へ前進させたベース（`ziku.jsonc` の補正込み）。 */
+  readonly advancedBase: HashMap;
+  /** 今回の比較で共通祖先として使ったベース。 */
+  readonly previousBase: HashMap;
+  readonly deletions: DeletionOutcome;
+}): HashMap {
+  const retained = params.deletions.candidates.filter(
+    (path) => !params.deletions.applied.has(path),
+  );
+  if (retained.length === 0) return params.advancedBase;
+
+  const base: HashMap = { ...params.advancedBase };
+  for (const path of retained) {
+    const previous = params.previousBase[path];
+    // 削除候補はベースにエントリを持つ（`utils/merge/classify.ts` の `hasBase: true` 側から
+    // しか出てこない）。型はそれを保証しないので、無ければ前進させた側をそのまま残す。
+    if (previous === undefined) continue;
+    base[path] = previous;
+  }
+  return base;
+}
+
+/**
+ * テンプレートで削除され、ローカルも base のままのファイルを処理する。
+ *
+ * @returns 実際にローカルから削除したファイル。残したものはベースを据え置く
+ *   （{@link baseAfterDeletions}）。
+ */
 async function handleDeletedFiles(
   deletedFiles: readonly RepoRelPath[],
   targetDir: AbsPath,
   flags: PullApprovalFlags,
-): Promise<void> {
+): Promise<ReadonlySet<RepoRelPath>> {
   const filesToDelete = await match(resolveDeletionPolicy(flags))
     .with("deleteAll", (): readonly RepoRelPath[] => {
       log.info(`Deleting ${deletedFiles.length} file(s) removed from template...`);
@@ -632,7 +720,7 @@ async function handleDeletedFiles(
     .with("askUser", () => selectDeletedFiles(deletedFiles))
     .exhaustive();
 
-  await deleteSelectedFiles(filesToDelete, targetDir);
+  return deleteSelectedFiles(filesToDelete, targetDir);
 }
 
 /**
@@ -642,18 +730,22 @@ async function handleDeletedFiles(
  * ローカルの編集はどこからも復元できず、`--force`（テンプレート由来の削除の承認）はその
  * 損失までは承認していない。非対話を意図する実行（`--force` / `--yes`）では選択プロンプトも
  * 出さずに全て残す。CI で入力待ちのまま止まるのを避けつつ、編集を守る側へ倒す。
- * 残ったファイルは以降「ローカルにしかないファイル」として push 候補になる。
+ *
+ * 残したファイルはベースを据え置くので、次回の pull でも同じ問いが出る
+ * （{@link baseAfterDeletions}）。
+ *
+ * @returns 実際にローカルから削除したファイル。
  */
 async function handleDeletedWithLocalEdits(
   files: readonly RepoRelPath[],
   targetDir: AbsPath,
   flags: PullApprovalFlags,
-): Promise<void> {
+): Promise<ReadonlySet<RepoRelPath>> {
   if (isNonInteractive(flags)) {
     log.warn(
       `Kept ${files.length} file(s) removed from the template because they have local edits. Run 'ziku pull' without --force / --yes to choose which to delete.`,
     );
-    return;
+    return new Set();
   }
 
   log.warn(
@@ -661,32 +753,43 @@ async function handleDeletedWithLocalEdits(
   );
   const filesToDelete = await selectDeletedFilesWithLocalEdits(files);
 
-  await deleteSelectedFiles(filesToDelete, targetDir);
+  const deleted = await deleteSelectedFiles(filesToDelete, targetDir);
 
-  const deleted = new Set<string>(filesToDelete);
   const kept = files.filter((f) => !deleted.has(f));
   if (kept.length > 0) {
     log.info(`Kept ${kept.length} locally edited file(s).`);
   }
+
+  return deleted;
 }
 
-/** 選択された削除対象をローカルから削除する。削除できないファイルは警告のみで続行する。 */
+/**
+ * 選択された削除対象をローカルから削除する。削除できないファイルは警告のみで続行する。
+ *
+ * @returns 実際に消えたファイル。消せなかったファイルはローカルに残っているため、
+ *   呼び出し側はベースを進めてはいけない。
+ */
 async function deleteSelectedFiles(
   files: readonly RepoRelPath[],
   targetDir: AbsPath,
-): Promise<void> {
+): Promise<ReadonlySet<RepoRelPath>> {
+  const deleted = new Set<RepoRelPath>();
   for (const file of files) {
-    await Effect.runPromise(
+    const removed = await Effect.runPromise(
       Effect.tryPromise(async () => {
         await rm(joinAbs(targetDir, file), { force: true });
         log.success(`Deleted: ${file}`);
+        return true;
       }).pipe(
         Effect.orElseSucceed(() => {
           log.warn(`Could not delete: ${file}`);
+          return false;
         }),
       ),
     );
+    if (removed) deleted.add(file);
   }
+  return deleted;
 }
 
 /**
@@ -732,6 +835,12 @@ function loadPausedMerge(targetDir: AbsPath): Effect.Effect<MergingLockState, Zi
  * どちらを選んでもベースはテンプレート側へ前進する。「ローカルを残す」は git の `--ours`
  * と同じく、テンプレートの変更を意図して拒否したという意思表示なので、次回以降その差分を
  * 蒸し返さない。
+ *
+ * 確定するベースは中断時に記録した `merge.nextBase` そのもので、ここでは組み直さない。
+ * 中断は削除の問い合わせより手前で起きるため、`nextBase` はテンプレートが削除したファイルの
+ * エントリを据え置いた状態で書かれている（{@link baseAfterDeletions}）。そのまま昇格させる
+ * ことで、問われないまま削除が失われる経路が無くなり、未処理の削除は次回の pull で改めて
+ * ユーザーに提示される。
  *
  * 引数が `MergingLockState` なので、解決待ちでない lock に対しては呼べない。
  */
