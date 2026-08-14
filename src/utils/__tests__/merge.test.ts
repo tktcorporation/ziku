@@ -793,6 +793,45 @@ line2`;
       expect(regions.map((r) => r.startLine)).toEqual([1, 6]);
     });
 
+    it("`=======` だけを消したブロックも未解決のまま", () => {
+      // `>>>>>>>` で打ち切られてファイル末尾に到達しないため、末尾の検査だけでは拾えない。
+      const content = ["<<<<<<< LOCAL", "a", "||||||| BASE", "o", ">>>>>>> TEMPLATE", ""].join(
+        "\n",
+      );
+
+      const regions = findConflictRegions(content);
+
+      expect(regions.map((r) => r.startLine)).toEqual([1]);
+    });
+
+    it("開きかけのブロックの途中で次のブロックが始まっても両方数える", () => {
+      const content = [
+        "<<<<<<< LOCAL",
+        "a",
+        "=======",
+        "b",
+        "<<<<<<< LOCAL",
+        "c",
+        "=======",
+        "d",
+        ">>>>>>> TEMPLATE",
+        "",
+      ].join("\n");
+
+      const regions = findConflictRegions(content);
+
+      expect(regions.map((r) => r.startLine)).toEqual([1, 5]);
+    });
+
+    it("`<<<<<<<` と `>>>>>>>` だけの並びは本文として扱う", () => {
+      // 区切りも base マーカーも無い並びは、コンフリクトの残骸と言い切れない。
+      const content = ["<<<<<<< LOCAL", "a", ">>>>>>> TEMPLATE", ""].join("\n");
+
+      const regions = findConflictRegions(content);
+
+      expect(regions).toEqual([]);
+    });
+
     it("マージ結果に残るブロックだけを数え、内容中の短いマーカーは本文として扱う", () => {
       const withMarkers = ["intro", "<<<<<<< LOCAL", "a", "=======", "b", ">>>>>>> TEMPLATE", ""];
       const base = withMarkers.join("\n");

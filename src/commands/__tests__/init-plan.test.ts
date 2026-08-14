@@ -82,12 +82,19 @@ describe("planFromArg", () => {
     expect(planFromArg(value)).toEqual({ _tag: "Invalid", value });
   });
 
-  it("リポジトリ名にスラッシュが含まれてもオーナーだけを切り出す", () => {
+  it("区切りが 2 つ以上ある値は弾く", () => {
+    // そのまま渡すと存在しない owner / repo への問い合わせになる。
     expect(planFromArg("my-org/group/repo")).toEqual({
-      _tag: "Repo",
-      owner: "my-org",
-      repo: "group/repo",
+      _tag: "Invalid",
+      value: "my-org/group/repo",
     });
+  });
+
+  it("未指定と空文字列を区別する", () => {
+    // 空文字列を未指定として扱うと自動検出へ落ち、意図しないリポジトリが同期元になる。
+    expect(planFromArg(undefined)).toEqual({ _tag: "Unspecified" });
+    expect(planFromArg("")).toEqual({ _tag: "Invalid", value: "" });
+    expect(planFromArg("   ")).toEqual({ _tag: "Invalid", value: "   " });
   });
 });
 

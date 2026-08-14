@@ -1,8 +1,7 @@
 import { Octokit } from "@octokit/rest";
 import { Effect, Option } from "effect";
-import { match } from "ts-pattern";
-import { zikuFailure } from "../errors";
-import type { ZikuFailure } from "../errors";
+import { P, match } from "ts-pattern";
+import { ZikuFailure, zikuFailure } from "../errors";
 import type {
   BlobSha,
   BranchRef,
@@ -69,10 +68,52 @@ export interface PushOptions {
  * {@link applyPush} が副作用（fork の作成・ブランチ・コミット・PR）だけを行う。
  * 検証が済むまで GitHub 上には何も作らないので、失敗しても後片付けの要る痕跡が残らない。
  */
-export async function createPullRequest(token: string, options: PushOptions): Promise<PrResult> {
-  const octokit = new Octokit({ auth: token });
-  const prepared = await preparePush(octokit, options);
-  return applyPush(octokit, prepared);
+export function createPullRequest(token: string, options: PushOptions): Promise<PrResult> {
+  return classified("create a pull request", async () => {
+    const octokit = new Octokit({ auth: token });
+    const prepared = await preparePush(octokit, options);
+    return applyPush(octokit, prepared);
+  });
+}
+
+/**
+ * GitHub API を呼ぶ操作を包み、行動を書ける失敗を分類済みの {@link ZikuFailure} にする。
+ *
+ * 分類をここに置くのは、呼び出し側で包む形にすると包み忘れが起こるため。実際、包んだ
+ * 呼び出し元と包まない呼び出し元が並ぶと、同じ 403 が一方では「fork の可否を確認してください」、
+ * もう一方では「ziku の不具合です」とスタックトレース付きで案内される。呼ぶ側の記憶ではなく
+ * 呼ばれる側の構造で担保する。
+ *
+ * `Unclassified`（ユーザーが取れる行動を書けないもの）は文言へ潰さず元の例外のまま投げ直す。
+ * 分類済みの失敗（`ZikuFailure`）も、既に行動が書かれているのでそのまま通す。
+ *
+ * レート制限を常に認証済みクォータとして扱うのは、この関数を通る操作がトークンを用意できた
+ * 後にしか走らないため。
+ */
+function classified<A>(operation: string, run: () => Promise<A>): Promise<A> {
+  return run().catch((cause: unknown): never => {
+    if (cause instanceof ZikuFailure) throw cause;
+
+    return match(classifyGitHubApiFailure(cause))
+      .with({ _tag: "Unclassified" }, (): never => {
+        throw cause;
+      })
+      .with(
+        {
+          _tag: P.union(
+            "AuthRejected",
+            "RateLimited",
+            "PermissionDenied",
+            "NotFound",
+            "Unreachable",
+          ),
+        },
+        (failure): never => {
+          throw githubApiFailure(failure, { operation, authenticated: true, cause });
+        },
+      )
+      .exhaustive();
+  });
 }
 
 /** PR の宛先と文言。送る内容とは別に運ぶ。 */
@@ -718,7 +759,17 @@ export function checkRepoSetup(owner: string, repo: string): Promise<boolean> {
  * 背景: org に `.github` テンプレートリポジトリが存在しない場合、
  * 空のリポジトリを作成し、README と .ziku/modules.jsonc を初期コミットする。
  */
-export async function scaffoldTemplateRepo(
+export function scaffoldTemplateRepo(
+  token: string,
+  targetOwner: string,
+  targetRepo: string,
+): Promise<{ url: string }> {
+  return classified("create the template repository", () =>
+    scaffoldTemplateRepoUnclassified(token, targetOwner, targetRepo),
+  );
+}
+
+async function scaffoldTemplateRepoUnclassified(
   token: string,
   targetOwner: string,
   targetRepo: string,

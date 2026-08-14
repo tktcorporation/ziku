@@ -130,30 +130,66 @@ const openBlock = (phase: "local" | "base" | "template", block: OpenBlock): Scan
 
 interface ScanStep {
   readonly next: ScanState;
-  /** 対応の取れたブロックが閉じた場合、その開始行番号（1 始まり） */
-  readonly closed?: number;
+  /**
+   * このステップで未解決と確定したブロックの開始行番号（1 始まり）。
+   *
+   * 「順序が揃って閉じた」場合と「揃わないまま打ち切られた」場合の両方がここに入る。
+   * 閉じたものだけを報告する形にすると、打ち切りの扱いを遷移ごとにその場で決めることになり、
+   * 「本文として捨てる」と「未解決として残す」の境目がどこにも書かれない状態になる。
+   */
+  readonly unresolved?: number;
+}
+
+/**
+ * 打ち切られたブロックのうち、未解決として数えるものの開始行。
+ *
+ * 区切り（`=======`）か base マーカー（`|||||||`）まで進んだブロックは、ziku が生成した
+ * コンフリクトの残骸とみなす。開始マーカーしか見ていないものは数えない。単独の `<<<<<<<` は
+ * 本文にも現れうる一方、区切りや base マーカーを伴う並びは本文にはまず現れないので、
+ * そこに誤検出と取りこぼしの境目を引く。誤検出すると `pull --continue` が永久に通らず、
+ * lock を手で直す以外の復旧手段が無くなる。
+ *
+ * この判断はここ 1 箇所にある。打ち切りが起きる経路（別のブロックの開始・対応しない
+ * `>>>>>>>`・ファイル末尾）が増えても、数える条件は分岐しない。
+ */
+function abandonedStart(state: ScanState): number | undefined {
+  return match(state)
+    .with({ phase: P.union("base", "template") }, (open) => open.startLine)
+    .with({ phase: P.union("outside", "local") }, () => undefined)
+    .exhaustive();
 }
 
 /**
  * マーカー行 1 本を受けて走査状態を進める。
  *
- * `<<<<<<<` → （`|||||||`）→ `=======` → `>>>>>>>` の順序で揃ったときだけブロックが閉じる。
- * 順序から外れたマーカーはブロックを破棄するか、新しいブロックの開始として扱う。
+ * `<<<<<<<` → （`|||||||`）→ `=======` → `>>>>>>>` の順序で揃ったときブロックが閉じる。
+ * 順序から外れたマーカーは開いているブロックを打ち切るか、新しいブロックの開始として扱う。
+ * 打ち切られたブロックを未解決に数えるかは {@link abandonedStart} が決める。
  */
 function stepScan(state: ScanState, marker: Marker, lineNumber: number): ScanStep {
   const started = { startLine: lineNumber, size: marker.length };
   return (
     match([state, marker.kind] as const)
-      .with([P.any, "start"], () => ({ next: openBlock("local", started) }))
+      // 開いているブロックの途中で現れる `<<<<<<<` は、そこまでを打ち切って新しく開き直す。
+      .with([P.any, "start"], ([open]) => ({
+        next: openBlock("local", started),
+        unresolved: abandonedStart(open),
+      }))
       // 開始マーカーが無いまま現れる `=======` は、setext 見出しの下線や区切り線などの本文。
       .with([{ phase: "outside" }, P.any], () => ({ next: OUTSIDE }))
       .with([{ phase: "local" }, "base"], ([open]) => ({ next: openBlock("base", open) }))
       .with([{ phase: P.union("local", "base") }, "separator"], ([open]) => ({
         next: openBlock("template", open),
       }))
-      .with([{ phase: "template" }, "end"], ([open]) => ({ next: OUTSIDE, closed: open.startLine }))
-      // `=======` を伴わない `>>>>>>>` は対応の取れたブロックではない。ここまでを破棄する。
-      .with([{ phase: P.union("local", "base") }, "end"], () => ({ next: OUTSIDE }))
+      .with([{ phase: "template" }, "end"], ([open]) => ({
+        next: OUTSIDE,
+        unresolved: open.startLine,
+      }))
+      // `=======` を伴わない `>>>>>>>` は順序が揃っていない。ここまでを打ち切る。
+      .with([{ phase: P.union("local", "base") }, "end"], ([open]) => ({
+        next: OUTSIDE,
+        unresolved: abandonedStart(open),
+      }))
       // ブロック内に重ねて現れる同種のマーカーは本文として読み飛ばす。
       .with([{ phase: "base" }, "base"], ([open]) => ({ next: openBlock("base", open) }))
       .with([{ phase: "template" }, P.union("base", "separator")], ([open]) => ({
@@ -169,8 +205,9 @@ function stepScan(state: ScanState, marker: Marker, lineNumber: number): ScanSte
  * 行頭の前方一致だけで判定すると、Markdown の setext 見出し下線や区切り線
  * `========` を未解決と誤検出する。誤検出すると `pull --continue` が永久に通らず、
  * 解決済みのマージを確定できなくなるため、開始マーカーから始まる順序の取れたブロックだけを
- * 未解決とみなす。区切りまで進んだブロックは閉じないまま終わっても未解決に数える。閉じたものだけを
- * 数えると、閉じ側のマーカーだけを消せば解決したことになってしまう。
+ * 未解決とみなす。順序が揃わずに打ち切られたブロックも、区切りか base マーカーまで進んで
+ * いれば未解決に数える（{@link abandonedStart}）。閉じたものだけを数えると、閉じ側の
+ * マーカーだけを消せば解決したことになってしまう。
  *
  * ブロックの内側では、開始マーカーより短いマーカー行は本文として扱う。マージ結果は
  * 内容中の最長マーカーより長いマーカーで囲まれているので、この長さ比較で
@@ -192,18 +229,12 @@ export function findConflictRegions(content: string): ConflictRegion[] {
 
     const step = stepScan(state, marker, i + 1);
     state = step.next;
-    if (step.closed !== undefined) regions.push({ startLine: step.closed });
+    if (step.unresolved !== undefined) regions.push({ startLine: step.unresolved });
   }
 
-  // 区切りまで進んだまま閉じずに終わったブロックも未解決として数える。閉じ側のマーカーだけを
-  // 消して解決したつもりになると、開始マーカーと区切り行が本文に残ったまま `pull --continue`
-  // が通り、その内容が同期ベースへ載って以後テンプレートへ送られる。
-  //
-  // 開始マーカーしか見ていない場合（`local`）は数えない。単独の `<<<<<<<` は本文にも現れうる
-  // 一方、区切りを伴う並びは本文にはまず現れないので、そこで誤検出と取りこぼしの境目を引く。
-  if (state.phase === "base" || state.phase === "template") {
-    regions.push({ startLine: state.startLine });
-  }
+  // ファイル末尾も打ち切りの一種。走査の途中で起きる打ち切りと同じ規則で数える。
+  const trailing = abandonedStart(state);
+  if (trailing !== undefined) regions.push({ startLine: trailing });
 
   return regions;
 }

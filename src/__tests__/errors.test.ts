@@ -1,6 +1,25 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { FailureReason } from "../errors";
 import { ZikuFailure, describeFailure, zikuFailure } from "../errors";
+
+describe("利用者へ出す文言", () => {
+  // 網羅性検査はケースが存在することしか要求しないので、文言の書き方は担保されない。
+  // ケースを足す人が周りのコメント（日本語）に引きずられて日本語で書いても、型は通る。
+  // ソースを直接見て、ケースを列挙せずに全件を検査する。
+  it("message と hint はすべて英語で書かれている", () => {
+    const source = readFileSync(fileURLToPath(new URL("../errors.ts", import.meta.url)), "utf-8");
+
+    // em dash のような英文で使う記号は許す。仮名・漢字・全角記号だけを見る。
+    const japanese = /[　-〿぀-ゟ゠-ヿ一-鿿＀-￯]/;
+    const offenders = source
+      .split("\n")
+      .filter((line) => /^\s*(message|hint):/.test(line) && japanese.test(line));
+
+    expect(offenders).toEqual([]);
+  });
+});
 
 describe("describeFailure", () => {
   // 各ケースが「何が起きたか」と「次に何をするか」の両方をユーザーに渡すことを確認する。

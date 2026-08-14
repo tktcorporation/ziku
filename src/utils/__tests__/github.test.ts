@@ -253,7 +253,7 @@ describe("createPullRequest", () => {
     });
   });
 
-  it("fork を作れなかったときは、ステータスを持つ元の例外をそのまま投げる", async () => {
+  it("fork を作れなかったときは、権限の問題として分類済みの失敗を投げる", async () => {
     mockReposGet.mockRejectedValue(new Error("Not Found"));
     const denied = apiError(403, "Resource not accessible by personal access token");
     mockReposCreateFork.mockRejectedValue(denied);
@@ -267,9 +267,29 @@ describe("createPullRequest", () => {
       baseBranch: "main",
     }).catch((e: unknown) => e);
 
-    // Effect の FiberFailure に埋もれると、呼び出し側は 403 を権限の問題として案内できない
-    expect(thrown).toBe(denied);
-    expect(classifyGitHubApiFailure(thrown)).toMatchObject({ _tag: "PermissionDenied" });
+    // 分類を呼び出し側に任せると、包み忘れた呼び出し元で「ziku の不具合」として報告される。
+    expect(thrown).toBeInstanceOf(ZikuFailure);
+    expect((thrown as ZikuFailure).reason).toMatchObject({ kind: "GitHubPermissionDenied" });
+    // 原因を捨てないので、ステータスは追える。
+    expect((thrown as ZikuFailure).cause).toBe(denied);
+  });
+
+  it("行動を書けない失敗は文言に潰さず元の例外のまま投げる", async () => {
+    mockReposGet.mockRejectedValue(new Error("Not Found"));
+    const broken = apiError(500, "Internal Server Error");
+    mockReposCreateFork.mockRejectedValue(broken);
+
+    const thrown = await createPullRequest("token", {
+      owner: "owner",
+      repo: "repo",
+      files: [{ path: repoRelPath("file.txt"), content: asPushContent("content") }],
+      title: "Test PR",
+      body: "Test body",
+      baseBranch: "main",
+    }).catch((e: unknown) => e);
+
+    expect(thrown).toBe(broken);
+    expect(classifyGitHubApiFailure(thrown)).toMatchObject({ _tag: "Unclassified" });
   });
 
   it("複数のファイルをコミットする", async () => {

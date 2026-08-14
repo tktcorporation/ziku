@@ -82,7 +82,13 @@ import {
   splitOwnerRepo,
   withReadyFlags,
 } from "./init-plan";
-import type { BlockingExistence, InitOutcome, ProbeGate, UnverifiedExistence } from "./init-plan";
+import type {
+  BlockingExistence,
+  FromArgPlan,
+  InitOutcome,
+  ProbeGate,
+  UnverifiedExistence,
+} from "./init-plan";
 
 // ビルド時に置換される定数
 declare const __VERSION__: string;
@@ -700,7 +706,8 @@ async function resolveTemplateSourceWithCheck(
   nonInteractive: boolean,
   dryRun: boolean,
 ): Promise<GitHubTemplateRef> {
-  if (from) return resolveExplicitSource(from);
+  const fromPlan = planFromArg(from);
+  if (fromPlan._tag !== "Unspecified") return resolveExplicitSource(fromPlan);
 
   const { allCandidates, existingCandidates, deduplicatedCandidates } =
     await discoverTemplateCandidates();
@@ -812,9 +819,14 @@ async function probeSetup<T>(
 /**
  * --from で明示指定されたソースを解決する。
  * owner/repo 形式ならそのまま存在チェック、owner のみならデフォルトリポジトリを探索。
+ *
+ * 読み取り済みの計画を受け取るのは、「指定されたか」の判定を呼び出し側と重複させないため
+ * （{@link planFromArg}）。
  */
-function resolveExplicitSource(from: string): Promise<GitHubTemplateRef> {
-  return match(planFromArg(from))
+function resolveExplicitSource(
+  plan: Exclude<FromArgPlan, { readonly _tag: "Unspecified" }>,
+): Promise<GitHubTemplateRef> {
+  return match(plan)
     .with({ _tag: "Invalid" }, ({ value }): never => {
       throw invalidFromArg(value);
     })
@@ -981,26 +993,20 @@ function invalidFromArg(from: string): ZikuFailure {
  * 存在チェックなしのため、デフォルトリポジトリ候補の先頭を使用する。
  */
 export function resolveTemplateSource(from: string | undefined): GitHubTemplateRef | null {
-  if (from) {
-    return match(planFromArg(from))
-      .with({ _tag: "Repo" }, ({ owner, repo }) => ({ sourceOwner: owner, sourceRepo: repo }))
-      .with({ _tag: "OwnerOnly" }, ({ owner }) => ({
-        sourceOwner: owner,
-        sourceRepo: DEFAULT_TEMPLATE_REPO,
-      }))
-      .with({ _tag: "Invalid" }, ({ value }): never => {
-        throw invalidFromArg(value);
-      })
-      .exhaustive();
-  }
-
-  const detectedOwner = detectGitHubOwner();
-  if (detectedOwner) {
-    return {
-      sourceOwner: detectedOwner,
+  return match(planFromArg(from))
+    .with({ _tag: "Repo" }, ({ owner, repo }) => ({ sourceOwner: owner, sourceRepo: repo }))
+    .with({ _tag: "OwnerOnly" }, ({ owner }) => ({
+      sourceOwner: owner,
       sourceRepo: DEFAULT_TEMPLATE_REPO,
-    };
-  }
-
-  return null;
+    }))
+    .with({ _tag: "Invalid" }, ({ value }): never => {
+      throw invalidFromArg(value);
+    })
+    .with({ _tag: "Unspecified" }, () => {
+      const detectedOwner = detectGitHubOwner();
+      return detectedOwner
+        ? { sourceOwner: detectedOwner, sourceRepo: DEFAULT_TEMPLATE_REPO }
+        : null;
+    })
+    .exhaustive();
 }

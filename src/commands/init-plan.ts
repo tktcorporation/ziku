@@ -45,33 +45,45 @@ export function asNonEmpty<T>(items: readonly T[]): NonEmptyArray<T> | undefined
 
 // ─── 引数の解釈 ───
 
-/** `--from` の読み取り結果。owner だけの指定は既定リポジトリの探索へ回る。 */
+/**
+ * `--from` の読み取り結果。owner だけの指定は既定リポジトリの探索へ回る。
+ *
+ * 「指定されたか」も結果の 1 ケースとして持つ。有無の判定を呼び出し側へ残すと、`--from ""`
+ * を未指定として扱う消費者と不正な値として扱う消費者が並び、前者では自動検出が走って
+ * 意図と違うリポジトリが同期元として記録される。
+ */
 export type FromArgPlan =
+  | { readonly _tag: "Unspecified" }
   | { readonly _tag: "Repo"; readonly owner: string; readonly repo: string }
   | { readonly _tag: "OwnerOnly"; readonly owner: string }
   | { readonly _tag: "Invalid"; readonly value: string };
 
 /**
- * `--from` の値を読む。
+ * `--from` の値を読む。`--from` を解釈する唯一の入口。
  *
  * `owner/repo` はそのリポジトリ 1 つを指す。`owner` だけなら、どの既定リポジトリを使うかは
- * 存在確認をしないと決められないので、リポジトリ名を補わずに owner だけを返す。
- * 区切りが端にある（`owner/` / `/repo`）値は、どちらの形としても読めないので弾く。
+ * 消費者側の事情（存在確認をするか、既定名を補うか）で決まるので、リポジトリ名を補わずに
+ * owner だけを返す。
+ *
+ * 空・空白のみ・端に区切りがある（`owner/` / `/repo`）・区切りが 2 つ以上（`a/b/c`）の値は
+ * 弾く。どれもそのまま渡すと、存在しない owner / repo への問い合わせになる。
  */
-export function planFromArg(from: string): FromArgPlan {
-  const slashIndex = from.indexOf("/");
-  if (slashIndex === -1) {
-    return from.trim() ? { _tag: "OwnerOnly", owner: from } : { _tag: "Invalid", value: from };
-  }
-  if (slashIndex === 0 || slashIndex === from.length - 1) {
-    return { _tag: "Invalid", value: from };
-  }
-  return {
-    _tag: "Repo",
-    owner: from.slice(0, slashIndex),
-    repo: from.slice(slashIndex + 1),
-  };
+export function planFromArg(from: string | undefined): FromArgPlan {
+  if (from === undefined) return { _tag: "Unspecified" };
+
+  return match(from.split("/"))
+    .with([P.string], ([owner]) =>
+      isBlank(owner) ? invalidFrom(from) : { _tag: "OwnerOnly" as const, owner },
+    )
+    .with([P.string, P.string], ([owner, repo]) =>
+      isBlank(owner) || isBlank(repo) ? invalidFrom(from) : { _tag: "Repo" as const, owner, repo },
+    )
+    .otherwise(() => invalidFrom(from));
 }
+
+const isBlank = (value: string): boolean => value.trim() === "";
+
+const invalidFrom = (value: string): FromArgPlan => ({ _tag: "Invalid", value });
 
 /**
  * ユーザーが入力した `owner/repo` を分解する。

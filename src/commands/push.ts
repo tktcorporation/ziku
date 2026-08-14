@@ -703,12 +703,12 @@ export const pushCommand = defineCommand({
     });
 
     const pushArgs: PushArgs = {
-      dryRun: args.dryRun as boolean,
+      dryRun: args.dryRun,
       message: args.message as string | undefined,
-      yes: args.yes as boolean,
-      edit: args.edit as boolean,
+      yes: args.yes,
+      edit: args.edit,
       files: args.files as string | undefined,
-      includeDeletions: args.includeDeletions as boolean,
+      includeDeletions: args.includeDeletions,
     };
 
     // 本体を Effect.promise で包む理由: 本体は Promise を返す I/O を並べるので、失敗は型に

@@ -13,6 +13,7 @@ import { match } from "ts-pattern";
 import pc from "picocolors";
 import type { FileDiff, FileOperationResult } from "../modules/schemas";
 import { summarizeDiff } from "../modules/schemas";
+import { PROJECT_ISSUES_URL } from "../project";
 
 declare const __VERSION__: string;
 const version = typeof __VERSION__ !== "undefined" ? __VERSION__ : "dev";
@@ -187,7 +188,7 @@ const CAUSE_CHAIN_LIMIT = 5;
 export function logUnexpectedError(error: unknown): void {
   p.log.error("Unexpected error — this is a bug in ziku.");
   p.log.message(describeUnexpected(error));
-  p.log.message(pc.dim("Please report it at https://github.com/tktcorporation/ziku/issues"));
+  p.log.message(pc.dim(`Please report it at ${PROJECT_ISSUES_URL}`));
 }
 
 /** エラーとその cause 連鎖を、スタックトレース付きの 1 つのテキストにまとめる。 */

@@ -153,7 +153,7 @@ export const pullCommand = defineCommand({
     if (args.continue) {
       const lock = await runCommandEffect(loadPausedMerge(targetDir));
       await runContinue(targetDir, lock, {
-        dryRun: args.dryRun as boolean,
+        dryRun: args.dryRun,
         flags: approvalFlags,
       });
       return;

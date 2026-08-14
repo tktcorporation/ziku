@@ -275,7 +275,7 @@ export function describeFailure(reason: FailureReason): FailureDisplay {
     }))
     .with({ kind: "GitHubAuthRejected" }, (r) => ({
       message: `GitHub authentication failed: ${r.detail}`,
-      hint: "GITHUB_TOKEN / GH_TOKEN が無効または失効しています。`gh auth login` で再ログインするか、環境変数を更新してください。",
+      hint: "GITHUB_TOKEN / GH_TOKEN is invalid or expired. Run `gh auth login` again, or update the environment variable.",
     }))
     .with({ kind: "GitHubRateLimited" }, (r) => ({
       message: "GitHub API rate limit exceeded",
