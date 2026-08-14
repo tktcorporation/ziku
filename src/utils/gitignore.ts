@@ -48,7 +48,7 @@ export async function loadMergedGitignore(
   dirs: readonly AbsPath[],
   include: readonly GlobPattern[],
 ): Promise<IgnoreDecision> {
-  const { dirs: baseDirs } = getBaseDirsFromPatterns(include);
+  const baseDirs = gitignoreScanRoots(include);
   const perRepository: Ignore[] = [];
 
   for (const dir of dirs) {
@@ -67,6 +67,25 @@ export async function loadMergedGitignore(
 }
 
 /**
+ * `.gitignore` の探索を始めるディレクトリを、include パターンから決める。
+ *
+ * 先頭セグメントが実在のディレクトリ名を指すパターンは、そのディレクトリから下だけを見れば
+ * よい。先頭セグメントが glob の記法を含むパターン（`**\/*.env`、`{services,apps}/**`）は
+ * どこへでも届きうるので、リポジトリ全体を起点にする。展開先をディレクトリ名として
+ * 静的に読むと、その名前のディレクトリは実在せず走査が始まらないため、`services/app/.gitignore`
+ * のような規則が読まれないまま、そのファイルが同期対象に残る。
+ *
+ * ルートを起点にする場合は他の起点を持たない。ルートから辿れば全て含まれる。
+ */
+function gitignoreScanRoots(include: readonly GlobPattern[]): readonly string[] {
+  const { dirs, reachesWholeRepo } = getBaseDirsFromPatterns(include);
+  return reachesWholeRepo ? [REPO_ROOT] : dirs;
+}
+
+/** 走査の起点としてのリポジトリルート。ルートからの相対で表すので空文字列になる。 */
+const REPO_ROOT = "";
+
+/**
  * 走査に入らないディレクトリ名。
  *
  * 依存パッケージと git のオブジェクトデータベースは同期の対象にならないので、その中に
@@ -83,14 +102,15 @@ const UNSCANNED_DIRS: ReadonlySet<string> = new Set([".git", "node_modules"]);
  * 置かれた規則が判定から漏れる。漏れた規則が資格情報を無視していれば、そのファイルは
  * 同期の対象に残り、pull が上書きし push が送る。
  *
- * 探索は include パターンが到達しうるサブツリーに限る（{@link getBaseDirsFromPatterns}）。
- * リポジトリ全体を歩くと、同期の対象にならないディレクトリの走査に実行時間を取られる。
+ * 探索は include パターンが到達しうるサブツリーに限る（{@link gitignoreScanRoots}）。
+ * 同期の対象にならないディレクトリまで歩くと、実行時間をそこに取られる。
  *
- * 戻り値は浅い順。呼び出し側がこの順で規則を足すことで、深い側が浅い側を上書きするという
+ * 戻り値は浅い順で、リポジトリルート自身は含まない（ルートの `.gitignore` は呼び出し側が
+ * 先に読む）。呼び出し側がこの順で規則を足すことで、深い側が浅い側を上書きするという
  * git の規則が、Ignore へ追加する順序として表れる。
  *
  * @param repoDir 走査するリポジトリのルート。
- * @param baseDirs ルートからの相対で表した、走査を始めるサブツリー。
+ * @param baseDirs ルートからの相対で表した、走査を始めるサブツリー。ルート自身は空文字列。
  */
 async function findGitignoreDirs(repoDir: AbsPath, baseDirs: readonly string[]): Promise<string[]> {
   const found: string[] = [];
@@ -106,8 +126,11 @@ async function findGitignoreDirs(repoDir: AbsPath, baseDirs: readonly string[]):
         // リンク先がサブツリーの外なら、そこの `.gitignore` はこのリポジトリの規則ではなく、
         // リンクが循環すれば走査が終わらない。
         const descend = entry.isDirectory() && !UNSCANNED_DIRS.has(entry.name);
-        if (descend) deeper.push(`${rel}/${entry.name}`);
-        else if (!entry.isDirectory() && entry.name === GITIGNORE_FILE) found.push(rel);
+        if (descend) deeper.push(rel === REPO_ROOT ? entry.name : `${rel}/${entry.name}`);
+        // ルートの `.gitignore` は接頭辞を付けずに読むので、ここでは拾わない。
+        else if (rel !== REPO_ROOT && !entry.isDirectory() && entry.name === GITIGNORE_FILE) {
+          found.push(rel);
+        }
       }
     }
     frontier = deeper;

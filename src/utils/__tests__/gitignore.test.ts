@@ -235,6 +235,32 @@ node_modules/
       expect(ig.ignores(repoRelPath(".claude/sub/keep.pem"))).toBe(false);
     });
 
+    it("先頭が `**` のパターンでは、ルートから下の `.gitignore` を読む", async () => {
+      // `**` をディレクトリ名として扱うと、その名前のディレクトリが実在せず走査が始まらない。
+      vol.fromJSON({
+        "/project/services/app/.gitignore": ".env",
+        "/project/services/app/main.ts": "",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns(["**/*.env"]));
+
+      expect(ig.ignores(repoRelPath("services/app/.env"))).toBe(true);
+    });
+
+    it("先頭が波括弧展開のパターンでも、ルートから下の `.gitignore` を読む", async () => {
+      vol.fromJSON({
+        "/project/services/app/.gitignore": ".env",
+        "/project/services/app/main.ts": "",
+      });
+
+      const ig = await loadMergedGitignore(
+        [absPath("/project")],
+        globPatterns(["{services,apps}/**"]),
+      );
+
+      expect(ig.ignores(repoRelPath("services/app/.env"))).toBe(true);
+    });
+
     it("片方のリポジトリの否定規則が、もう片方の無視を打ち消さない", async () => {
       // 規則を 1 つの matcher へ連結すると gitignore の「後の規則が勝つ」順序が働き、
       // ローカルが無視すると決めた資格情報がテンプレート側の否定で同期対象へ戻る。

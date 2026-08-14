@@ -73,29 +73,51 @@ export interface PatternBaseDirs {
   readonly dirs: string[];
   /** リポジトリ直下のファイルを指すパターンがあるか。 */
   readonly hasRootPatterns: boolean;
+  /**
+   * 到達先がリポジトリ全体に及ぶパターンがあるか。
+   *
+   * 先頭セグメントに glob の記法（`**` / `{a,b}` / `*.env` など）を含むパターンは、
+   * どのトップレベルディレクトリへも届きうる。走査の起点をルートに広げないと、
+   * そこから下にある `.gitignore` が読まれない。
+   */
+  readonly reachesWholeRepo: boolean;
 }
+
+/** glob として展開される記法。これを含むセグメントは実在のディレクトリ名として扱えない。 */
+const GLOB_META = /[*?[\]{}()!+@]/;
 
 /**
  * include パターンから、触れうるディレクトリを抽出する。
  *
- * 先頭セグメントだけを見るので、`.claude/**` も `.claude/rules/*.md` も `.claude` に畳まれる。
- * 走査の基点も、`.gitignore` の探索を始める位置も、この粒度で足りる。どちらもここから
- * 下へ辿るので、パターンが実際に届く深さまで畳んでも得るものが無い。
+ * 先頭セグメントが実在のディレクトリ名なら、そこを走査の起点にする。`.claude/**` も
+ * `.claude/rules/*.md` も `.claude` に畳まれる。起点から下へ辿るので、パターンが実際に
+ * 届く深さまで畳んでも得るものが無い。
+ *
+ * 先頭セグメントが glob の記法を含む場合は、ディレクトリ名として読めない。`**` や
+ * `{services,apps}` をそのままディレクトリ名として扱うと、その名前のディレクトリは
+ * 実在しないので走査が始まらず、`services/app/.gitignore` のような規則が読まれないまま
+ * そのファイルが同期対象に残る。展開先を静的に決めることはできないので、リポジトリ全体を
+ * 起点にする。
  */
 export function getBaseDirsFromPatterns(include: readonly GlobPattern[]): PatternBaseDirs {
   const dirs = new Set<string>();
   let hasRootPatterns = false;
+  let reachesWholeRepo = false;
 
   for (const pattern of include) {
     const firstSegment = pattern.split("/")[0];
-    if (pattern.includes("/") && firstSegment) {
-      dirs.add(firstSegment);
-    } else {
+    if (!pattern.includes("/") || !firstSegment) {
       hasRootPatterns = true;
+      continue;
     }
+    if (GLOB_META.test(firstSegment)) {
+      reachesWholeRepo = true;
+      continue;
+    }
+    dirs.add(firstSegment);
   }
 
-  return { dirs: [...dirs], hasRootPatterns };
+  return { dirs: [...dirs], hasRootPatterns, reachesWholeRepo };
 }
 
 /**
