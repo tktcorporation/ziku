@@ -100,7 +100,7 @@ export const initUserLifecycle: CommandLifecycle = {
       file: ZIKU_CONFIG_FILE,
       location: "template",
       op: "read",
-      note: "テンプレートの include パターンを取得",
+      note: "テンプレートの include パターンを取得し、ディレクトリ選択 UI の候補にする",
     },
     {
       file: ZIKU_CONFIG_FILE,

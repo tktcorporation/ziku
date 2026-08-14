@@ -12,26 +12,28 @@ ziku が管理するファイルと、各コマンドでの振る舞いを整理
 graph TB
 
   subgraph Template["Template Repository"]
-    ZIKU_TPL[".ziku/ziku.jsonc"]
-    T_FILES["synced files"]
+    T_ZIKU_ZIKU_JSONC[".ziku/ziku.jsonc"]
+    T_SYNCED_FILES["synced files"]
+    T_README_MD["README.md"]
   end
 
   subgraph User["User Project"]
-    ZIKU[".ziku/ziku.jsonc"]
-    LOCK[".ziku/lock.json"]
-    U_FILES["synced files"]
+    U_ZIKU_ZIKU_JSONC[".ziku/ziku.jsonc"]
+    U_ZIKU_LOCK_JSON[".ziku/lock.json"]
+    U_SYNCED_FILES["synced files"]
   end
 
-  setup([setup]) -->|create| ZIKU_TPL
-  init([init]) -->|read| ZIKU_TPL
-  init -->|create| ZIKU & LOCK & U_FILES
-  push([push]) -->|read| ZIKU & LOCK
-  push -->|update| T_FILES
-  pull([pull]) -->|read| ZIKU & LOCK
-  pull -->|update| U_FILES & ZIKU & LOCK
-  diff([diff]) -.->|read| ZIKU & LOCK & U_FILES
-  status([status]) -.->|read| ZIKU & LOCK & U_FILES
-  track([track]) -.->|update| ZIKU
+  setup([setup]) -->|create| T_ZIKU_ZIKU_JSONC
+  init([init]) -.->|read| T_ZIKU_ZIKU_JSONC
+  init -->|create| U_ZIKU_ZIKU_JSONC & U_ZIKU_LOCK_JSON & U_SYNCED_FILES
+  pull([pull]) -.->|read| U_ZIKU_ZIKU_JSONC & U_ZIKU_LOCK_JSON & T_SYNCED_FILES
+  pull -->|update| U_SYNCED_FILES & U_ZIKU_ZIKU_JSONC & U_ZIKU_LOCK_JSON
+  push([push]) -.->|read| U_ZIKU_ZIKU_JSONC & U_ZIKU_LOCK_JSON & U_SYNCED_FILES & T_SYNCED_FILES
+  push -->|update| U_ZIKU_ZIKU_JSONC & T_SYNCED_FILES & T_ZIKU_ZIKU_JSONC & T_README_MD & U_ZIKU_LOCK_JSON
+  diff([diff]) -.->|read| U_ZIKU_ZIKU_JSONC & U_ZIKU_LOCK_JSON & U_SYNCED_FILES & T_SYNCED_FILES
+  status([status]) -.->|read| U_ZIKU_ZIKU_JSONC & U_ZIKU_LOCK_JSON & U_SYNCED_FILES & T_SYNCED_FILES
+  track([track]) -.->|read| U_ZIKU_ZIKU_JSONC
+  track -->|update| U_ZIKU_ZIKU_JSONC
 
 ```
 
@@ -39,38 +41,44 @@ graph TB
 
 ### `.ziku/ziku.jsonc`
 
-**場所:** 両方（テンプレート + ユーザー）  
 **役割:** 同期対象パターン定義（include/exclude）。テンプレートとユーザーで同一フォーマット
 
-| フェーズ | 詳細                                                                               |
-| -------- | ---------------------------------------------------------------------------------- |
-| 生成     | `ziku setup` でデフォルトパターンを含む初期ファイルをテンプレートに作成            |
-| 読み取り | `ziku init` でテンプレートのパターンを読み、ディレクトリ選択 UI のデータとして使用 |
-| 生成     | `ziku init` で選択結果をユーザープロジェクトに保存                                 |
-| 読み取り | `pull` / `push` / `diff` でパターンを取得                                          |
-| 更新     | `ziku track` で新しいパターンを追加                                                |
+| 操作     | 場所     | コマンド                                  |
+| -------- | -------- | ----------------------------------------- |
+| 読み取り | template | `init`                                    |
+| 読み取り | local    | `pull`, `push`, `diff`, `status`, `track` |
+| 作成     | template | `setup`                                   |
+| 作成     | local    | `init`                                    |
+| 更新     | template | `push`                                    |
+| 更新     | local    | `pull`, `push`, `track`                   |
 
 ### `.ziku/lock.json`
 
-**場所:** ユーザープロジェクト  
 **役割:** 同期状態 + ソース情報（source, sync, base, merge）
 
-| フェーズ | 詳細                                                                   |
-| -------- | ---------------------------------------------------------------------- |
-| 生成     | `ziku init` でソース情報 + テンプレートのコミット SHA とハッシュを記録 |
-| 読み取り | `pull` / `push` / `diff` でソースと前回同期状態との差分検出に使用      |
-| 更新     | `ziku pull` で最新のベースに更新                                       |
+| 操作     | 場所  | コマンド                         |
+| -------- | ----- | -------------------------------- |
+| 読み取り | local | `pull`, `push`, `diff`, `status` |
+| 作成     | local | `init`                           |
+| 更新     | local | `pull`, `push`                   |
 
 ### synced files
 
-**場所:** 両方  
 **役割:** パターンに一致する実際のファイル群（.claude/rules/\*.md など）
 
-| フェーズ | 詳細                                                     |
-| -------- | -------------------------------------------------------- |
-| 生成     | `ziku init` でテンプレートからコピー                     |
-| 更新     | `ziku pull` で 3-way マージにより同期                    |
-| 更新     | `ziku push` でローカル変更を PR としてテンプレートに送信 |
+| 操作     | 場所     | コマンド                         |
+| -------- | -------- | -------------------------------- |
+| 読み取り | template | `pull`, `push`, `diff`, `status` |
+| 読み取り | local    | `push`, `diff`, `status`         |
+| 作成     | local    | `init`                           |
+| 更新     | template | `push`                           |
+| 更新     | local    | `pull`                           |
+
+### `README.md`
+
+| 操作 | 場所     | コマンド |
+| ---- | -------- | -------- |
+| 更新 | template | `push`   |
 
 ## コマンドごとのファイル操作
 
@@ -86,12 +94,12 @@ Initialize a template repository
 
 Initialize user project from template
 
-| 操作     | ファイル           | 場所     | 詳細                                               |
-| -------- | ------------------ | -------- | -------------------------------------------------- |
-| 読み取り | `.ziku/ziku.jsonc` | template | テンプレートの include パターンを取得              |
-| 作成     | `.ziku/ziku.jsonc` | local    | 選択パターンを保存                                 |
-| 作成     | `.ziku/lock.json`  | local    | ソース情報 + ベースコミット SHA + ハッシュを記録   |
-| 作成     | synced files       | local    | テンプレートからパターンに一致するファイルをコピー |
+| 操作     | ファイル           | 場所     | 詳細                                                                      |
+| -------- | ------------------ | -------- | ------------------------------------------------------------------------- |
+| 読み取り | `.ziku/ziku.jsonc` | template | テンプレートの include パターンを取得し、ディレクトリ選択 UI の候補にする |
+| 作成     | `.ziku/ziku.jsonc` | local    | 選択パターンを保存                                                        |
+| 作成     | `.ziku/lock.json`  | local    | ソース情報 + ベースコミット SHA + ハッシュを記録                          |
+| 作成     | synced files       | local    | テンプレートからパターンに一致するファイルをコピー                        |
 
 ### `pull`
 
