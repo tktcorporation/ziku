@@ -1,7 +1,13 @@
 import { vol } from "memfs";
 import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { FileNotFoundError, ZikuFailure, zikuFailure } from "../../errors";
+import {
+  DefaultBranchUnresolvedError,
+  FileNotFoundError,
+  GitHubAuthRejectedError,
+  ZikuFailure,
+  zikuFailure,
+} from "../../errors";
 import type {
   AbsPath,
   CommitSha,
@@ -228,8 +234,16 @@ const { classifyFiles, mergeOneFile, downloadBaseForMerge } = await import("../.
 // マージ結果の判定は本物を使う（"../../utils/merge" のモックは index 経由の import だけを
 // 置き換えるので、実装モジュールを直接読み込めば素の関数が得られる）。
 const { classifyMergeOutcome } = await import("../../utils/merge/types");
-const { absPath, commitSha, globPatterns, hashMap, pendingConflict, repoRelPath, repoRelPaths } =
-  await import("../../__tests__/brands");
+const {
+  absPath,
+  commitSha,
+  globPatterns,
+  hashMap,
+  pendingConflict,
+  repoRelPath,
+  repoRelPaths,
+  resolvedTemplate,
+} = await import("../../__tests__/brands");
 const mockWriteFile = vi.mocked(writeFile);
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
 const mockDetectDiff = vi.mocked(detectDiff);
@@ -313,15 +327,23 @@ function mockContext(overrides?: {
   lock?: LockState;
   source?: TemplateSource;
   templateDir?: AbsPath;
+  /** ref を持たない GitHub ソースで、取得先として決着した既定ブランチ名。 */
+  defaultBranch?: string;
 }) {
   const cleanup = vi.fn();
   const source = overrides?.source ?? githubSource;
+  const templateDir = overrides?.templateDir ?? absPath("/tmp/template");
   return {
     effect: Effect.succeed({
       config: overrides?.config ?? validZikuConfig,
       lock: overrides?.lock ?? validLock,
       source,
-      templateDir: overrides?.templateDir ?? absPath("/tmp/template"),
+      resolved: resolvedTemplate({
+        source,
+        dir: templateDir,
+        defaultBranch: overrides?.defaultBranch,
+      }),
+      templateDir,
       cleanup,
       resolveBaseRef: Effect.succeed(Option.none<CommitSha>()),
     }),
@@ -1081,12 +1103,14 @@ describe("pushCommand", () => {
       expect([...(selectOptions?.restoresTemplateDeletion ?? [])]).toEqual(["edited.md"]);
     });
 
-    it("既定ブランチが master のテンプレートには master 宛の PR を出す", async () => {
+    it("既定ブランチが master のテンプレートには master 宛の PR を出し、引き直さない", async () => {
+      const { effect } = mockContext({ defaultBranch: "master" });
+      mockLoadCommandContext.mockReturnValue(effect);
+
       setupPushableFiles([
         { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
       ]);
       mockGetGitHubToken.mockReturnValue("ghp_token");
-      mockFetchDefaultBranch.mockResolvedValueOnce({ _tag: "Resolved", name: "master" });
       mockCreatePullRequest.mockResolvedValueOnce({
         url: "https://github.com/owner/repo/pull/1",
         branch: "update-template-123",
@@ -1100,55 +1124,16 @@ describe("pushCommand", () => {
       });
 
       expect(mockCreatePullRequest.mock.calls[0]?.[1]).toMatchObject({ baseBranch: "master" });
+      // 既定ブランチの問い合わせはテンプレートの取得先を決めるときの 1 回だけ（ここでは
+      // loadCommandContext がモックなので 0 回）。push が宛先のために引き直すと、1 回の実行で
+      // 同じ問い合わせが二度走り、未認証の 60 req/h を用途の数だけ消費する。
+      expect(mockFetchDefaultBranch).not.toHaveBeenCalled();
     });
 
-    it("レート制限では、控えた既定ブランチ宛の PR を出して実行を続ける", async () => {
-      const recordedSource: TemplateSource = { ...githubSource, defaultBranch: "master" };
-      const { effect } = mockContext({
-        source: recordedSource,
-        lock: lockWith({ source: recordedSource }),
-      });
-      mockLoadCommandContext.mockReturnValue(effect);
-
-      setupPushableFiles([
-        { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
-      ]);
-      mockGetGitHubToken.mockReturnValue("ghp_token");
-      mockFetchDefaultBranch.mockResolvedValueOnce({
-        _tag: "Unresolved",
-        reason: "API rate limit exceeded",
-      });
-      mockCreatePullRequest.mockResolvedValueOnce({
-        url: "https://github.com/owner/repo/pull/1",
-        branch: "update-template-123",
-        number: 1,
-      });
-
-      await (pushCommand.run as any)({
-        args: { dir: "/test", dryRun: false, yes: true, edit: false },
-        rawArgs: [],
-        cmd: pushCommand,
-      });
-
-      expect(mockCreatePullRequest.mock.calls[0]?.[1]).toMatchObject({ baseBranch: "master" });
-    });
-
-    it("トークンを拒否されたら、控えがあっても PR を作らずトークンの直し方を案内する", async () => {
-      const recordedSource: TemplateSource = { ...githubSource, defaultBranch: "master" };
-      const { effect } = mockContext({
-        source: recordedSource,
-        lock: lockWith({ source: recordedSource }),
-      });
-      mockLoadCommandContext.mockReturnValue(effect);
-
-      setupPushableFiles([
-        { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
-      ]);
-      mockGetGitHubToken.mockReturnValue("ghp_token");
-      mockFetchDefaultBranch.mockResolvedValueOnce({
-        _tag: "AuthRejected",
-        detail: "Bad credentials",
-      });
+    it("トークンを拒否されたら PR を作らずトークンの直し方を案内する", async () => {
+      mockLoadCommandContext.mockReturnValue(
+        Effect.fail(new GitHubAuthRejectedError({ detail: "Bad credentials" })),
+      );
 
       await expect(
         (pushCommand.run as any)({
@@ -1164,14 +1149,15 @@ describe("pushCommand", () => {
     });
 
     it("既定ブランチを引けず控えも無ければ PR を作らず、宛先の決め方を案内する", async () => {
-      setupPushableFiles([
-        { path: repoRelPath("file.txt"), type: "added", localContent: "content" },
-      ]);
-      mockGetGitHubToken.mockReturnValue("ghp_token");
-      mockFetchDefaultBranch.mockResolvedValueOnce({
-        _tag: "Unresolved",
-        reason: "API rate limit exceeded",
-      });
+      mockLoadCommandContext.mockReturnValue(
+        Effect.fail(
+          new DefaultBranchUnresolvedError({
+            owner: "tktcorporation",
+            repo: ".github",
+            detail: "API rate limit exceeded",
+          }),
+        ),
+      );
 
       await expect(
         (pushCommand.run as any)({

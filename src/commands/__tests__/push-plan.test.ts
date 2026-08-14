@@ -11,14 +11,8 @@ import { classifyMergeOutcome } from "../../utils/merge/types";
 import type { SyncPlan, ZikuConfigState } from "../../utils/merge/sync-plan";
 import { partitionSyncPlan } from "../../utils/merge/sync-plan";
 import type { ConfigDrift } from "../../utils/config-merge";
-import type { DefaultBranchResolution } from "../../utils/github";
-import type {
-  DeletablePath,
-  FileDiff,
-  GitHubSource,
-  PushContent,
-  RepoRelPath,
-} from "../../modules/schemas";
+import type { PinnedGitHubSource } from "../../utils/template-resolve";
+import type { DeletablePath, FileDiff, PushContent, RepoRelPath } from "../../modules/schemas";
 import { asDeletablePath, asPushContent, mergedAsPushContent } from "../../modules/schemas";
 import { classifySyncPath } from "../../utils/ziku-config";
 import {
@@ -143,26 +137,10 @@ function paths(files: readonly { path: RepoRelPath }[]): string[] {
   return files.map((f) => f.path);
 }
 
-function source(ref?: GitHubSource["ref"]): GitHubSource {
+/** テンプレートの取得に使った参照が決まった状態のソース。 */
+function pinnedSource(ref: PinnedGitHubSource["ref"]): PinnedGitHubSource {
   return { kind: "github", owner: "o", repo: "r", ref };
 }
-
-/** 既定ブランチを引けた問い合わせ結果。 */
-function fetched(name: string): DefaultBranchResolution {
-  return { _tag: "Resolved", name };
-}
-
-/** レート制限のように、待てば直る失敗で終わった問い合わせ結果。 */
-const RATE_LIMITED: DefaultBranchResolution = {
-  _tag: "Unresolved",
-  reason: "API rate limit exceeded",
-};
-
-/** トークンを拒否された問い合わせ結果。 */
-const AUTH_REJECTED: DefaultBranchResolution = {
-  _tag: "AuthRejected",
-  detail: "Bad credentials",
-};
 
 describe("planPushCandidates", () => {
   it("ローカル側に伝えるものがある分類を送信候補にする", () => {
@@ -955,60 +933,21 @@ describe("patternsToPersist", () => {
 });
 
 describe("resolvePrBaseBranch", () => {
-  it("ref を持たないソースは引けた既定ブランチへ向ける", () => {
-    expect(resolvePrBaseBranch(source(), fetched("master"))).toEqual({
+  it("取得に使ったブランチをそのまま宛先にする", () => {
+    // ref 未指定のソースでは、既定ブランチとして決着した名前がここに入っている。
+    expect(resolvePrBaseBranch(pinnedSource({ kind: "branch", name: "master" }))).toEqual({
       _tag: "Branch",
       name: "master",
-    });
-  });
-
-  it("待てば直る失敗では、控えた既定ブランチを宛先にする", () => {
-    const recorded = { ...source(), defaultBranch: "master" };
-
-    expect(resolvePrBaseBranch(recorded, RATE_LIMITED)).toEqual({
-      _tag: "Branch",
-      name: "master",
-    });
-  });
-
-  it("トークンを拒否されたら、控えがあっても宛先にしない", () => {
-    const recorded = { ...source(), defaultBranch: "master" };
-
-    expect(resolvePrBaseBranch(recorded, AUTH_REJECTED)).toEqual({
-      _tag: "AuthRejected",
-      detail: "Bad credentials",
-    });
-  });
-
-  it("引けず控えも無ければ宛先を決めない（main を仮定しない）", () => {
-    expect(resolvePrBaseBranch(source(), RATE_LIMITED)).toEqual({
-      _tag: "DefaultBranchUnresolved",
-    });
-  });
-
-  it("既定ブランチを問い合わせていなければ宛先を決めない", () => {
-    expect(resolvePrBaseBranch(source(), undefined)).toEqual({ _tag: "DefaultBranchUnresolved" });
-  });
-
-  it("ブランチ指定は既定ブランチより優先される", () => {
-    expect(
-      resolvePrBaseBranch(source({ kind: "branch", name: "develop" }), fetched("master")),
-    ).toEqual({
-      _tag: "Branch",
-      name: "develop",
     });
   });
 
   it("タグ・コミット固定は PR の宛先にできない", () => {
-    expect(resolvePrBaseBranch(source({ kind: "tag", name: "v1.0.0" }), fetched("main"))).toEqual({
+    expect(resolvePrBaseBranch(pinnedSource({ kind: "tag", name: "v1.0.0" }))).toEqual({
       _tag: "UnsupportedRef",
       kind: "tag",
     });
     expect(
-      resolvePrBaseBranch(
-        source({ kind: "commit", sha: commitSha("a".repeat(40)) }),
-        fetched("main"),
-      ),
+      resolvePrBaseBranch(pinnedSource({ kind: "commit", sha: commitSha("a".repeat(40)) })),
     ).toEqual({ _tag: "UnsupportedRef", kind: "commit" });
   });
 });

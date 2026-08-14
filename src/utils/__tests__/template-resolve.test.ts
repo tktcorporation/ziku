@@ -37,7 +37,7 @@ vi.mock("@octokit/rest", () => ({
 const { absPath } = await import("../../__tests__/brands");
 const { DefaultBranchUnresolvedError, GitHubAuthRejectedError } = await import("../../errors");
 const { resolvePrBaseBranch } = await import("../../commands/push-plan");
-const { fetchDefaultBranch, resolveSourceCommit } = await import("../github");
+const { resolveSourceCommit } = await import("../github");
 const { resolveTemplateDirScoped } = await import("../template-resolve");
 const { _resetForTest } = await import("../temp-tracker");
 const giget = await import("giget");
@@ -92,17 +92,25 @@ describe("resolveTemplateDirScoped の取得先ブランチ", () => {
     mockReposGet.mockResolvedValue({ data: { default_branch: "master" } });
     globalThis.fetch = vi.fn().mockResolvedValue(shaResponse("sha-master"));
 
-    const fetched = await fetchedSourceString(source);
-    const recorded = await resolveSourceCommit(source.owner, source.repo, source.ref);
-    const prBase = resolvePrBaseBranch(source, await fetchDefaultBranch(source.owner, source.repo));
+    const resolved = await Effect.runPromise(
+      Effect.scoped(resolveTemplateDirScoped(source, targetDir)),
+    );
+    expect(resolved.kind).toBe("github");
+    if (resolved.kind !== "github") return;
+    const recorded = await resolveSourceCommit(source.owner, source.repo, resolved.pinned.ref);
+    const prBase = resolvePrBaseBranch(resolved.pinned);
 
-    expect(fetched).toBe("gh:tktcorporation/.github#master");
+    expect(vi.mocked(giget.downloadTemplate).mock.calls[0]?.[0]).toBe(
+      "gh:tktcorporation/.github#master",
+    );
     expect(recorded).toEqual({ _tag: "Resolved", sha: "sha-master" });
     expect(globalThis.fetch).toHaveBeenCalledWith(
       "https://api.github.com/repos/tktcorporation/.github/commits/master",
       expect.anything(),
     );
     expect(prBase).toEqual({ _tag: "Branch", name: "master" });
+    // 3 つの用途が同じ解決を共有するので、既定ブランチの問い合わせは 1 回で足りる。
+    expect(mockReposGet).toHaveBeenCalledTimes(1);
   });
 
   it("source.ref のブランチから取得し、既定ブランチは問い合わせない", async () => {
@@ -155,16 +163,17 @@ describe("resolveTemplateDirScoped の取得先ブランチ", () => {
 
   it("控えへ倒したとき、PR の宛先も同じ控えたブランチを指す", async () => {
     mockReposGet.mockRejectedValue(rateLimited());
-    const recorded = { ...source, defaultBranch: "master" };
 
-    const fetched = await fetchedSourceString(recorded);
-    const prBase = resolvePrBaseBranch(
-      recorded,
-      await fetchDefaultBranch(recorded.owner, recorded.repo),
+    const resolved = await Effect.runPromise(
+      Effect.scoped(resolveTemplateDirScoped({ ...source, defaultBranch: "master" }, targetDir)),
     );
+    expect(resolved.kind).toBe("github");
+    if (resolved.kind !== "github") return;
 
-    expect(fetched).toBe("gh:tktcorporation/.github#master");
-    expect(prBase).toEqual({ _tag: "Branch", name: "master" });
+    expect(vi.mocked(giget.downloadTemplate).mock.calls[0]?.[0]).toBe(
+      "gh:tktcorporation/.github#master",
+    );
+    expect(resolvePrBaseBranch(resolved.pinned)).toEqual({ _tag: "Branch", name: "master" });
   });
 
   it("控えへ倒しても、取得したツリーと SHA を引く ref は同じブランチを指す", async () => {
@@ -243,7 +252,11 @@ describe("resolveTemplateDirScoped の取得先ブランチ", () => {
       ),
     );
 
-    expect(resolved).toEqual({ kind: "local", dir: "/tmp/tpl" });
+    expect(resolved).toEqual({
+      kind: "local",
+      dir: "/tmp/tpl",
+      source: { kind: "local", path: "/tmp/tpl" },
+    });
     expect(mockReposGet).not.toHaveBeenCalled();
     expect(giget.downloadTemplate).not.toHaveBeenCalled();
   });

@@ -40,9 +40,10 @@ export interface MergedTemplatePatterns {
  *
  * - `ziku.jsonc` が無い: まだ ziku を使っていないテンプレートという正当な状態。追加分ゼロ
  *   として扱い、ローカルのパターンだけが残る。
- * - 構文が壊れている: 空へ潰さず中断する。潰すと「テンプレートは何も同期対象と定めていない」
- *   という読みが走査範囲になり、テンプレートが追跡しているファイルが分類にも差分にも現れない
- *   まま、同期済みとして報告される。テキストは人が直せるので、直すまで待っても何も失われない。
+ * - 構文が壊れている / ziku の設定として解釈できない: 空へ潰さず中断する。潰すと「テンプレートは
+ *   何も同期対象と定めていない」という読みが走査範囲になり、テンプレートが追跡しているファイルが
+ *   分類にも差分にも現れないまま、同期済みとして報告される。テキストは人が直せるので、直すまで
+ *   待っても何も失われない。構文の破綻とスキーマ違反は、直す箇所が違うので別の失敗として報告する。
  *
  * 失敗は `ZikuFailure` を throw して返す（`src/utils/config-merge.ts` と同じ経路）。呼び出し元は
  * Effect ではない async 関数の連なりで、その先はコマンド層が defect ごと拾ってトップレベルへ運ぶ。
@@ -69,6 +70,9 @@ export async function mergeTemplatePatterns(
             { kind: "ConfigUnparsable", path: e.path, detail: String(e.cause) },
             { cause: e.cause },
           );
+        })
+        .with({ _tag: "ValidationError" }, (e): never => {
+          throw zikuFailure({ kind: "ConfigInvalid", path: e.path, issues: e.issues });
         })
         .exhaustive(),
   });

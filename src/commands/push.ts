@@ -9,7 +9,6 @@ import { ZikuFailure, zikuFailure } from "../errors";
 import type {
   AbsPath,
   FileDiff,
-  GitHubSource,
   GlobPattern,
   LocalSource,
   LockState,
@@ -47,6 +46,7 @@ import {
   findLocalOnlyPatternsForPaths,
 } from "../utils/config-merge";
 import type { CommandContextShape } from "../services/command-context";
+import type { PinnedGitHubSource } from "../utils/template-resolve";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 import {
@@ -67,7 +67,6 @@ import { detectDiff } from "../utils/diff";
 import {
   classifyGitHubApiFailure,
   createPullRequest,
-  fetchDefaultBranch,
   getGitHubToken,
   githubApiFailure,
 } from "../utils/github";
@@ -259,44 +258,22 @@ function errnoStringOf(cause: unknown, key: "code" | "path"): string | undefined
 /**
  * PR の宛先ブランチを決め、ブランチへ向けられないソースは失敗として返す。
  *
- * 宛先が定まらない 3 通りは、ユーザーが取る行動が違うので別の失敗にする。タグ・コミットへ
- * 固定されたテンプレートは lock を直せば解決し、トークンを拒否された場合はトークンを入れ直す
- * ことになり、既定ブランチを引けず控えも無い場合は到達性（ネットワーク）を疑うか宛先を
- * 明示することになる。
+ * 宛先はテンプレートの取得に使った参照から導く（{@link resolvePrBaseBranch}）。GitHub への
+ * 既定ブランチの問い合わせはテンプレートの取得先を決めるときに済んでおり、その結果が
+ * `pinned.ref` に入っているので、push は引き直さない。引き直すと 1 回の実行で同じ問い合わせが
+ * 二度走り、控えへ倒れるかが問い合わせごとに変わりうる。
  *
- * 問い合わせ結果を潰さずに渡すのは、引けなかった理由で宛先の決まり方が変わるため
- * （{@link resolvePrBaseBranch}）。レート制限のように待てば直る失敗では lock に控えた既定
- * ブランチ名が宛先になり、テンプレートの取得が控えへ倒れて続行できる実行で PR だけが
- * 作れない状態を作らない。
- *
- * 既定ブランチの問い合わせは ref を持たないソースだけに要る。ブランチ指定済み・タグ /
- * コミット固定のソースでは結果を使わないので、API を呼ばない。
+ * 失敗になるのはタグ・コミットへ固定されたテンプレートだけで、ユーザーは lock の `source.ref`
+ * を直すことになる。既定ブランチが分からない実行はテンプレートの取得自体が失敗するので、
+ * ここまで到達しない。
  */
-function prBaseBranch(source: GitHubSource): Effect.Effect<string, ZikuFailure> {
-  return Effect.gen(function* () {
-    const defaultBranchLookup =
-      source.ref === undefined
-        ? yield* Effect.promise(() => fetchDefaultBranch(source.owner, source.repo))
-        : undefined;
-
-    return yield* match(resolvePrBaseBranch(source, defaultBranchLookup))
-      .with({ _tag: "Branch" }, ({ name }) => Effect.succeed(name))
-      .with({ _tag: "UnsupportedRef" }, ({ kind }) =>
-        Effect.fail(zikuFailure({ kind: "TemplateRefNotBranch", refKind: kind })),
-      )
-      .with({ _tag: "AuthRejected" }, ({ detail }) =>
-        Effect.fail(zikuFailure({ kind: "GitHubAuthRejected", detail })),
-      )
-      .with({ _tag: "DefaultBranchUnresolved" }, () =>
-        Effect.fail(
-          zikuFailure({
-            kind: "DefaultBranchUnresolved",
-            repo: `${source.owner}/${source.repo}`,
-          }),
-        ),
-      )
-      .exhaustive();
-  });
+function prBaseBranch(pinned: PinnedGitHubSource): Effect.Effect<string, ZikuFailure> {
+  return match(resolvePrBaseBranch(pinned))
+    .with({ _tag: "Branch" }, ({ name }) => Effect.succeed(name))
+    .with({ _tag: "UnsupportedRef" }, ({ kind }) =>
+      Effect.fail(zikuFailure({ kind: "TemplateRefNotBranch", refKind: kind })),
+    )
+    .exhaustive();
 }
 
 /**
@@ -308,7 +285,7 @@ function prBaseBranch(source: GitHubSource): Effect.Effect<string, ZikuFailure> 
  *   呼び出し側はこの結果で「追跡の永続化を行うか」を判断する（push 成功後のみ永続化する）。
  */
 function pushToGitHub(
-  ghSource: GitHubSource,
+  ghSource: PinnedGitHubSource,
   target: PushSend,
   ctx: CommandContextShape,
   args: { message?: string; edit?: boolean; yes?: boolean },
@@ -866,18 +843,21 @@ async function pushProject(params: {
   if (target === undefined) return;
 
   // ─── 分岐: ソース種別に応じた push 戦略 (ts-pattern + Effect) ───
+  //
+  // 分岐は解決済みの取得先（`ctx.resolved`）で行う。lock の source で分岐すると、GitHub への
+  // push が取得に使った参照を持たず、PR の宛先を決めるために既定ブランチを引き直すことになる。
   const pushed = await runCommandEffect(
-    match(ctx.source)
-      .with({ kind: "github" }, (ghSource) =>
-        pushToGitHub(ghSource, target, ctx, {
+    match(ctx.resolved)
+      .with({ kind: "github" }, (resolved) =>
+        pushToGitHub(resolved.pinned, target, ctx, {
           message: args.message,
           edit: args.edit,
           yes: args.yes,
         }),
       )
-      .with({ kind: "local" }, (localSource) =>
+      .with({ kind: "local" }, (resolved) =>
         pushToLocal({
-          localSource,
+          localSource: resolved.source,
           target,
           ctx,
           projectDir: targetDir,

@@ -20,16 +20,12 @@
  * トレードオフ: パターンの「削除」は自動伝播しない（明示的に各 ziku.jsonc を編集する必要が
  * ある）。これは安全性とのトレードオフとして受け入れる。
  */
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { match } from "ts-pattern";
 import { zikuFailure } from "../errors";
 import type { AbsPath, GlobPattern, RepoRelPath } from "../modules/schemas";
-import { describeSchemaIssues, zikuConfigSchema } from "../modules/schemas";
-import { parseJsonc } from "./jsonc";
 import { joinAbs, selectPatternsMatchingPaths } from "./paths";
 import { unionPatterns } from "./patterns";
-import { ZIKU_CONFIG_FILE, generateZikuJsonc, withPatterns } from "./ziku-config";
+import { ZIKU_CONFIG_FILE, generateZikuJsonc, readZikuConfig, withPatterns } from "./ziku-config";
 
 export interface ConfigPatterns {
   readonly include: readonly GlobPattern[];
@@ -71,12 +67,11 @@ interface ConfigDocument {
  * 指定ディレクトリの `.ziku/ziku.jsonc` を読む。
  * ファイルが無ければ undefined（base が無いケースの判定に使う）。
  *
- * 内容は構文（{@link parseJsonc}）とスキーマ（`zikuConfigSchema`）の両方を通す。構文だけを
- * 見て値をキャストで通すと、`"include": "a"` や `"include": [1]` のようにスキーマだけを
- * 破った設定が、パターン列を組み立てる時点の型エラー（`map is not a function`）や、数値を
- * glob として扱う同期として現れる。どちらも分類済みの失敗にならず、利用者はどのファイルの
- * どこが悪いか分からないまま止まる。境界で parse すれば、直すべき箇所を持った
- * `ConfigInvalid` として報告できる。
+ * 読み取りと失敗の分類は {@link readZikuConfig} が持ち、ここはその結果を `ZikuFailure` へ
+ * 写すだけにする。構文だけを見て値をキャストで通すと、`"include": "a"` や `"include": [1]`
+ * のようにスキーマだけを破った設定が、パターン列を組み立てる時点の型エラー
+ * （`map is not a function`）や、数値を glob として扱う同期として現れる。どちらも分類済みの
+ * 失敗にならず、利用者はどのファイルのどこが悪いか分からないまま止まる。
  *
  * 構文が壊れていれば、ユーザーが手で直せる失敗として報告して中断する。パターン無しとして
  * 扱わないのは、ここで読んだ内容が union の入力であると同時に、{@link renderUnionInto} が
@@ -96,30 +91,20 @@ interface ConfigDocument {
  */
 async function readConfigAt(dir: AbsPath): Promise<ConfigDocument | undefined> {
   const path = joinAbs(dir, ZIKU_CONFIG_FILE);
-  if (!existsSync(path)) return undefined;
-  const raw = await readFile(path, "utf-8");
 
-  // ディスク上の JSONC はスキーマを通っていない生の値。ここがパターンの brand 入口になる。
-  const document = match(parseJsonc(raw))
-    .with({ kind: "parsed" }, ({ value }) => value)
-    .with({ kind: "unparsable" }, ({ detail }): never => {
+  return match(await readZikuConfig(dir))
+    .with({ _tag: "NotFound" }, () => undefined)
+    .with({ _tag: "Unparsable" }, ({ detail }): never => {
       throw zikuFailure({ kind: "ConfigUnparsable", path, detail });
     })
+    .with({ _tag: "Invalid" }, ({ issues }): never => {
+      throw zikuFailure({ kind: "ConfigInvalid", path, issues });
+    })
+    .with({ _tag: "Ok" }, ({ raw, config }) => ({
+      raw,
+      patterns: { include: config.include, exclude: config.exclude ?? [] },
+    }))
     .exhaustive();
-
-  const parsed = zikuConfigSchema.safeParse(document);
-  if (!parsed.success) {
-    throw zikuFailure({
-      kind: "ConfigInvalid",
-      path,
-      issues: describeSchemaIssues(parsed.error),
-    });
-  }
-
-  return {
-    raw,
-    patterns: { include: parsed.data.include, exclude: parsed.data.exclude ?? [] },
-  };
 }
 
 /**

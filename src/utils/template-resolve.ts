@@ -10,7 +10,13 @@
 import { Effect } from "effect";
 import type { Scope } from "effect";
 import { match } from "ts-pattern";
-import type { AbsPath, GitHubSource, TemplateRef, TemplateSource } from "../modules/schemas";
+import type {
+  AbsPath,
+  GitHubSource,
+  LocalSource,
+  TemplateRef,
+  TemplateSource,
+} from "../modules/schemas";
 import type { TemplateError } from "../errors";
 import { DefaultBranchUnresolvedError, GitHubAuthRejectedError } from "../errors";
 import { log } from "../ui/renderer";
@@ -51,14 +57,15 @@ export interface GitHubFetchTarget {
  *
  * 埋める理由: テンプレートの取得先は、同じ実行の中で決まる他の 2 つと同じブランチでなければ
  * 意味を持たない。lock の `base.ref` に記録するコミット SHA（`resolveSourceCommit`）と、
- * push が PR を向ける宛先ブランチ（`resolvePrBaseBranch`）は、どちらも「リポジトリの既定
- * ブランチ」を見る。ref を落として giget に任せると giget の既定である `main` から取得され、
- * 既定ブランチが `master` のリポジトリでは差分比較のツリーだけが別のブランチを指す。
+ * push が PR を向ける宛先ブランチ（`resolvePrBaseBranch`）は、どちらもここで確定した `pinned`
+ * から導く。ref を落として giget に任せると giget の既定である `main` から取得され、既定
+ * ブランチが `master` のリポジトリでは差分比較のツリーだけが別のブランチを指す。
  *
- * 引けなかったときにどこまで進むかは {@link decideDefaultBranch} が決める。取得先の決定と
- * PR の宛先の決定が同じ規則で動くので、片方だけが控えへ倒れることはない。取得を止める失敗は
- * 種別ごとに別のエラーへ写す（トークン拒否は人がトークンを直すまで、控えの不在は宛先を明示
- * するまで解消しない）。
+ * 既定ブランチを GitHub へ問い合わせるのはこの関数だけにする。同じ実行で二度引くと、控えへ
+ * 倒れるかどうかが問い合わせごとに変わりうるうえ、未認証で 60 req/h しかない予算を用途の
+ * 数だけ消費する。引けなかったときにどこまで進むかは {@link decideDefaultBranch} が決める。
+ * 取得を止める失敗は種別ごとに別のエラーへ写す（トークン拒否は人がトークンを直すまで、控えの
+ * 不在は宛先を明示するまで解消しない）。
  *
  * 控えへ倒しても取得したツリーと記録する参照は食い違わない。`pinned.ref` は控えのブランチ名で
  * 埋まり、ベースの SHA も呼び出し側が同じ `pinned` で引く。SHA まで引けなければ lock の
@@ -117,9 +124,18 @@ function pinnedToBranch(gh: GitHubSource, name: string): PinnedGitHubSource {
  * GitHub ソースだけが `pinned` と `defaultBranch` を持つ。ローカルソースには取得先の ref も
  * 既定ブランチも無く、共通の形にすると「ローカルソースなのに ref がある」状態を呼び出し側が
  * 場当たりに潰すことになる。
+ *
+ * 取得元（`source` / `pinned`）も同じ値に載せる理由: ソース種別で処理を分ける呼び出し側が、
+ * 取得元と解決結果を別々に分岐せずに済む。別々に分岐すると「GitHub ソースなのにローカルの
+ * 解決結果」という組み合わせが型として残り、呼び出し側がそれを場当たりに潰すことになる。
  */
 export type ResolvedTemplate =
-  | { readonly kind: "local"; readonly dir: AbsPath }
+  | {
+      readonly kind: "local";
+      readonly dir: AbsPath;
+      /** lock に載っている取得元そのもの。`dir` はこれを絶対パスへ直した読み書きの基点。 */
+      readonly source: LocalSource;
+    }
   | {
       readonly kind: "github";
       readonly dir: AbsPath;
@@ -165,7 +181,7 @@ export function resolveTemplateDirScoped(
       // lock.json は手で書き換えられるので、載っているパスが絶対とは限らない。読んだ値を
       // そのまま基点にすると、カレントディレクトリ次第で別の場所をテンプレートとして扱う。
       .with({ kind: "local" }, (local) =>
-        Effect.succeed({ kind: "local", dir: absPath(local.path) }),
+        Effect.succeed({ kind: "local", dir: absPath(local.path), source: local }),
       )
       .with({ kind: "github" }, (gh) =>
         resolveGitHubFetchSource(gh).pipe(

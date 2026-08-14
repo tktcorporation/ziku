@@ -214,8 +214,16 @@ const { classifyFiles, mergeOneFile, writeFileEnsureDir, downloadBaseForMerge } 
 // 置き換えるので、実装モジュールを直接読み込めば素の関数が得られる）。
 const { classifyMergeOutcome } = await import("../../utils/merge/types");
 const { log } = await import("../../ui/renderer");
-const { absPath, commitSha, globPatterns, hashMap, pendingConflict, repoRelPath, repoRelPaths } =
-  await import("../../__tests__/brands");
+const {
+  absPath,
+  commitSha,
+  globPatterns,
+  hashMap,
+  pendingConflict,
+  repoRelPath,
+  repoRelPaths,
+  resolvedTemplate,
+} = await import("../../__tests__/brands");
 
 const mockLoadCommandContext = vi.mocked(loadCommandContext);
 const mockDownloadTemplateToTemp = vi.mocked(downloadTemplateToTemp);
@@ -310,12 +318,14 @@ function mockContext(overrides?: {
 }) {
   const cleanup = vi.fn();
   const source = overrides?.source ?? baseSource;
+  const templateDir = overrides?.templateDir ?? absPath("/tmp/template");
   return {
     effect: Effect.succeed({
       config: overrides?.config ?? baseZikuConfig,
       lock: overrides?.lock ?? baseLock,
       source,
-      templateDir: overrides?.templateDir ?? absPath("/tmp/template"),
+      resolved: resolvedTemplate({ source, dir: templateDir }),
+      templateDir,
       cleanup,
       resolveBaseRef: overrides?.resolveBaseRef ?? Effect.succeed(Option.none<CommitSha>()),
     }),

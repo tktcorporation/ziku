@@ -23,6 +23,7 @@ import type {
 } from "../errors";
 import { loadZikuConfig } from "../utils/ziku-config";
 import { loadLock } from "../utils/lock";
+import type { ResolvedTemplate } from "../utils/template-resolve";
 import { resolveTemplateDirScoped } from "../utils/template-resolve";
 import type { CommitShaResolution } from "../utils/github";
 import { resolveSourceCommit } from "../utils/github";
@@ -42,7 +43,19 @@ export interface CommandContextShape {
   readonly lock: LockState;
   /** テンプレートの取得元（lock.source のエイリアス） */
   readonly source: TemplateSource;
-  /** 解決済みテンプレートディレクトリのパス */
+  /**
+   * この実行が確定させたテンプレートの取得先。
+   *
+   * GitHub ソースのときだけ、取得に使った参照（`pinned`）と引けた既定ブランチ名を持つ
+   * （{@link ResolvedTemplate}）。ローカルソースには既定ブランチの概念が無いので、その値も
+   * 型として存在しない。
+   *
+   * 既定ブランチを要する後段（push の PR 宛先）はこの値を読むこと。lock の `source.ref` から
+   * 引き直すと、未指定のときに GitHub への問い合わせが実行ごとに二度走り、控えへ倒れるかが
+   * 問い合わせごとに変わりうる。
+   */
+  readonly resolved: ResolvedTemplate;
+  /** 解決済みテンプレートディレクトリのパス（`resolved.dir` のエイリアス） */
   readonly templateDir: AbsPath;
   /**
    * テンプレートの一時ディレクトリを削除する関数。
@@ -172,6 +185,7 @@ export function loadCommandContext(
       config,
       lock,
       source: lock.source,
+      resolved: template,
       templateDir: template.dir,
       cleanup,
       resolveBaseRef,

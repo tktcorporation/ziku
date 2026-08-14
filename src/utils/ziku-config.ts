@@ -118,11 +118,8 @@ export function withConfigTracked(include: readonly GlobPattern[]): GlobPattern[
  *
  * - パターン解決（{@link withConfigTracked}）はディスクを見ない。テンプレート側にしか無い
  *   ファイルも走査させる必要があり、実在チェックを挟むと初回取得ができなくなる。
- * - ハッシュ計算は 1 ディレクトリの glob 結果へ戻す。exclude で消えた分が対象で、include に
- *   明示されているときだけ戻す（設定ファイルを追跡しないパターンで呼ぶ利用者に押し付けない）。
- * - diff 検出はローカルとテンプレートを突き合わせた集合へ戻す。gitignore で消えた分が対象で、
- *   include の明示は問わない。走査は {@link withConfigTracked} 済みの include で走るので
- *   合成エントリは常に在り、明示を条件にすると gitignore で消えた分を戻せなくなる。
+ * - ハッシュ計算は 1 ディレクトリの glob 結果へ戻す。exclude で消えた分が対象。
+ * - diff 検出はローカルとテンプレートを突き合わせた集合へ戻す。gitignore で消えた分が対象。
  *
  * 3 者が共有できるのは「どのパスが対象か」だけなので、その一覧をこの関数と
  * {@link withConfigTracked} が同じ定数から引く。
@@ -135,12 +132,63 @@ export const ZIKU_CONFIG_SCHEMA_URL =
   "https://raw.githubusercontent.com/tktcorporation/ziku/main/schema/ziku.json";
 
 /**
- * `.ziku/ziku.jsonc` を読み込む。
+ * `.ziku/ziku.jsonc` を読んだ結果。
  *
- * 失敗理由を 3 つに分けて返す。全部を「パース失敗」に潰すと、スキーマ違反まで
- * 構文エラーとして報告され、ユーザーは壊れていない JSONC の中で構文ミスを探すことになる。
+ * 「読めなかった理由」を 3 つに分ける。全部を「パース失敗」に潰すと、スキーマ違反まで
+ * 構文エラーとして報告され、利用者は壊れていない JSONC の中で構文ミスを探すことになる。
  *
- * - `FileNotFoundError`: ファイルが読めない（未初期化）
+ * 読む入口はローカル側（{@link loadZikuConfig}）・マージ側（`src/utils/config-merge.ts`）・
+ * テンプレート側（`src/utils/template-config.ts`）の 3 つあり、失敗の運び方（Effect の
+ * エラーチャネル / throw）が入口ごとに違う。分類まで入口ごとに書くと、同じ内容の
+ * `ziku.jsonc` が入口によって構文エラーになったりスキーマ違反になったりする。分類を
+ * {@link readZikuConfig} だけが持ち、各入口はこの union を自分の失敗の形へ写すだけにする
+ * ことで、ケースを足したとき全入口の `match().exhaustive()` がコンパイルエラーになる。
+ *
+ * `Ok` が生のテキストも持つのは、書き戻す入口が「新しく生成した内容」ではなく「元の内容の
+ * include / exclude だけを差し替えたもの」を作るため（{@link withPatterns}）。パターンだけを
+ * 取り出して作り直すと、注釈と ziku が読まないキーが同期のたびに消える。
+ */
+export type ZikuConfigRead =
+  /** ファイルが無い。未初期化のプロジェクト、または ziku を使っていないテンプレート。 */
+  | { readonly _tag: "NotFound" }
+  /** JSONC として壊れている。`detail` は最初の破綻を行・桁で示した 1 行。 */
+  | { readonly _tag: "Unparsable"; readonly detail: string }
+  /** 構文は通るが ziku の設定として解釈できない。`issues` は直すべき箇所の説明。 */
+  | { readonly _tag: "Invalid"; readonly issues: readonly string[] }
+  /** 読めた。`raw` は部分編集の土台にできる元テキスト。 */
+  | { readonly _tag: "Ok"; readonly config: ZikuConfig; readonly raw: string };
+
+/**
+ * `.ziku/ziku.jsonc` を読み、失敗を分類して返す。
+ *
+ * 失敗を投げず値で返すので、Effect のエラーチャネルへ載せる入口も `ZikuFailure` を throw する
+ * 入口も、同じ分類から自分の形へ写せる。
+ */
+export async function readZikuConfig(dir: AbsPath): Promise<ZikuConfigRead> {
+  const configPath = joinAbs(dir, ZIKU_CONFIG_FILE);
+  if (!existsSync(configPath)) return { _tag: "NotFound" };
+  return classifyZikuConfigText(await readFile(configPath, "utf-8"));
+}
+
+/** 読み出したテキストを分類する。ディスクを見ないので `NotFound` は返らない。 */
+function classifyZikuConfigText(raw: string): Exclude<ZikuConfigRead, { _tag: "NotFound" }> {
+  return match(parseJsonc(raw))
+    .with({ kind: "unparsable" }, ({ detail }) => ({ _tag: "Unparsable", detail }) as const)
+    .with({ kind: "parsed" }, ({ value }) => {
+      const result = zikuConfigSchema.safeParse(value);
+      return result.success
+        ? ({ _tag: "Ok", config: result.data, raw } as const)
+        : ({ _tag: "Invalid", issues: describeSchemaIssues(result.error) } as const);
+    })
+    .exhaustive();
+}
+
+/**
+ * ローカルの `.ziku/ziku.jsonc` を読み込む。
+ *
+ * {@link readZikuConfig} の分類を、コマンド層が扱うエラーチャネルへ写す。
+ *
+ * - `FileNotFoundError`: ファイルが無い（未初期化）
  * - `ParseError`: JSONC として壊れている
  * - `ValidationError`: JSONC ではあるが ziku の設定として解釈できない
  */
@@ -150,32 +198,28 @@ export function loadZikuConfig(
   { config: ZikuConfig; rawContent: string },
   FileNotFoundError | ParseError | ValidationError
 > {
-  const configPath = joinAbs(targetDir, ZIKU_CONFIG_FILE);
-
-  return Effect.gen(function* () {
-    const content = yield* Effect.tryPromise({
-      try: () => readFile(configPath, "utf-8"),
-      catch: () => new FileNotFoundError({ path: ZIKU_CONFIG_FILE }),
-    });
-
-    const document = parseJsonc(content);
-    if (document.kind === "unparsable") {
-      return yield* new ParseError({
-        path: ZIKU_CONFIG_FILE,
-        cause: new SyntaxError(document.detail),
-      });
-    }
-
-    const result = zikuConfigSchema.safeParse(document.value);
-    if (!result.success) {
-      return yield* new ValidationError({
-        path: ZIKU_CONFIG_FILE,
-        issues: describeSchemaIssues(result.error),
-      });
-    }
-
-    return { config: result.data, rawContent: content };
-  });
+  return Effect.promise(() => readZikuConfig(targetDir)).pipe(
+    Effect.flatMap(
+      (
+        read,
+      ): Effect.Effect<
+        { config: ZikuConfig; rawContent: string },
+        FileNotFoundError | ParseError | ValidationError
+      > =>
+        match(read)
+          .with({ _tag: "NotFound" }, () =>
+            Effect.fail(new FileNotFoundError({ path: ZIKU_CONFIG_FILE })),
+          )
+          .with({ _tag: "Unparsable" }, ({ detail }) =>
+            Effect.fail(new ParseError({ path: ZIKU_CONFIG_FILE, cause: new SyntaxError(detail) })),
+          )
+          .with({ _tag: "Invalid" }, ({ issues }) =>
+            Effect.fail(new ValidationError({ path: ZIKU_CONFIG_FILE, issues })),
+          )
+          .with({ _tag: "Ok" }, ({ config, raw }) => Effect.succeed({ config, rawContent: raw }))
+          .exhaustive(),
+    ),
+  );
 }
 
 /**

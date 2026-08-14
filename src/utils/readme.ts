@@ -10,8 +10,15 @@ import { zikuConfigSchema } from "../modules/schemas";
 import { parseJsonc } from "./jsonc";
 import { ZIKU_CONFIG_FILE } from "./ziku-config";
 
-// マーカー定義
-const MARKERS = {
+/**
+ * ziku がマーカー間を組み直す README の区画。
+ *
+ * マーカー名は、テンプレートの README を書き換える ziku 本体（{@link renderTemplateReadme}）と、
+ * このリポジトリの README を生成する `scripts/generate-readme.ts` の間の取り決めでもある。
+ * 定義を 2 箇所に置くと、片方の名前を変えたときにもう片方が「マーカーが無い」として無言で
+ * 何も書かなくなるので、名前はここだけに持つ。
+ */
+export const MARKERS = {
   features: {
     start: "<!-- FEATURES:START -->",
     end: "<!-- FEATURES:END -->",
@@ -103,27 +110,38 @@ function generateFilesSection(patterns: string[]): string {
 }
 
 /**
- * README のマーカー間を更新
+ * マーカー間を差し替えた結果。
+ *
+ * マーカーが見つからなかったことを値で返すのは、不在の意味が呼び出し側で違うため。任意の
+ * テンプレートの README を組み直す経路（{@link renderTemplateReadme}）では、区画を持たない
+ * README に触れないのが正しい。自分のリポジトリの README を組み直す生成器
+ * （`scripts/generate-readme.ts`）では、不在は書き換え漏れなので止める対象になる。元の内容を
+ * そのまま返して潰すと、後者が「生成したのに何も書いていない」ことに気づけない。
  */
-function updateSection(
+export type SectionUpdate =
+  | { readonly _tag: "Replaced"; readonly content: string; readonly updated: boolean }
+  /** `startMarker` と `endMarker` の対が揃っていない。 */
+  | { readonly _tag: "MarkerNotFound"; readonly startMarker: string };
+
+/** README のマーカー間を、渡した内容で差し替える。 */
+export function updateSection(
   content: string,
   startMarker: string,
   endMarker: string,
   newSection: string,
-): { content: string; updated: boolean } {
+): SectionUpdate {
   const startIndex = content.indexOf(startMarker);
   const endIndex = content.indexOf(endMarker);
 
   if (startIndex === -1 || endIndex === -1) {
-    // マーカーがない場合はそのまま返す
-    return { content, updated: false };
+    return { _tag: "MarkerNotFound", startMarker };
   }
 
   const before = content.slice(0, startIndex + startMarker.length);
   const after = content.slice(endIndex);
   const newContent = `${before}\n\n${newSection}\n${after}`;
 
-  return { content: newContent, updated: newContent !== content };
+  return { _tag: "Replaced", content: newContent, updated: newContent !== content };
 }
 
 export interface GenerateReadmeOptions {
@@ -175,15 +193,22 @@ function applyGeneratedSections(params: {
     sections.push({ ...MARKERS.files, body: generateFilesSection([...params.include]) });
   }
 
-  let content = params.readme;
-  let updated = false;
-  for (const section of sections) {
-    const result = updateSection(content, section.start, section.end, section.body);
-    content = result.content;
-    updated = updated || result.updated;
-  }
-
-  return { content, updated };
+  return sections.reduce<RenderedReadme>(
+    (rendered, section) =>
+      match(updateSection(rendered.content, section.start, section.end, section.body))
+        .with(
+          { _tag: "Replaced" },
+          (replaced): RenderedReadme => ({
+            content: replaced.content,
+            updated: rendered.updated || replaced.updated,
+          }),
+        )
+        // マーカーを持たない区画は飛ばす。どの区画を置くかはテンプレートの README が決めることで、
+        // 無い区画を作りに行くと ziku が README の構成を決めてしまう。
+        .with({ _tag: "MarkerNotFound" }, () => rendered)
+        .exhaustive(),
+    { content: params.readme, updated: false },
+  );
 }
 
 /**

@@ -19,6 +19,7 @@ import {
   pendingConflict,
   repoRelPath,
   repoRelPaths,
+  resolvedTemplate,
   syncScope,
 } from "../../__tests__/brands";
 
@@ -62,11 +63,13 @@ vi.mock("../../utils/lock", () => ({
   LOCK_FILE: ".ziku/lock.json",
 }));
 
-// utils/ziku-config をモック (fast-path の整合性チェックで呼ばれる)。
+// utils/ziku-config は zikuConfigExists だけ差し替える (fast-path の整合性チェックで呼ばれる)。
 // デフォルトは false: config 未作成相当 → fast-path をスルーして既存テストと互換。
-vi.mock("../../utils/ziku-config", () => ({
+// 残りは実装のまま通す。設定ファイルを読む経路（drift 判定）は memfs 上の空のディスクを見て
+// 「ファイルが無い」に落ちるので、モックを増やさなくても既存テストの前提が保たれる。
+vi.mock("../../utils/ziku-config", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../utils/ziku-config")>()),
   zikuConfigExists: vi.fn().mockReturnValue(false),
-  ZIKU_CONFIG_FILE: ".ziku/ziku.jsonc",
 }));
 
 // utils/untracked をモック
@@ -196,6 +199,7 @@ function mockContext(
       config: { include: overrides.include ?? globPatterns([".claude/**"]) },
       lock: overrides.lock ?? pendingLock,
       source: testSource,
+      resolved: resolvedTemplate({ source: testSource, dir: absPath("/tmp/template") }),
       templateDir: absPath("/tmp/template"),
       cleanup,
       resolveBaseRef: Effect.succeed(Option.none<CommitSha>()),

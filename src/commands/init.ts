@@ -484,6 +484,9 @@ function loadInitTemplateConfig(
         ),
       ),
     ),
+    Effect.catchTag("ValidationError", (err) =>
+      Effect.fail(zikuFailure({ kind: "ConfigInvalid", path: err.path, issues: err.issues })),
+    ),
   );
 }
 

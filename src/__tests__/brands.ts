@@ -10,10 +10,19 @@
  * 組み立てだけにする。
  */
 import ignore from "ignore";
-import type { BlobSha, CommitSha, ContentHash, HashMap, PendingConflict } from "../modules/schemas";
+import type {
+  AbsPath,
+  BlobSha,
+  CommitSha,
+  ContentHash,
+  HashMap,
+  PendingConflict,
+  TemplateSource,
+} from "../modules/schemas";
 import { blobShaSchema, commitShaSchema, contentHashSchema } from "../modules/schemas";
 import { globPatterns, repoRelPath, repoRelPaths } from "../utils/paths";
 import type { SyncScope } from "../utils/sync-scope";
+import type { ResolvedTemplate } from "../utils/template-resolve";
 
 export {
   absPath,
@@ -103,4 +112,32 @@ export function hashMap(entries: Record<string, string>): HashMap {
     result[repoRelPath(path)] = contentHash(hash);
   }
   return result;
+}
+
+/**
+ * テンプレートを解決し終えた状態を組み立てる。
+ *
+ * 本番では `resolveTemplateDirScoped` が GitHub への問い合わせを経てこの値を作る。コマンドの
+ * コンテキストをモックするテストは問い合わせを通らないので、決着した後の姿をここで組み立てる。
+ *
+ * `ref` を持たない GitHub ソースは、既定ブランチが決まった後の姿になる（取得先も PR の宛先も
+ * `pinned.ref` から導かれるため、ここが空だと本番では作れない状態になる）。
+ *
+ * @param defaultBranch `ref` を持たない GitHub ソースで、既定ブランチとして決着した名前。
+ */
+export function resolvedTemplate(params: {
+  source: TemplateSource;
+  dir: AbsPath;
+  defaultBranch?: string;
+}): ResolvedTemplate {
+  const { source, dir } = params;
+  if (source.kind === "local") return { kind: "local", dir, source };
+
+  const settled = params.defaultBranch ?? "main";
+  return {
+    kind: "github",
+    dir,
+    pinned: { ...source, ref: source.ref ?? { kind: "branch", name: settled } },
+    defaultBranch: source.ref === undefined ? settled : undefined,
+  };
 }

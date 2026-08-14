@@ -13,7 +13,6 @@ import { P, match } from "ts-pattern";
 import type {
   DeletablePath,
   FileDiff,
-  GitHubSource,
   GlobPattern,
   HashMap,
   PushContent,
@@ -21,8 +20,7 @@ import type {
 } from "../modules/schemas";
 import { asDeletablePath, asPushContent } from "../modules/schemas";
 import type { ConfigDrift } from "../utils/config-merge";
-import type { DefaultBranchResolution } from "../utils/github";
-import { decideDefaultBranch } from "../utils/github";
+import type { PinnedGitHubSource } from "../utils/template-resolve";
 import type { SyncPlan } from "../utils/merge/sync-plan";
 import { zikuConfigPushOutcome } from "../utils/merge/sync-plan";
 import type { SyncHashes } from "../utils/sync-analysis";
@@ -757,72 +755,29 @@ export function patternsToPersist(
 /** PR の宛先。ブランチへ向けられない参照は送信自体を成立させない。 */
 export type PrBaseBranch =
   | { readonly _tag: "Branch"; readonly name: string }
-  | { readonly _tag: "UnsupportedRef"; readonly kind: "tag" | "commit" }
-  /** トークンを拒否された。控えたブランチ名があっても宛先には使わない。 */
-  | { readonly _tag: "AuthRejected"; readonly detail: string }
-  /** ref を持たないソースで、リポジトリの既定ブランチも控えも分からなかった。 */
-  | { readonly _tag: "DefaultBranchUnresolved" };
+  | { readonly _tag: "UnsupportedRef"; readonly kind: "tag" | "commit" };
 
 /**
- * PR のベースブランチを決める。
+ * PR のベースブランチを、今回テンプレートを取得した参照から決める。
  *
  * GitHub の PR はブランチにしか向けられない（ベースの解決に使う `repos.getBranch` は
- * タグやコミット SHA で 404 になる）。ref を持たないソースの宛先はリポジトリの既定
- * ブランチで、タグ・コミットへ固定されたソースは宛先が定まらないので `UnsupportedRef`
- * を返す。
+ * タグやコミット SHA で 404 になる）。タグ・コミットへ固定されたソースは宛先が定まらないので
+ * `UnsupportedRef` を返し、呼び出し側が失敗として報告する。
  *
- * 既定ブランチを引けなかったときに控え（`source.defaultBranch`）へ倒すかは
- * {@link decideDefaultBranch} が決める。宛先だけが別の規則で決まると、レート制限下で
- * テンプレートは控えたブランチから取得できるのに PR だけが作れない、という食い違いが出る。
- * 既定ブランチは `main` とは限らず（`master` / `trunk` 等）、控えも無いまま名前を仮定すると
- * 存在しないブランチを宛先にした PR 作成が 404 になり、原因の分からない失敗として出る。
- * 分からないことを `DefaultBranchUnresolved` として返し、呼び出し側が失敗として報告する。
- *
- * @param defaultBranchLookup 既定ブランチの問い合わせ結果。ref を持つソースでは結果を使わない
- *   ので、呼び出し側は問い合わせを省いて undefined を渡してよい。ref を持たないソースで
- *   undefined が渡れば、名前を知る手立てが無いので `DefaultBranchUnresolved` になる。
+ * 引数を {@link PinnedGitHubSource} に限る理由: 宛先を決める材料を「取得に使った参照」だけに
+ * すると、宛先が取得先と別のブランチになる状態を作れない。既定ブランチの問い合わせも、控えへ
+ * 倒すかの判断も `src/utils/template-resolve.ts` の `resolveGitHubFetchSource` で済んでおり、
+ * `ref` 未指定のソースでは決着したブランチ名が `pinned.ref` に入っている。名前が決まらなかった
+ * 実行はそこで失敗してテンプレート取得まで到達しないので、この関数は「宛先が分からない」
+ * ケースを持たない。
  */
-export function resolvePrBaseBranch(
-  source: GitHubSource,
-  defaultBranchLookup: DefaultBranchResolution | undefined,
-): PrBaseBranch {
-  return match(source.ref)
-    .with(
-      undefined,
-      (): PrBaseBranch =>
-        defaultBranchLookup === undefined
-          ? { _tag: "DefaultBranchUnresolved" }
-          : prBaseFromDefaultBranch(defaultBranchLookup, source.defaultBranch),
-    )
+export function resolvePrBaseBranch(pinned: PinnedGitHubSource): PrBaseBranch {
+  return match(pinned.ref)
     .with({ kind: "branch" }, (branch): PrBaseBranch => ({ _tag: "Branch", name: branch.name }))
     .with(
       { kind: P.union("tag", "commit") },
       (ref): PrBaseBranch => ({ _tag: "UnsupportedRef", kind: ref.kind }),
     )
-    .exhaustive();
-}
-
-/**
- * 既定ブランチ名の決着を PR の宛先へ写す。
- *
- * 引けた名前と控えた名前を同じ `Branch` にするのは、宛先としての意味が変わらないため。
- * 控えを使ったことは、同じ実行のテンプレート取得（`src/utils/template-resolve.ts` の
- * `resolveGitHubFetchSource`）が既に警告している。宛先の決定でも出すと警告が二重になる。
- */
-function prBaseFromDefaultBranch(
-  lookup: DefaultBranchResolution,
-  recorded: string | undefined,
-): PrBaseBranch {
-  return match(decideDefaultBranch(lookup, recorded))
-    .with(
-      { _tag: P.union("Fetched", "Recorded") },
-      (d): PrBaseBranch => ({ _tag: "Branch", name: d.name }),
-    )
-    .with(
-      { _tag: "AuthRejected" },
-      (f): PrBaseBranch => ({ _tag: "AuthRejected", detail: f.detail }),
-    )
-    .with({ _tag: "Unresolved" }, (): PrBaseBranch => ({ _tag: "DefaultBranchUnresolved" }))
     .exhaustive();
 }
 

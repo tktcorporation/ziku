@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FileNotFoundError } from "../../errors";
 import type { AbsPath, CommitSha, GlobPattern, TemplateSource } from "../../modules/schemas";
 import { createPendingLock } from "../../modules/schemas";
-import { absPath, globPatterns, repoRelPath } from "../../__tests__/brands";
+import { absPath, globPatterns, repoRelPath, resolvedTemplate } from "../../__tests__/brands";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -104,12 +104,14 @@ function mockContext(
     installedAt: "2024-01-01T00:00:00.000Z",
     source,
   });
+  const templateDir = overrides?.templateDir ?? absPath("/tmp/template");
   return {
     effect: Effect.succeed({
       config: { include: overrides?.include ?? globPatterns([".root/**", ".github/**"]) },
       lock,
       source,
-      templateDir: overrides?.templateDir ?? absPath("/tmp/template"),
+      resolved: resolvedTemplate({ source, dir: templateDir }),
+      templateDir,
       cleanup,
       resolveBaseRef: Effect.succeed(Option.none<CommitSha>()),
     }),

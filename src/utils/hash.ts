@@ -59,13 +59,12 @@ export async function hashFiles(dir: AbsPath, scope: SyncScope): Promise<HashMap
     ),
   );
 
-  // 常に追跡するファイルが include に明示指定されている場合、exclude（glob の ignore）で
-  // 消されても必ずハッシュ対象に含める。`.ziku/**` や `**/*.jsonc` のような exclude が
-  // あると、追跡対象であるはずの制御ファイルが分類経路から外れ、`ziku track` の変更が
-  // 黙って同期されなくなる。include の明示指定は exclude より優先する。
-  const literalPatterns = new Set<string>(scope.scan.include);
+  // 常に追跡するファイルは、exclude（glob の ignore）で消えても必ずハッシュ対象へ戻す。
+  // `.ziku/**` や `**/*.jsonc` のような exclude があると、追跡対象であるはずの制御ファイルが
+  // 分類経路から外れ、`ziku track` の変更が黙って同期されなくなる。差分検出（`detectDiff`）が
+  // 同じ集合を同じ条件で戻すので、片方だけに現れるファイルが生まれない。
   for (const path of alwaysTrackedPathsIn(dir)) {
-    if (literalPatterns.has(path)) fileSet.add(path);
+    fileSet.add(path);
   }
 
   const hashes: HashMap = {};

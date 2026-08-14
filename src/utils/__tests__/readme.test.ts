@@ -13,8 +13,14 @@ vi.mock("node:fs/promises", async () => {
 });
 
 // モック後にインポート
-const { generateReadme, updateReadmeFile, detectReadmeUpdate, renderTemplateReadme } =
-  await import("../readme");
+const {
+  MARKERS,
+  generateReadme,
+  updateReadmeFile,
+  detectReadmeUpdate,
+  renderTemplateReadme,
+  updateSection,
+} = await import("../readme");
 
 const CONFIG_PATH = "/project/.ziku/ziku.jsonc";
 
@@ -393,5 +399,27 @@ describe("renderTemplateReadme", () => {
     await renderTemplateReadme({ templateDir: "/template", readme: undefined, config: undefined });
 
     expect(vol.readFileSync("/template/README.md", "utf8")).toBe(TEMPLATE_README);
+  });
+});
+
+describe("updateSection", () => {
+  it("マーカー間を差し替えた内容を返す", () => {
+    const readme = `# P\n\n${MARKERS.features.start}\nOld\n${MARKERS.features.end}\n`;
+
+    const result = updateSection(readme, MARKERS.features.start, MARKERS.features.end, "New");
+
+    expect(result).toEqual({
+      _tag: "Replaced",
+      content: `# P\n\n${MARKERS.features.start}\n\nNew\n${MARKERS.features.end}\n`,
+      updated: true,
+    });
+  });
+
+  it("マーカーが無いことを呼び出し側へ返す（元の内容を黙って返さない）", () => {
+    // 潰して元の内容を返すと、生成器が「書いたのに何も変わっていない」ことに気づけない。
+    expect(updateSection("# P\n", MARKERS.files.start, MARKERS.files.end, "New")).toEqual({
+      _tag: "MarkerNotFound",
+      startMarker: MARKERS.files.start,
+    });
   });
 });
