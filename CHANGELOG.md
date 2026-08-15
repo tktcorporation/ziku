@@ -1,5 +1,93 @@
 # @tktco/ziku
 
+## 2.0.0
+
+### Major Changes
+
+- [#96](https://github.com/tktcorporation/ziku/pull/96) [`15a73fa`](https://github.com/tktcorporation/ziku/commit/15a73fa97d4da9f7889a47b9cd98f5503c85e9bc) Thanks [@tktcorporation](https://github.com/tktcorporation)! - `.ziku/lock.json` のスキーマと、コマンド間で揃っていなかったフラグの意味を変える。既存の lock は書き直しが必要になる。
+
+  - 同期状態を `pending` / `synced` / `merging` の判別 union で表す。テンプレートの取得元も `github` / `local` と参照（branch / tag / commit）に構造化する。「同期済みだがベースが無い」「マージ中だがコンフリクトが空」といった、実際には起こりえない組み合わせを lock が保持できない。
+  - `--force` は破壊的な操作の確認を省く意味に、`--yes` は対話プロンプトの既定を採る意味に統一する。どちらもコマンドをまたいで同じ意味を持つ。
+  - 既定ブランチを引けなくても、コマンドは lock に控えた値で動き続ける。GitHub への一時的な問い合わせ失敗が、全コマンドの停止につながらない。
+
+### Minor Changes
+
+- [#95](https://github.com/tktcorporation/ziku/pull/95) [`4ddfbfb`](https://github.com/tktcorporation/ziku/commit/4ddfbfb3bdc5f09ccb22a76acf4cc0a8c141b138) Thanks [@tktcorporation](https://github.com/tktcorporation)! - `ziku aggregate` を追加した。テンプレートリポジトリで実行すると、GitHub 上で owner 配下のリポジトリを列挙してそのテンプレートの利用リポジトリを特定し、各リポジトリの未同期差分（テンプレートへ未還元 / テンプレートから未配布 / 双方が変更）を横断的に棚卸しする。
+
+  - `--json` で JSON レポートを stdout へ出力、`--out=<path>` でファイルへ書き出す。既定は人間向けの要約表示で、リポジトリごとの件数・ファイルパス・スキップ理由を表示する。
+  - `--owner` で探索先の owner を、`--since` で「この日時以降に変更があったリポジトリだけ」に絞り込める（`--since` は日付のみ・オフセット付き ISO 8601 のいずれも受け付け、UTC に正規化する）。
+  - `--include-archived` でアーカイブ済みリポジトリも対象に含められる。`--concurrency` で並列処理数を調整できる。
+  - 読み取り専用コマンドであり、対象リポジトリの状態を変更したりテンプレートへの統合（push）を行ったりはしない。出力した JSON レポートを後段のエージェントやオペレーターが読み、テンプレートへの反映は別途行う。
+  - `.ziku/lock.json` の取得とリポジトリ内容のダウンロードを同じ commit SHA に固定する。スキャン中に対象リポジトリで `ziku pull` が並行して走っても、新しいファイルと古い `baseHashes` を突き合わせて実在しない conflict/pending を報告することがない。
+  - `--since` で利用リポジトリ全件が除外された場合の件数を `summary.excludedBySince` に載せ、既定出力・JSON レポートの双方で「テンプレートを使っているリポジトリが無い」と誤読されないようにした。
+  - テンプレートリポジトリがリネーム・移管された後も、利用リポジトリの `.ziku/lock.json` に残った旧名を GitHub のリダイレクト経由で正規名へ解決し、対象として拾う。正規名の解決が判定不能な失敗（レート制限・認証エラー等）に終わった場合は `skipped` に理由付きで残し、取りこぼしを黙って報告から消さない。
+  - `pull` の衝突が未解決のリポジトリと、テンプレートの別リビジョンに固定しているリポジトリは比較対象から外し、理由を `skipped` に残す。前者は中間状態が統合対象に上がり、後者は追随していないだけの差分が未同期として並ぶため。
+  - commit SHA の解決 URL で owner / repo / ref をエスケープする。git のブランチ名は `#` を許すため、素のまま差し込むとフラグメント以降が切り落とされて別のコミットを指すか 404 になる。`/` はこのエンドポイントが受け付ける区切りとして残す。
+
+- [#96](https://github.com/tktcorporation/ziku/pull/96) [`15a73fa`](https://github.com/tktcorporation/ziku/commit/15a73fa97d4da9f7889a47b9cd98f5503c85e9bc) Thanks [@tktcorporation](https://github.com/tktcorporation)! - 同期でこれまで扱えなかった内容と操作に対応する。
+
+  **扱える内容が増える**
+
+  - 改行コード・BOM・バイナリファイルを、内容を壊さずに同期する。
+  - `.ziku/ziku.jsonc` のマージが、コメントと `$schema` を保持する。
+  - glob で追跡したパターンが、`push` でテンプレートへ伝播する。
+  - 非公開テンプレートを、認証付きで取得できる。
+
+  **操作が増える**
+
+  - `ziku setup` に `--yes` (`-y`) を追加する。
+  - `ziku push --yes` がファイル選択のプロンプトを省き、既定の選択で送る。
+  - 対話メニューから `track` を選べる。
+
+  **確認と保護が増える**
+
+  - `ziku setup --remote` は、設定済みのテンプレートを規定パターンで置き換える前に検証する。
+  - ベースを取得できないコンフリクトでも、`ziku pull` は解決の判断を利用者に残す。
+  - テンプレートが `.ziku/ziku.jsonc` を削除しても、`pull` は同期ベースを保つ。次の `push` が設定ファイルを復活させる PR を立てない。
+
+### Patch Changes
+
+- [#96](https://github.com/tktcorporation/ziku/pull/96) [`15a73fa`](https://github.com/tktcorporation/ziku/commit/15a73fa97d4da9f7889a47b9cd98f5503c85e9bc) Thanks [@tktcorporation](https://github.com/tktcorporation)! - 同期の 3 点（同期ベース・ローカル・テンプレート）が実態とずれる不具合を修正する。
+
+  **データが消える / 巻き戻る**
+
+  - `pull` が gitignore されたファイルを上書きしていた。マシン固有の設定や資格情報が消える。
+  - `push` が、送っていないファイルまで同期ベースを進めていた。テンプレートの更新が失われ、次の `push` がそれを巻き戻す。
+  - `pull --continue` が、自動マージできなかったファイルを完了扱いにしてテンプレートの変更を捨てていた。
+  - `init --dirs` で選ばなかったディレクトリの既存ファイルが、次の `pull` で上書きされていた。
+  - `--force` が、テンプレート側の削除とローカルの編集が重なったファイルを確認なく削除していた。
+
+  **同期が二度と通らなくなる**
+
+  - `pull` の再実行でコンフリクトマーカーが入れ子になり、`push` が通らなくなっていた。
+  - Markdown の setext 見出しをコンフリクトマーカーと誤検出し、`pull --continue` が通らなくなっていた。
+
+  **コマンドが成立しない**
+
+  - 認証ユーザーがテンプレートリポジトリの所有者だと、`push` と `setup --remote` が必ず失敗していた。案内文も、対象リポジトリ自身のリネームか削除を促していた。
+  - `push --yes` が、非対話環境で入力待ちのまま止まっていた。
+  - 一時的な通信エラーで、全コマンドが使えなくなっていた。
+
+  **壊れた内容がそのまま流れる**
+
+  - `.ziku/ziku.jsonc` の構文検証が働いておらず、壊れた JSON がクリーンマージとして確定していた。
+  - バイナリが U+FFFD に潰れ、内容の違うファイルが同じハッシュになっていた。
+  - テンプレート設定の読み取り失敗が「パターン無し」に潰れ、走査範囲が黙って空になっていた。
+  - ネストした `.gitignore` の規則が、git と違う範囲で適用されていた。深い階層・行頭と行末の空白・リポジトリをまたぐ否定規則で、git が無視するファイルが同期対象に入っていた。
+
+  **表示と実際が食い違う**
+
+  - `push --dry-run` のプレビューと、実際に送る集合が食い違っていた。
+  - PR のタイトルと本文が選択集合から作られ、自動更新した README が PR に載るのに本文へ出なかった。
+  - 未追跡の検出が gitignore を再計算しており、`track` しても同期されないパターンが残っていた。
+  - `.ziku/lock.json` を未追跡として報告し、`ziku track` を勧めていた。
+  - 全角文字や TAB を含むパスで、サマリの桁が揃っていなかった。
+
+  **取得先がずれる**
+
+  - `source.ref` が無視され、既定ブランチが `main` に固定されていた。
+  - 同期ベースのハッシュとコミット SHA が、別のツリーを指しうる形で記録されていた。
+
 ## 1.6.0
 
 ### Minor Changes
