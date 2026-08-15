@@ -19,6 +19,11 @@ graph TB
     U_SYNCED_FILES["synced files"]
   end
 
+  subgraph Consumers["Consumer Repositories"]
+    R_ZIKU_LOCK_JSON[".ziku/lock.json"]
+    R_SYNCED_FILES["synced files"]
+  end
+
   setup([setup]) -->|create| T_ZIKU_ZIKU_JSONC
   init([init]) -.->|read| T_ZIKU_ZIKU_JSONC
   init -->|create| U_ZIKU_ZIKU_JSONC & U_ZIKU_LOCK_JSON & U_SYNCED_FILES
@@ -30,6 +35,7 @@ graph TB
   status([status]) -.->|read| U_ZIKU_ZIKU_JSONC & U_ZIKU_LOCK_JSON & U_SYNCED_FILES & T_SYNCED_FILES
   track([track]) -.->|read| U_ZIKU_ZIKU_JSONC
   track -->|update| U_ZIKU_ZIKU_JSONC
+  aggregate([aggregate]) -.->|read| T_ZIKU_ZIKU_JSONC & R_ZIKU_LOCK_JSON & T_SYNCED_FILES & R_SYNCED_FILES
 
 ```
 

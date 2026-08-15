@@ -1673,6 +1673,23 @@ describe("resolveLatestCommitSha", () => {
     );
   });
 
+  it("ブランチ名に # が含まれてもフラグメントとして切り落とさない", async () => {
+    // git のブランチ名は # を許す。素のまま URL へ差し込むと以降が切り落とされ、
+    // 別のコミットを指すか 404 になる。
+    globalThis.fetch = vi.fn().mockResolvedValue(shaResponse("sha-issue"));
+
+    const resolution = await resolveLatestCommitSha("owner", "repo", {
+      kind: "branch",
+      name: "feat/#123",
+    });
+
+    expect(resolution).toEqual({ _tag: "Resolved", sha: "sha-issue" });
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "https://api.github.com/repos/owner/repo/commits/feat/%23123",
+      expect.anything(),
+    );
+  });
+
   it("ref 未指定の場合はリポジトリの既定ブランチの SHA を解決する", async () => {
     mockReposGet.mockResolvedValue({ data: { default_branch: "master" } });
     globalThis.fetch = vi.fn().mockResolvedValue(shaResponse("sha-master"));

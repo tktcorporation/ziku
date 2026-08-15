@@ -25,6 +25,7 @@ import type { CommandLifecycle, FileOp, Location, Op } from "./lifecycle-types";
 // 各コマンドからライフサイクルを集約
 // ──────────────────────────────────────────────
 
+import { aggregateLifecycle } from "../commands/aggregate";
 import { initUserLifecycle } from "../commands/init";
 import { pullLifecycle } from "../commands/pull";
 import { pushLifecycle } from "../commands/push";
@@ -51,6 +52,7 @@ export const LIFECYCLE_BY_COMMAND: Record<SubCommandName, CommandLifecycle> = {
   diff: diffLifecycle,
   status: statusLifecycle,
   track: trackLifecycle,
+  aggregate: aggregateLifecycle,
 };
 
 export const lifecycle: readonly CommandLifecycle[] = Object.values(LIFECYCLE_BY_COMMAND);

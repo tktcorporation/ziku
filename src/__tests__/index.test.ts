@@ -319,10 +319,11 @@ describe("引数の振り分け", () => {
         "diff",
         "status",
         "track",
+        "aggregate",
       ]);
     });
 
-    it.each(["init", "setup", "push", "pull", "diff", "status", "track"])(
+    it.each(["init", "setup", "push", "pull", "diff", "status", "track", "aggregate"])(
       "%s を選ぶとそのコマンドを実行し、値の要る位置引数を空のまま渡さない",
       async (name) => {
         mockSelect.mockResolvedValue(name);
@@ -338,6 +339,7 @@ describe("引数の振り分け", () => {
           diff: (await import("../commands/diff")).diffCommand,
           status: (await import("../commands/status")).statusCommand,
           track: (await import("../commands/track")).trackCommand,
+          aggregate: (await import("../commands/aggregate")).aggregateCommand,
         };
         const { cmd, rawArgs } = dispatchedCommand();
         expect(cmd).toBe(commands[name as keyof typeof commands]);
@@ -346,7 +348,7 @@ describe("引数の振り分け", () => {
       },
     );
 
-    it.each(["init", "setup", "push", "pull", "diff", "status"])(
+    it.each(["init", "setup", "push", "pull", "diff", "status", "aggregate"])(
       "%s はカレントディレクトリが対象になるので引数なしで実行する",
       async (name) => {
         mockSelect.mockResolvedValue(name);

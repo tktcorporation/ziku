@@ -6,6 +6,7 @@ import type { ArgsDef, CommandDef } from "citty";
 import { Cause, Effect, Exit } from "effect";
 import { P, match } from "ts-pattern";
 import { version } from "../package.json";
+import { aggregateCommand } from "./commands/aggregate";
 import { diffCommand } from "./commands/diff";
 import { initCommand } from "./commands/init";
 import { pullCommand } from "./commands/pull";
@@ -45,13 +46,14 @@ const COMMAND_HINTS: Record<SubCommandName, string> = {
   diff: "Show differences from template",
   status: "Show pending pull/push and recommend next action",
   track: "Add file patterns to the sync whitelist",
+  aggregate: "Inventory unsynced diffs across repositories using this template (read-only)",
 };
 
 /**
  * メニューで選ばれたサブコマンドを実行する。
  *
- * init / setup / push / pull / diff / status は位置引数がプロジェクトディレクトリだけで、
- * 既定値のカレントディレクトリを対象に動く。メニューはそのまま引数なしで起動してよい。
+ * init / setup / push / pull / diff / status / aggregate は位置引数がプロジェクトディレクトリ
+ * だけで、既定値のカレントディレクトリを対象に動く。メニューはそのまま引数なしで起動してよい。
  * track だけは位置引数が「include に足すパターン」で、既定値を置きようがない（足すものが
  * 決まらなければコマンドが成り立たない）。引数なしで起動すると必ず `MissingArgument` に
  * なるので、起動する前にパターンを尋ねる。
@@ -70,6 +72,7 @@ function runSelectedCommand(name: SubCommandName): Promise<void> {
     .with("diff", () => runCli(diffCommand, []))
     .with("status", () => runCli(statusCommand, []))
     .with("track", async () => runCli(trackCommand, await promptTrackPatterns()))
+    .with("aggregate", () => runCli(aggregateCommand, []))
     .exhaustive();
 }
 

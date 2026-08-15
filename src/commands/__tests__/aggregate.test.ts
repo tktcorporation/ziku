@@ -1,8 +1,9 @@
 import { vol } from "memfs";
 import { Effect } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ZikuError, GitHubApiError } from "../../errors";
-import type { AggregateReport } from "../../modules/schemas";
+import { ZikuFailure, zikuFailure } from "../../errors";
+import type { AggregateReport, CommitSha, RepoRelPath } from "../../modules/schemas";
+import { commitShaSchema, repoRelPathSchema } from "../../modules/schemas";
 
 // fs モジュールをモック（--out のファイル書き出しテスト用）
 vi.mock("node:fs", async () => {
@@ -58,10 +59,20 @@ const mockDetectGitHubRepo = vi.mocked(detectGitHubRepo);
 const mockLog = vi.mocked(log);
 const mockOutro = vi.mocked(outro);
 
+/** テスト用の commit SHA を brand する。 */
+function sha(value: string): CommitSha {
+  return commitShaSchema.parse(value);
+}
+
+/** テスト用のリポジトリ相対パスを brand する。 */
+function rel(value: string): RepoRelPath {
+  return repoRelPathSchema.parse(value);
+}
+
 /** テスト用の最小 AggregateReport フィクスチャ */
 function makeReport(overrides: Partial<AggregateReport> = {}): AggregateReport {
   return {
-    template: { owner: "acme", repo: "template", ref: "abc1234567890" },
+    template: { owner: "acme", repo: "template", ref: sha("abc1234567890") },
     generatedAt: "2026-01-01T00:00:00.000Z",
     repositories: [],
     skipped: [],
@@ -111,9 +122,6 @@ describe("normalizeSince", () => {
   it("パースできない入力はエラーになる", () => {
     const result = normalizeSince("not-a-date");
     expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.message).toContain("Invalid --since value");
-    }
   });
 
   // new Date() は "2026-02-30" を 3 月 2 日へ繰り上げ、"01/02/2026" のような
@@ -186,15 +194,20 @@ describe("aggregateCommand", () => {
   });
 
   describe("run", () => {
-    it("git remote から owner/repo を検出できない場合は ZikuError", async () => {
+    it("git remote から owner/repo を検出できない場合は ZikuFailure (InvalidArgument)", async () => {
       mockDetectGitHubRepo.mockReturnValue(null);
 
-      await expect(runAggregate({})).rejects.toThrow(ZikuError);
+      await expect(runAggregate({})).rejects.toThrow(ZikuFailure);
       expect(mockAggregateTemplateUsage).not.toHaveBeenCalled();
     });
 
-    it("パースできない --since は ZikuError（aggregateTemplateUsage は呼ばれない）", async () => {
-      await expect(runAggregate({ since: "not-a-date" })).rejects.toThrow(ZikuError);
+    it("パースできない --since は ZikuFailure（aggregateTemplateUsage は呼ばれない）", async () => {
+      const thrown = await runAggregate({ since: "not-a-date" }).catch((e: unknown) => e);
+      expect(thrown).toBeInstanceOf(ZikuFailure);
+      expect((thrown as ZikuFailure).reason).toMatchObject({
+        kind: "InvalidArgument",
+        argument: "--since",
+      });
       expect(mockAggregateTemplateUsage).not.toHaveBeenCalled();
     });
 
@@ -206,13 +219,18 @@ describe("aggregateCommand", () => {
       );
     });
 
-    it("--concurrency=0 は ZikuError（aggregateTemplateUsage は呼ばれない）", async () => {
-      await expect(runAggregate({ concurrency: "0" })).rejects.toThrow(ZikuError);
+    it("--concurrency=0 は ZikuFailure（aggregateTemplateUsage は呼ばれない）", async () => {
+      const thrown = await runAggregate({ concurrency: "0" }).catch((e: unknown) => e);
+      expect(thrown).toBeInstanceOf(ZikuFailure);
+      expect((thrown as ZikuFailure).reason).toMatchObject({
+        kind: "InvalidArgument",
+        argument: "--concurrency",
+      });
       expect(mockAggregateTemplateUsage).not.toHaveBeenCalled();
     });
 
-    it("--concurrency=abc は ZikuError", async () => {
-      await expect(runAggregate({ concurrency: "abc" })).rejects.toThrow(ZikuError);
+    it("--concurrency=abc は ZikuFailure", async () => {
+      await expect(runAggregate({ concurrency: "abc" })).rejects.toThrow(ZikuFailure);
       expect(mockAggregateTemplateUsage).not.toHaveBeenCalled();
     });
 
@@ -243,12 +261,16 @@ describe("aggregateCommand", () => {
       );
     });
 
-    it("aggregateTemplateUsage の GitHubApiError は ZikuError に変換される", async () => {
+    it("aggregateTemplateUsage が ZikuFailure で失敗したら、そのまま伝播する", async () => {
       mockAggregateTemplateUsage.mockReturnValue(
-        Effect.fail(new GitHubApiError({ message: "rate limited" })),
+        Effect.fail(
+          zikuFailure({ kind: "GitHubRateLimited", authenticated: false, resetAt: undefined }),
+        ),
       );
 
-      await expect(runAggregate({})).rejects.toThrow(ZikuError);
+      const thrown = await runAggregate({}).catch((e: unknown) => e);
+      expect(thrown).toBeInstanceOf(ZikuFailure);
+      expect((thrown as ZikuFailure).reason).toMatchObject({ kind: "GitHubRateLimited" });
     });
 
     it("--json 指定時は stdout に JSON としてパース可能な出力のみを書く（装飾なし）", async () => {
@@ -300,8 +322,8 @@ describe("aggregateCommand", () => {
             owner: "acme",
             repo: "consumer-a",
             defaultBranch: "main",
-            ref: "deadbeef",
-            pendingPush: [{ path: ".claude/rules/foo.md", reason: "localOnly" }],
+            ref: sha("deadbeef"),
+            pendingPush: [{ path: rel(".claude/rules/foo.md"), reason: "localOnly" }],
             pendingPull: [],
             conflicts: [],
           },

@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { AggregateReport } from "../../modules/schemas";
+import type { AggregateReport, CommitSha } from "../../modules/schemas";
+import { commitShaSchema } from "../../modules/schemas";
 import { aggregateOutroLine, renderAggregateSummary } from "../aggregate-view";
+
+/** テスト用の commit SHA を brand する。 */
+function sha(value: string): CommitSha {
+  return commitShaSchema.parse(value);
+}
 
 /**
  * ANSI SGR エスケープシーケンス（ESC + `[` + 数値 + `m`）を取り除き、素のテキストで比較する。
@@ -15,7 +21,7 @@ function strip(s: string): string {
 
 function makeReport(overrides: Partial<AggregateReport> = {}): AggregateReport {
   return {
-    template: { owner: "acme", repo: "template", ref: "abc1234567890" },
+    template: { owner: "acme", repo: "template", ref: sha("abc1234567890") },
     generatedAt: "2026-01-01T00:00:00.000Z",
     repositories: [],
     skipped: [],
@@ -38,7 +44,7 @@ describe("renderAggregateSummary", () => {
           owner: "acme",
           repo: "consumer-a",
           defaultBranch: "main",
-          ref: "deadbeef",
+          ref: sha("deadbeef"),
           pendingPush: [],
           pendingPull: [],
           conflicts: [],
@@ -64,7 +70,7 @@ describe("renderAggregateSummary", () => {
           owner: "acme",
           repo: "consumer-a",
           defaultBranch: "main",
-          ref: "deadbeef",
+          ref: sha("deadbeef"),
           pendingPush: [],
           pendingPull: [],
           conflicts: [],
@@ -145,7 +151,7 @@ describe("aggregateOutroLine", () => {
           owner: "acme",
           repo: "consumer-a",
           defaultBranch: "main",
-          ref: "deadbeef",
+          ref: sha("deadbeef"),
           pendingPush: [],
           pendingPull: [],
           conflicts: [],

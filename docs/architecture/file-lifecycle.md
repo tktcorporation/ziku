@@ -23,6 +23,11 @@ graph TB
     U_SYNCED_FILES["synced files"]
   end
 
+  subgraph Consumers["Consumer Repositories"]
+    R_ZIKU_LOCK_JSON[".ziku/lock.json"]
+    R_SYNCED_FILES["synced files"]
+  end
+
   setup([setup]) -->|create| T_ZIKU_ZIKU_JSONC
   init([init]) -.->|read| T_ZIKU_ZIKU_JSONC
   init -->|create| U_ZIKU_ZIKU_JSONC & U_ZIKU_LOCK_JSON & U_SYNCED_FILES
@@ -34,6 +39,7 @@ graph TB
   status([status]) -.->|read| U_ZIKU_ZIKU_JSONC & U_ZIKU_LOCK_JSON & U_SYNCED_FILES & T_SYNCED_FILES
   track([track]) -.->|read| U_ZIKU_ZIKU_JSONC
   track -->|update| U_ZIKU_ZIKU_JSONC
+  aggregate([aggregate]) -.->|read| T_ZIKU_ZIKU_JSONC & R_ZIKU_LOCK_JSON & T_SYNCED_FILES & R_SYNCED_FILES
 
 ```
 
@@ -45,7 +51,7 @@ graph TB
 
 | 操作     | 場所     | コマンド                                  |
 | -------- | -------- | ----------------------------------------- |
-| 読み取り | template | `init`                                    |
+| 読み取り | template | `init`, `aggregate`                       |
 | 読み取り | local    | `pull`, `push`, `diff`, `status`, `track` |
 | 作成     | template | `setup`                                   |
 | 作成     | local    | `init`                                    |
@@ -56,23 +62,25 @@ graph TB
 
 **役割:** 同期状態 + ソース情報（source, sync, base, merge）
 
-| 操作     | 場所  | コマンド                         |
-| -------- | ----- | -------------------------------- |
-| 読み取り | local | `pull`, `push`, `diff`, `status` |
-| 作成     | local | `init`                           |
-| 更新     | local | `pull`, `push`                   |
+| 操作     | 場所   | コマンド                         |
+| -------- | ------ | -------------------------------- |
+| 読み取り | local  | `pull`, `push`, `diff`, `status` |
+| 読み取り | remote | `aggregate`                      |
+| 作成     | local  | `init`                           |
+| 更新     | local  | `pull`, `push`                   |
 
 ### synced files
 
 **役割:** パターンに一致する実際のファイル群（.claude/rules/\*.md など）
 
-| 操作     | 場所     | コマンド                         |
-| -------- | -------- | -------------------------------- |
-| 読み取り | template | `pull`, `push`, `diff`, `status` |
-| 読み取り | local    | `push`, `diff`, `status`         |
-| 作成     | local    | `init`                           |
-| 更新     | template | `push`                           |
-| 更新     | local    | `pull`                           |
+| 操作     | 場所     | コマンド                                      |
+| -------- | -------- | --------------------------------------------- |
+| 読み取り | template | `pull`, `push`, `diff`, `status`, `aggregate` |
+| 読み取り | local    | `push`, `diff`, `status`                      |
+| 読み取り | remote   | `aggregate`                                   |
+| 作成     | local    | `init`                                        |
+| 更新     | template | `push`                                        |
+| 更新     | local    | `pull`                                        |
 
 ### `README.md`
 

@@ -1195,6 +1195,11 @@ export function fetchDefaultBranch(owner: string, repo: string): Promise<Default
  * GitHub API の `Accept: application/vnd.github.sha` を使い、SHA 文字列のみを取得する。
  * トークンがあれば付与する: プライベートなテンプレートリポジトリは未認証だと 404 になり、
  * ベースコミットが lock に記録されないまま 3-way マージの共通祖先を失う。
+ *
+ * ref はセグメントごとにエスケープする。git のブランチ名・タグ名は `#` を許すので、
+ * 素のまま URL へ差し込むと `feat/#123` のような ref でフラグメント以降が切り落とされ、
+ * 別のコミットを指すか 404 になる。`/` は区切りとして残す。このエンドポイントは
+ * `heads/BRANCH_NAME` のように `/` を含む ref をそのまま受け取る。
  */
 function fetchCommitSha(owner: string, repo: string, ref: string): Promise<CommitShaResolution> {
   const headers = {
@@ -1205,7 +1210,7 @@ function fetchCommitSha(owner: string, repo: string, ref: string): Promise<Commi
   return Effect.runPromise(
     Effect.tryPromise({
       try: async (): Promise<CommitShaResolution> => {
-        const url = `https://api.github.com/repos/${owner}/${repo}/commits/${ref}`;
+        const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeGitHubPathSegments(ref)}`;
         const res = await fetch(url, { headers });
         if (!res.ok) return classifyLookupFailure(res);
         // API レスポンスがコミット SHA の入口。ここから先は brand 付きで流れる。

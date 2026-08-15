@@ -7,45 +7,56 @@
  * 棚卸しして {@link AggregateReport} にまとめる。
  *
  * 1 リポジトリの失敗（権限不足・lock.json の破損・ダウンロード失敗・レート制限）は
- * 全体を落とさず `skipped` に積んで処理を継続する。`listOwnerRepos` 自体の失敗
- * （owner が存在しない・認証エラー）だけは全体の失敗として返る。
+ * 全体を落とさず `skipped` に積んで処理を継続する。owner 横断探索そのものの失敗
+ * （owner が存在しない・認証エラー）とテンプレート自身の解決失敗だけは全体の失敗として返る。
  */
 import { tmpdir } from "node:os";
 import { Effect, Either, Equivalence, Option } from "effect";
 import type { Scope } from "effect";
 import { join } from "pathe";
-import { GitHubApiError, TemplateError } from "../errors";
+import { match } from "ts-pattern";
+import type { FileNotFoundError, ParseError, TemplateError, ValidationError } from "../errors";
+import { ZikuFailure, zikuFailure } from "../errors";
 import type {
+  AbsPath,
   AggregateReport,
   AggregateRepositoryReport,
+  CommitSha,
   ConflictEntry,
+  HashMap,
   LockState,
   PendingPullEntry,
   PendingPushEntry,
+  RepoRelPath,
   SkippedRepository,
+  TemplateRef,
 } from "../modules/schemas";
-import { isGitHubSource, lockSchema } from "../modules/schemas";
+import { baseCommitSha, baseHashesOf, lockSchema, templateRefToString } from "../modules/schemas";
+import { analyzeConfigDrift } from "./config-merge";
 import {
   fetchRepoTextFile,
   getLastCommitDate,
   getRepoIdentity,
   listOwnerRepos,
   resolveLatestCommitSha,
+  resolveSourceCommit,
 } from "./github";
 import type { OwnerRepoInfo, RepoIdentity } from "./github";
 import { LOCK_FILE } from "./lock";
 import type { FileClassification } from "./merge/types";
-import { analyzeConfigDrift, applyConfigDrift } from "./config-merge";
-import { mergePatterns } from "./patterns";
+import type { ZikuConfigStatus } from "./merge/sync-plan";
+import { withZikuConfigStatus, zikuConfigStatus } from "./merge/sync-plan";
+import { absPath } from "./paths";
 import { analyzeSync } from "./sync-analysis";
 import type { SyncHashes } from "./sync-analysis";
-import { acquireTempTemplate, buildTemplateSource } from "./template";
+import { resolveSyncScope } from "./sync-scope";
+import { acquireTempTemplate, buildCommitPinnedSource } from "./template";
 import {
   registerTempDirEffect,
   removeTempDirEffect,
   unregisterTempDirEffect,
 } from "./temp-tracker";
-import { loadZikuConfig, withConfigTracked } from "./ziku-config";
+import { ZIKU_CONFIG_FILE, loadZikuConfig } from "./ziku-config";
 
 /** aggregate の対象となるテンプレートリポジトリ */
 export interface AggregateTemplateRepo {
@@ -55,7 +66,7 @@ export interface AggregateTemplateRepo {
    * 比較に使うテンプレート側の commit SHA。
    * 省略時はテンプレートリポジトリの既定ブランチの最新コミットを解決する。
    */
-  readonly ref?: string;
+  readonly ref?: CommitSha;
 }
 
 export interface AggregateOptions {
@@ -81,7 +92,8 @@ export interface AggregateOptions {
   /**
    * テンプレート/リポジトリのダウンロード先ベースディレクトリ。
    * 省略時は OS の一時ディレクトリ配下にランダムなサブディレクトリを使う。
-   * テストで memfs 上の固定パスに向けるために公開している。
+   * テストで memfs 上の固定パスに向けるために公開している。文字列のまま受け取り、
+   * 外から入ってくる値を brand する境界としてこの関数の内側で {@link absPath} を通す。
    */
   readonly tmpBaseDir?: string;
 }
@@ -103,12 +115,12 @@ const DEFAULT_CONCURRENCY = 4;
  */
 export function aggregateTemplateUsage(
   options: AggregateOptions,
-): Effect.Effect<AggregateReport, GitHubApiError | TemplateError> {
+): Effect.Effect<AggregateReport, ZikuFailure> {
   const { template, includeArchived, since } = options;
   const searchOwner = options.searchOwner ?? template.owner;
   const concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
   const explicitTmpBaseDir = options.tmpBaseDir;
-  const tmpBaseDir = explicitTmpBaseDir ?? defaultTmpBaseDir();
+  const tmpBaseDir = absPath(explicitTmpBaseDir ?? defaultTmpBaseDirPath());
 
   return Effect.scoped(
     Effect.gen(function* () {
@@ -124,23 +136,23 @@ export function aggregateTemplateUsage(
         );
       }
 
-      const allRepos = yield* listOwnerRepos(searchOwner, { includeArchived });
+      const allRepos = yield* tryGitHub(() => listOwnerRepos(searchOwner, { includeArchived }));
 
       // owner/repo の正規名解決（GitHub のリネーム・移管リダイレクト経由）をキャッシュする。
       // 同じ owner/repo への同時・重複呼び出しを 1 回の GitHub API 呼び出しにまとめる
       // （{@link resolveTemplateRef} と {@link resolveCanonicalMatch} の双方から使う）。
       const resolveIdentity: ResolveRepoIdentity = yield* Effect.cachedFunction(
-        ([owner, repo]: readonly [string, string]) => getRepoIdentity(owner, repo),
+        ([owner, repo]: readonly [string, string]) => tryGitHub(() => getRepoIdentity(owner, repo)),
         Equivalence.tuple(Equivalence.string, Equivalence.string),
       );
 
-      const templateRef = template.ref ?? (yield* resolveTemplateRef(template, resolveIdentity));
+      const templateRefSha = template.ref ?? (yield* resolveTemplateRef(template, resolveIdentity));
 
       const candidates = allRepos.filter((r) => !isSameRepo(r, template));
 
       const evaluations = yield* Effect.forEach(
         candidates,
-        (candidate) => evaluateCandidate(template, templateRef, candidate, resolveIdentity),
+        (candidate) => evaluateCandidate(template, templateRefSha, candidate, resolveIdentity),
         { concurrency },
       );
 
@@ -155,27 +167,25 @@ export function aggregateTemplateUsage(
       // テンプレートは全リポジトリ共通の比較基準なので、この Scope に 1 度だけ取得して
       // 使い回す。リポジトリごとに取得すると同じ commit を候補数だけダウンロードすることになる。
       // 比較対象が 1 件も無ければ取得自体が不要なので、候補の確定後に取りに行く。
-      const templateSnapshot =
+      const templateDir =
         acceptedCandidates.length === 0
           ? undefined
-          : yield* acquireTemplateSnapshot(tmpBaseDir, template, templateRef);
+          : yield* acquireTemplateSnapshot(tmpBaseDir, template, templateRefSha);
 
       const outcomes =
-        templateSnapshot === undefined
+        templateDir === undefined
           ? []
           : yield* Effect.forEach(
               // sanitizeLabel は owner/repo の記号をすべて "_" に潰すため、異なる候補が
-              // 同じテンポラリラベルに衝突しうる（#8）。候補配列内の位置を label に
-              // 付与し、衝突しても一意になるようにする。
+              // 同じテンポラリラベルに衝突しうる。候補配列内の位置を label に付与し、
+              // 衝突しても一意になるようにする。
               acceptedCandidates.map((candidate, candidateIndex) => ({
                 candidate,
                 candidateIndex,
               })),
               ({ candidate, candidateIndex }) =>
                 processCandidate({
-                  templateDir: templateSnapshot.dir,
-                  templateInclude: templateSnapshot.include,
-                  templateExclude: templateSnapshot.exclude,
+                  templateDir,
                   candidate,
                   candidateIndex,
                   tmpBaseDir,
@@ -198,7 +208,7 @@ export function aggregateTemplateUsage(
 
       return buildReport(
         template,
-        templateRef,
+        templateRefSha,
         repositories,
         [...skippedFromEvaluation, ...skippedFromProcessing],
         excludedBySince,
@@ -221,13 +231,51 @@ function isSameRepo(
   );
 }
 
-function defaultTmpBaseDir(): string {
+function defaultTmpBaseDirPath(): string {
   return join(tmpdir(), `ziku-aggregate-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 }
 
 /** Effect.tryPromise / Effect.try の catch で、失敗理由を人間が読めるメッセージ文字列に正規化する */
 function toMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * `src/utils/github.ts` の Promise ベース関数を Effect へ持ち上げる。
+ *
+ * `classified()`（github.ts）は分類済みの失敗を `ZikuFailure` として投げ、分類できない
+ * 例外はそのまま投げ直す設計になっている。ここではその区別をそのままエラーチャネルへ
+ * 反映する: `ZikuFailure` は型付きの失敗として運び、それ以外（ziku 自身の不具合や想定外の
+ * レスポンス形）は defect のまま運ぶ。呼び出し側が両方を一様に catch すると、ziku 自身の
+ * 不具合まで「対象リポジトリ固有の問題」として `skipped` に紛れ込み、原因が埋もれる。
+ */
+function tryGitHub<A>(run: () => Promise<A>): Effect.Effect<A, ZikuFailure> {
+  return Effect.tryPromise({ try: run, catch: (cause) => cause }).pipe(
+    Effect.catchAll((cause) =>
+      cause instanceof ZikuFailure ? Effect.fail(cause) : Effect.die(cause),
+    ),
+  );
+}
+
+/** `acquireTempTemplate` が返す `TemplateError` を `ZikuFailure` へ変換する。 */
+function toTemplateFailure(e: TemplateError): ZikuFailure {
+  return zikuFailure({ kind: "TemplateUnavailable", detail: e.message }, { cause: e.cause });
+}
+
+/**
+ * `loadZikuConfig` が返すユーティリティ層の失敗を、`skipped` の理由文へ変換する。
+ * `FileNotFoundError` 等は Effect の型付きエラーであって Error のメッセージを持たないため、
+ * `toMessage` では読める文にならない。
+ */
+function describeConfigLoadError(e: FileNotFoundError | ParseError | ValidationError): string {
+  return match(e)
+    .with({ _tag: "FileNotFoundError" }, (err) => `${err.path} not found`)
+    .with({ _tag: "ParseError" }, (err) => `Failed to parse ${err.path}: ${toMessage(err.cause)}`)
+    .with(
+      { _tag: "ValidationError" },
+      (err) => `${err.path} failed schema validation: ${err.issues.join("; ")}`,
+    )
+    .exhaustive();
 }
 
 /**
@@ -239,7 +287,7 @@ function toMessage(e: unknown): string {
  */
 type ResolveRepoIdentity = (
   key: readonly [owner: string, repo: string],
-) => Effect.Effect<RepoIdentity, GitHubApiError>;
+) => Effect.Effect<RepoIdentity, ZikuFailure>;
 
 /**
  * テンプレートリポジトリ自身の比較用 commit SHA を解決する。
@@ -247,15 +295,11 @@ type ResolveRepoIdentity = (
  * 既定ブランチは `resolveIdentity` 経由で直接取得する（`GET /repos/{owner}/{repo}`）。
  * `listOwnerRepos` の列挙結果から owner/repo 一致で defaultBranch を引く方法だと、
  * `--owner`（searchOwner）がテンプレートと別 owner を指す場合や、テンプレートが
- * アーカイブ済みで列挙結果に含まれない場合に defaultBranch が引けず、
- * `resolveLatestCommitSha` の既定値 `"main"` にフォールバックしてしまう
- * （`master` / `develop` を既定ブランチにしているテンプレートで失敗する）。
+ * アーカイブ済みで列挙結果に含まれない場合に defaultBranch が引けない。
  *
- * `resolveLatestCommitSha` は 404・ネットワークエラーいずれも `undefined` を返し例外を
- * 投げないため、"解決できなかった" ことを検知するには戻り値チェックが必要。
- * テンプレート側の基準 commit が定まらないとレポート全体の `template.ref` が
- * 埋められず後段のエージェントが決定的にファイルを取得できないため、ここでは
- * 個別リポジトリと違って fatal 扱いにし、aggregate 全体を失敗させる。
+ * テンプレート側の基準 commit が定まらないとレポート全体の `template.ref` が埋められず
+ * 後段のエージェントが決定的にファイルを取得できないため、個別リポジトリと違って
+ * fatal 扱いにし、aggregate 全体を失敗させる。
  *
  * `resolveIdentity` はキャッシュ経由なので、この呼び出しでテンプレートの正規名
  * （owner/repo）もキャッシュへ積まれる。この後 {@link resolveCanonicalMatch} が
@@ -264,54 +308,51 @@ type ResolveRepoIdentity = (
 function resolveTemplateRef(
   template: AggregateTemplateRepo,
   resolveIdentity: ResolveRepoIdentity,
-): Effect.Effect<string, GitHubApiError> {
+): Effect.Effect<CommitSha, ZikuFailure> {
   return Effect.gen(function* () {
     const identity = yield* resolveIdentity([template.owner, template.repo]);
-    const ref = yield* Effect.tryPromise({
-      try: () => resolveLatestCommitSha(template.owner, template.repo, identity.defaultBranch),
-      catch: (e) => new GitHubApiError({ message: toMessage(e) }),
-    });
-    if (ref === undefined) {
-      return yield* Effect.fail(
-        new GitHubApiError({
-          message: `Could not resolve latest commit SHA for template repository ${template.owner}/${template.repo}`,
-        }),
-      );
-    }
-    return ref;
+    const resolution = yield* Effect.promise(() =>
+      resolveLatestCommitSha(template.owner, template.repo, {
+        kind: "branch",
+        name: identity.defaultBranch,
+      }),
+    );
+    return yield* match(resolution)
+      .with({ _tag: "Resolved" }, (r) => Effect.succeed(r.sha))
+      .with({ _tag: "AuthRejected" }, (f) =>
+        Effect.fail(zikuFailure({ kind: "GitHubAuthRejected", detail: f.detail })),
+      )
+      .with({ _tag: "Unresolved" }, (f) =>
+        Effect.fail(
+          zikuFailure({
+            kind: "TemplateUnavailable",
+            detail: `Could not resolve the latest commit SHA for template repository ${template.owner}/${template.repo}: ${f.reason}`,
+          }),
+        ),
+      )
+      .exhaustive();
   });
 }
 
-/** 全利用リポジトリの比較基準として 1 度だけ取得したテンプレートの内容 */
-interface TemplateSnapshot {
-  readonly dir: string;
-  readonly include: string[];
-  readonly exclude: string[];
-}
-
 /**
- * テンプレートを指定 commit でテンポラリへ取得し、その追跡パターンを読み出す。
+ * テンプレートを指定 commit でテンポラリへ取得する。
  *
  * 取得失敗は個別リポジトリの失敗と違い、全リポジトリの比較基準が失われることを意味する。
  * `skipped` に丸めると全件が同じ理由で skipped になり原因が埋もれるため、全体を失敗させる。
  */
 function acquireTemplateSnapshot(
-  tmpBaseDir: string,
+  tmpBaseDir: AbsPath,
   template: AggregateTemplateRepo,
-  templateRef: string,
-): Effect.Effect<TemplateSnapshot, TemplateError, Scope.Scope> {
-  return Effect.gen(function* () {
-    const dir = yield* acquireTempTemplate(
-      tmpBaseDir,
-      buildTemplateSource({ owner: template.owner, repo: template.repo, ref: templateRef }),
-      "aggregate-template",
-    );
-    const loaded = yield* Effect.tryPromise({
-      try: () => loadZikuConfig(dir),
-      catch: (e) => new TemplateError({ message: "Failed to load template ziku.jsonc", cause: e }),
-    });
-    return { dir, include: loaded.config.include, exclude: loaded.config.exclude ?? [] };
-  });
+  templateRefSha: CommitSha,
+): Effect.Effect<AbsPath, ZikuFailure, Scope.Scope> {
+  return acquireTempTemplate(
+    tmpBaseDir,
+    buildCommitPinnedSource(
+      { kind: "github", owner: template.owner, repo: template.repo },
+      templateRefSha,
+    ),
+    "aggregate-template",
+  ).pipe(Effect.mapError(toTemplateFailure));
 }
 
 /** lock.json を評価した結果、そのリポジトリを対象に含めるかどうかを表す判別 union */
@@ -331,40 +372,51 @@ type CandidateEvaluation =
 interface AcceptedCandidate {
   readonly repoInfo: OwnerRepoInfo;
   readonly lock: LockState;
-  readonly ref: string;
+  readonly ref: CommitSha;
 }
 
 /** {@link resolveCandidateRef} の結果を表す判別 union */
 type CandidateRefResolution =
-  | { readonly _tag: "resolved"; readonly ref: string }
+  | { readonly _tag: "resolved"; readonly ref: CommitSha }
   | { readonly _tag: "failed"; readonly reason: string };
 
 /**
  * 候補リポジトリの比較用 commit SHA を解決する。
  *
  * `.ziku/lock.json` の取得とリポジトリ内容のダウンロードを同じ ref に固定するために使う。
- * `resolveLatestCommitSha` は 404・ネットワークエラーいずれも例外を投げず `undefined` を
- * 返すため、両方のケースを区別せず `failed` として扱う。
+ * `resolveLatestCommitSha` は失敗を戻り値で表すため（`Effect.promise` に例外は飛ばない）、
+ * `AuthRejected` / `Unresolved` のどちらも同じ `failed` として扱う。
  */
 function resolveCandidateRef(candidate: OwnerRepoInfo): Effect.Effect<CandidateRefResolution> {
-  return Effect.gen(function* () {
-    const refResult = yield* Effect.either(
-      Effect.tryPromise({
-        try: () => resolveLatestCommitSha(candidate.owner, candidate.repo, candidate.defaultBranch),
-        catch: toMessage,
-      }),
-    );
-    if (Either.isLeft(refResult)) {
-      return {
-        _tag: "failed" as const,
-        reason: `Failed to resolve the latest commit SHA: ${refResult.left}`,
-      };
-    }
-    if (refResult.right === undefined) {
-      return { _tag: "failed" as const, reason: "Could not resolve the latest commit SHA" };
-    }
-    return { _tag: "resolved" as const, ref: refResult.right };
-  });
+  return Effect.promise(() =>
+    resolveLatestCommitSha(candidate.owner, candidate.repo, {
+      kind: "branch",
+      name: candidate.defaultBranch,
+    }),
+  ).pipe(
+    Effect.map((resolution) =>
+      match(resolution)
+        .with(
+          { _tag: "Resolved" },
+          (r): CandidateRefResolution => ({ _tag: "resolved" as const, ref: r.sha }),
+        )
+        .with(
+          { _tag: "AuthRejected" },
+          (f): CandidateRefResolution => ({
+            _tag: "failed" as const,
+            reason: `Could not resolve the latest commit SHA: GitHub rejected the authentication token (${f.detail})`,
+          }),
+        )
+        .with(
+          { _tag: "Unresolved" },
+          (f): CandidateRefResolution => ({
+            _tag: "failed" as const,
+            reason: `Could not resolve the latest commit SHA: ${f.reason}`,
+          }),
+        )
+        .exhaustive(),
+    ),
+  );
 }
 
 /**
@@ -383,7 +435,7 @@ function resolveCandidateRef(candidate: OwnerRepoInfo): Effect.Effect<CandidateR
  *
  * 読み直しの結果を採用するのは、リポジトリ内容のダウンロードと同じコミットに固定するため。
  * ふるい用の 1 回目とリポジトリ内容が別コミットになると、更新後のファイルを更新前の
- * `baseHashes` と突き合わせて実在しない差分を報告する。
+ * `base` ハッシュと突き合わせて実在しない差分を報告する。
  *
  * - lock.json が無い（404 = ziku 未導入）、`lock.source` がローカルパス形式、
  *   対象テンプレート以外を指す場合は `excluded` として静かに除外する。
@@ -394,14 +446,14 @@ function resolveCandidateRef(candidate: OwnerRepoInfo): Effect.Effect<CandidateR
  */
 function evaluateCandidate(
   template: AggregateTemplateRepo,
-  templateRef: string,
+  templateRefSha: CommitSha,
   candidate: OwnerRepoInfo,
   resolveIdentity: ResolveRepoIdentity,
 ): Effect.Effect<CandidateEvaluation> {
   return Effect.gen(function* () {
     const screening = yield* readCandidateLock(
       template,
-      templateRef,
+      templateRefSha,
       candidate,
       undefined,
       resolveIdentity,
@@ -416,7 +468,13 @@ function evaluateCandidate(
 
     // 固定した ref で読み直したものを採用する。ふるい用の読み取りとの間に
     // 対象リポジトリが ziku を外した場合は、そのコミット時点では利用リポジトリではない。
-    const pinned = yield* readCandidateLock(template, templateRef, candidate, ref, resolveIdentity);
+    const pinned = yield* readCandidateLock(
+      template,
+      templateRefSha,
+      candidate,
+      ref,
+      resolveIdentity,
+    );
     if (pinned._tag !== "usable") return pinned;
 
     return {
@@ -430,30 +488,36 @@ function evaluateCandidate(
  * 利用リポジトリが固定しているテンプレートのリビジョンが、このスキャンの比較基準と
  * 同じスナップショットを指すかを確かめる。同じなら `undefined`、違えば skipped の理由文を返す。
  *
- * `lock.source.ref` はブランチ名・タグ名・SHA のいずれも取りうる。比較基準 `templateRef` は
- * 解決済みの SHA なので、文字列の一致だけでは「既定ブランチ名で固定している利用リポジトリ」を
- * 別系列と誤判定する。一致しない場合は ref を SHA へ解決してから比べ直す。
+ * `lock.source.ref` はブランチ名・タグ名・SHA のいずれも取りうる（判別 union の
+ * {@link TemplateRef}）。比較基準 `templateRefSha` は解決済みの SHA なので、
+ * `resolveSourceCommit` で種別を問わず同じコミットへ解決してから比べる。
  */
 function checkPinnedRef(
   template: AggregateTemplateRepo,
-  pinnedRef: string,
-  templateRef: string,
+  pinnedRef: TemplateRef,
+  templateRefSha: CommitSha,
 ): Effect.Effect<string | undefined> {
-  if (pinnedRef === templateRef) return Effect.succeed(undefined);
-
-  return Effect.gen(function* () {
-    const resolved = yield* Effect.either(
-      Effect.tryPromise({
-        try: () => resolveLatestCommitSha(template.owner, template.repo, pinnedRef),
-        catch: toMessage,
-      }),
-    );
-    if (Either.isLeft(resolved) || resolved.right === undefined) {
-      return `Pinned to template ref "${pinnedRef}", which could not be resolved to a commit in ${template.owner}/${template.repo}`;
-    }
-    if (resolved.right === templateRef) return undefined;
-    return `Pinned to template ref "${pinnedRef}" (${resolved.right}), which is a different revision from the one this scan compares against (${templateRef})`;
-  });
+  return Effect.promise(() => resolveSourceCommit(template.owner, template.repo, pinnedRef)).pipe(
+    Effect.map((resolution) =>
+      match(resolution)
+        .with({ _tag: "Resolved" }, (r) =>
+          r.sha === templateRefSha
+            ? undefined
+            : `Pinned to template ref "${templateRefToString(pinnedRef)}" (${r.sha}), which is a different revision from the one this scan compares against (${templateRefSha})`,
+        )
+        .with(
+          { _tag: "AuthRejected" },
+          (f) =>
+            `Pinned to template ref "${templateRefToString(pinnedRef)}", which could not be resolved to a commit in ${template.owner}/${template.repo}: ${f.detail}`,
+        )
+        .with(
+          { _tag: "Unresolved" },
+          (f) =>
+            `Pinned to template ref "${templateRefToString(pinnedRef)}", which could not be resolved to a commit in ${template.owner}/${template.repo}: ${f.reason}`,
+        )
+        .exhaustive(),
+    ),
+  );
 }
 
 /** {@link readCandidateLock} の結果。`usable` は「対象テンプレートの利用リポジトリだった」 */
@@ -477,8 +541,8 @@ type CanonicalMatchResult =
  * リダイレクトするため `ziku pull` は動き続けるが、文字列比較だけでは「無関係な
  * リポジトリ」と誤判定して黙って除外してしまう。
  *
- * - `lock.source` 側の解決が 404 → 別テンプレートを指している、またはテンプレートが
- *   削除済み。`excluded` として静かに除外する（対象外であって処理の失敗ではない）
+ * - `lock.source` 側の解決が 404（`GitHubTargetNotFound`）→ 別テンプレートを指している、
+ *   またはテンプレートが削除済み。`excluded` として静かに除外する（対象外であって処理の失敗ではない）
  * - `lock.source` 側・テンプレート側いずれかの解決が 404 以外で失敗（レート制限・
  *   認証エラー等）→ 判定不能。`excluded` に丸めると取りこぼしが黙って報告から消えるため
  *   `skipped` に理由付きで残す
@@ -492,7 +556,9 @@ function resolveCanonicalMatch(
   return Effect.gen(function* () {
     const sourceIdentity = yield* Effect.either(resolveIdentity([source.owner, source.repo]));
     if (Either.isLeft(sourceIdentity)) {
-      if (sourceIdentity.left.status === 404) return { _tag: "excluded" as const };
+      if (sourceIdentity.left.reason.kind === "GitHubTargetNotFound") {
+        return { _tag: "excluded" as const };
+      }
       return {
         _tag: "skipped" as const,
         reason: `Could not resolve the canonical name of lock.json's template source "${source.owner}/${source.repo}" (it may have been renamed or transferred): ${sourceIdentity.left.message}`,
@@ -519,14 +585,14 @@ function resolveCanonicalMatch(
  */
 function readCandidateLock(
   template: AggregateTemplateRepo,
-  templateRef: string,
+  templateRefSha: CommitSha,
   candidate: OwnerRepoInfo,
-  ref: string | undefined,
+  ref: CommitSha | undefined,
   resolveIdentity: ResolveRepoIdentity,
 ): Effect.Effect<LockReadResult> {
   return Effect.gen(function* () {
     const fetched = yield* Effect.either(
-      fetchRepoTextFile(candidate.owner, candidate.repo, LOCK_FILE, ref),
+      tryGitHub(() => fetchRepoTextFile(candidate.owner, candidate.repo, LOCK_FILE, ref)),
     );
     if (Either.isLeft(fetched)) {
       return skippedEvaluation(candidate, `Failed to fetch lock.json: ${fetched.left.message}`);
@@ -553,8 +619,8 @@ function readCandidateLock(
     }
 
     const lock = parsedLock.data;
-    // ローカルパス source（`{ path }`）は owner 配下探索の対象外。
-    if (!isGitHubSource(lock.source)) {
+    // ローカルパス source は owner 配下探索の対象外。
+    if (lock.source.kind !== "github") {
       return { _tag: "excluded" as const };
     }
     // 文字列としては一致しなくても、テンプレートがリネーム・移管されていて
@@ -577,18 +643,18 @@ function readCandidateLock(
     // 対象外だが「見つかったのに比較しなかった」ことは伝える必要があるため、
     // 黙って除外せず理由付きで残す。
     if (lock.source.ref !== undefined) {
-      const pinnedCheck = yield* checkPinnedRef(template, lock.source.ref, templateRef);
+      const pinnedCheck = yield* checkPinnedRef(template, lock.source.ref, templateRefSha);
       if (pinnedCheck !== undefined) return skippedEvaluation(candidate, pinnedCheck);
     }
 
     // `ziku pull` の途中（衝突未解決）で止まっているリポジトリ。ファイルには衝突マーカーや
-    // 未確定の解決内容が入りうる一方、baseHashes は pull 前のまま前進していない。この状態を
+    // 未確定の解決内容が入りうる一方、base のハッシュは pull 前のまま前進していない。この状態を
     // 比較すると、中間状態が未還元の差分として統合の対象に上がる。`push` も同じ状態を
     // ブロックしている。
-    if (lock.pendingMerge) {
+    if (lock.sync === "merging") {
       return skippedEvaluation(
         candidate,
-        `Has unresolved merge conflicts from \`ziku pull\` (${lock.pendingMerge.conflicts.length} files); run \`ziku pull --continue\` in that repository first`,
+        `Has unresolved merge conflicts from \`ziku pull\` (${lock.merge.conflicts.length} files); run \`ziku pull --continue\` in that repository first`,
       );
     }
     return { _tag: "usable" as const, lock };
@@ -609,13 +675,11 @@ type ProcessOutcome =
   | { readonly _tag: "filteredBySince" };
 
 interface ProcessCandidateOptions {
-  readonly templateDir: string;
-  readonly templateInclude: string[];
-  readonly templateExclude: string[];
+  readonly templateDir: AbsPath;
   readonly candidate: AcceptedCandidate;
-  /** 候補配列内の位置。テンポラリラベルの一意性確保に使う（#8） */
+  /** 候補配列内の位置。テンポラリラベルの一意性確保に使う */
   readonly candidateIndex: number;
-  readonly tmpBaseDir: string;
+  readonly tmpBaseDir: AbsPath;
   readonly since: string | undefined;
   /**
    * `since` 指定時、変更ファイルごとのコミット日時取得（`attachLastCommittedAt`）を
@@ -636,20 +700,11 @@ interface ProcessCandidateOptions {
  * commit SHA は `candidate.ref`（`evaluateCandidate` が lock.json 取得前に解決済み）を
  * そのまま使い、ここでは解決し直さない。ここで改めて解決すると、lock.json を読んだ
  * 時点と内容をダウンロードする時点で対象リポジトリの既定ブランチが進んでいた場合に
- * 別コミットを見てしまい、新しいファイルと古い baseHashes を突き合わせて実在しない
+ * 別コミットを見てしまい、新しいファイルと古い base ハッシュを突き合わせて実在しない
  * conflict/pending を報告する原因になる。
  */
 function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessOutcome> {
-  const {
-    templateDir,
-    templateInclude,
-    templateExclude,
-    candidate,
-    candidateIndex,
-    tmpBaseDir,
-    since,
-    concurrency,
-  } = opts;
+  const { templateDir, candidate, candidateIndex, tmpBaseDir, since, concurrency } = opts;
   const { repoInfo, lock, ref } = candidate;
 
   return Effect.gen(function* () {
@@ -657,13 +712,11 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
       Effect.scoped(
         classifyAgainstTemplate({
           templateDir,
-          templateInclude,
-          templateExclude,
           repoInfo,
           ref,
           candidateIndex,
           tmpBaseDir,
-          baseHashes: lock.baseHashes ?? {},
+          baseHashes: baseHashesOf(lock),
         }),
       ),
     );
@@ -673,11 +726,11 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
         `Failed to classify the diff against the template: ${classificationResult.left}`,
       );
     }
-    const classification = classificationResult.right;
+    const files = classificationResult.right;
 
-    let pendingPush = toPendingPushEntries(classification);
-    let conflicts = toConflictEntries(classification);
-    const pendingPull = toPendingPullEntries(classification);
+    let pendingPush = toPendingPushEntries(files);
+    let conflicts = toConflictEntries(files);
+    const pendingPull = toPendingPullEntries(files);
 
     if (since !== undefined) {
       // pendingPull はテンプレート側発の変更（テンプレートの更新を配布するだけ）であり、
@@ -714,7 +767,7 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
         repo: repoInfo.repo,
         defaultBranch: repoInfo.defaultBranch,
         ref,
-        baseRef: lock.baseRef,
+        baseRef: baseCommitSha(lock),
         pendingPush,
         pendingPull,
         conflicts,
@@ -728,15 +781,13 @@ function processSkipped(repoInfo: OwnerRepoInfo, reason: string): ProcessOutcome
 }
 
 interface ClassifyAgainstTemplateOptions {
-  readonly templateDir: string;
-  readonly templateInclude: string[];
-  readonly templateExclude: string[];
+  readonly templateDir: AbsPath;
   readonly repoInfo: OwnerRepoInfo;
-  readonly ref: string;
-  /** 候補配列内の位置。テンポラリラベルの一意性確保に使う（#8） */
+  readonly ref: CommitSha;
+  /** 候補配列内の位置。テンポラリラベルの一意性確保に使う */
   readonly candidateIndex: number;
-  readonly tmpBaseDir: string;
-  readonly baseHashes: Record<string, string>;
+  readonly tmpBaseDir: AbsPath;
+  readonly baseHashes: HashMap;
 }
 
 /**
@@ -747,16 +798,7 @@ interface ClassifyAgainstTemplateOptions {
 function classifyAgainstTemplate(
   opts: ClassifyAgainstTemplateOptions,
 ): Effect.Effect<FileClassification, string, Scope.Scope> {
-  const {
-    templateDir,
-    templateInclude,
-    templateExclude,
-    repoInfo,
-    ref,
-    candidateIndex,
-    tmpBaseDir,
-    baseHashes,
-  } = opts;
+  const { templateDir, repoInfo, ref, candidateIndex, tmpBaseDir, baseHashes } = opts;
   // sanitizeLabel は記号を "_" に潰すだけなので、owner/repo が違っても衝突しうる
   // （例: "foo.bar" と "foo_bar"）。candidateIndex を付与して一意性を保証する。
   const label = `${sanitizeLabel(`${repoInfo.owner}-${repoInfo.repo}`)}-${candidateIndex}`;
@@ -764,82 +806,75 @@ function classifyAgainstTemplate(
   return Effect.gen(function* () {
     const repoDir = yield* acquireTempTemplate(
       tmpBaseDir,
-      buildTemplateSource({ owner: repoInfo.owner, repo: repoInfo.repo, ref }),
+      buildCommitPinnedSource({ kind: "github", owner: repoInfo.owner, repo: repoInfo.repo }, ref),
       `${label}-repo`,
     ).pipe(Effect.mapError(toMessage));
 
-    const repoConfig = yield* Effect.tryPromise({
-      try: () => loadZikuConfig(repoDir),
-      catch: toMessage,
-    });
+    const repoConfig = yield* loadZikuConfig(repoDir).pipe(
+      Effect.mapError(describeConfigLoadError),
+    );
 
-    // 利用リポジトリ側だけが `ziku track` で追加した include パターンを取りこぼさない
-    // ため、テンプレート側のパターンと和集合を取る（どちらか一方だけを使うと、
-    // もう一方だけが追跡しているファイルの差分が分類対象から漏れる）。
-    const include = mergePatterns(templateInclude, repoConfig.config.include);
-    const exclude = mergePatterns(templateExclude, repoConfig.config.exclude ?? []);
-
-    // `.ziku/ziku.jsonc` 自体を同期対象に含める（init/pull/push/status と同じ扱い）。
-    // これを省くと、baseHashes には載っているのに local/template どちらのハッシュにも
-    // 載らず、全リポジトリで一律に deletedFiles（誤った pendingPull）として報告される。
-    // ハッシュ比較の手順は analyzeSync（SSOT）に委ね、hashFiles を手書きで 2 回呼ぶ
-    // 複製をしない。
-    const { classification, hashes } = yield* Effect.tryPromise({
+    // 追跡パターンはテンプレート側と利用リポジトリ側の和集合。resolveSyncScope が
+    // テンプレートの ziku.jsonc を読み直し、利用リポジトリ側だけが `ziku track` した
+    // ファイルの差分も取りこぼさないよう union を取る。
+    const { scope } = yield* Effect.tryPromise({
       try: () =>
-        analyzeSync({
+        resolveSyncScope({
           targetDir: repoDir,
           templateDir,
-          baseHashes,
-          include: withConfigTracked(include),
-          exclude,
+          include: repoConfig.config.include,
+          exclude: repoConfig.config.exclude ?? [],
         }),
       catch: toMessage,
     });
 
-    // `ziku.jsonc` は加法 union で同期されるため、生の 3-way 分類のままだと
+    const { plan, hashes } = yield* Effect.tryPromise({
+      try: () => analyzeSync({ targetDir: repoDir, templateDir, baseHashes, scope }),
+      catch: toMessage,
+    });
+
+    // `.ziku/ziku.jsonc` は加法 union で同期されるため、生の 3-way 分類のままだと
     // 「利用側がパターンを 1 つ削っただけ」が push 相当の差分に見える。レポートを読んだ
     // エージェントがテンプレートからそのパターンを消すと、全利用リポジトリへ波及する。
-    // status と同じ補正を通す。
+    // status と同じ状態機械（zikuConfigStatus）を通してから、通常の追跡ファイルと同じ
+    // FileClassification へ合流させる。
     const drift = yield* Effect.tryPromise({
       try: () => analyzeConfigDrift(repoDir, templateDir),
       catch: toMessage,
     });
+    const configStatus = zikuConfigStatus(plan.config, drift);
+    const files = withZikuConfigStatus(plan.files, configStatus);
 
-    return refineDeletedFiles(applyConfigDrift(classification, drift), hashes);
+    return finalizeClassification(files, configStatus, hashes);
   });
 }
 
 /**
- * `deletedFiles`（テンプレート側で削除されたファイル）を、利用リポジトリ側の状態で
- * 3 つに切り分ける。
+ * `withZikuConfigStatus` 適用後の分類結果に、aggregate 固有の補正を 2 つ加える。
  *
- * `classifyFiles` の `deletedFiles` 分岐は base と template の有無だけで判定し、
- * local を見ない。pull は該当ファイルを利用者に確認してから消すのでそれで足りるが、
- * aggregate のレポートは人ではなく後段のエージェントが読む。切り分けずに
- * `pendingPull` へ流すと、次の 2 つが「削除を配布せよ」と読める。
- *
- * - 利用リポジトリ側で編集済み: 双方が変更した状態なので `conflicts` に回す。
- *   削除として扱うと、その利用リポジトリにしか無い編集が黙って捨てられる
- * - 利用リポジトリ側でも削除済み: 既に一致しているので、何も保留していない
+ * 1. `deletedFiles`（テンプレート側で削除されたファイル）のうち、利用リポジトリ側でも
+ *    既に削除済み（`hashes.localHashes` に無い）ものを外す。`classifyOneFile` は base と
+ *    template の有無だけで判定し local を見ないため、「双方とも削除済みで保留は無い」場合も
+ *    `deletedFiles` に入ってしまう。ローカルに編集を残したまま削除されたケースは
+ *    `deletedWithLocalEdits` として既に分離済みなので、ここで見るのは「local も無い」場合だけ。
+ * 2. `ZikuConfigStatus` が `LocalOnlyPatterns`（テンプレート側が ziku.jsonc 自体を削除して
+ *    おり、pull・push のどちらも書き込まないが、ローカルには届いていないパターンが残る状態）
+ *    のとき、pendingPush/pendingPull どちらにも自然には現れないため conflicts へ手動で足す。
+ *    テンプレートの削除を意図的なものとして追随すべきか、利用側の独自パターンとして残す
+ *    べきかは自動で決めがたく、人の判断を要する点で通常の conflicts と同じ性質だから。
  */
-function refineDeletedFiles(
-  classification: FileClassification,
+function finalizeClassification(
+  files: FileClassification,
+  configStatus: ZikuConfigStatus,
   hashes: SyncHashes,
 ): FileClassification {
-  const propagatableDeletions: string[] = [];
-  const editedAgainstDeletion: string[] = [];
-
-  for (const path of classification.deletedFiles) {
-    const local = hashes.localHashes[path];
-    if (local === undefined) continue; // 双方で削除済み。保留は無い
-    if (local === hashes.baseHashes[path]) propagatableDeletions.push(path);
-    else editedAgainstDeletion.push(path);
-  }
-
   return {
-    ...classification,
-    deletedFiles: propagatableDeletions,
-    conflicts: [...classification.conflicts, ...editedAgainstDeletion],
+    ...files,
+    deletedFiles: files.deletedFiles.filter((path) => hashes.localHashes[path] !== undefined),
+    conflicts:
+      configStatus._tag === "LocalOnlyPatterns"
+        ? [...files.conflicts, ZIKU_CONFIG_FILE]
+        : files.conflicts,
   };
 }
 
@@ -867,8 +902,19 @@ function toPendingPullEntries(c: FileClassification): PendingPullEntry[] {
   ];
 }
 
+/**
+ * `conflicts`（テキストとして 3-way マージを試みる対象）と `deletedWithLocalEdits`
+ * （テンプレート側で削除され、ローカルは base から変更している対象）はどちらも
+ * 「双方が変更しており自動では確定できない」ので同じ conflicts バケツへまとめるが、
+ * 後段のエージェントが手順を分岐できるよう reason で区別する。
+ */
 function toConflictEntries(c: FileClassification): ConflictEntry[] {
-  return c.conflicts.map((path): ConflictEntry => ({ path }));
+  return [
+    ...c.conflicts.map((path): ConflictEntry => ({ path, reason: "textConflict" })),
+    ...c.deletedWithLocalEdits.map(
+      (path): ConflictEntry => ({ path, reason: "deletedWithLocalEdits" }),
+    ),
+  ];
 }
 
 /**
@@ -910,9 +956,9 @@ interface AttachLastCommittedAtResult<T> {
  * 当たりやすくなる。`concurrency` で並列実行し、呼び出し元（`aggregateTemplateUsage`）の
  * 並列度設定に揃える。
  */
-function attachLastCommittedAt<T extends { readonly path: string }>(
+function attachLastCommittedAt<T extends { readonly path: RepoRelPath }>(
   repoInfo: OwnerRepoInfo,
-  ref: string,
+  ref: CommitSha,
   entries: readonly T[],
   concurrency: number,
 ): Effect.Effect<AttachLastCommittedAtResult<T>> {
@@ -920,19 +966,26 @@ function attachLastCommittedAt<T extends { readonly path: string }>(
     const results = yield* Effect.forEach(
       entries,
       (entry) =>
-        getLastCommitDate(repoInfo.owner, repoInfo.repo, entry.path, ref).pipe(
-          Effect.map((opt) => ({
-            entry: {
-              ...entry,
-              lastCommittedAt: Option.match(opt, {
-                onNone: () => undefined,
-                onSome: normalizeCommitDateToUtc,
+        Effect.either(
+          tryGitHub(() => getLastCommitDate(repoInfo.owner, repoInfo.repo, entry.path, ref)),
+        ).pipe(
+          Effect.map((result) =>
+            Either.match(result, {
+              onLeft: () => ({
+                entry: { ...entry, lastCommittedAt: undefined },
+                fetchFailed: true,
               }),
-            },
-            fetchFailed: false,
-          })),
-          Effect.catchAll(() =>
-            Effect.succeed({ entry: { ...entry, lastCommittedAt: undefined }, fetchFailed: true }),
+              onRight: (opt) => ({
+                entry: {
+                  ...entry,
+                  lastCommittedAt: Option.match(opt, {
+                    onNone: () => undefined,
+                    onSome: normalizeCommitDateToUtc,
+                  }),
+                },
+                fetchFailed: false,
+              }),
+            }),
           ),
         ),
       { concurrency },
@@ -959,13 +1012,13 @@ function newestCommittedAt(
 
 function buildReport(
   template: AggregateTemplateRepo,
-  templateRef: string,
+  templateRefSha: CommitSha,
   repositories: AggregateRepositoryReport[],
   skipped: SkippedRepository[],
   excludedBySince: number,
 ): AggregateReport {
   return {
-    template: { owner: template.owner, repo: template.repo, ref: templateRef },
+    template: { owner: template.owner, repo: template.repo, ref: templateRefSha },
     generatedAt: new Date().toISOString(),
     repositories,
     skipped,

@@ -1,7 +1,9 @@
 import { Effect, Option } from "effect";
 import { vol } from "memfs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { GitHubApiError } from "../../errors";
+import { TemplateError, zikuFailure } from "../../errors";
+import type { CommitSha } from "../../modules/schemas";
+import { commitShaSchema } from "../../modules/schemas";
 
 // fs をモック
 vi.mock("node:fs/promises", async () => {
@@ -25,6 +27,7 @@ const mockListOwnerRepos = vi.fn();
 const mockFetchRepoTextFile = vi.fn();
 const mockGetLastCommitDate = vi.fn();
 const mockResolveLatestCommitSha = vi.fn();
+const mockResolveSourceCommit = vi.fn();
 const mockGetRepoIdentity = vi.fn();
 
 vi.mock("../github", () => ({
@@ -32,20 +35,23 @@ vi.mock("../github", () => ({
   fetchRepoTextFile: (...args: unknown[]) => mockFetchRepoTextFile(...args),
   getLastCommitDate: (...args: unknown[]) => mockGetLastCommitDate(...args),
   resolveLatestCommitSha: (...args: unknown[]) => mockResolveLatestCommitSha(...args),
+  resolveSourceCommit: (...args: unknown[]) => mockResolveSourceCommit(...args),
   getRepoIdentity: (...args: unknown[]) => mockGetRepoIdentity(...args),
 }));
 
 const mockAcquireTempTemplate = vi.fn();
 
-vi.mock("../template", () => ({
-  buildTemplateSource: (source: { owner: string; repo: string; ref?: string }) =>
-    source.ref !== undefined
-      ? `gh:${source.owner}/${source.repo}#${source.ref}`
-      : `gh:${source.owner}/${source.repo}`,
-  acquireTempTemplate: (...args: unknown[]) => mockAcquireTempTemplate(...args),
-}));
+// buildTemplateSource / buildCommitPinnedSource は純粋な文字列組み立てなので実装のまま使う。
+// acquireTempTemplate だけを差し替える（テンポラリディレクトリを実際には作らない）。
+vi.mock("../template", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../template")>();
+  return {
+    ...actual,
+    acquireTempTemplate: (...args: unknown[]) => mockAcquireTempTemplate(...args),
+  };
+});
 
-// tmpBaseDir の register/finalizer 呼び出しを検証するためモックする（#10）。
+// tmpBaseDir の register/finalizer 呼び出しを検証するためモックする。
 // aggregate.ts の他の一時ディレクトリ操作は "../template" 経由の acquireTempTemplate が
 // 完全にモックされているため、このモックの影響を受けない。
 const mockRegisterTempDirEffect = vi.fn();
@@ -62,6 +68,7 @@ const { aggregateTemplateUsage } = await import("../aggregate");
 const { hashContent } = await import("../hash");
 const { ZIKU_CONFIG_FILE } = await import("../ziku-config");
 const { LOCK_FILE } = await import("../lock");
+const { absPath } = await import("../paths");
 const { glob } = await import("tinyglobby");
 const mockedGlob = vi.mocked(glob);
 
@@ -72,6 +79,11 @@ mockRemoveTempDirEffect.mockImplementation(() => Effect.void);
 // ---------------------------------------------------------------------------
 // フィクスチャヘルパー
 // ---------------------------------------------------------------------------
+
+/** テスト用の commit SHA を brand する。 */
+function sha(value: string): CommitSha {
+  return commitShaSchema.parse(value);
+}
 
 interface OwnerRepoFixture {
   owner: string;
@@ -93,23 +105,60 @@ function repoInfo(fixture: OwnerRepoFixture) {
   };
 }
 
-function lockJson(overrides: Record<string, unknown> = {}): string {
+type LockJsonRef =
+  | { readonly kind: "branch" | "tag"; readonly name: string }
+  | { readonly kind: "commit"; readonly sha: string };
+
+interface LockJsonOptions {
+  readonly source?: { readonly owner: string; readonly repo: string; readonly ref?: LockJsonRef };
+  readonly baseHashes?: Record<string, string>;
+  readonly merging?: {
+    readonly conflicts: readonly { readonly path: string; readonly reason: "noBase" }[];
+  };
+}
+
+/** 新スキーマ（kind 判別 union の source / sync 状態機械）に沿った lock.json フィクスチャを作る。 */
+function lockJson(opts: LockJsonOptions = {}): string {
+  const source = { kind: "github" as const, owner: "acme", repo: "template", ...opts.source };
+  const base = { hashes: opts.baseHashes ?? {} };
+
+  if (opts.merging) {
+    return JSON.stringify({
+      version: "1.0.0",
+      installedAt: "2024-01-01T00:00:00Z",
+      source,
+      sync: "merging",
+      base,
+      merge: { conflicts: opts.merging.conflicts, nextBase: base },
+    });
+  }
+
+  if (opts.baseHashes === undefined) {
+    return JSON.stringify({
+      version: "1.0.0",
+      installedAt: "2024-01-01T00:00:00Z",
+      source,
+      sync: "pending",
+    });
+  }
+
   return JSON.stringify({
     version: "1.0.0",
     installedAt: "2024-01-01T00:00:00Z",
-    source: { owner: "acme", repo: "template" },
-    ...overrides,
+    source,
+    sync: "synced",
+    base,
   });
 }
 
-/** owner/repo をキーに lock.json の取得結果を差し替える */
+/** owner/repo をキーに lock.json の取得結果を差し替える（reject する thunk も渡せる）。 */
 function setLockFixture(
-  fixtures: Map<string, Effect.Effect<Option.Option<string>, GitHubApiError>>,
+  fixtures: Map<string, () => Promise<Option.Option<string>>>,
   owner: string,
   repo: string,
-  result: Effect.Effect<Option.Option<string>, GitHubApiError>,
+  thunk: () => Promise<Option.Option<string>>,
 ): void {
-  fixtures.set(`${owner}/${repo}`, result);
+  fixtures.set(`${owner}/${repo}`, thunk);
 }
 
 /**
@@ -124,8 +173,8 @@ function queueGlobResults(templateFiles: string[], repoFiles: string[]): void {
 }
 
 describe("aggregateTemplateUsage", () => {
-  const lockFixtures = new Map<string, Effect.Effect<Option.Option<string>, GitHubApiError>>();
-  const shaFixtures = new Map<string, string | undefined>();
+  const lockFixtures = new Map<string, () => Promise<Option.Option<string>>>();
+  const shaFixtures = new Map<string, CommitSha>();
   const dirsBySource = new Map<string, string>();
 
   beforeEach(() => {
@@ -136,42 +185,54 @@ describe("aggregateTemplateUsage", () => {
     dirsBySource.clear();
 
     mockFetchRepoTextFile.mockImplementation((owner: string, repo: string) => {
-      return lockFixtures.get(`${owner}/${repo}`) ?? Effect.succeed(Option.none());
+      const thunk = lockFixtures.get(`${owner}/${repo}`);
+      return thunk ? thunk() : Promise.resolve(Option.none());
     });
-    mockResolveLatestCommitSha.mockImplementation(async (owner: string, repo: string) =>
-      shaFixtures.get(`${owner}/${repo}`),
+    mockResolveLatestCommitSha.mockImplementation(async (owner: string, repo: string) => {
+      const fixture = shaFixtures.get(`${owner}/${repo}`);
+      return fixture !== undefined
+        ? { _tag: "Resolved", sha: fixture }
+        : { _tag: "Unresolved", reason: "no fixture registered" };
+    });
+    // resolveSourceCommit は commit 種別を API 呼び出しなしで解決する（実装と同じ挙動）。
+    // ブランチ・タグの解決は個別テストで上書きする。
+    mockResolveSourceCommit.mockImplementation(
+      async (_owner: string, _repo: string, ref?: LockJsonRef) => {
+        if (ref?.kind === "commit") return { _tag: "Resolved", sha: ref.sha };
+        return { _tag: "Unresolved", reason: "no fixture registered" };
+      },
     );
     mockAcquireTempTemplate.mockImplementation((_targetDir: string, source: string) => {
       const dir = dirsBySource.get(source);
       if (dir === undefined) {
-        return Effect.fail(new Error(`no fixture dir registered for source: ${source}`));
+        return Effect.fail(
+          new TemplateError({ message: `no fixture dir registered for source: ${source}` }),
+        );
       }
-      return Effect.succeed(dir);
+      return Effect.succeed(absPath(dir));
     });
-    mockGetLastCommitDate.mockImplementation(() => Effect.succeed(Option.none()));
+    mockGetLastCommitDate.mockImplementation(() => Promise.resolve(Option.none()));
     // 既定では「リネームされていない」（owner/repo をそのまま正規名として返す）状態にする。
     // ほとんどのテストは template.ref を明示指定するため呼ばれないが、lock.source が
-    // テンプレートと owner/repo 文字列で一致しない候補（#11 の canonical 解決）や、
+    // テンプレートと owner/repo 文字列で一致しない候補（canonical 解決）や、
     // template.ref 省略時の既定ブランチ解決から呼ばれる。個別に上書きする場合はそちらが優先される。
     mockGetRepoIdentity.mockImplementation((owner: string, repo: string) =>
-      Effect.succeed({ owner, repo, defaultBranch: "main" }),
+      Promise.resolve({ owner, repo, defaultBranch: "main" }),
     );
   });
 
   it("`.ziku/lock.json` が無いリポジトリは skipped に入らず黙って除外される", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([
-        repoInfo({ owner: "acme", repo: "template" }),
-        repoInfo({ owner: "acme", repo: "no-lock" }),
-      ]),
-    );
+    mockListOwnerRepos.mockResolvedValue([
+      repoInfo({ owner: "acme", repo: "template" }),
+      repoInfo({ owner: "acme", repo: "no-lock" }),
+    ]);
     // SHA 解決には成功する（回帰確認: SHA 解決成功後の 404 だけが黙って除外される対象）。
-    shaFixtures.set("acme/no-lock", "no-lock-sha");
+    shaFixtures.set("acme/no-lock", sha("no-lock-sha"));
     // lockFixtures に何も登録しない = fetchRepoTextFile は既定で Option.none()（404 相当）を返す
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
       }),
     );
@@ -182,21 +243,18 @@ describe("aggregateTemplateUsage", () => {
   });
 
   // pull の途中で止まっているリポジトリは、ファイルに衝突マーカーが残りうる一方
-  // baseHashes は前進していない。その中間状態を統合の対象に上げてはいけない。
+  // base のハッシュは前進していない。その中間状態を統合の対象に上げてはいけない。
   it("pull の衝突が未解決のリポジトリは、理由付きで skipped に残す", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([repoInfo({ owner: "acme", repo: "mid-pull" })]),
-    );
-    setLockFixture(
-      lockFixtures,
-      "acme",
-      "mid-pull",
-      Effect.succeed(
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "mid-pull" })]);
+    setLockFixture(lockFixtures, "acme", "mid-pull", () =>
+      Promise.resolve(
         Option.some(
           lockJson({
-            pendingMerge: {
-              conflicts: [".claude/rules/a.md", ".claude/rules/b.md"],
-              templateHashes: {},
+            merging: {
+              conflicts: [
+                { path: ".claude/rules/a.md", reason: "noBase" },
+                { path: ".claude/rules/b.md", reason: "noBase" },
+              ],
             },
           }),
         ),
@@ -205,7 +263,7 @@ describe("aggregateTemplateUsage", () => {
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
       }),
     );
@@ -219,21 +277,20 @@ describe("aggregateTemplateUsage", () => {
   // lock.source.ref でテンプレートの特定リビジョンに固定している利用リポジトリは、
   // 既定ブランチの先頭と比較すると「追随していないだけの差分」が未同期として並ぶ。
   it("テンプレートの別リビジョンに固定している利用リポジトリは、理由付きで skipped に残す", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([repoInfo({ owner: "acme", repo: "pinned" })]),
-    );
-    setLockFixture(
-      lockFixtures,
-      "acme",
-      "pinned",
-      Effect.succeed(
-        Option.some(lockJson({ source: { owner: "acme", repo: "template", ref: "v1.0.0" } })),
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "pinned" })]);
+    setLockFixture(lockFixtures, "acme", "pinned", () =>
+      Promise.resolve(
+        Option.some(
+          lockJson({
+            source: { owner: "acme", repo: "template", ref: { kind: "tag", name: "v1.0.0" } },
+          }),
+        ),
       ),
     );
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
       }),
     );
@@ -245,26 +302,32 @@ describe("aggregateTemplateUsage", () => {
   });
 
   // lock.source.ref はブランチ名・タグ名も取りうる。比較基準は解決済み SHA なので、
-  // 文字列一致だけで判定すると「既定ブランチ名で固定しているだけ」の利用リポジトリを
-  // 別系列として落としてしまう。
+  // 種別を問わず resolveSourceCommit で解決してから比較する。
   it("ブランチ名で固定していても、同じ SHA に解決されるなら対象に含める", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([repoInfo({ owner: "acme", repo: "branch-pinned" })]),
-    );
-    setLockFixture(
-      lockFixtures,
-      "acme",
-      "branch-pinned",
-      Effect.succeed(
-        Option.some(lockJson({ source: { owner: "acme", repo: "template", ref: "main" } })),
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "branch-pinned" })]);
+    setLockFixture(lockFixtures, "acme", "branch-pinned", () =>
+      Promise.resolve(
+        Option.some(
+          lockJson({
+            source: { owner: "acme", repo: "template", ref: { kind: "branch", name: "main" } },
+          }),
+        ),
       ),
     );
-    shaFixtures.set("acme/branch-pinned", "branch-pinned-sha");
+    shaFixtures.set("acme/branch-pinned", sha("branch-pinned-sha"));
     // テンプレートの "main" は比較基準と同じ SHA に解決される
-    mockResolveLatestCommitSha.mockImplementation(
-      async (owner: string, repo: string, ref?: string) => {
-        if (owner === "acme" && repo === "template" && ref === "main") return "tmpl-sha";
-        return shaFixtures.get(`${owner}/${repo}`);
+    mockResolveSourceCommit.mockImplementation(
+      async (owner: string, repo: string, ref?: LockJsonRef) => {
+        if (
+          owner === "acme" &&
+          repo === "template" &&
+          ref?.kind === "branch" &&
+          ref.name === "main"
+        ) {
+          return { _tag: "Resolved", sha: sha("tmpl-sha") };
+        }
+        if (ref?.kind === "commit") return { _tag: "Resolved", sha: ref.sha };
+        return { _tag: "Unresolved", reason: "no fixture registered" };
       },
     );
     dirsBySource.set("gh:acme/branch-pinned#branch-pinned-sha", "/branch-pinned-dir");
@@ -277,7 +340,7 @@ describe("aggregateTemplateUsage", () => {
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
       }),
     );
@@ -287,18 +350,17 @@ describe("aggregateTemplateUsage", () => {
   });
 
   it("lock.source.ref がスキャンの比較基準と一致していれば対象に含める", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([repoInfo({ owner: "acme", repo: "same-ref" })]),
-    );
-    setLockFixture(
-      lockFixtures,
-      "acme",
-      "same-ref",
-      Effect.succeed(
-        Option.some(lockJson({ source: { owner: "acme", repo: "template", ref: "tmpl-sha" } })),
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "same-ref" })]);
+    setLockFixture(lockFixtures, "acme", "same-ref", () =>
+      Promise.resolve(
+        Option.some(
+          lockJson({
+            source: { owner: "acme", repo: "template", ref: { kind: "commit", sha: "tmpl-sha" } },
+          }),
+        ),
       ),
     );
-    shaFixtures.set("acme/same-ref", "same-ref-sha");
+    shaFixtures.set("acme/same-ref", sha("same-ref-sha"));
     dirsBySource.set("gh:acme/same-ref#same-ref-sha", "/same-ref-dir");
     dirsBySource.set("gh:acme/template#tmpl-sha", "/same-ref-tmpl-dir");
     vol.fromJSON({
@@ -309,7 +371,7 @@ describe("aggregateTemplateUsage", () => {
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
       }),
     );
@@ -319,22 +381,19 @@ describe("aggregateTemplateUsage", () => {
   });
 
   it("lock.source が別テンプレートを指すリポジトリは除外される", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([repoInfo({ owner: "acme", repo: "other-template-user" })]),
-    );
-    shaFixtures.set("acme/other-template-user", "other-template-user-sha");
-    setLockFixture(
-      lockFixtures,
-      "acme",
-      "other-template-user",
-      Effect.succeed(
+    mockListOwnerRepos.mockResolvedValue([
+      repoInfo({ owner: "acme", repo: "other-template-user" }),
+    ]);
+    shaFixtures.set("acme/other-template-user", sha("other-template-user-sha"));
+    setLockFixture(lockFixtures, "acme", "other-template-user", () =>
+      Promise.resolve(
         Option.some(lockJson({ source: { owner: "someone-else", repo: "different-template" } })),
       ),
     );
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
       }),
     );
@@ -349,25 +408,22 @@ describe("aggregateTemplateUsage", () => {
   // 比べ直す。
   describe("テンプレートのリネーム・移管（lock.source の正規名解決）", () => {
     it("lock.source が旧名のままでも、正規名の解決を経てレポートに含める", async () => {
-      mockListOwnerRepos.mockReturnValue(
-        Effect.succeed([repoInfo({ owner: "acme", repo: "renamed-consumer" })]),
-      );
-      setLockFixture(
-        lockFixtures,
-        "acme",
-        "renamed-consumer",
-        Effect.succeed(
+      mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "renamed-consumer" })]);
+      setLockFixture(lockFixtures, "acme", "renamed-consumer", () =>
+        Promise.resolve(
           Option.some(lockJson({ source: { owner: "old-owner", repo: "old-template" } })),
         ),
       );
       // lock.source (old-owner/old-template) は GitHub 上のリダイレクトで
       // 現在のテンプレート (acme/template) を指す。
       mockGetRepoIdentity.mockImplementation((owner: string, repo: string) =>
-        owner === "old-owner" && repo === "old-template"
-          ? Effect.succeed({ owner: "acme", repo: "template", defaultBranch: "main" })
-          : Effect.succeed({ owner, repo, defaultBranch: "main" }),
+        Promise.resolve(
+          owner === "old-owner" && repo === "old-template"
+            ? { owner: "acme", repo: "template", defaultBranch: "main" }
+            : { owner, repo, defaultBranch: "main" },
+        ),
       );
-      shaFixtures.set("acme/renamed-consumer", "renamed-consumer-sha");
+      shaFixtures.set("acme/renamed-consumer", sha("renamed-consumer-sha"));
       dirsBySource.set("gh:acme/renamed-consumer#renamed-consumer-sha", "/renamed-consumer-dir");
       dirsBySource.set("gh:acme/template#tmpl-sha", "/renamed-consumer-tmpl-dir");
       vol.fromJSON({
@@ -378,7 +434,7 @@ describe("aggregateTemplateUsage", () => {
 
       const report = await Effect.runPromise(
         aggregateTemplateUsage({
-          template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+          template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
           tmpBaseDir: "/tmp-base",
         }),
       );
@@ -388,26 +444,27 @@ describe("aggregateTemplateUsage", () => {
     });
 
     it("正規名の解決が 404 だったリポジトリは skipped に積まず静かに除外する", async () => {
-      mockListOwnerRepos.mockReturnValue(
-        Effect.succeed([repoInfo({ owner: "acme", repo: "unrelated-repo" })]),
-      );
-      setLockFixture(
-        lockFixtures,
-        "acme",
-        "unrelated-repo",
-        Effect.succeed(
+      mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "unrelated-repo" })]);
+      setLockFixture(lockFixtures, "acme", "unrelated-repo", () =>
+        Promise.resolve(
           Option.some(lockJson({ source: { owner: "gone-owner", repo: "gone-template" } })),
         ),
       );
       mockGetRepoIdentity.mockImplementation((owner: string, repo: string) =>
         owner === "gone-owner" && repo === "gone-template"
-          ? Effect.fail(new GitHubApiError({ message: "Not Found", status: 404 }))
-          : Effect.succeed({ owner, repo, defaultBranch: "main" }),
+          ? Promise.reject(
+              zikuFailure({
+                kind: "GitHubTargetNotFound",
+                operation: "look up the canonical identity",
+                detail: "Not Found",
+              }),
+            )
+          : Promise.resolve({ owner, repo, defaultBranch: "main" }),
       );
 
       const report = await Effect.runPromise(
         aggregateTemplateUsage({
-          template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+          template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
           tmpBaseDir: "/tmp-base",
         }),
       );
@@ -417,26 +474,29 @@ describe("aggregateTemplateUsage", () => {
     });
 
     it("正規名の解決が 403 など判定不能な失敗をしたリポジトリは、理由付きで skipped に残す", async () => {
-      mockListOwnerRepos.mockReturnValue(
-        Effect.succeed([repoInfo({ owner: "acme", repo: "rate-limited-consumer" })]),
-      );
-      setLockFixture(
-        lockFixtures,
-        "acme",
-        "rate-limited-consumer",
-        Effect.succeed(
+      mockListOwnerRepos.mockResolvedValue([
+        repoInfo({ owner: "acme", repo: "rate-limited-consumer" }),
+      ]);
+      setLockFixture(lockFixtures, "acme", "rate-limited-consumer", () =>
+        Promise.resolve(
           Option.some(lockJson({ source: { owner: "maybe-renamed", repo: "maybe-template" } })),
         ),
       );
       mockGetRepoIdentity.mockImplementation((owner: string, repo: string) =>
         owner === "maybe-renamed" && repo === "maybe-template"
-          ? Effect.fail(new GitHubApiError({ message: "rate limit exceeded", status: 403 }))
-          : Effect.succeed({ owner, repo, defaultBranch: "main" }),
+          ? Promise.reject(
+              zikuFailure({
+                kind: "GitHubPermissionDenied",
+                operation: "look up the canonical identity",
+                detail: "rate limit exceeded",
+              }),
+            )
+          : Promise.resolve({ owner, repo, defaultBranch: "main" }),
       );
 
       const report = await Effect.runPromise(
         aggregateTemplateUsage({
-          template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+          template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
           tmpBaseDir: "/tmp-base",
         }),
       );
@@ -448,16 +508,14 @@ describe("aggregateTemplateUsage", () => {
     });
 
     it("lock.source が文字列としてテンプレートと一致する場合は正規名解決 API を呼ばない", async () => {
-      mockListOwnerRepos.mockReturnValue(
-        Effect.succeed([repoInfo({ owner: "acme", repo: "exact-match" })]),
-      );
+      mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "exact-match" })]);
       setLockFixture(
         lockFixtures,
         "acme",
         "exact-match",
-        Effect.succeed(Option.some(lockJson())), // source: { owner: "acme", repo: "template" }
+        () => Promise.resolve(Option.some(lockJson())), // source: { owner: "acme", repo: "template" }
       );
-      shaFixtures.set("acme/exact-match", "exact-match-sha");
+      shaFixtures.set("acme/exact-match", sha("exact-match-sha"));
       dirsBySource.set("gh:acme/exact-match#exact-match-sha", "/exact-match-dir");
       dirsBySource.set("gh:acme/template#tmpl-sha", "/exact-match-tmpl-dir");
       vol.fromJSON({
@@ -468,7 +526,7 @@ describe("aggregateTemplateUsage", () => {
 
       const report = await Effect.runPromise(
         aggregateTemplateUsage({
-          template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+          template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
           tmpBaseDir: "/tmp-base",
         }),
       );
@@ -481,17 +539,17 @@ describe("aggregateTemplateUsage", () => {
   });
 
   it("lock.json が壊れているリポジトリは skipped に理由付きで入り、他のリポジトリの結果は返る", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([
-        repoInfo({ owner: "acme", repo: "broken" }),
-        repoInfo({ owner: "acme", repo: "good" }),
-      ]),
+    mockListOwnerRepos.mockResolvedValue([
+      repoInfo({ owner: "acme", repo: "broken" }),
+      repoInfo({ owner: "acme", repo: "good" }),
+    ]);
+    setLockFixture(lockFixtures, "acme", "broken", () =>
+      Promise.resolve(Option.some("{ not valid json")),
     );
-    setLockFixture(lockFixtures, "acme", "broken", Effect.succeed(Option.some("{ not valid json")));
-    setLockFixture(lockFixtures, "acme", "good", Effect.succeed(Option.some(lockJson())));
+    setLockFixture(lockFixtures, "acme", "good", () => Promise.resolve(Option.some(lockJson())));
 
-    shaFixtures.set("acme/broken", "broken-sha");
-    shaFixtures.set("acme/good", "good-sha");
+    shaFixtures.set("acme/broken", sha("broken-sha"));
+    shaFixtures.set("acme/good", sha("good-sha"));
     dirsBySource.set("gh:acme/good#good-sha", "/good-dir");
     dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-simple");
 
@@ -504,7 +562,7 @@ describe("aggregateTemplateUsage", () => {
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
         concurrency: 1,
       }),
@@ -526,17 +584,12 @@ describe("aggregateTemplateUsage", () => {
   });
 
   it("分類結果が pendingPush / pendingPull / conflicts に正しく写る（ziku.jsonc 自身の drift を含む）", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([repoInfo({ owner: "acme", repo: "proj-a" })]),
-    );
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "proj-a" })]);
     // リポジトリは `ziku track` で "docs/local.md" を追加済み（テンプレートには無い）。
     const templateZikuJsonc = JSON.stringify({ include: [".github/**"] });
     const repoZikuJsonc = JSON.stringify({ include: [".github/**", "docs/local.md"] });
-    setLockFixture(
-      lockFixtures,
-      "acme",
-      "proj-a",
-      Effect.succeed(
+    setLockFixture(lockFixtures, "acme", "proj-a", () =>
+      Promise.resolve(
         Option.some(
           lockJson({
             baseHashes: {
@@ -545,16 +598,16 @@ describe("aggregateTemplateUsage", () => {
               ".github/local-change.yml": hashContent("orig"),
               ".github/removed-locally.yml": hashContent("stable"),
               "docs/local.md": hashContent("base-doc"),
-              // 前回 sync 時点ではテンプレートと同じ内容だった（= track 前）。
-              // withConfigTracked による同期対象化（#1）を検証するため、実運用同様に
-              // baseHashes へ ziku.jsonc 自身のハッシュも含める。
+              // 実運用では init/pull/push が同期対象化のため ziku.jsonc 自身のハッシュも
+              // baseHashes へ記録する。この値が local/template どちらのハッシュ計算からも
+              // 漏れずに含まれることを検証する。
               [ZIKU_CONFIG_FILE]: hashContent(templateZikuJsonc),
             },
           }),
         ),
       ),
     );
-    shaFixtures.set("acme/proj-a", "proj-a-sha");
+    shaFixtures.set("acme/proj-a", sha("proj-a-sha"));
     dirsBySource.set("gh:acme/proj-a#proj-a-sha", "/repo-a-dir");
     dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir");
 
@@ -584,7 +637,7 @@ describe("aggregateTemplateUsage", () => {
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
       }),
     );
@@ -601,12 +654,12 @@ describe("aggregateTemplateUsage", () => {
       ]),
     );
     // ziku.jsonc がテンプレート/ローカルどちらのハッシュマップにも載っていれば
-    // deletedFiles（誤った pendingPull）には出ない（#1 の回帰確認）。
+    // deletedFiles（誤った pendingPull）には出ない。
     expect(result?.pendingPull.some((e) => e.path === ZIKU_CONFIG_FILE)).toBe(false);
     expect(result?.pendingPull).toHaveLength(3);
 
     // ziku.jsonc は前回 sync 以降ローカルだけが変更した（track で新パターンを追加した）ので
-    // localOnly → pendingPush として実差分が報告される（#1 の主張どおり）。
+    // localOnly → pendingPush として実差分が報告される。
     expect(result?.pendingPush).toEqual(
       expect.arrayContaining([
         { path: ".github/local-change.yml", reason: "localOnly" },
@@ -616,28 +669,25 @@ describe("aggregateTemplateUsage", () => {
     );
     expect(result?.pendingPush).toHaveLength(3);
 
-    expect(result?.conflicts).toEqual([{ path: "docs/local.md" }]);
+    expect(result?.conflicts).toEqual([{ path: "docs/local.md", reason: "textConflict" }]);
   });
 
   // ziku.jsonc は加法 union で同期されるため、片側だけのパターン削除はアクション不要。
-  // 生の 3-way 分類のままだと localOnly → pendingPush となり、レポートを読んだエージェントが
-  // テンプレートからそのパターンを消して全利用リポジトリへ波及させうる。
+  // status と同じ状態機械（zikuConfigStatus）を経由することで、テンプレートからそのパターンを
+  // 消して全利用リポジトリへ波及させる pendingPush を出さない。
   it("利用リポジトリ側だけが ziku.jsonc のパターンを削除した場合、pendingPush に出さない", async () => {
-    mockListOwnerRepos.mockReturnValue(Effect.succeed([repoInfo({ owner: "acme", repo: "proj" })]));
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "proj" })]);
     // テンプレートは 2 パターン、利用リポジトリは 1 つ削って 1 パターンだけ持つ。
     const templateZikuJsonc = JSON.stringify({ include: ["a.txt", "b.txt"] });
     const repoZikuJsonc = JSON.stringify({ include: ["a.txt"] });
-    setLockFixture(
-      lockFixtures,
-      "acme",
-      "proj",
-      Effect.succeed(
+    setLockFixture(lockFixtures, "acme", "proj", () =>
+      Promise.resolve(
         Option.some(
           lockJson({ baseHashes: { [ZIKU_CONFIG_FILE]: hashContent(templateZikuJsonc) } }),
         ),
       ),
     );
-    shaFixtures.set("acme/proj", "proj-sha");
+    shaFixtures.set("acme/proj", sha("proj-sha"));
     dirsBySource.set("gh:acme/proj#proj-sha", "/drift-repo-dir");
     dirsBySource.set("gh:acme/template#tmpl-sha", "/drift-tmpl-dir");
 
@@ -649,31 +699,26 @@ describe("aggregateTemplateUsage", () => {
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
       }),
     );
 
     const [result] = report.repositories;
-    // union == テンプレート側なので push すべき差分は無い
+    // 利用リポジトリがパターンを削っただけの状態が pendingPush に出ると、レポートを読んだ
+    // エージェントがテンプレートからそのパターンを消し、全利用リポジトリへ波及しうる。
     expect(result?.pendingPush.some((e) => e.path === ZIKU_CONFIG_FILE)).toBe(false);
-    // union == ローカルではない（テンプレートにしか無い b.txt がある）ので pull 側に出る
-    expect(result?.pendingPull).toEqual(
-      expect.arrayContaining([{ path: ZIKU_CONFIG_FILE, reason: "autoUpdate" }]),
-    );
+    expect(result?.conflicts.some((e) => e.path === ZIKU_CONFIG_FILE)).toBe(false);
   });
 
-  // classifyFiles の deletedFiles 分岐は base/template の有無だけで判定し local を見ない。
-  // 切り分けずに pendingPull へ流すと、利用リポジトリ側の編集が「削除を配布せよ」と
-  // 読めてしまい、そのリポジトリにしか無い変更が捨てられる。
+  // classifyFiles の deletedFiles 分岐は base/template の有無だけで判定し、local を見ない。
+  // テンプレート側で削除され、ローカルは base から変更している場合は
+  // deletedWithLocalEdits に分離され、双方で削除済みの場合は保留が無い。
   it("テンプレートで削除されたファイルを、利用リポジトリ側の状態で切り分ける", async () => {
-    mockListOwnerRepos.mockReturnValue(Effect.succeed([repoInfo({ owner: "acme", repo: "proj" })]));
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "proj" })]);
     const zikuJsonc = JSON.stringify({ include: ["f/**"] });
-    setLockFixture(
-      lockFixtures,
-      "acme",
-      "proj",
-      Effect.succeed(
+    setLockFixture(lockFixtures, "acme", "proj", () =>
+      Promise.resolve(
         Option.some(
           lockJson({
             baseHashes: {
@@ -686,7 +731,7 @@ describe("aggregateTemplateUsage", () => {
         ),
       ),
     );
-    shaFixtures.set("acme/proj", "proj-sha");
+    shaFixtures.set("acme/proj", sha("proj-sha"));
     dirsBySource.set("gh:acme/proj#proj-sha", "/del-repo-dir");
     dirsBySource.set("gh:acme/template#tmpl-sha", "/del-tmpl-dir");
 
@@ -701,15 +746,15 @@ describe("aggregateTemplateUsage", () => {
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
       }),
     );
 
     const [result] = report.repositories;
 
-    // 利用リポジトリ側で編集済み → 双方が変更した状態なので conflicts
-    expect(result?.conflicts).toEqual([{ path: "f/edited.txt" }]);
+    // 利用リポジトリ側で編集済み → 双方が変更した状態なので conflicts（deletedWithLocalEdits）
+    expect(result?.conflicts).toEqual([{ path: "f/edited.txt", reason: "deletedWithLocalEdits" }]);
     // 前回 sync 時点から変わっていない → 削除をそのまま配布できる
     expect(result?.pendingPull).toEqual(
       expect.arrayContaining([{ path: "f/untouched.txt", reason: "deletedFiles" }]),
@@ -721,27 +766,19 @@ describe("aggregateTemplateUsage", () => {
   });
 
   it("since フィルタが効く（pendingPush/conflicts の最終コミット日時でリポジトリ単位に絞り込む）", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([
-        repoInfo({ owner: "acme", repo: "recent" }),
-        repoInfo({ owner: "acme", repo: "stale" }),
-      ]),
-    );
+    mockListOwnerRepos.mockResolvedValue([
+      repoInfo({ owner: "acme", repo: "recent" }),
+      repoInfo({ owner: "acme", repo: "stale" }),
+    ]);
     const baseHashes = { "f.txt": hashContent("v1") };
-    setLockFixture(
-      lockFixtures,
-      "acme",
-      "recent",
-      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    setLockFixture(lockFixtures, "acme", "recent", () =>
+      Promise.resolve(Option.some(lockJson({ baseHashes }))),
     );
-    setLockFixture(
-      lockFixtures,
-      "acme",
-      "stale",
-      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    setLockFixture(lockFixtures, "acme", "stale", () =>
+      Promise.resolve(Option.some(lockJson({ baseHashes }))),
     );
-    shaFixtures.set("acme/recent", "recent-sha");
-    shaFixtures.set("acme/stale", "stale-sha");
+    shaFixtures.set("acme/recent", sha("recent-sha"));
+    shaFixtures.set("acme/stale", sha("stale-sha"));
     dirsBySource.set("gh:acme/recent#recent-sha", "/recent-dir");
     dirsBySource.set("gh:acme/stale#stale-sha", "/stale-dir");
     dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-since");
@@ -759,14 +796,14 @@ describe("aggregateTemplateUsage", () => {
     queueGlobResults(["f.txt"], ["f.txt"]);
 
     mockGetLastCommitDate.mockImplementation((owner: string, repo: string) => {
-      if (repo === "recent") return Effect.succeed(Option.some("2026-08-10T00:00:00Z"));
-      if (repo === "stale") return Effect.succeed(Option.some("2025-01-01T00:00:00Z"));
-      return Effect.succeed(Option.none());
+      if (repo === "recent") return Promise.resolve(Option.some("2026-08-10T00:00:00Z"));
+      if (repo === "stale") return Promise.resolve(Option.some("2025-01-01T00:00:00Z"));
+      return Promise.resolve(Option.none());
     });
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
         concurrency: 1,
         since: "2026-08-01T00:00:00Z",
@@ -775,7 +812,7 @@ describe("aggregateTemplateUsage", () => {
 
     expect(report.repositories.map((r) => r.repo)).toEqual(["recent"]);
     expect(report.skipped).toEqual([]);
-    // attachLastCommittedAt が UTC ISO 8601 へ正規化する（#7）ため、ミリ秒付きの
+    // attachLastCommittedAt が UTC ISO 8601 へ正規化するため、ミリ秒付きの
     // 表記 (.000Z) になる。
     expect(report.repositories[0]?.pendingPush[0]).toMatchObject({
       path: "f.txt",
@@ -785,18 +822,16 @@ describe("aggregateTemplateUsage", () => {
   });
 
   it("テンプレートリポジトリ自身は結果に含まれない", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([
-        repoInfo({ owner: "acme", repo: "template" }),
-        repoInfo({ owner: "acme", repo: "other" }),
-      ]),
-    );
+    mockListOwnerRepos.mockResolvedValue([
+      repoInfo({ owner: "acme", repo: "template" }),
+      repoInfo({ owner: "acme", repo: "other" }),
+    ]);
     // "other" は lock.json 未導入（fetchRepoTextFile 既定の Option.none()）。SHA 解決は成功させる。
-    shaFixtures.set("acme/other", "other-sha");
+    shaFixtures.set("acme/other", sha("other-sha"));
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
       }),
     );
@@ -811,27 +846,19 @@ describe("aggregateTemplateUsage", () => {
   });
 
   it("テンプレートは利用リポジトリが何件あっても 1 度しか取得しない", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([
-        repoInfo({ owner: "acme", repo: "a" }),
-        repoInfo({ owner: "acme", repo: "b" }),
-      ]),
-    );
+    mockListOwnerRepos.mockResolvedValue([
+      repoInfo({ owner: "acme", repo: "a" }),
+      repoInfo({ owner: "acme", repo: "b" }),
+    ]);
     const baseHashes = { "f.txt": hashContent("v1") };
-    setLockFixture(
-      lockFixtures,
-      "acme",
-      "a",
-      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    setLockFixture(lockFixtures, "acme", "a", () =>
+      Promise.resolve(Option.some(lockJson({ baseHashes }))),
     );
-    setLockFixture(
-      lockFixtures,
-      "acme",
-      "b",
-      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    setLockFixture(lockFixtures, "acme", "b", () =>
+      Promise.resolve(Option.some(lockJson({ baseHashes }))),
     );
-    shaFixtures.set("acme/a", "a-sha");
-    shaFixtures.set("acme/b", "b-sha");
+    shaFixtures.set("acme/a", sha("a-sha"));
+    shaFixtures.set("acme/b", sha("b-sha"));
     dirsBySource.set("gh:acme/a#a-sha", "/a-dir");
     dirsBySource.set("gh:acme/b#b-sha", "/b-dir");
     dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-once");
@@ -849,7 +876,7 @@ describe("aggregateTemplateUsage", () => {
 
     await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
         concurrency: 1,
       }),
@@ -862,11 +889,11 @@ describe("aggregateTemplateUsage", () => {
   });
 
   it("searchOwner を指定するとテンプレートの owner ではなくそちらを探索する", async () => {
-    mockListOwnerRepos.mockReturnValue(Effect.succeed([]));
+    mockListOwnerRepos.mockResolvedValue([]);
 
     await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         searchOwner: "another-org",
         tmpBaseDir: "/tmp-base",
       }),
@@ -875,21 +902,15 @@ describe("aggregateTemplateUsage", () => {
     expect(mockListOwnerRepos.mock.calls[0]?.[0]).toBe("another-org");
   });
 
-  it("`.ziku/ziku.jsonc` はテンプレートと内容が同じなら pendingPull にも pendingPush にも出ない（同期対象からの漏れ修正・#1）", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([repoInfo({ owner: "acme", repo: "config-sync" })]),
-    );
+  it("`.ziku/ziku.jsonc` はテンプレートと内容が同じなら pendingPull にも pendingPush にも出ない（同期対象からの漏れ修正）", async () => {
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "config-sync" })]);
     const configContent = JSON.stringify({ include: ["docs/**"] });
-    setLockFixture(
-      lockFixtures,
-      "acme",
-      "config-sync",
-      Effect.succeed(
+    setLockFixture(lockFixtures, "acme", "config-sync", () =>
+      Promise.resolve(
         Option.some(
           lockJson({
-            // 実運用では push/pull/init が withConfigTracked 経由で ziku.jsonc 自身の
-            // ハッシュを baseHashes に記録する。この値が local/template どちらの
-            // ハッシュ計算からも漏れずに含まれることを検証する。
+            // 実運用では push/pull/init が ziku.jsonc 自身のハッシュを baseHashes に記録する。
+            // この値が local/template どちらのハッシュ計算からも漏れずに含まれることを検証する。
             baseHashes: {
               [ZIKU_CONFIG_FILE]: hashContent(configContent),
               "docs/a.md": hashContent("a"),
@@ -898,7 +919,7 @@ describe("aggregateTemplateUsage", () => {
         ),
       ),
     );
-    shaFixtures.set("acme/config-sync", "config-sync-sha");
+    shaFixtures.set("acme/config-sync", sha("config-sync-sha"));
     dirsBySource.set("gh:acme/config-sync#config-sync-sha", "/config-sync-dir");
     dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-config");
 
@@ -912,7 +933,7 @@ describe("aggregateTemplateUsage", () => {
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
       }),
     );
@@ -924,18 +945,13 @@ describe("aggregateTemplateUsage", () => {
     expect(result?.pendingPush.some((e) => e.path === ZIKU_CONFIG_FILE)).toBe(false);
   });
 
-  it("--since 指定時、コミット日時の取得が全件失敗したリポジトリは filteredBySince で消えず skipped に入る（#4）", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([repoInfo({ owner: "acme", repo: "rate-limited" })]),
-    );
+  it("--since 指定時、コミット日時の取得が全件失敗したリポジトリは filteredBySince で消えず skipped に入る", async () => {
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "rate-limited" })]);
     const baseHashes = { "f.txt": hashContent("v1") };
-    setLockFixture(
-      lockFixtures,
-      "acme",
-      "rate-limited",
-      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    setLockFixture(lockFixtures, "acme", "rate-limited", () =>
+      Promise.resolve(Option.some(lockJson({ baseHashes }))),
     );
-    shaFixtures.set("acme/rate-limited", "rl-sha");
+    shaFixtures.set("acme/rate-limited", sha("rl-sha"));
     dirsBySource.set("gh:acme/rate-limited#rl-sha", "/rl-dir");
     dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-rl");
 
@@ -949,12 +965,14 @@ describe("aggregateTemplateUsage", () => {
 
     // レート制限などで getLastCommitDate が全件失敗する状況を再現する。
     mockGetLastCommitDate.mockReturnValue(
-      Effect.fail(new GitHubApiError({ message: "rate limited", status: 403 })),
+      Promise.reject(
+        zikuFailure({ kind: "GitHubRateLimited", authenticated: false, resetAt: undefined }),
+      ),
     );
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
         since: "2026-08-01T00:00:00.000Z",
       }),
@@ -968,18 +986,13 @@ describe("aggregateTemplateUsage", () => {
     expect(report.skipped[0]?.reason.length).toBeGreaterThan(0);
   });
 
-  it("--since 比較はコミット日時をオフセットに関わらず UTC へ正規化してから行う（#7）", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([repoInfo({ owner: "acme", repo: "offset-commit" })]),
-    );
+  it("--since 比較はコミット日時をオフセットに関わらず UTC へ正規化してから行う", async () => {
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "offset-commit" })]);
     const baseHashes = { "f.txt": hashContent("v1") };
-    setLockFixture(
-      lockFixtures,
-      "acme",
-      "offset-commit",
-      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    setLockFixture(lockFixtures, "acme", "offset-commit", () =>
+      Promise.resolve(Option.some(lockJson({ baseHashes }))),
     );
-    shaFixtures.set("acme/offset-commit", "oc-sha");
+    shaFixtures.set("acme/offset-commit", sha("oc-sha"));
     dirsBySource.set("gh:acme/offset-commit#oc-sha", "/oc-dir");
     dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-oc");
 
@@ -993,11 +1006,13 @@ describe("aggregateTemplateUsage", () => {
 
     // UTC 換算では since (2026-08-10T00:00:00.000Z) より前だが、"+09:00" のオフセット
     // 表記のせいで文字列の辞書順比較では since 以降に見えてしまう値。
-    mockGetLastCommitDate.mockReturnValue(Effect.succeed(Option.some("2026-08-10T08:00:00+09:00")));
+    mockGetLastCommitDate.mockReturnValue(
+      Promise.resolve(Option.some("2026-08-10T08:00:00+09:00")),
+    );
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
         since: "2026-08-10T00:00:00.000Z",
       }),
@@ -1010,28 +1025,20 @@ describe("aggregateTemplateUsage", () => {
     expect(report.skipped).toEqual([]);
   });
 
-  it("sanitizeLabel で衝突しうる owner/repo でも、候補ごとに一意なテンポラリラベルを使う（#8）", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([
-        repoInfo({ owner: "foo.bar", repo: "x" }),
-        repoInfo({ owner: "foo_bar", repo: "x" }),
-      ]),
-    );
+  it("sanitizeLabel で衝突しうる owner/repo でも、候補ごとに一意なテンポラリラベルを使う", async () => {
+    mockListOwnerRepos.mockResolvedValue([
+      repoInfo({ owner: "foo.bar", repo: "x" }),
+      repoInfo({ owner: "foo_bar", repo: "x" }),
+    ]);
     const baseHashes = { "f.txt": hashContent("v1") };
-    setLockFixture(
-      lockFixtures,
-      "foo.bar",
-      "x",
-      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    setLockFixture(lockFixtures, "foo.bar", "x", () =>
+      Promise.resolve(Option.some(lockJson({ baseHashes }))),
     );
-    setLockFixture(
-      lockFixtures,
-      "foo_bar",
-      "x",
-      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    setLockFixture(lockFixtures, "foo_bar", "x", () =>
+      Promise.resolve(Option.some(lockJson({ baseHashes }))),
     );
-    shaFixtures.set("foo.bar/x", "sha-1");
-    shaFixtures.set("foo_bar/x", "sha-2");
+    shaFixtures.set("foo.bar/x", sha("sha-1"));
+    shaFixtures.set("foo_bar/x", sha("sha-2"));
     dirsBySource.set("gh:foo.bar/x#sha-1", "/dir-1");
     dirsBySource.set("gh:foo_bar/x#sha-2", "/dir-2");
     dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-collision");
@@ -1049,7 +1056,7 @@ describe("aggregateTemplateUsage", () => {
 
     await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
         concurrency: 1,
       }),
@@ -1064,17 +1071,19 @@ describe("aggregateTemplateUsage", () => {
     expect(new Set(repoLabels).size).toBe(2);
   });
 
-  it("テンプレートの既定ブランチを GET /repos で解決する（main 決め打ちにならない・#6）", async () => {
+  it("テンプレートの既定ブランチを GET /repos で解決する（main 決め打ちにならない）", async () => {
     // searchOwner がテンプレートと別 owner のため、listOwnerRepos の列挙結果に
     // テンプレート自身が含まれない状況を再現する。
-    mockListOwnerRepos.mockReturnValue(Effect.succeed([]));
-    mockGetRepoIdentity.mockReturnValue(
-      Effect.succeed({ owner: "acme", repo: "template", defaultBranch: "develop" }),
-    );
+    mockListOwnerRepos.mockResolvedValue([]);
+    mockGetRepoIdentity.mockResolvedValue({
+      owner: "acme",
+      repo: "template",
+      defaultBranch: "develop",
+    });
     mockResolveLatestCommitSha.mockImplementation(
-      async (_owner: string, _repo: string, ref?: string) => {
-        expect(ref).toBe("develop");
-        return "resolved-sha";
+      async (_owner: string, _repo: string, branch?: { kind: "branch"; name: string }) => {
+        expect(branch).toEqual({ kind: "branch", name: "develop" });
+        return { _tag: "Resolved", sha: sha("resolved-sha") };
       },
     );
 
@@ -1090,12 +1099,12 @@ describe("aggregateTemplateUsage", () => {
     expect(report.template.ref).toBe("resolved-sha");
   });
 
-  it("tmpBaseDir 省略時は Scope クローズ時に tmpBaseDir を削除する（#10）", async () => {
-    mockListOwnerRepos.mockReturnValue(Effect.succeed([]));
+  it("tmpBaseDir 省略時は Scope クローズ時に tmpBaseDir を削除する", async () => {
+    mockListOwnerRepos.mockResolvedValue([]);
 
     await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
       }),
     );
 
@@ -1106,19 +1115,14 @@ describe("aggregateTemplateUsage", () => {
     );
   });
 
-  it("--since 指定時、コミット日時の取得は concurrency 分だけ並列実行される（#2）", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([repoInfo({ owner: "acme", repo: "many-files" })]),
-    );
+  it("--since 指定時、コミット日時の取得は concurrency 分だけ並列実行される", async () => {
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "many-files" })]);
     const paths = ["f1.txt", "f2.txt", "f3.txt", "f4.txt"];
     const baseHashes = Object.fromEntries(paths.map((p) => [p, hashContent("v1")]));
-    setLockFixture(
-      lockFixtures,
-      "acme",
-      "many-files",
-      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    setLockFixture(lockFixtures, "acme", "many-files", () =>
+      Promise.resolve(Option.some(lockJson({ baseHashes }))),
     );
-    shaFixtures.set("acme/many-files", "mf-sha");
+    shaFixtures.set("acme/many-files", sha("mf-sha"));
     dirsBySource.set("gh:acme/many-files#mf-sha", "/mf-dir");
     dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-mf");
 
@@ -1139,19 +1143,21 @@ describe("aggregateTemplateUsage", () => {
     // 各呼び出しが同時に何件走っているかを記録し、逐次実行 (常に 1) との違いを検出する。
     let inFlight = 0;
     let maxInFlight = 0;
-    mockGetLastCommitDate.mockImplementation(() =>
-      Effect.gen(function* () {
-        inFlight += 1;
-        maxInFlight = Math.max(maxInFlight, inFlight);
-        yield* Effect.sleep("20 millis");
-        inFlight -= 1;
-        return Option.some("2026-08-10T00:00:00Z");
-      }),
+    mockGetLastCommitDate.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          setTimeout(() => {
+            inFlight -= 1;
+            resolve(Option.some("2026-08-10T00:00:00Z"));
+          }, 20);
+        }),
     );
 
     await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
         concurrency: 4,
         since: "2026-08-01T00:00:00.000Z",
@@ -1163,16 +1169,16 @@ describe("aggregateTemplateUsage", () => {
     expect(maxInFlight).toBeGreaterThan(1);
   });
 
-  it("skipped の reason は英語である（#5: 後段のエージェント/他の CLI 出力との一貫性）", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([repoInfo({ owner: "acme", repo: "broken" })]),
+  it("skipped の reason は英語である（後段のエージェント/他の CLI 出力との一貫性）", async () => {
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "broken" })]);
+    shaFixtures.set("acme/broken", sha("broken-sha"));
+    setLockFixture(lockFixtures, "acme", "broken", () =>
+      Promise.resolve(Option.some("{ not valid json")),
     );
-    shaFixtures.set("acme/broken", "broken-sha");
-    setLockFixture(lockFixtures, "acme", "broken", Effect.succeed(Option.some("{ not valid json")));
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
       }),
     );
@@ -1186,12 +1192,12 @@ describe("aggregateTemplateUsage", () => {
     expect(reason).toContain("Failed to parse lock.json as JSON");
   });
 
-  it("tmpBaseDir を明示指定した場合は削除しない（#10）", async () => {
-    mockListOwnerRepos.mockReturnValue(Effect.succeed([]));
+  it("tmpBaseDir を明示指定した場合は削除しない", async () => {
+    mockListOwnerRepos.mockResolvedValue([]);
 
     await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/explicit-tmp-base",
       }),
     );
@@ -1201,15 +1207,12 @@ describe("aggregateTemplateUsage", () => {
   });
 
   it("lock.json の取得は、リポジトリ内容のダウンロードと同じ commit SHA を ref に使う", async () => {
-    mockListOwnerRepos.mockReturnValue(Effect.succeed([repoInfo({ owner: "acme", repo: "proj" })]));
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "proj" })]);
     const baseHashes = { "f.txt": hashContent("v1") };
-    setLockFixture(
-      lockFixtures,
-      "acme",
-      "proj",
-      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    setLockFixture(lockFixtures, "acme", "proj", () =>
+      Promise.resolve(Option.some(lockJson({ baseHashes }))),
     );
-    shaFixtures.set("acme/proj", "shared-sha");
+    shaFixtures.set("acme/proj", sha("shared-sha"));
     dirsBySource.set("gh:acme/proj#shared-sha", "/proj-dir");
     dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-shared");
 
@@ -1223,14 +1226,14 @@ describe("aggregateTemplateUsage", () => {
 
     await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
       }),
     );
 
     // lock.json の取得は resolveLatestCommitSha が返した SHA を ref として渡す。
     expect(mockFetchRepoTextFile).toHaveBeenCalledWith("acme", "proj", LOCK_FILE, "shared-sha");
-    // リポジトリ内容のダウンロード（buildTemplateSource 経由の acquireTempTemplate）も
+    // リポジトリ内容のダウンロード（buildCommitPinnedSource 経由の acquireTempTemplate）も
     // 同じ SHA を使っている（"gh:acme/proj#shared-sha" 以外のソースでは呼ばれていない）。
     const repoDownloadSources = mockAcquireTempTemplate.mock.calls
       .map(([, source]) => source)
@@ -1238,37 +1241,33 @@ describe("aggregateTemplateUsage", () => {
     expect(repoDownloadSources).toEqual(["gh:acme/proj#shared-sha"]);
   });
 
-  it("利用リポジトリと分かった後に SHA 解決が undefined を返したら理由付きで skipped に残す", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([repoInfo({ owner: "acme", repo: "no-sha" })]),
-    );
-    setLockFixture(lockFixtures, "acme", "no-sha", Effect.succeed(Option.some(lockJson())));
-    // shaFixtures に登録しない = mockResolveLatestCommitSha は undefined を返す
+  it("利用リポジトリと分かった後に SHA 解決が失敗したら理由付きで skipped に残す", async () => {
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "no-sha" })]);
+    setLockFixture(lockFixtures, "acme", "no-sha", () => Promise.resolve(Option.some(lockJson())));
+    // shaFixtures に登録しない = mockResolveLatestCommitSha は既定で Unresolved を返す
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
       }),
     );
 
     expect(report.repositories).toEqual([]);
-    expect(report.skipped).toEqual([
-      { owner: "acme", repo: "no-sha", reason: "Could not resolve the latest commit SHA" },
-    ]);
+    expect(report.skipped).toHaveLength(1);
+    expect(report.skipped[0]).toMatchObject({ owner: "acme", repo: "no-sha" });
+    expect(report.skipped[0]?.reason).toContain("Could not resolve the latest commit SHA");
   });
 
   // owner 配下には空リポジトリなど SHA を解決できないものが混ざる。ziku を使っていない
   // リポジトリまで skipped に並べると、レポートがノイズで読めなくなる。
   it("ziku を使っていないリポジトリは、SHA 解決を試みずに黙って除外する", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([repoInfo({ owner: "acme", repo: "empty-repo" })]),
-    );
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "empty-repo" })]);
     // lockFixtures にも shaFixtures にも登録しない
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
       }),
     );
@@ -1281,19 +1280,22 @@ describe("aggregateTemplateUsage", () => {
     ).toBe(false);
   });
 
-  it("SHA 解決が失敗（例外）したリポジトリは理由付きで skipped に残る", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([repoInfo({ owner: "acme", repo: "unresolvable" })]),
+  it("SHA 解決がネットワークエラーで解決不能だったリポジトリは理由付きで skipped に残る", async () => {
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "unresolvable" })]);
+    setLockFixture(lockFixtures, "acme", "unresolvable", () =>
+      Promise.resolve(Option.some(lockJson())),
     );
-    setLockFixture(lockFixtures, "acme", "unresolvable", Effect.succeed(Option.some(lockJson())));
     mockResolveLatestCommitSha.mockImplementation(async (owner: string, repo: string) => {
-      if (repo === "unresolvable") throw new Error("network error");
-      return shaFixtures.get(`${owner}/${repo}`);
+      if (repo === "unresolvable") return { _tag: "Unresolved", reason: "network error" };
+      const fixture = shaFixtures.get(`${owner}/${repo}`);
+      return fixture !== undefined
+        ? { _tag: "Resolved", sha: fixture }
+        : { _tag: "Unresolved", reason: "no fixture registered" };
     });
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
       }),
     );
@@ -1301,32 +1303,24 @@ describe("aggregateTemplateUsage", () => {
     expect(report.repositories).toEqual([]);
     expect(report.skipped).toHaveLength(1);
     expect(report.skipped[0]).toMatchObject({ owner: "acme", repo: "unresolvable" });
-    expect(report.skipped[0]?.reason).toContain("Failed to resolve the latest commit SHA");
+    expect(report.skipped[0]?.reason).toContain("Could not resolve the latest commit SHA");
     expect(report.skipped[0]?.reason).toContain("network error");
   });
 
   it("--since で全件除外された場合、除外件数が summary.excludedBySince に載る", async () => {
-    mockListOwnerRepos.mockReturnValue(
-      Effect.succeed([
-        repoInfo({ owner: "acme", repo: "stale-a" }),
-        repoInfo({ owner: "acme", repo: "stale-b" }),
-      ]),
-    );
+    mockListOwnerRepos.mockResolvedValue([
+      repoInfo({ owner: "acme", repo: "stale-a" }),
+      repoInfo({ owner: "acme", repo: "stale-b" }),
+    ]);
     const baseHashes = { "f.txt": hashContent("v1") };
-    setLockFixture(
-      lockFixtures,
-      "acme",
-      "stale-a",
-      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    setLockFixture(lockFixtures, "acme", "stale-a", () =>
+      Promise.resolve(Option.some(lockJson({ baseHashes }))),
     );
-    setLockFixture(
-      lockFixtures,
-      "acme",
-      "stale-b",
-      Effect.succeed(Option.some(lockJson({ baseHashes }))),
+    setLockFixture(lockFixtures, "acme", "stale-b", () =>
+      Promise.resolve(Option.some(lockJson({ baseHashes }))),
     );
-    shaFixtures.set("acme/stale-a", "stale-a-sha");
-    shaFixtures.set("acme/stale-b", "stale-b-sha");
+    shaFixtures.set("acme/stale-a", sha("stale-a-sha"));
+    shaFixtures.set("acme/stale-b", sha("stale-b-sha"));
     dirsBySource.set("gh:acme/stale-a#stale-a-sha", "/stale-a-dir");
     dirsBySource.set("gh:acme/stale-b#stale-b-sha", "/stale-b-dir");
     dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-stale");
@@ -1343,11 +1337,11 @@ describe("aggregateTemplateUsage", () => {
     queueGlobResults(["f.txt"], ["f.txt"]);
 
     // 両リポジトリとも since より古いコミット日時を返す = 全件 filteredBySince
-    mockGetLastCommitDate.mockReturnValue(Effect.succeed(Option.some("2025-01-01T00:00:00Z")));
+    mockGetLastCommitDate.mockReturnValue(Promise.resolve(Option.some("2025-01-01T00:00:00Z")));
 
     const report = await Effect.runPromise(
       aggregateTemplateUsage({
-        template: { owner: "acme", repo: "template", ref: "tmpl-sha" },
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
         tmpBaseDir: "/tmp-base",
         concurrency: 1,
         since: "2026-08-01T00:00:00.000Z",

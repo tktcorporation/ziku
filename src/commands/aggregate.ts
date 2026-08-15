@@ -1,11 +1,9 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { defineCommand } from "citty";
-import { Effect } from "effect";
-import { dirname, resolve } from "pathe";
+import { dirname } from "pathe";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
-import { ZikuError } from "../errors";
-import type { GitHubApiError, TemplateError } from "../errors";
+import { zikuFailure } from "../errors";
 import type { AggregateReport } from "../modules/schemas";
 import { runCommandEffect } from "../services/command-context";
 import { aggregateOutroLine, renderAggregateSummary } from "../ui/aggregate-view";
@@ -13,6 +11,7 @@ import { intro, log, outro, pc, withSpinner } from "../ui/renderer";
 import { aggregateTemplateUsage } from "../utils/aggregate";
 import { detectGitHubRepo } from "../utils/git-remote";
 import { LOCK_FILE } from "../utils/lock";
+import { absPath } from "../utils/paths";
 import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
 
 /**
@@ -57,9 +56,7 @@ export const aggregateLifecycle: CommandLifecycle = {
 
 // ─── 入力バリデーション（純粋関数） ───
 
-type SinceParseResult =
-  | { readonly ok: true; readonly value: string }
-  | { readonly ok: false; readonly message: string };
+type SinceParseResult = { readonly ok: true; readonly value: string } | { readonly ok: false };
 
 const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -74,8 +71,9 @@ const HAS_EXPLICIT_OFFSET_PATTERN = /(?:Z|[+-]\d{2}:?\d{2})$/;
 const ISO_DATE_TIME_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})?$/;
 
-const SINCE_FORMAT_HINT =
-  'Use an ISO 8601 date ("2026-01-01") or date-time ("2026-01-01T09:30:00"). An explicit offset ("+09:00" / "Z") is honored; without one the value is read as UTC.';
+/** `--since` の期待フォーマット。CLI ガード節が `InvalidArgument` の `expected` に使う。 */
+export const SINCE_FORMAT_HINT =
+  'an ISO 8601 date ("2026-01-01") or date-time ("2026-01-01T09:30:00"); an explicit offset ("+09:00" / "Z") is honored, without one the value is read as UTC';
 
 /**
  * 年月日が実在する組み合わせかを判定する。
@@ -111,9 +109,7 @@ function isRealCalendarDate(year: number, month: number, day: number): boolean {
  */
 export function normalizeSince(raw: string): SinceParseResult {
   const normalized = DATE_ONLY_PATTERN.test(raw) ? normalizeDateOnly(raw) : normalizeDateTime(raw);
-  return normalized === undefined
-    ? { ok: false, message: `Invalid --since value: "${raw}". ${SINCE_FORMAT_HINT}` }
-    : { ok: true, value: normalized };
+  return normalized === undefined ? { ok: false } : { ok: true, value: normalized };
 }
 
 /** `YYYY-MM-DD` を UTC の 0 時として正規化する。暦上ありえない日付は undefined */
@@ -158,7 +154,10 @@ function isRealTimeOfDay(hour = 0, minute = 0, second = 0): boolean {
 
 type ConcurrencyParseResult =
   | { readonly ok: true; readonly value: number | undefined }
-  | { readonly ok: false; readonly message: string };
+  | { readonly ok: false };
+
+/** `--concurrency` の期待フォーマット。CLI ガード節が `InvalidArgument` の `expected` に使う。 */
+export const CONCURRENCY_FORMAT_HINT = "a positive integer, e.g. --concurrency=4";
 
 /**
  * `--concurrency` を正の整数として検証する。
@@ -168,26 +167,9 @@ export function parseConcurrency(raw: string | undefined): ConcurrencyParseResul
   if (raw === undefined) return { ok: true, value: undefined };
   const value = Number(raw);
   if (!Number.isInteger(value) || value <= 0) {
-    return {
-      ok: false,
-      message: `Invalid --concurrency value: "${raw}". Provide a positive integer, e.g. --concurrency=4.`,
-    };
+    return { ok: false };
   }
   return { ok: true, value };
-}
-
-/** aggregateTemplateUsage が返すエラーを、コマンド層の ZikuError に変換する */
-function toAggregateZikuError(err: GitHubApiError | TemplateError): ZikuError {
-  if (err._tag === "GitHubApiError") {
-    return new ZikuError(
-      `GitHub API error: ${err.message}`,
-      "Check that a GitHub token with access to the owner's repositories is available, and that --owner is correct.",
-    );
-  }
-  return new ZikuError(
-    `Failed to prepare the template repository for comparison: ${err.message}`,
-    "Check that the template repository and its default branch are reachable.",
-  );
 }
 
 export const aggregateCommand = defineCommand({
@@ -238,14 +220,17 @@ export const aggregateCommand = defineCommand({
     // --json 時はこれらを一切呼ばない（装飾を混ぜない）。
     if (!jsonMode) intro("aggregate");
 
-    const targetDir = resolve(args.dir);
+    const targetDir = absPath(args.dir as string);
 
     const templateRepo = detectGitHubRepo(targetDir);
     if (!templateRepo) {
-      throw new ZikuError(
-        `Could not detect a GitHub repository at ${targetDir}.`,
-        "Run `ziku aggregate` inside the template repository's git checkout (it must have a GitHub 'origin' remote), or pass DIR to point at one.",
-      );
+      throw zikuFailure({
+        kind: "InvalidArgument",
+        argument: "dir",
+        value: targetDir,
+        expected:
+          "a directory with a GitHub 'origin' remote — run `ziku aggregate` inside the template repository's git checkout, or pass DIR to point at one",
+      });
     }
 
     const owner = (args.owner as string | undefined) ?? templateRepo.owner;
@@ -255,17 +240,25 @@ export const aggregateCommand = defineCommand({
     if (sinceRaw !== undefined) {
       const parsedSince = normalizeSince(sinceRaw);
       if (!parsedSince.ok) {
-        throw new ZikuError(
-          parsedSince.message,
-          'Examples: --since="2026-01-01" or --since="2026-01-01T00:00:00+09:00"',
-        );
+        throw zikuFailure({
+          kind: "InvalidArgument",
+          argument: "--since",
+          value: sinceRaw,
+          expected: SINCE_FORMAT_HINT,
+        });
       }
       since = parsedSince.value;
     }
 
-    const parsedConcurrency = parseConcurrency(args.concurrency as string | undefined);
+    const concurrencyRaw = args.concurrency as string | undefined;
+    const parsedConcurrency = parseConcurrency(concurrencyRaw);
     if (!parsedConcurrency.ok) {
-      throw new ZikuError(parsedConcurrency.message, "Example: --concurrency=4");
+      throw zikuFailure({
+        kind: "InvalidArgument",
+        argument: "--concurrency",
+        value: concurrencyRaw ?? "",
+        expected: CONCURRENCY_FORMAT_HINT,
+      });
     }
 
     const includeArchived = args["include-archived"] as boolean;
@@ -281,7 +274,7 @@ export const aggregateCommand = defineCommand({
       includeArchived,
       concurrency: parsedConcurrency.value,
       since,
-    }).pipe(Effect.mapError(toAggregateZikuError));
+    });
 
     const report: AggregateReport = jsonMode
       ? await runCommandEffect(aggregateEffect)
@@ -298,7 +291,7 @@ export const aggregateCommand = defineCommand({
 
     const outArg = args.out as string | undefined;
     if (outArg !== undefined) {
-      const outPath = resolve(outArg);
+      const outPath = absPath(outArg);
       await mkdir(dirname(outPath), { recursive: true });
       await writeFile(outPath, `${JSON.stringify(report, null, 2)}\n`, "utf-8");
       if (!jsonMode) log.success(`Report written to ${pc.cyan(outPath)}`);
