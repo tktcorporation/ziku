@@ -21,6 +21,7 @@ import { SYNCED_FILES } from "../docs/lifecycle-types";
 export const diffLifecycle: CommandLifecycle = {
   name: "diff",
   description: "Show differences between local and template",
+  audience: "Template user",
   ops: [
     { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "patterns を取得" },
     { file: LOCK_FILE, location: "local", op: "read", note: "source を取得" },

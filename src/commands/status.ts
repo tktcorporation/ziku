@@ -25,6 +25,7 @@ import { ZIKU_CONFIG_FILE, zikuConfigExists } from "../utils/ziku-config";
 export const statusLifecycle: CommandLifecycle = {
   name: "status",
   description: "Show pending pull/push counts and recommend next action",
+  audience: "Template user",
   ops: [
     { file: ZIKU_CONFIG_FILE, location: "local", op: "read", note: "patterns を取得" },
     {

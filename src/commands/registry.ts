@@ -14,6 +14,7 @@
  * `src/index.ts` ではなくこのモジュールが持つ理由: エントリポイントはモジュール本体で CLI を
  * 起動するので、ドキュメント生成が import すると生成の途中で CLI が走ってしまう。
  */
+import { aggregateCommand } from "./aggregate";
 import { diffCommand } from "./diff";
 import { initCommand } from "./init";
 import { pullCommand } from "./pull";
@@ -31,4 +32,5 @@ export const subCommands = {
   diff: diffCommand,
   status: statusCommand,
   track: trackCommand,
+  aggregate: aggregateCommand,
 } satisfies Record<SubCommandName, unknown>;

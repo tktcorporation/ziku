@@ -14,6 +14,7 @@ Templates go stale the moment you scaffold them. Each project improves upon the 
 - **`status`** — See pending pull/push counts and what to do next
 - **`diff`** — See what's changed
 - **`track`** — Add file patterns to the sync whitelist
+- **`aggregate`** — Inventory unsynced diffs across every repository using your template (read-only; run from the template repo)
 
 Your template stays alive, fed by every project that uses it.
 
@@ -115,6 +116,12 @@ graph TB
     U_SYNCED_FILES["synced files"]
   end
 
+  subgraph Consumers["Consumer Repositories"]
+    R_ZIKU_LOCK_JSON[".ziku/lock.json"]
+    R_ZIKU_ZIKU_JSONC[".ziku/ziku.jsonc"]
+    R_SYNCED_FILES["synced files"]
+  end
+
   setup([setup]) -->|create| T_ZIKU_ZIKU_JSONC
   init([init]) -.->|read| T_ZIKU_ZIKU_JSONC
   init -->|create| U_ZIKU_ZIKU_JSONC & U_ZIKU_LOCK_JSON & U_SYNCED_FILES
@@ -126,6 +133,7 @@ graph TB
   status([status]) -.->|read| U_ZIKU_ZIKU_JSONC & U_ZIKU_LOCK_JSON & U_SYNCED_FILES & T_SYNCED_FILES
   track([track]) -.->|read| U_ZIKU_ZIKU_JSONC
   track -->|update| U_ZIKU_ZIKU_JSONC
+  aggregate([aggregate]) -.->|read| T_ZIKU_ZIKU_JSONC & R_ZIKU_LOCK_JSON & R_ZIKU_ZIKU_JSONC & T_SYNCED_FILES & R_SYNCED_FILES
 
 ```
 
@@ -156,6 +164,7 @@ Both the template and user project share the same `.ziku/ziku.jsonc` format — 
 | **`diff`** | Template user | Show differences between local and template |
 | **`status`** | Template user | Show pending pull/push counts and recommend next action |
 | **`track`** | Template user | Add file patterns to the sync whitelist |
+| **`aggregate`** | Template author | Inventory unsynced diffs across repositories using this template (read-only) |
 
 Template source info (owner/repo or local path) is stored in `.ziku/lock.json`, separate from patterns. When you `pull`, new patterns added to the template's `.ziku/ziku.jsonc` are automatically merged into yours.
 
@@ -308,8 +317,32 @@ OPTIONS
      -n, --dryRun    Preview patterns that would be tracked, without writing (Default: false)
 ```
 
+### `aggregate`
+
+Inventory unsynced diffs across all repositories using this template (read-only; does not push or consolidate changes)
+
+```
+Inventory unsynced diffs across all repositories using this template (read-only; does not push or consolidate changes) (aggregate)
+
+USAGE aggregate [OPTIONS] [DIR]
+
+ARGUMENTS
+
+  DIR    Template repository directory (Default: .)
+
+OPTIONS
+
+              --owner=<owner>    GitHub owner to search for template usage (default: origin owner)
+              --since=<since>    Only include repositories with pending-push/conflict changes on or after this date/time (ISO 8601; interpreted as UTC unless an explicit offset is given)
+                       --json    Print the JSON report to stdout (no decoration; safe to pipe) (Default: false)
+                  --out=<out>    Write the JSON report to this file path
+           --include-archived    Include archived repositories (Default: false)
+  --concurrency=<concurrency>    Number of repositories to process concurrently (default: 4)
+```
+
 <!-- COMMANDS:END -->
 
+`aggregate` runs in the template repository and reads GitHub (via the API) to find repositories using it, comparing each against the template. It only inventories differences into a JSON report (`--json` / `--out`) — it never writes to any repository. Consolidating the reported diffs back into the template (e.g. via `push`) is a separate, deliberate step for a human or an agent reading the report.
 
 <!-- FILES:START -->
 

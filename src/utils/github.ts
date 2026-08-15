@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { Octokit } from "@octokit/rest";
 import { Effect, Option } from "effect";
 import { P, match } from "ts-pattern";
@@ -69,7 +70,7 @@ export interface PushOptions {
  * 検証が済むまで GitHub 上には何も作らないので、失敗しても後片付けの要る痕跡が残らない。
  */
 export function createPullRequest(token: string, options: PushOptions): Promise<PrResult> {
-  return classified("create a pull request", async () => {
+  return classified("create a pull request", true, async () => {
     const octokit = new Octokit({ auth: token });
     const prepared = await preparePush(octokit, options);
     return applyPush(octokit, prepared);
@@ -87,10 +88,16 @@ export function createPullRequest(token: string, options: PushOptions): Promise<
  * `Unclassified`（ユーザーが取れる行動を書けないもの）は文言へ潰さず元の例外のまま投げ直す。
  * 分類済みの失敗（`ZikuFailure`）も、既に行動が書かれているのでそのまま通す。
  *
- * レート制限を常に認証済みクォータとして扱うのは、この関数を通る操作がトークンを用意できた
- * 後にしか走らないため。
+ * @param authenticated レート制限の案内文を「認証済みクォータ」「未認証クォータ」の
+ *   どちらで出すか。トークンを用意できた後にしか走らない書き込み系操作（PR 作成等）は
+ *   常に `true` でよいが、トークンが無くても動く読み取り系操作（owner 横断探索等）は
+ *   呼び出し側で `getGitHubToken() !== undefined` を渡す。
  */
-function classified<A>(operation: string, run: () => Promise<A>): Promise<A> {
+function classified<A>(
+  operation: string,
+  authenticated: boolean,
+  run: () => Promise<A>,
+): Promise<A> {
   return run().catch((cause: unknown): never => {
     if (cause instanceof ZikuFailure) throw cause;
 
@@ -109,7 +116,7 @@ function classified<A>(operation: string, run: () => Promise<A>): Promise<A> {
           ),
         },
         (failure): never => {
-          throw githubApiFailure(failure, { operation, authenticated: true, cause });
+          throw githubApiFailure(failure, { operation, authenticated, cause });
         },
       )
       .exhaustive();
@@ -498,32 +505,57 @@ export function getGitHubToken(): string | undefined {
 }
 
 /**
+ * `getGhCliToken` の結果（取得できなかった場合の undefined も含めて）を
+ * プロセス起動 1 回分だけ保持するモジュールレベルキャッシュ。
+ *
+ * `githubFetch` は GitHub API リクエストのたびに `getGitHubToken()` を呼ぶ。
+ * `GITHUB_TOKEN` / `GH_TOKEN` が未設定の環境では、そのたびに `gh auth token` の同期
+ * サブプロセス起動（タイムアウト 5 秒）が走り、イベントループを止めて owner 横断探索
+ * （`listOwnerRepos` 等、多数のリポジトリを並列に問い合わせる処理）の並列化の効果を
+ * 打ち消す。gh CLI の認証状態はプロセス実行中に変わらない前提でキャッシュする。
+ */
+let ghCliTokenCache: { readonly token: string | undefined } | undefined;
+
+/**
  * gh CLI の `gh auth token` からトークンを取得する。
  * gh CLI が未インストール or 未ログインの場合は undefined を返す。
+ *
+ * 結果はプロセス内でキャッシュされる（{@link resetGhCliTokenCache} 参照）。
  */
 export function getGhCliToken(): string | undefined {
-  return Option.getOrUndefined(
+  if (ghCliTokenCache !== undefined) return ghCliTokenCache.token;
+
+  const token = Option.getOrUndefined(
     Effect.runSync(
-      Effect.try(() => {
-        const { execFileSync } = require("node:child_process");
-        return (
-          execFileSync("gh", ["auth", "token"], {
-            encoding: "utf-8",
-            timeout: 5000,
-            stdio: ["pipe", "pipe", "pipe"],
-          }) as string
-        ).trim();
-      }).pipe(
-        Effect.flatMap((token) =>
-          token &&
-          (token.startsWith("ghp_") || token.startsWith("gho_") || token.startsWith("github_pat_"))
-            ? Effect.succeed(token)
+      Effect.try(() =>
+        execFileSync("gh", ["auth", "token"], {
+          encoding: "utf-8",
+          timeout: 5000,
+          stdio: ["pipe", "pipe", "pipe"],
+        }).trim(),
+      ).pipe(
+        Effect.flatMap((t) =>
+          t && (t.startsWith("ghp_") || t.startsWith("gho_") || t.startsWith("github_pat_"))
+            ? Effect.succeed(t)
             : Effect.fail("invalid token format" as const),
         ),
         Effect.option,
       ),
     ),
   );
+  ghCliTokenCache = { token };
+  return token;
+}
+
+/**
+ * `getGhCliToken` のモジュールレベルキャッシュをリセットする。
+ *
+ * テストで gh CLI の認証状態（またはそのモック）を切り替える前に呼ぶこと。
+ * プロダクションコードから呼ぶ必要はない（プロセス寿命の間キャッシュが有効という
+ * 前提のため）。
+ */
+export function resetGhCliTokenCache(): void {
+  ghCliTokenCache = undefined;
 }
 
 /**
@@ -764,7 +796,7 @@ export function scaffoldTemplateRepo(
   targetOwner: string,
   targetRepo: string,
 ): Promise<{ url: string }> {
-  return classified("create the template repository", () =>
+  return classified("create the template repository", true, () =>
     scaffoldTemplateRepoUnclassified(token, targetOwner, targetRepo),
   );
 }
@@ -1163,6 +1195,11 @@ export function fetchDefaultBranch(owner: string, repo: string): Promise<Default
  * GitHub API の `Accept: application/vnd.github.sha` を使い、SHA 文字列のみを取得する。
  * トークンがあれば付与する: プライベートなテンプレートリポジトリは未認証だと 404 になり、
  * ベースコミットが lock に記録されないまま 3-way マージの共通祖先を失う。
+ *
+ * ref はセグメントごとにエスケープする。git のブランチ名・タグ名は `#` を許すので、
+ * 素のまま URL へ差し込むと `feat/#123` のような ref でフラグメント以降が切り落とされ、
+ * 別のコミットを指すか 404 になる。`/` は区切りとして残す。このエンドポイントは
+ * `heads/BRANCH_NAME` のように `/` を含む ref をそのまま受け取る。
  */
 function fetchCommitSha(owner: string, repo: string, ref: string): Promise<CommitShaResolution> {
   const headers = {
@@ -1173,7 +1210,7 @@ function fetchCommitSha(owner: string, repo: string, ref: string): Promise<Commi
   return Effect.runPromise(
     Effect.tryPromise({
       try: async (): Promise<CommitShaResolution> => {
-        const url = `https://api.github.com/repos/${owner}/${repo}/commits/${ref}`;
+        const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeGitHubPathSegments(ref)}`;
         const res = await fetch(url, { headers });
         if (!res.ok) return classifyLookupFailure(res);
         // API レスポンスがコミット SHA の入口。ここから先は brand 付きで流れる。
@@ -1262,6 +1299,423 @@ export async function resolveSourceCommitSha(
     .with({ _tag: "AuthRejected" }, () => undefined)
     .with({ _tag: "Unresolved" }, () => undefined)
     .exhaustive();
+}
+
+// ────────────────────────────────────────────────────────────────
+// owner 横断探索ユーティリティ (ziku aggregate 用)
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * GitHub REST API への fetch ラッパー。API バージョンと認証ヘッダを固定する。
+ *
+ * HTTP ステータス（404/403 等）は呼び出し側がレスポンスを見て意味づけする。「存在しない」
+ * なのか「エラー」なのかはエンドポイントごとに異なるため、ここでは判定しない。fetch 自体が
+ * 失敗する（名前解決不能・接続断等）場合は素の例外のまま reject され、`classified()` が
+ * 例外チェーンの errno から `Unreachable` に分類する。
+ */
+function githubFetch(url: string, init?: RequestInit): Promise<Response> {
+  return fetch(url, {
+    ...init,
+    headers: {
+      // API のバージョンを明示しない場合、GitHub 側の既定バージョンが変わると
+      // レスポンス形状も変わりうる。明示して形状を固定する。
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      ...githubAuthHeaders(getGitHubToken()),
+      ...(init?.headers as Record<string, string> | undefined),
+    },
+  });
+}
+
+/**
+ * 2xx 以外のレスポンスを、`classified()` の分類ロジックが読める形の例外に変換する。
+ *
+ * `classifyGitHubApiFailure` は Octokit の `RequestError`（`status` と、レート制限判定に
+ * 使う `response.headers` を持つ）を読む前提で書かれている。fetch の `Response` はヘッダを
+ * `Headers` インスタンスで持つため、`Object.fromEntries` で素のオブジェクトへ詰め替えて
+ * 同じ分類ロジックに乗せる。
+ */
+function githubResponseError(res: Response): Error {
+  return Object.assign(new Error(res.statusText || `HTTP ${res.status}`), {
+    status: res.status,
+    response: { status: res.status, headers: Object.fromEntries(res.headers.entries()) },
+  });
+}
+
+/**
+ * レスポンスボディを JSON としてパースする。GitHub がステータス 200 で不正な JSON を
+ * 返すことは通常無いが、`.json()` 自体が reject しうるため、その reject は呼び出し元の
+ * `classified()` が拾い、HTTP ステータスを持たない例外として `Unclassified` に分類する。
+ */
+function parseGitHubJson<T>(res: Response): Promise<T> {
+  return res.json() as Promise<T>;
+}
+
+/** GitHub Repos API (`/orgs/{owner}/repos` `/users/{owner}/repos`) の 1 要素。必要フィールドのみ */
+interface GitHubRepoListItem {
+  readonly name: string;
+  readonly owner: { readonly login: string };
+  readonly default_branch: string;
+  readonly archived: boolean;
+  readonly pushed_at: string | null;
+  readonly private: boolean;
+}
+
+/**
+ * owner が Organization かどうかを判定する。
+ *
+ * `GET /orgs/{owner}` が 200 なら org、404 なら Personal アカウントとして user 扱いにする。
+ *
+ * 404 以外の失敗（レート制限・認証エラー）を user 扱いへ丸めてはいけない。`/users/{org}/repos`
+ * は Organization に対しても public リポジトリだけを返すため、丸めるとエラーが表面化しないまま
+ * 「private リポジトリが 1 つも無い owner」に見えてしまう。取りこぼしを黙って返すより失敗させる。
+ */
+async function isOrganization(owner: string): Promise<boolean> {
+  const res = await githubFetch(`https://api.github.com/orgs/${encodeURIComponent(owner)}`, {
+    method: "HEAD",
+  });
+  if (res.status === 404) return false;
+  if (!res.ok) throw githubResponseError(res);
+  return true;
+}
+
+/**
+ * リポジトリ一覧 API をページネーションしながら全件取得する。
+ *
+ * `per_page=100` で取得し、返却件数が `per_page` 未満になったページを最後と判定する
+ * （GitHub の Link ヘッダをパースする方法もあるが、この用途では単純な件数判定で十分）。
+ *
+ * @param extraParams `baseUrl` だけでは表現できない追加クエリパラメータ
+ *   （例: `/user/repos?affiliation=owner` の `affiliation`）。
+ */
+async function fetchAllRepoPages(
+  baseUrl: string,
+  extraParams?: Record<string, string>,
+): Promise<readonly GitHubRepoListItem[]> {
+  const perPage = 100;
+  const acc: GitHubRepoListItem[] = [];
+  for (let page = 1; ; page += 1) {
+    const url = new URL(baseUrl);
+    url.searchParams.set("per_page", String(perPage));
+    url.searchParams.set("page", String(page));
+    for (const [key, value] of Object.entries(extraParams ?? {})) {
+      url.searchParams.set(key, value);
+    }
+    const res = await githubFetch(url.toString());
+    if (!res.ok) throw githubResponseError(res);
+    const items = await parseGitHubJson<readonly GitHubRepoListItem[]>(res);
+    acc.push(...items);
+    if (items.length < perPage) return acc;
+  }
+}
+
+/**
+ * `listOwnerRepos` 用に、認証済み GitHub ユーザーのログイン名を取得する。
+ *
+ * `getAuthenticatedUserLogin`（テンプレートソースの自動検出向け）とは失敗の扱いを変える。
+ * ここでの用途は「探索対象 owner が認証ユーザー自身かどうか」の判定であり、誤って「自分では
+ * ない」側に倒すと、private リポジトリしか返さない `/user/repos?affiliation=owner` を使わず
+ * public 限定の `/users/{owner}/repos` に落ち、private リポジトリが黙って報告から漏れる。
+ * `isOrganization` と同じ「取りこぼしを黙って返すより失敗させる」方針で、次のように区別する。
+ *
+ * - トークンが無い: `undefined` で成功する。認証ユーザーは存在しないので、owner が誰であっても
+ *   「自分ではない」が正しい判定。
+ * - トークンはあるが `/user` の取得に失敗した（401/403/ネットワークエラー等）: 失敗させる。
+ *   判定不能のまま public 限定へ丸めない。
+ */
+async function resolveAuthenticatedUserLogin(): Promise<string | undefined> {
+  const token = getGitHubToken();
+  if (!token) return undefined;
+
+  const res = await githubFetch("https://api.github.com/user");
+  if (!res.ok) throw githubResponseError(res);
+  const data = await parseGitHubJson<{ login?: string }>(res);
+  if (!data.login) {
+    throw zikuFailure({
+      kind: "GitHubUnusableResponse",
+      operation: "identify the authenticated user",
+      detail: 'the "/user" response did not include a login',
+    });
+  }
+  return data.login;
+}
+
+/**
+ * Personal アカウント owner のリポジトリ一覧を取得する。
+ *
+ * `GET /users/{owner}/repos` は認証していても public リポジトリしか返さない（GitHub API の
+ * 仕様）。探索対象の owner が認証ユーザー自身の場合は `GET /user/repos?affiliation=owner` に
+ * 切り替える。このエンドポイントは認証ユーザーが owner のリポジトリ（private を含む）を返す。
+ *
+ * 他人の Personal アカウントを探索する場合に public リポジトリしか見えないのは GitHub API 側の
+ * 仕様上の制約であり、この関数の対処範囲外（挙動は変えない）。
+ */
+async function fetchPersonalOwnerRepoPages(owner: string): Promise<readonly GitHubRepoListItem[]> {
+  const authenticatedLogin = await resolveAuthenticatedUserLogin();
+  // login はケースを区別しないため、比較前に正規化する。
+  const isSelf = authenticatedLogin?.toLowerCase() === owner.toLowerCase();
+  if (isSelf) {
+    return fetchAllRepoPages("https://api.github.com/user/repos", { affiliation: "owner" });
+  }
+  return fetchAllRepoPages(`https://api.github.com/users/${encodeURIComponent(owner)}/repos`);
+}
+
+/** `listOwnerRepos` が返すリポジトリ 1 件分の情報 */
+export interface OwnerRepoInfo {
+  readonly owner: string;
+  readonly repo: string;
+  readonly defaultBranch: string;
+  readonly archived: boolean;
+  /** ISO 8601 文字列。push 履歴が無い空リポジトリでは null */
+  readonly pushedAt: string | null;
+  readonly isPrivate: boolean;
+}
+
+/** {@link listOwnerRepos} の探索オプション */
+export interface ListOwnerReposOptions {
+  /** true の場合アーカイブ済みリポジトリも含める。既定は false（除外） */
+  readonly includeArchived?: boolean;
+}
+
+/**
+ * owner（Organization または User）配下の全リポジトリを列挙する。
+ *
+ * - owner が Organization か User かを {@link isOrganization} で判定する。Organization なら
+ *   `/orgs/{owner}/repos` を使う。
+ * - User の場合、{@link fetchPersonalOwnerRepoPages} が owner が認証ユーザー自身かどうかで
+ *   さらに使い分ける。認証ユーザー自身なら `/user/repos?affiliation=owner`（private を含む）、
+ *   他人なら `/users/{owner}/repos`（public のみ、GitHub API の仕様上の制約）。
+ * - ページネーションを最後まで辿るため、リポジトリ数が多い owner でも全件返る（1 ページ目だけ
+ *   で打ち切らない）。
+ * - `includeArchived` が false（既定）の場合、アーカイブ済みリポジトリは結果から除く。
+ * - 認証は `getGitHubToken()` に委ねる。トークンが無くても public リポジトリの一覧は取得できる
+ *   （未認証は 60req/h に制限されるため、クォータに達すると `ZikuFailure`
+ *   （`kind: "GitHubRateLimited"`）で失敗する）。
+ */
+export function listOwnerRepos(
+  owner: string,
+  options?: ListOwnerReposOptions,
+): Promise<OwnerRepoInfo[]> {
+  const includeArchived = options?.includeArchived ?? false;
+  return classified(
+    `list repositories under ${owner}`,
+    getGitHubToken() !== undefined,
+    async () => {
+      const isOrg = await isOrganization(owner);
+      const items = isOrg
+        ? await fetchAllRepoPages(`https://api.github.com/orgs/${encodeURIComponent(owner)}/repos`)
+        : await fetchPersonalOwnerRepoPages(owner);
+      return items
+        .filter((item) => includeArchived || !item.archived)
+        .map(
+          (item): OwnerRepoInfo => ({
+            owner: item.owner.login,
+            repo: item.name,
+            defaultBranch: item.default_branch,
+            archived: item.archived,
+            pushedAt: item.pushed_at,
+            isPrivate: item.private,
+          }),
+        );
+    },
+  );
+}
+
+/** GitHub Repos API (`/repos/{owner}/{repo}`) の必要フィールドのみ */
+interface GitHubRepoDetail {
+  readonly default_branch: string;
+  /** `owner/repo` 形式の正規表記。リネーム・移管後の旧名アクセスではリダイレクト後の値が入る */
+  readonly full_name: string;
+}
+
+/** {@link getRepoIdentity} が返す、正規化された owner/repo と既定ブランチ */
+export interface RepoIdentity {
+  /** GitHub 側の正規表記の owner。リネーム・移管後は追随した値になる */
+  readonly owner: string;
+  /** GitHub 側の正規表記の repo。リネーム・移管後は追随した値になる */
+  readonly repo: string;
+  readonly defaultBranch: string;
+}
+
+/**
+ * 単一リポジトリの正規名（owner/repo）と既定ブランチ名を取得する。
+ *
+ * `listOwnerRepos` の列挙結果から owner/repo 一致で defaultBranch を引く方法は、探索対象の
+ * owner がリポジトリ自身の owner と異なる場合や、リポジトリがアーカイブ済みで列挙結果に
+ * 含まれない場合に defaultBranch を解決できない。`GET /repos/{owner}/{repo}` は列挙に依存せず
+ * 単一リポジトリの既定ブランチを直接返すため、そのようなケースでも解決できる。
+ *
+ * `GET /repos/{owner}/{repo}` はリポジトリがリネーム・移管された後も旧名でアクセスすると
+ * リダイレクトされ、レスポンスの `full_name` には正規名が入る。呼び出し側は `.ziku/lock.json`
+ * に残った旧テンプレート名を正規名へ解決してテンプレートと突き合わせるためにこの `full_name`
+ * を利用できる。想定外の形（`owner/repo` の 2 セグメントになっていない）は GitHub 側の契約
+ * 違反であり、ユーザーが直せる行動が無いので、文言に潰さず元の例外のまま投げ直す
+ * （`classified()` の `Unclassified` 経路）。
+ */
+export function getRepoIdentity(owner: string, repo: string): Promise<RepoIdentity> {
+  return classified(
+    `look up the canonical identity of ${owner}/${repo}`,
+    getGitHubToken() !== undefined,
+    async () => {
+      const res = await githubFetch(
+        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+      );
+      if (!res.ok) throw githubResponseError(res);
+      const data = await parseGitHubJson<GitHubRepoDetail>(res);
+      const segments = data.full_name.split("/");
+      const [canonicalOwner, canonicalRepo] = segments;
+      if (segments.length !== 2 || !canonicalOwner || !canonicalRepo) {
+        throw zikuFailure({
+          kind: "GitHubUnusableResponse",
+          operation: `resolve the canonical name of ${owner}/${repo}`,
+          detail: `"full_name" was not in owner/repo form: ${data.full_name}`,
+        });
+      }
+      return { owner: canonicalOwner, repo: canonicalRepo, defaultBranch: data.default_branch };
+    },
+  );
+}
+
+/**
+ * GitHub API の URL パスセグメントを `/` 区切りで個別に `encodeURIComponent` する。
+ *
+ * リポジトリ内パスは `/` を含む（例: `.ziku/lock.json`）。文字列全体へ `encodeURIComponent`
+ * を適用すると `/` 自体も `%2F` にエスケープされ、GitHub 側が別のパスセグメント数として
+ * 解釈してしまう。`/` はパス区切りとして残し、セグメント内の空白や記号だけをエスケープする。
+ */
+function encodeGitHubPathSegments(path: string): string {
+  return path
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+}
+
+/**
+ * Contents API の URL を組み立てる。path は {@link encodeGitHubPathSegments} でセグメント
+ * ごとにエスケープする。
+ */
+function buildContentsUrl(owner: string, repo: string, path: RepoRelPath, ref?: string): string {
+  const url = new URL(
+    `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodeGitHubPathSegments(path)}`,
+  );
+  if (ref) url.searchParams.set("ref", ref);
+  return url.toString();
+}
+
+/** GitHub Contents API (`/repos/{owner}/{repo}/contents/{path}`) のレスポンス。ファイル 1 件分 */
+interface GitHubContentFile {
+  readonly type: "file" | "dir" | "symlink" | "submodule";
+  /** base64 エンコードされた内容。1MB を超えるファイルでは省略される */
+  readonly content?: string;
+  readonly encoding?: string;
+  readonly size: number;
+}
+
+/**
+ * リポジトリ内のテキストファイルを取得する。
+ *
+ * - ファイルが存在しない（404）場合は `Option.none()` を返す。これは「そのリポジトリが
+ *   まだそのファイルを導入していない」という正常系であり、失敗ではない。
+ * - path がディレクトリを指していた場合（Contents API は配列を返す）も、テキストファイル
+ *   としては取得不可能なので `Option.none()` として扱う。
+ * - ファイルが 1MB を超え `content` フィールドが省略されるケースは、空文字列を返すと
+ *   「ファイルが空」と区別が付かなくなるため失敗として扱う。
+ * - 404 以外の失敗（403 のレート制限、401 の認証エラーなど）は `ZikuFailure` として失敗する。
+ *   404 と混同しないよう、ステータスコードでの分岐は 404 を最初に判定する。
+ */
+export function fetchRepoTextFile(
+  owner: string,
+  repo: string,
+  path: RepoRelPath,
+  ref?: string,
+): Promise<Option.Option<string>> {
+  return classified(
+    `fetch ${path} from ${owner}/${repo}`,
+    getGitHubToken() !== undefined,
+    async () => {
+      const res = await githubFetch(buildContentsUrl(owner, repo, path, ref));
+      if (res.status === 404) return Option.none<string>();
+      if (!res.ok) throw githubResponseError(res);
+
+      const data = await parseGitHubJson<GitHubContentFile | GitHubContentFile[]>(res);
+      if (Array.isArray(data)) {
+        // ディレクトリを指定した場合。テキストファイルとしては存在しないものとして扱う。
+        return Option.none<string>();
+      }
+      if (data.content === undefined || data.encoding !== "base64") {
+        // 分類済みの失敗にしておく。生の Error のままだと呼び出し側で defect になり、
+        // 1 ファイルが上限を超えただけで owner 横断の走査全体が落ちる。
+        throw zikuFailure({
+          kind: "GitHubUnusableResponse",
+          operation: `read ${owner}/${repo}/${path}`,
+          detail: `the response carried no usable content (size=${data.size} bytes; the Contents API omits bodies over 1MB)`,
+        });
+      }
+      // Option.some(...) は unicorn/no-array-callback-reference が Array.prototype.some との
+      // 名前衝突で誤検知するため、fromNullable で同じ意味を表現する（decoded は常に
+      // 非 null/undefined の string なので Some(decoded) と等価）。
+      const decoded = Buffer.from(data.content, "base64").toString("utf-8");
+      return Option.fromNullable(decoded);
+    },
+  );
+}
+
+/** GitHub Commits API (`/repos/{owner}/{repo}/commits`) のレスポンス。1 件分の必要フィールドのみ */
+interface GitHubCommitListItem {
+  readonly commit: {
+    // GitHub App によるコミットなど、committer/author が無いレスポンスも存在するため null 許容
+    readonly committer: { readonly date: string } | null;
+    readonly author: { readonly date: string } | null;
+  };
+}
+
+/**
+ * リポジトリ内の指定パスに対する最終コミット日時を取得する。
+ *
+ * - 該当パスへのコミット履歴が無い（0 件）場合は `Option.none()` を返す。これは「そのファイル
+ *   がまだ存在しない／変更されたことがない」という正常系。
+ * - コミットが見つかった場合は最新 1 件の commit.committer.date（無ければ commit.author.date）
+ *   を ISO 8601 文字列で返す。
+ * - リポジトリ自体が存在しない、レート制限、認証エラーなどは `ZikuFailure` として失敗する。
+ */
+export function getLastCommitDate(
+  owner: string,
+  repo: string,
+  path: RepoRelPath,
+  ref?: string,
+): Promise<Option.Option<string>> {
+  return classified(
+    `get the last commit date for ${path} in ${owner}/${repo}`,
+    getGitHubToken() !== undefined,
+    async () => {
+      const url = new URL(
+        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits`,
+      );
+      url.searchParams.set("path", path);
+      url.searchParams.set("per_page", "1");
+      if (ref) url.searchParams.set("sha", ref);
+
+      const res = await githubFetch(url.toString());
+      if (!res.ok) throw githubResponseError(res);
+
+      const commits = await parseGitHubJson<readonly GitHubCommitListItem[]>(res);
+      if (commits.length === 0) return Option.none<string>();
+
+      const first = commits[0];
+      const date = first?.commit.committer?.date ?? first?.commit.author?.date;
+      if (!date) {
+        throw zikuFailure({
+          kind: "GitHubUnusableResponse",
+          operation: `read the last commit date of ${owner}/${repo}/${path}`,
+          detail: "the latest commit carried neither a committer nor an author date",
+        });
+      }
+      // Option.some(...) は unicorn/no-array-callback-reference が Array.prototype.some との
+      // 名前衝突で誤検知するため、fromNullable で同じ意味を表現する（date は直前の !date
+      // チェックで非 null/undefined が確定している）。
+      return Option.fromNullable(date);
+    },
+  );
 }
 
 /**

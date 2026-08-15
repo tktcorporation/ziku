@@ -145,6 +145,29 @@ OPTIONS
      -n, --dryRun    Preview patterns that would be tracked, without writing (Default: false)
 ```
 
+## `aggregate`
+
+Inventory unsynced diffs across all repositories using this template (read-only; does not push or consolidate changes)
+
+```
+Inventory unsynced diffs across all repositories using this template (read-only; does not push or consolidate changes) (aggregate)
+
+USAGE aggregate [OPTIONS] [DIR]
+
+ARGUMENTS
+
+  DIR    Template repository directory (Default: .)
+
+OPTIONS
+
+              --owner=<owner>    GitHub owner to search for template usage (default: origin owner)
+              --since=<since>    Only include repositories with pending-push/conflict changes on or after this date/time (ISO 8601; interpreted as UTC unless an explicit offset is given)
+                       --json    Print the JSON report to stdout (no decoration; safe to pipe) (Default: false)
+                  --out=<out>    Write the JSON report to this file path
+           --include-archived    Include archived repositories (Default: false)
+  --concurrency=<concurrency>    Number of repositories to process concurrently (default: 4)
+```
+
 # What You Get
 
 The files you get depend on the patterns configured in your template's `.ziku/ziku.jsonc`. After running `ziku init`, your selected patterns are saved in your own `.ziku/ziku.jsonc` — you can customize them anytime with `ziku track`.

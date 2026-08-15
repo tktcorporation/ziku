@@ -42,6 +42,7 @@ const version = typeof __VERSION__ !== "undefined" ? __VERSION__ : "dev";
 export const setupLifecycle: CommandLifecycle = {
   name: "setup",
   description: "Initialize a template repository",
+  audience: "Template author",
   ops: [
     {
       file: ZIKU_CONFIG_FILE,

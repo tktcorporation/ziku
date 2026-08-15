@@ -17,6 +17,7 @@ export const SUBCOMMAND_NAMES = [
   "diff",
   "status",
   "track",
+  "aggregate",
 ] as const;
 
 export type SubCommandName = (typeof SUBCOMMAND_NAMES)[number];

@@ -97,6 +97,7 @@ const version = typeof __VERSION__ !== "undefined" ? __VERSION__ : "dev";
 export const initUserLifecycle: CommandLifecycle = {
   name: "init (user project)",
   description: "Initialize user project from template",
+  audience: "Template user",
   ops: [
     {
       file: ZIKU_CONFIG_FILE,

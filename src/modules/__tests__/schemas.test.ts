@@ -11,10 +11,22 @@ import {
 import { UNKNOWN_MARKER_SIZE, knownMarkerSize } from "../../utils/merge";
 import { classifyMergeOutcome } from "../../utils/merge/types";
 import { classifySyncPath } from "../../utils/ziku-config";
-import type { FileDiff, LockState, PendingConflict, PushContent, SyncPoint } from "../schemas";
+import type {
+  AggregateRepositoryReport,
+  ConflictEntry,
+  FileDiff,
+  LockState,
+  PendingConflict,
+  PushContent,
+  SyncPoint,
+} from "../schemas";
 import {
+  aggregateReportSchema,
+  aggregateRepositoryReportSchema,
+  aggregateSummarySchema,
   asDeletablePath,
   asPushContent,
+  conflictEntrySchema,
   mergedAsPushContent,
   diffResultSchema,
   diffTypeSchema,
@@ -23,7 +35,10 @@ import {
   fileOperationResultSchema,
   lockSchema,
   overwriteStrategySchema,
+  pendingPullEntrySchema,
+  pendingPushEntrySchema,
   prResultSchema,
+  skippedRepositorySchema,
   zikuConfigSchema,
   templateRefSchema,
   templateRefToString,
@@ -674,5 +689,192 @@ describe("asDeletablePath", () => {
 
   it("ziku 自身の設定ファイルは削除として送れない", () => {
     expect(asDeletablePath(classifySyncPath(repoRelPath(".ziku/ziku.jsonc")))).toBeUndefined();
+  });
+});
+
+describe("pendingPushEntrySchema", () => {
+  it("localOnly / deletedLocally を受け入れる", () => {
+    expect(pendingPushEntrySchema.parse({ path: "a.txt", reason: "localOnly" })).toEqual({
+      path: "a.txt",
+      reason: "localOnly",
+    });
+    expect(pendingPushEntrySchema.parse({ path: "a.txt", reason: "deletedLocally" })).toEqual({
+      path: "a.txt",
+      reason: "deletedLocally",
+    });
+  });
+
+  it("lastCommittedAt は省略できる", () => {
+    const entry = { path: "a.txt", reason: "localOnly", lastCommittedAt: "2024-06-15T10:30:00Z" };
+    expect(pendingPushEntrySchema.parse(entry)).toEqual(entry);
+  });
+
+  it("無効な reason を拒否する", () => {
+    expect(() => pendingPushEntrySchema.parse({ path: "a.txt", reason: "newFiles" })).toThrow();
+  });
+});
+
+describe("pendingPullEntrySchema", () => {
+  it("autoUpdate / newFiles / deletedFiles を受け入れる", () => {
+    for (const reason of ["autoUpdate", "newFiles", "deletedFiles"]) {
+      expect(pendingPullEntrySchema.parse({ path: "a.txt", reason })).toEqual({
+        path: "a.txt",
+        reason,
+      });
+    }
+  });
+
+  it("無効な reason を拒否する", () => {
+    expect(() => pendingPullEntrySchema.parse({ path: "a.txt", reason: "localOnly" })).toThrow();
+  });
+});
+
+describe("conflictEntrySchema", () => {
+  it("textConflict / deletedWithLocalEdits を区別して受け入れる", () => {
+    // deletedWithLocalEdits はテンプレート側にファイルが無いので、textConflict 向けの
+    // 「テンプレートから取得して 3-way マージする」手順をそのまま使えない。reason で
+    // 区別できることが、後段のエージェントが手順を出し分けるための要件。
+    expect(conflictEntrySchema.parse({ path: "a.txt", reason: "textConflict" })).toEqual({
+      path: "a.txt",
+      reason: "textConflict",
+    });
+    expect(conflictEntrySchema.parse({ path: "a.txt", reason: "deletedWithLocalEdits" })).toEqual({
+      path: "a.txt",
+      reason: "deletedWithLocalEdits",
+    });
+  });
+
+  it("型: brand の付いたパスと日時しか受け付けない", () => {
+    const entry: ConflictEntry = {
+      path: repoRelPath("a.txt"),
+      reason: "textConflict",
+      lastCommittedAt: "2024-06-15T10:30:00Z",
+    };
+    expect(conflictEntrySchema.parse(entry)).toEqual(entry);
+  });
+});
+
+describe("aggregateRepositoryReportSchema", () => {
+  const base: AggregateRepositoryReport = {
+    owner: "tktcorporation",
+    repo: "app",
+    defaultBranch: "main",
+    ref: commitSha("abc123"),
+    pendingPush: [{ path: repoRelPath("a.txt"), reason: "localOnly" }],
+    pendingPull: [{ path: repoRelPath("b.txt"), reason: "autoUpdate" }],
+    conflicts: [{ path: repoRelPath("c.txt"), reason: "textConflict" }],
+  };
+
+  it("baseRef を省略できる（3-way マージのベース情報がない）", () => {
+    expect(aggregateRepositoryReportSchema.parse(base)).toEqual(base);
+  });
+
+  it("baseRef 付きのレポートを受け入れる", () => {
+    const withBaseRef = { ...base, baseRef: commitSha("def456") };
+    expect(aggregateRepositoryReportSchema.parse(withBaseRef)).toEqual(withBaseRef);
+  });
+
+  it("型: ref / baseRef に生の文字列を渡すと型エラーになる", () => {
+    // commit SHA は 40 桁前後の 16 進文字列に見えるが、内容ハッシュや glob パターンと同じ
+    // `string` のままだと取り違えが型で止まらない。@ts-expect-error が外れたら
+    // （= 生の文字列を渡せるようになったら）typecheck が失敗して気付ける。
+    const invalid: AggregateRepositoryReport = {
+      ...base,
+      // @ts-expect-error ref はコミット SHA の brand が要る
+      ref: "abc123",
+    };
+    expect(aggregateRepositoryReportSchema.parse(invalid)).toEqual(base);
+  });
+
+  it("型: path に生の文字列を渡すと型エラーになる", () => {
+    const invalid: AggregateRepositoryReport = {
+      ...base,
+      // @ts-expect-error pendingPush[].path は相対パスの brand が要る
+      pendingPush: [{ path: "a.txt", reason: "localOnly" }],
+    };
+    expect(aggregateRepositoryReportSchema.parse(invalid)).toEqual(base);
+  });
+});
+
+describe("skippedRepositorySchema", () => {
+  it("処理できなかった理由を受け入れる", () => {
+    const skipped = { owner: "o", repo: "r", reason: "lock.json が読めない" };
+    expect(skippedRepositorySchema.parse(skipped)).toEqual(skipped);
+  });
+});
+
+describe("aggregateSummarySchema", () => {
+  it("集計値を受け入れる", () => {
+    const summary = {
+      totalRepositories: 3,
+      repositoriesWithPendingPush: 1,
+      pendingPushFiles: 2,
+      conflictFiles: 0,
+      excludedBySince: 0,
+    };
+    expect(aggregateSummarySchema.parse(summary)).toEqual(summary);
+  });
+
+  it("負の値を拒否する", () => {
+    expect(() =>
+      aggregateSummarySchema.parse({
+        totalRepositories: -1,
+        repositoriesWithPendingPush: 0,
+        pendingPushFiles: 0,
+        conflictFiles: 0,
+        excludedBySince: 0,
+      }),
+    ).toThrow();
+  });
+});
+
+describe("aggregateReportSchema", () => {
+  it("レポート全体を受け入れる", () => {
+    const report = {
+      template: { owner: "tktcorporation", repo: "template", ref: "abc123" },
+      generatedAt: "2024-06-15T10:30:00Z",
+      repositories: [
+        {
+          owner: "tktcorporation",
+          repo: "app",
+          defaultBranch: "main",
+          ref: "def456",
+          baseRef: "aaa000",
+          pendingPush: [{ path: "a.txt", reason: "localOnly" }],
+          pendingPull: [{ path: "b.txt", reason: "autoUpdate" }],
+          conflicts: [
+            { path: "c.txt", reason: "textConflict" },
+            { path: "d.txt", reason: "deletedWithLocalEdits" },
+          ],
+        },
+      ],
+      skipped: [{ owner: "tktcorporation", repo: "legacy", reason: "ziku 未導入" }],
+      summary: {
+        totalRepositories: 1,
+        repositoriesWithPendingPush: 1,
+        pendingPushFiles: 1,
+        conflictFiles: 2,
+        excludedBySince: 0,
+      },
+    };
+    expect(aggregateReportSchema.parse(report)).toEqual(report);
+  });
+
+  it("generatedAt が不正な datetime 形式なら拒否する", () => {
+    expect(() =>
+      aggregateReportSchema.parse({
+        template: { owner: "o", repo: "r", ref: "abc123" },
+        generatedAt: "invalid-date",
+        repositories: [],
+        skipped: [],
+        summary: {
+          totalRepositories: 0,
+          repositoriesWithPendingPush: 0,
+          pendingPushFiles: 0,
+          conflictFiles: 0,
+          excludedBySince: 0,
+        },
+      }),
+    ).toThrow();
   });
 });
