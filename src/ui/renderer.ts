@@ -8,9 +8,11 @@
  * 削除条件: ziku が別の UI フレームワーク（ink 等）に移行する場合。
  */
 import * as p from "@clack/prompts";
-import { Effect } from "effect";
 import { match } from "ts-pattern";
 import pc from "picocolors";
+import type { FileDiff, FileOperationResult } from "../modules/schemas";
+import { summarizeDiff } from "../modules/schemas";
+import { PROJECT_ISSUES_URL } from "../project";
 
 declare const __VERSION__: string;
 const version = typeof __VERSION__ !== "undefined" ? __VERSION__ : "dev";
@@ -47,13 +49,20 @@ export const log = {
   message: (message: string) => p.log.message(message),
 };
 
-/** スピナー付きで非同期タスクを実行 */
+/**
+ * スピナー付きで非同期タスクを実行する。
+ *
+ * 失敗はそのまま投げ直す。`Effect.runPromise` で包むと、reject される値が FiberFailure に
+ * 置き換わって元の型もプロパティも失われる。呼び出し側は投げられた値を見て失敗を分類する
+ * （`push` の `pushFailure`、`createPullRequest` が投げる `ZikuFailure`）ので、表示のための
+ * 中間層が値を包み直すと、対処できる失敗がすべて「原因不明」へ落ちる。
+ */
 export function withSpinner<T>(message: string, task: () => Promise<T>): Promise<T> {
   // 非 TTY（パイプ・ログリダイレクト・--yes での非対話実行）ではスピナーの
   // アニメーションを使わない。@clack の spinner は `process.env.CI === "true"`
   // のときだけフレーム描画を抑制するため、CI 環境変数が無いままパイプに流すと
   // フレーム（◒◐◓◑ + CR）を 80ms 間隔で書き続け、数百行分の制御文字でログを
-  // 埋めてしまう（#84）。非 TTY では開始メッセージを 1 行だけ出し、失敗時のみ
+  // 埋めてしまう。非 TTY では開始メッセージを 1 行だけ出し、失敗時のみ
   // 失敗行を足す。
   if (!process.stdout.isTTY) {
     return runWithoutSpinner(message, task);
@@ -61,11 +70,15 @@ export function withSpinner<T>(message: string, task: () => Promise<T>): Promise
 
   const s = p.spinner();
   s.start(message);
-  return Effect.runPromise(
-    Effect.tryPromise({ try: () => task(), catch: (e) => e }).pipe(
-      Effect.tap(() => Effect.sync(() => s.stop(message))),
-      Effect.tapError(() => Effect.sync(() => s.stop(pc.red(`Failed: ${message}`)))),
-    ),
+  return task().then(
+    (value) => {
+      s.stop(message);
+      return value;
+    },
+    (cause: unknown): never => {
+      s.stop(pc.red(`Failed: ${message}`));
+      throw cause;
+    },
   );
 }
 
@@ -78,15 +91,23 @@ export function withSpinner<T>(message: string, task: () => Promise<T>): Promise
  */
 function runWithoutSpinner<T>(message: string, task: () => Promise<T>): Promise<T> {
   log.step(message);
-  return Effect.runPromise(
-    Effect.tryPromise({ try: () => task(), catch: (e) => e }).pipe(
-      Effect.tapError(() => Effect.sync(() => log.error(`Failed: ${message}`))),
-    ),
+  return task().then(
+    (value) => value,
+    (cause: unknown): never => {
+      log.error(`Failed: ${message}`);
+      throw cause;
+    },
   );
 }
 
-/** ファイル操作結果を表示（init コマンド用） */
-export function logFileResults(results: { action: string; path: string }[]): {
+/**
+ * ファイル操作結果を表示（init コマンド用）。
+ *
+ * 引数を `FileAction` の union で受けるのは、表示区分への振り分けを網羅的に書くため。
+ * `action: string` で受けると既定値へ落とす分岐しか書けず、種別を足したときに
+ * どの区分へ数えるか決めないまま「スキップ」に紛れ込む。
+ */
+export function logFileResults(results: readonly FileOperationResult[]): {
   added: number;
   updated: number;
   skipped: number;
@@ -100,7 +121,8 @@ export function logFileResults(results: { action: string; path: string }[]): {
     const label = match(r.action)
       .with("copied", "created", () => "added" as const)
       .with("overwritten", () => "updated" as const)
-      .otherwise(() => "skipped" as const);
+      .with("skipped", "skipped_ignored", () => "skipped" as const)
+      .exhaustive();
 
     if (label === "added") {
       lines.push(`${pc.green("+")} ${r.path}`);
@@ -128,7 +150,7 @@ export function logFileResults(results: { action: string; path: string }[]): {
 }
 
 /** diff サマリーを表示（push/diff コマンド用） */
-export function logDiffSummary(files: { path: string; type: string }[]): void {
+export function logDiffSummary(files: readonly FileDiff[]): void {
   const changed = files.filter((f) => f.type !== "unchanged");
   if (changed.length === 0) {
     p.log.info("No changes detected");
@@ -140,18 +162,12 @@ export function logDiffSummary(files: { path: string; type: string }[]): void {
       .with("added", () => `${pc.green("+")} ${pc.green(f.path)}`)
       .with("modified", () => `${pc.yellow("~")} ${pc.yellow(f.path)}`)
       .with("deleted", () => `${pc.red("-")} ${pc.red(f.path)}`)
-      .otherwise(() => `  ${pc.dim(f.path)}`),
+      .exhaustive(),
   );
 
-  const summary = files.reduce(
-    (acc, f) => {
-      if (f.type === "added") acc.added++;
-      else if (f.type === "modified") acc.modified++;
-      else if (f.type === "deleted") acc.deleted++;
-      return acc;
-    },
-    { added: 0, modified: 0, deleted: 0 },
-  );
+  // 件数は差分そのものから数える。表示用に別集計を持つと、絞り込んだ一覧と
+  // 件数が食い違ったまま表示されうる。
+  const summary = summarizeDiff(files);
 
   const summaryParts = [
     summary.added > 0 ? pc.green(`+${summary.added} added`) : null,
@@ -164,12 +180,47 @@ export function logDiffSummary(files: { path: string; type: string }[]): void {
   p.log.message([...lines, "", summaryParts].join("\n"));
 }
 
-/** ZikuError を整形表示する。トップレベルエラーハンドラから呼ばれる。 */
+/** 予期された失敗を整形表示する。トップレベルエラーハンドラから呼ばれる。 */
 export function logZikuError(error: { message: string; hint?: string }): void {
   p.log.error(error.message);
   if (error.hint) {
     p.log.message(pc.dim(error.hint));
   }
+}
+
+/** 原因の連鎖をたどる深さの上限。cause が循環していても止まるようにする。 */
+const CAUSE_CHAIN_LIMIT = 5;
+
+/**
+ * 予期しないエラーを表示する。トップレベルエラーハンドラから呼ばれる。
+ *
+ * 予期された失敗と違い、ユーザーが取れる行動が分からない。原因を握り潰さず、
+ * スタックトレースと cause の連鎖をそのまま見せて報告できる状態にする。
+ */
+export function logUnexpectedError(error: unknown): void {
+  p.log.error("Unexpected error — this is a bug in ziku.");
+  p.log.message(describeUnexpected(error));
+  p.log.message(pc.dim(`Please report it at ${PROJECT_ISSUES_URL}`));
+}
+
+/** エラーとその cause 連鎖を、スタックトレース付きの 1 つのテキストにまとめる。 */
+function describeUnexpected(error: unknown): string {
+  const lines: string[] = [];
+  let current: unknown = error;
+
+  for (let depth = 0; depth < CAUSE_CHAIN_LIMIT; depth++) {
+    const prefix = depth === 0 ? "" : "Caused by: ";
+    if (!(current instanceof Error)) {
+      lines.push(`${prefix}${String(current)}`);
+      return lines.join("\n");
+    }
+    lines.push(`${prefix}${current.stack ?? `${current.name}: ${current.message}`}`);
+    if (current.cause === undefined) return lines.join("\n");
+    current = current.cause;
+  }
+
+  lines.push("Caused by: ... (truncated)");
+  return lines.join("\n");
 }
 
 export { pc };

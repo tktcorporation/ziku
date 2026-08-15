@@ -21,14 +21,17 @@ import * as p from "@clack/prompts";
 import {
   intro,
   log,
+  logUnexpectedError,
   logZikuError,
   logDiffSummary,
   logFileResults,
   outro,
   withSpinner,
 } from "../renderer";
+import type { FileOperationResult } from "../../modules/schemas";
+import { repoRelPath } from "../../__tests__/brands";
 
-/** テスト中に process.stdout.isTTY を切り替えるヘルパー（#84 の分岐検証用） */
+/** テスト中に process.stdout.isTTY を切り替えるヘルパー（TTY 分岐の検証用） */
 function setIsTTY(value: boolean): void {
   Object.defineProperty(process.stdout, "isTTY", { value, configurable: true });
 }
@@ -80,7 +83,7 @@ describe("renderer", () => {
   });
 
   describe("withSpinner", () => {
-    // withSpinner は process.stdout.isTTY で挙動を分岐する（#84）。
+    // withSpinner は process.stdout.isTTY で挙動を分岐する。
     // TTY 経路（アニメーション）を検証するため、各テストで isTTY を明示的に切り替える。
     let originalIsTTY: boolean | undefined;
 
@@ -138,7 +141,46 @@ describe("renderer", () => {
       expect(mockSpinner.stop).toHaveBeenCalled();
     });
 
-    it("非 TTY ではスピナーを使わず単一行で開始メッセージを出す（#84）", async () => {
+    it("投げられた値をそのまま伝える（TTY）", async () => {
+      // 呼び出し側は投げられた値を見て失敗を分類する。包み直すと、対処できる失敗が
+      // すべて「原因不明」へ落ちる。メッセージの部分一致では包み直しを検出できないので、
+      // 同一性で見る。
+      setIsTTY(true);
+      const mockSpinner = {
+        start: vi.fn(),
+        stop: vi.fn(),
+        cancel: vi.fn(),
+        error: vi.fn(),
+        message: vi.fn(),
+        clear: vi.fn(),
+        isCancelled: false,
+      };
+      vi.mocked(p.spinner).mockReturnValue(mockSpinner);
+
+      class Marker extends Error {}
+      const original = new Marker("boom");
+      const thrown = await withSpinner("loading...", async () => {
+        throw original;
+      }).catch((e: unknown) => e);
+
+      expect(thrown).toBe(original);
+      expect(thrown).toBeInstanceOf(Marker);
+    });
+
+    it("投げられた値をそのまま伝える（非 TTY）", async () => {
+      setIsTTY(false);
+
+      class Marker extends Error {}
+      const original = new Marker("boom");
+      const thrown = await withSpinner("loading...", async () => {
+        throw original;
+      }).catch((e: unknown) => e);
+
+      expect(thrown).toBe(original);
+      expect(thrown).toBeInstanceOf(Marker);
+    });
+
+    it("非 TTY ではスピナーを使わず単一行で開始メッセージを出す", async () => {
       setIsTTY(false);
 
       const result = await withSpinner("loading...", async () => 42);
@@ -151,7 +193,7 @@ describe("renderer", () => {
       expect(p.log.step).toHaveBeenCalledWith("loading...");
     });
 
-    it("非 TTY でタスク失敗時は失敗行を出しエラーを伝播する（#84）", async () => {
+    it("非 TTY でタスク失敗時は失敗行を出しエラーを伝播する", async () => {
       setIsTTY(false);
 
       await expect(
@@ -167,14 +209,15 @@ describe("renderer", () => {
 
   describe("logFileResults", () => {
     it("should count added/updated/skipped", () => {
-      const results = [
-        { action: "copied", path: "a.ts" },
-        { action: "created", path: "b.ts" },
-        { action: "overwritten", path: "c.ts" },
-        { action: "skipped", path: "d.ts" },
+      const results: FileOperationResult[] = [
+        { action: "copied", path: repoRelPath("a.ts") },
+        { action: "created", path: repoRelPath("b.ts") },
+        { action: "overwritten", path: repoRelPath("c.ts") },
+        { action: "skipped", path: repoRelPath("d.ts") },
+        { action: "skipped_ignored", path: repoRelPath("e.ts") },
       ];
       const summary = logFileResults(results);
-      expect(summary).toEqual({ added: 2, updated: 1, skipped: 1 });
+      expect(summary).toEqual({ added: 2, updated: 1, skipped: 2 });
       expect(p.log.message).toHaveBeenCalledTimes(1);
     });
 
@@ -182,21 +225,51 @@ describe("renderer", () => {
       const summary = logFileResults([]);
       expect(summary).toEqual({ added: 0, updated: 0, skipped: 0 });
     });
+
+    it("型: FileAction 以外の操作結果は渡せない", () => {
+      // 表示区分への振り分けを網羅的に書けることが型の役目なので、@ts-expect-error が
+      // 外れたら（= 未知の action を渡せるようになったら）typecheck が失敗して気付ける。
+      const invalid: Parameters<typeof logFileResults>[0] = [
+        // @ts-expect-error FileAction に無い action は集計対象にならない
+        { action: "unknown", path: "a.ts" },
+      ];
+      expect(invalid).toHaveLength(1);
+    });
   });
 
   describe("logDiffSummary", () => {
     it("should show no changes message when all unchanged", () => {
-      logDiffSummary([{ path: "a.ts", type: "unchanged" }]);
+      logDiffSummary([
+        {
+          path: repoRelPath("a.ts"),
+          type: "unchanged",
+          localContent: "same",
+          templateContent: "same",
+        },
+      ]);
       expect(p.log.info).toHaveBeenCalledWith("No changes detected");
     });
 
     it("should display changed files", () => {
       logDiffSummary([
-        { path: "a.ts", type: "added" },
-        { path: "b.ts", type: "modified" },
-        { path: "c.ts", type: "deleted" },
+        { path: repoRelPath("a.ts"), type: "added", localContent: "a" },
+        { path: repoRelPath("b.ts"), type: "modified", localContent: "b", templateContent: "B" },
+        { path: repoRelPath("c.ts"), type: "deleted", templateContent: "c" },
       ]);
       expect(p.log.message).toHaveBeenCalledTimes(1);
+    });
+
+    it("件数は渡された差分から数える", () => {
+      logDiffSummary([
+        { path: repoRelPath("a.ts"), type: "added", localContent: "a" },
+        { path: repoRelPath("b.ts"), type: "added", localContent: "b" },
+        { path: repoRelPath("c.ts"), type: "deleted", templateContent: "c" },
+        { path: repoRelPath("d.ts"), type: "unchanged", localContent: "d", templateContent: "d" },
+      ]);
+      const message = vi.mocked(p.log.message).mock.calls[0][0] as string;
+      expect(message).toContain("+2 added");
+      expect(message).toContain("-1 deleted");
+      expect(message).not.toContain("modified");
     });
   });
 
@@ -211,6 +284,40 @@ describe("renderer", () => {
       logZikuError({ message: "not found" });
       expect(p.log.error).toHaveBeenCalledWith("not found");
       expect(p.log.message).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("logUnexpectedError", () => {
+    it("スタックトレースと cause の連鎖をそのまま見せる", () => {
+      const root = new Error("socket hang up");
+      const wrapper = new Error("request failed", { cause: root });
+
+      logUnexpectedError(wrapper);
+
+      expect(p.log.error).toHaveBeenCalledWith("Unexpected error — this is a bug in ziku.");
+      const body = vi.mocked(p.log.message).mock.calls[0][0] as string;
+      expect(body).toContain("request failed");
+      expect(body).toContain("Caused by:");
+      expect(body).toContain("socket hang up");
+      expect(body).toContain("renderer.test.ts");
+    });
+
+    it("Error でない値も文字列にして見せる", () => {
+      logUnexpectedError("boom");
+
+      const body = vi.mocked(p.log.message).mock.calls[0][0] as string;
+      expect(body).toBe("boom");
+    });
+
+    it("cause が循環していても打ち切る", () => {
+      const a = new Error("a");
+      const b = new Error("b", { cause: a });
+      a.cause = b;
+
+      logUnexpectedError(a);
+
+      const body = vi.mocked(p.log.message).mock.calls[0][0] as string;
+      expect(body).toContain("(truncated)");
     });
   });
 });

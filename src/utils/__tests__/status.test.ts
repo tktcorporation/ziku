@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { absPath, pendingConflict, repoRelPath, repoRelPaths } from "../../__tests__/brands";
 import type { LockState } from "../../modules/schemas";
+import type { ZikuConfigStatus } from "../merge/sync-plan";
 import type { FileClassification } from "../merge/types";
 import {
   categorizeForStatus,
@@ -18,10 +20,14 @@ function emptyClassification(): FileClassification {
     conflicts: [],
     newFiles: [],
     deletedFiles: [],
+    deletedWithLocalEdits: [],
     deletedLocally: [],
     unchanged: [],
   };
 }
+
+/** 既定の設定ファイル状態: 同期済み（バケツに現れない差分を持たない）。 */
+const SYNCED_CONFIG: ZikuConfigStatus = { _tag: "Categorized", category: "unchanged" };
 
 /** ヘルパー: 空の StatusBuckets を作る */
 function emptyBuckets(): StatusBuckets {
@@ -37,6 +43,7 @@ describe("status", () => {
       "localOnly",
       "deletedLocally",
       "conflicts",
+      "deletedWithLocalEdits",
     ] as const)("%s は EntryCategory（status の表示対象）", (cat) => {
       expect(isEntryCategory(cat)).toBe(true);
     });
@@ -54,6 +61,7 @@ describe("status", () => {
       ["localOnly", "push"],
       ["deletedLocally", "push"],
       ["conflicts", "conflict"],
+      ["deletedWithLocalEdits", "conflict"],
     ] as const)("%s カテゴリは %s 方向にマップされる", (cat, expected) => {
       expect(directionOfCategory(cat)).toBe(expected);
     });
@@ -62,9 +70,10 @@ describe("status", () => {
   });
 
   describe("isDestructiveCategory", () => {
-    it("deletedFiles と deletedLocally は破壊的", () => {
+    it("削除を伴うカテゴリは破壊的", () => {
       expect(isDestructiveCategory("deletedFiles")).toBe(true);
       expect(isDestructiveCategory("deletedLocally")).toBe(true);
+      expect(isDestructiveCategory("deletedWithLocalEdits")).toBe(true);
     });
 
     it("非削除カテゴリは非破壊的", () => {
@@ -87,9 +96,9 @@ describe("status", () => {
     it("autoUpdate / newFiles / deletedFiles はすべて pull バケツに入る", () => {
       const result = categorizeForStatus({
         ...emptyClassification(),
-        autoUpdate: ["a.txt"],
-        newFiles: ["b.txt"],
-        deletedFiles: ["c.txt"],
+        autoUpdate: repoRelPaths(["a.txt"]),
+        newFiles: repoRelPaths(["b.txt"]),
+        deletedFiles: repoRelPaths(["c.txt"]),
       });
 
       expect(result.pull.map((e) => e.path)).toEqual(["a.txt", "b.txt", "c.txt"]);
@@ -100,8 +109,8 @@ describe("status", () => {
     it("localOnly / deletedLocally は push バケツに入る", () => {
       const result = categorizeForStatus({
         ...emptyClassification(),
-        localOnly: ["x.txt"],
-        deletedLocally: ["y.txt"],
+        localOnly: repoRelPaths(["x.txt"]),
+        deletedLocally: repoRelPaths(["y.txt"]),
       });
 
       expect(result.push.map((e) => e.path)).toEqual(["x.txt", "y.txt"]);
@@ -111,16 +120,28 @@ describe("status", () => {
     it("conflicts は conflict バケツに入る", () => {
       const result = categorizeForStatus({
         ...emptyClassification(),
-        conflicts: ["both.txt"],
+        conflicts: repoRelPaths(["both.txt"]),
       });
 
       expect(result.conflict.map((e) => e.path)).toEqual(["both.txt"]);
     });
 
+    it("deletedWithLocalEdits は conflict バケツに入り、破壊的として扱われる", () => {
+      const result = categorizeForStatus({
+        ...emptyClassification(),
+        deletedWithLocalEdits: repoRelPaths(["edited-then-deleted.txt"]),
+      });
+
+      expect(result.conflict.map((e) => e.path)).toEqual(["edited-then-deleted.txt"]);
+      expect(result.conflict[0]?.isDestructive).toBe(true);
+      expect(result.pull).toEqual([]);
+      expect(result.push).toEqual([]);
+    });
+
     it("unchanged は inSyncCount に反映される（バケツには入らない）", () => {
       const result = categorizeForStatus({
         ...emptyClassification(),
-        unchanged: ["a.txt", "b.txt", "c.txt"],
+        unchanged: repoRelPaths(["a.txt", "b.txt", "c.txt"]),
       });
 
       expect(result.inSyncCount).toBe(3);
@@ -132,12 +153,12 @@ describe("status", () => {
     it("deletedFiles と deletedLocally は isDestructive: true、それ以外は false", () => {
       const result = categorizeForStatus({
         ...emptyClassification(),
-        autoUpdate: ["a.txt"],
-        newFiles: ["b.txt"],
-        deletedFiles: ["c.txt"],
-        localOnly: ["x.txt"],
-        deletedLocally: ["y.txt"],
-        conflicts: ["both.txt"],
+        autoUpdate: repoRelPaths(["a.txt"]),
+        newFiles: repoRelPaths(["b.txt"]),
+        deletedFiles: repoRelPaths(["c.txt"]),
+        localOnly: repoRelPaths(["x.txt"]),
+        deletedLocally: repoRelPaths(["y.txt"]),
+        conflicts: repoRelPaths(["both.txt"]),
       });
 
       const findEntry = (path: string) =>
@@ -154,7 +175,7 @@ describe("status", () => {
     it("各バケツ内は path 昇順でソートされる（決定論的出力）", () => {
       const result = categorizeForStatus({
         ...emptyClassification(),
-        autoUpdate: ["z.txt", "a.txt", "m.txt"],
+        autoUpdate: repoRelPaths(["z.txt", "a.txt", "m.txt"]),
       });
       expect(result.pull.map((e) => e.path)).toEqual(["a.txt", "m.txt", "z.txt"]);
     });
@@ -162,9 +183,9 @@ describe("status", () => {
     it("category フィールドが元のカテゴリを保持する（UI でラベル分けに使用）", () => {
       const result = categorizeForStatus({
         ...emptyClassification(),
-        autoUpdate: ["modified.txt"],
-        newFiles: ["new.txt"],
-        deletedFiles: ["gone.txt"],
+        autoUpdate: repoRelPaths(["modified.txt"]),
+        newFiles: repoRelPaths(["new.txt"]),
+        deletedFiles: repoRelPaths(["gone.txt"]),
       });
 
       const byPath = Object.fromEntries(result.pull.map((e) => [e.path, e.category]));
@@ -175,36 +196,76 @@ describe("status", () => {
   });
 
   describe("decideRecommendation", () => {
-    const noLock: Pick<LockState, "pendingMerge"> = {};
+    const syncedLock: LockState = {
+      version: "1.0.0",
+      installedAt: "2024-01-01T00:00:00Z",
+      source: { kind: "github", owner: "o", repo: "r" },
+      sync: "synced",
+      base: { hashes: {} },
+    };
 
     it("全バケツ空 → inSync", () => {
-      const rec = decideRecommendation(emptyBuckets(), noLock);
+      const rec = decideRecommendation(emptyBuckets(), syncedLock, SYNCED_CONFIG);
       expect(rec).toEqual({ kind: "inSync" });
     });
 
     it("pull のみ → pullOnly", () => {
       const buckets: StatusBuckets = {
         ...emptyBuckets(),
-        pull: [{ path: "a", direction: "pull", category: "autoUpdate", isDestructive: false }],
+        pull: [
+          {
+            path: repoRelPath("a"),
+            direction: "pull",
+            category: "autoUpdate",
+            isDestructive: false,
+          },
+        ],
       };
-      expect(decideRecommendation(buckets, noLock)).toEqual({ kind: "pullOnly", pullCount: 1 });
+      expect(decideRecommendation(buckets, syncedLock, SYNCED_CONFIG)).toEqual({
+        kind: "pullOnly",
+        pullCount: 1,
+      });
     });
 
     it("push のみ → pushOnly", () => {
       const buckets: StatusBuckets = {
         ...emptyBuckets(),
-        push: [{ path: "a", direction: "push", category: "localOnly", isDestructive: false }],
+        push: [
+          {
+            path: repoRelPath("a"),
+            direction: "push",
+            category: "localOnly",
+            isDestructive: false,
+          },
+        ],
       };
-      expect(decideRecommendation(buckets, noLock)).toEqual({ kind: "pushOnly", pushCount: 1 });
+      expect(decideRecommendation(buckets, syncedLock, SYNCED_CONFIG)).toEqual({
+        kind: "pushOnly",
+        pushCount: 1,
+      });
     });
 
     it("pull + push → pullThenPush", () => {
       const buckets: StatusBuckets = {
         ...emptyBuckets(),
-        pull: [{ path: "a", direction: "pull", category: "autoUpdate", isDestructive: false }],
-        push: [{ path: "b", direction: "push", category: "localOnly", isDestructive: false }],
+        pull: [
+          {
+            path: repoRelPath("a"),
+            direction: "pull",
+            category: "autoUpdate",
+            isDestructive: false,
+          },
+        ],
+        push: [
+          {
+            path: repoRelPath("b"),
+            direction: "push",
+            category: "localOnly",
+            isDestructive: false,
+          },
+        ],
       };
-      expect(decideRecommendation(buckets, noLock)).toEqual({
+      expect(decideRecommendation(buckets, syncedLock, SYNCED_CONFIG)).toEqual({
         kind: "pullThenPush",
         pullCount: 1,
         pushCount: 1,
@@ -214,13 +275,32 @@ describe("status", () => {
     it("conflict があれば pull/push の有無に関係なく resolveConflict", () => {
       const buckets: StatusBuckets = {
         ...emptyBuckets(),
-        pull: [{ path: "a", direction: "pull", category: "autoUpdate", isDestructive: false }],
-        push: [{ path: "b", direction: "push", category: "localOnly", isDestructive: false }],
+        pull: [
+          {
+            path: repoRelPath("a"),
+            direction: "pull",
+            category: "autoUpdate",
+            isDestructive: false,
+          },
+        ],
+        push: [
+          {
+            path: repoRelPath("b"),
+            direction: "push",
+            category: "localOnly",
+            isDestructive: false,
+          },
+        ],
         conflict: [
-          { path: "c", direction: "conflict", category: "conflicts", isDestructive: false },
+          {
+            path: repoRelPath("c"),
+            direction: "conflict",
+            category: "conflicts",
+            isDestructive: false,
+          },
         ],
       };
-      expect(decideRecommendation(buckets, noLock)).toEqual({
+      expect(decideRecommendation(buckets, syncedLock, SYNCED_CONFIG)).toEqual({
         kind: "resolveConflict",
         conflictCount: 1,
         pullCount: 1,
@@ -228,68 +308,91 @@ describe("status", () => {
       });
     });
 
-    it("pendingMerge が存在し conflicts に内容があれば continueMerge（最優先）", () => {
-      const lock: Pick<LockState, "pendingMerge"> = {
-        pendingMerge: {
-          conflicts: ["a.txt", "b.txt"],
-          templateHashes: {},
+    it("解決待ちのコンフリクトがあれば continueMerge（最優先）", () => {
+      const lock: LockState = {
+        ...syncedLock,
+        sync: "merging",
+        base: { hashes: {} },
+        merge: {
+          conflicts: [pendingConflict("a.txt"), pendingConflict("b.txt")],
+          nextBase: { hashes: {} },
         },
       };
       // 通常なら pullThenPush になる buckets でも continueMerge が優先される
       const buckets: StatusBuckets = {
         ...emptyBuckets(),
-        pull: [{ path: "x", direction: "pull", category: "autoUpdate", isDestructive: false }],
-        push: [{ path: "y", direction: "push", category: "localOnly", isDestructive: false }],
+        pull: [
+          {
+            path: repoRelPath("x"),
+            direction: "pull",
+            category: "autoUpdate",
+            isDestructive: false,
+          },
+        ],
+        push: [
+          {
+            path: repoRelPath("y"),
+            direction: "push",
+            category: "localOnly",
+            isDestructive: false,
+          },
+        ],
       };
-      expect(decideRecommendation(buckets, lock)).toEqual({
+      expect(decideRecommendation(buckets, lock, SYNCED_CONFIG)).toEqual({
         kind: "continueMerge",
         conflictCount: 2,
       });
     });
 
-    it("patternsUpdated=true + 全バケツ空 → pullOnly (ファイル差分ゼロでもパターン取り込み必須)", () => {
-      // codex review #71 P1: テンプレが新パターン追加、ファイル差分ゼロのケース。
-      // inSync を返すと、ユーザーが push しても push は raw config.include しか見ないので
-      // 何も起きず「次操作が no-op」という UX 事故になる。pull を必ず推奨する。
+    it("全バケツ空 → inSync（バケツに現れない差分を推奨に足さない）", () => {
+      // テンプレ側のパターン追加は ziku.jsonc 自体が pull バケツへ入ることで現れる。
+      // バケツと別軸の信号を足すと、pull が何も書き換えない状態でも pull を勧めてしまう。
       const buckets = emptyBuckets();
-      expect(decideRecommendation(buckets, noLock, true)).toEqual({
-        kind: "pullOnly",
-        pullCount: 0,
-      });
+      expect(decideRecommendation(buckets, syncedLock, SYNCED_CONFIG)).toEqual({ kind: "inSync" });
     });
 
-    it("patternsUpdated=true + push のみ → pullThenPush (push 単独だと patterns が反映されない)", () => {
+    it("ローカルにしか無いパターンが残っていれば inSync と言わない", () => {
+      // ziku.jsonc はどのバケツにも載らない（pull も push も書き換えない）が、テンプレートには
+      // 届いていない。バケツだけを見て inSync に落とすと、status が事実と食い違う。
+      expect(
+        decideRecommendation(emptyBuckets(), syncedLock, { _tag: "LocalOnlyPatterns" }),
+      ).toEqual({ kind: "localOnlyConfigPatterns" });
+    });
+
+    it("送るファイルがあるときは、そのコマンドの案内が優先される", () => {
       const buckets: StatusBuckets = {
         ...emptyBuckets(),
-        push: [{ path: "x", direction: "push", category: "localOnly", isDestructive: false }],
+        push: [
+          {
+            path: repoRelPath("a"),
+            direction: "push",
+            category: "localOnly",
+            isDestructive: false,
+          },
+        ],
       };
-      expect(decideRecommendation(buckets, noLock, true)).toEqual({
-        kind: "pullThenPush",
-        pullCount: 0,
+      expect(decideRecommendation(buckets, syncedLock, { _tag: "LocalOnlyPatterns" })).toEqual({
+        kind: "pushOnly",
         pushCount: 1,
       });
     });
 
-    it("patternsUpdated=false + 全バケツ空 → inSync (regression: デフォルト挙動を維持)", () => {
-      // patternsUpdated 引数追加で既存呼び出しが壊れないことを保証
-      const buckets = emptyBuckets();
-      expect(decideRecommendation(buckets, noLock)).toEqual({ kind: "inSync" });
-    });
-
-    it("pendingMerge が空 conflicts でも continueMerge を返す（stale lock として扱う）", () => {
-      // --continue 直前にプロセスが死んだ等で lock が stale な状態。
-      // inSync にフォールスルーすると、その後 push が pendingMerge ガードで
-      // ブロックされる際に理由が分からなくなるため、明示的に continueMerge を返す。
-      const lock: Pick<LockState, "pendingMerge"> = {
-        pendingMerge: {
-          conflicts: [],
-          templateHashes: {},
-        },
+    it("ベース未確定 (sync: pending) の lock でも通常どおり推奨を出す", () => {
+      const pendingLock: LockState = {
+        version: "1.0.0",
+        installedAt: "2024-01-01T00:00:00Z",
+        source: { kind: "local", path: absPath("/tpl") },
+        sync: "pending",
       };
-      const buckets = emptyBuckets();
-      expect(decideRecommendation(buckets, lock)).toEqual({
-        kind: "continueMerge",
-        conflictCount: 0,
+      const buckets: StatusBuckets = {
+        ...emptyBuckets(),
+        pull: [
+          { path: repoRelPath("a"), direction: "pull", category: "newFiles", isDestructive: false },
+        ],
+      };
+      expect(decideRecommendation(buckets, pendingLock, SYNCED_CONFIG)).toEqual({
+        kind: "pullOnly",
+        pullCount: 1,
       });
     });
   });

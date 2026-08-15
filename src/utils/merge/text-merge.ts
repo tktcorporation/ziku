@@ -1,85 +1,100 @@
 import { diff3Merge } from "node-diff3";
+import { match } from "ts-pattern";
+import {
+  type ConflictMarkers,
+  conflictMarkerSize,
+  conflictMarkers,
+  knownMarkerSize,
+} from "./conflict-markers";
 import { validateStructuredContent } from "./file-detection";
-import type { MergeResult } from "./types";
+import { type MergeOutcome, classifyMergeOutcome } from "./types";
 
 // ---- テキスト 3-way マージ ----
 
 /**
  * GNU diff3 と同等の行レベル 3-way マージ。
  *
- * 背景: 以前の実装は diff ライブラリの applyPatch を使っていたが、
- * これは「パッチが物理的に適用可能か」のみを判定し、git のような
- * 「両側の独立した変更の競合検出」をしなかった。
- * そのため、ローカルの変更がサイレントに上書きされたり、
- * 内容が二重化される問題があった (#51)。
+ * base/local/template の3者を比較し、同じ領域を両側が異なる内容へ変更した場合は
+ * 必ずコンフリクトにする。「パッチが物理的に適用可能か」だけを見る patch 適用系の
+ * 手法と違い、片側の変更がサイレントに消えたり内容が二重化したりしない。
  *
- * node-diff3 の diff3Merge は base/local/template の3者を比較し、
- * 同じ領域を両側が異なる内容に変更した場合は必ず conflict にする。
+ * @param filePath 構造ファイル（JSON/TOML/YAML）の検証に使う。省略すると検証しない。
  */
 export function textThreeWayMerge(
   base: string,
   local: string,
   template: string,
   filePath?: string,
-): MergeResult {
-  const baseLines = base.split("\n");
-  const localLines = local.split("\n");
-  const templateLines = template.split("\n");
+): MergeOutcome {
+  // ここで決めた長さは、書き込んだマーカーを後から見分けるための根拠として結果に載せる
+  // （{@link GeneratedMarkerSize}）。ファイル全体を 1 ブロックにする経路も同じ長さで囲む。
+  const size = conflictMarkerSize([base, local, template]);
+  const markers = conflictMarkers(size);
+  const generated = knownMarkerSize(size);
 
   // node-diff3: diff3Merge(a, o, b) — a=local, o=base, b=template
-  const regions = diff3Merge(localLines, baseLines, templateLines);
+  const regions = diff3Merge(local.split("\n"), base.split("\n"), template.split("\n"));
 
   const resultLines: string[] = [];
-  let hasConflicts = false;
 
   for (const region of regions) {
     if ("ok" in region && region.ok) {
       resultLines.push(...region.ok);
     } else if ("conflict" in region && region.conflict) {
-      hasConflicts = true;
-      resultLines.push("<<<<<<< LOCAL");
-      resultLines.push(...region.conflict.a);
-      resultLines.push("=======");
-      resultLines.push(...region.conflict.b);
-      resultLines.push(">>>>>>> TEMPLATE");
+      resultLines.push(
+        markers.local,
+        ...region.conflict.a,
+        markers.base,
+        ...region.conflict.o,
+        markers.separator,
+        ...region.conflict.b,
+        markers.template,
+      );
     }
   }
 
-  const content = resultLines.join("\n");
-
-  // 構造ファイル（JSON/TOML/YAML）のクリーンマージ結果をパースで検証。
+  // 構造ファイル（JSON/TOML/YAML）のクリーンな結果はパースで検証する。
   // diff3Merge は行レベルで競合を判定するため、構造的に壊れた出力を
-  // クリーンマージとして返す可能性がある。検証失敗時はファイル全体を
-  // コンフリクトとしてマークし、壊れたファイルの生成を防ぐ。
-  if (!hasConflicts && filePath && !validateStructuredContent(content, filePath)) {
-    return {
-      content: ["<<<<<<< LOCAL", local, "=======", template, ">>>>>>> TEMPLATE"].join("\n"),
-      hasConflicts: true,
-    };
-  }
-
-  return {
-    content,
-    hasConflicts,
-  };
+  // クリーンマージとして返す可能性がある。検証に失敗した場合はファイル全体を
+  // 1 つのコンフリクトブロックにして、壊れたファイルの生成を防ぐ。
+  return match(classifyMergeOutcome(resultLines.join("\n"), generated))
+    .with({ _tag: "Conflicted" }, (outcome) => outcome)
+    .with({ _tag: "Clean" }, (outcome) =>
+      filePath === undefined || validateStructuredContent(outcome.content, filePath)
+        ? outcome
+        : classifyMergeOutcome(wholeFileConflict({ base, local, template, markers }), generated),
+    )
+    .exhaustive();
 }
 
 /**
- * ファイル内容にコンフリクトマーカーが含まれるかを検出する。
+ * ファイル全体を 1 つのコンフリクトブロックにする。
  *
- * 背景: マージ後のファイルにユーザーが手動解決すべきコンフリクトが
- * 残っているかを判定するために使用する。
+ * 各セクションは行へ分解してから結合する。末尾改行付きの内容をそのまま連結すると
+ * 次のマーカーの直前に空行が入り、ファイル末尾の改行も失われる。
  */
-export function hasConflictMarkers(content: string): { found: boolean; lines: number[] } {
-  const lines: number[] = [];
-  const contentLines = content.split("\n");
+function wholeFileConflict(params: {
+  base: string;
+  local: string;
+  template: string;
+  markers: ConflictMarkers;
+}): string {
+  const { base, local, template, markers } = params;
+  const lines = [
+    markers.local,
+    ...toLines(local),
+    markers.base,
+    ...toLines(base),
+    markers.separator,
+    ...toLines(template),
+    markers.template,
+  ];
+  // 最終行はマーカーなので必ず改行で終端する（git のマーカー出力と同じ）。
+  return `${lines.join("\n")}\n`;
+}
 
-  for (let i = 0; i < contentLines.length; i++) {
-    const line = contentLines[i];
-    if (line.startsWith("<<<<<<<") || line.startsWith("=======") || line.startsWith(">>>>>>>")) {
-      lines.push(i + 1);
-    }
-  }
-
-  return { found: lines.length > 0, lines };
+/** 内容を行へ分解する。末尾改行は行の区切りとして扱い、空行を作らない。 */
+function toLines(content: string): string[] {
+  const lines = content.split("\n");
+  return lines.at(-1) === "" ? lines.slice(0, -1) : lines;
 }

@@ -1,7 +1,17 @@
 import { vol } from "memfs";
 import { Effect } from "effect";
+import { dirname, resolve } from "pathe";
+import { match } from "ts-pattern";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ZikuError } from "../../errors";
+import { baseHashesOf, lockSchema, templateRefToString } from "../../modules/schemas";
+import { absPath, globPatterns, hashMap, repoRelPath } from "../../__tests__/brands";
+import type { AbsPath, GitHubSource, HashMap } from "../../modules/schemas";
+import { classifyFiles } from "../../utils/merge";
+import {
+  partitionSyncPlan,
+  zikuConfigPullAction,
+  zikuConfigPushOutcome,
+} from "../../utils/merge/sync-plan";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -23,9 +33,10 @@ vi.mock("../../utils/git-remote", () => ({
 }));
 
 vi.mock("../../utils/template", () => ({
-  buildTemplateSource: vi.fn(
-    (source: { owner: string; repo: string }) => `gh:${source.owner}/${source.repo}`,
-  ),
+  buildTemplateSource: vi.fn((source: GitHubSource) => {
+    const base = `gh:${source.owner}/${source.repo}`;
+    return source.ref ? `${base}#${templateRefToString(source.ref)}` : base;
+  }),
   downloadTemplateToTemp: vi.fn(),
   fetchTemplates: vi.fn(),
   writeFileWithStrategy: vi.fn(),
@@ -41,11 +52,15 @@ vi.mock("../../utils/github", async () => {
   const actual = await vi.importActual<typeof import("../../utils/github")>("../../utils/github");
   return {
     resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
+    resolveSourceCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
+    fetchDefaultBranch: vi.fn(() => Promise.resolve({ _tag: "Resolved" as const, name: "main" })),
     checkRepoExists: vi.fn(() => Promise.resolve({ _tag: "Exists" as const })),
     checkRepoSetup: vi.fn(() => Promise.resolve(true)),
     getGitHubToken: vi.fn(() => {}),
     getAuthenticatedUserLogin: vi.fn(() => Promise.resolve()),
     scaffoldTemplateRepo: vi.fn(() => Promise.resolve({ url: "https://github.com/test/repo" })),
+    // 既定ブランチの控えへ倒す規則は実装を通す（コマンドの挙動そのものなのでモックしない）
+    decideDefaultBranch: actual.decideDefaultBranch,
     rateLimitedError: actual.rateLimitedError,
   };
 });
@@ -116,18 +131,18 @@ vi.mock("../../utils/template-config", () => ({
 }));
 
 // モック後にインポート
-const { initCommand, resolveConfigBaseHash } = await import("../init");
-const { generateZikuJsonc } = await import("../../utils/ziku-config");
-const { hashContent } = await import("../../utils/hash");
+const { initCommand } = await import("../init");
+const { ZIKU_CONFIG_FILE, generateZikuJsonc } = await import("../../utils/ziku-config");
 const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy, copyFile } =
   await import("../../utils/template");
 const { detectGitHubOwner, detectGitHubRepo } = await import("../../utils/git-remote");
 const { selectDirectories, selectOverwriteStrategy, selectTemplateCandidate } =
   await import("../../ui/prompts");
 const { log, outro } = await import("../../ui/renderer");
-const { hashFiles } = await import("../../utils/hash");
+const { hashFiles, hashContent } = await import("../../utils/hash");
 const { loadTemplateConfig } = await import("../../utils/template-config");
-const { checkRepoExists, checkRepoSetup } = await import("../../utils/github");
+const { checkRepoExists, checkRepoSetup, fetchDefaultBranch, resolveSourceCommitSha } =
+  await import("../../utils/github");
 
 const mockDownloadTemplateToTemp = vi.mocked(downloadTemplateToTemp);
 const mockFetchTemplates = vi.mocked(fetchTemplates);
@@ -143,6 +158,8 @@ const mockHashFiles = vi.mocked(hashFiles);
 const _mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
 const mockCheckRepoExists = vi.mocked(checkRepoExists);
 const mockCheckRepoSetup = vi.mocked(checkRepoSetup);
+const mockFetchDefaultBranch = vi.mocked(fetchDefaultBranch);
+const mockResolveSourceCommitSha = vi.mocked(resolveSourceCommitSha);
 
 describe("initCommand", () => {
   beforeEach(() => {
@@ -151,17 +168,19 @@ describe("initCommand", () => {
 
     // デフォルトのモック設定
     mockDownloadTemplateToTemp.mockResolvedValue({
-      templateDir: "/tmp/template",
+      templateDir: absPath("/tmp/template"),
       cleanup: vi.fn(),
     });
     mockFetchTemplates.mockResolvedValue([]);
-    mockWriteFileWithStrategy.mockResolvedValue({
-      action: "created",
-      path: ".ziku/lock.json",
-    });
+    // 操作結果のパスは実装と同じく書き込み対象のパスを返す。lock のベースは
+    // 「どのファイルをどう扱ったか」をパスで引くので、別のパスを返すモックだと
+    // 実装では起こらない「操作結果の無いファイル」の経路をテストが通ってしまう。
+    mockWriteFileWithStrategy.mockImplementation(({ relativePath }) =>
+      Promise.resolve({ action: "created" as const, path: relativePath }),
+    );
     mockCopyFile.mockResolvedValue({
       action: "skipped",
-      path: ".ziku/ziku.jsonc",
+      path: repoRelPath(".ziku/ziku.jsonc"),
     });
     mockHashFiles.mockResolvedValue({});
   });
@@ -220,7 +239,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: true },
@@ -237,10 +256,10 @@ describe("initCommand", () => {
     it("ターゲットディレクトリが存在しない場合は作成", async () => {
       vol.fromJSON({});
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/new-dir", force: false, yes: false },
@@ -251,12 +270,31 @@ describe("initCommand", () => {
       expect(vol.existsSync("/new-dir")).toBe(true);
     });
 
+    it("位置引数 'init' は ./init というディレクトリ指定として扱う", async () => {
+      // citty はサブコマンド名を rawArgs から取り除いてから initCommand へ渡すので、
+      // dir に "init" が入るのは `ziku init init` と打たれたときだけ。この場合ユーザーが
+      // 求めているのは ./init の作成で、カレントディレクトリへ倒してはいけない。
+      vol.fromJSON({});
+
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json"]));
+      mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "init", force: false, yes: false },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(vol.existsSync(resolve(process.cwd(), "init"))).toBe(true);
+    });
+
     it("devcontainer ディレクトリ選択時に env.example を作成", async () => {
       vol.fromJSON({
         "/test": null,
       });
 
-      mockSelectDirectories.mockResolvedValueOnce([".devcontainer/**"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".devcontainer/**"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -280,7 +318,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -299,6 +337,28 @@ describe("initCommand", () => {
       );
     });
 
+    it("--yes だけでは既存ファイルを上書きしない（skip 戦略）", async () => {
+      vol.fromJSON({
+        "/test": null,
+      });
+
+      mockFetchTemplates.mockResolvedValue([]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      // --yes はプロンプトを省くだけで、既存の内容を失う承認は含まない
+      expect(mockSelectOverwriteStrategy).not.toHaveBeenCalled();
+      expect(mockFetchTemplates).toHaveBeenCalledWith(
+        expect.objectContaining({
+          overwriteStrategy: "skip",
+        }),
+      );
+    });
+
     it("cleanup が必ず呼ばれる", async () => {
       vol.fromJSON({
         "/test": null,
@@ -306,11 +366,11 @@ describe("initCommand", () => {
 
       const mockCleanup = vi.fn();
       mockDownloadTemplateToTemp.mockResolvedValue({
-        templateDir: "/tmp/template",
+        templateDir: absPath("/tmp/template"),
         cleanup: mockCleanup,
       });
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -329,7 +389,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -355,7 +415,7 @@ describe("initCommand", () => {
 
       const mockCleanup = vi.fn();
       mockDownloadTemplateToTemp.mockResolvedValue({
-        templateDir: "/tmp/template",
+        templateDir: absPath("/tmp/template"),
         cleanup: mockCleanup,
       });
 
@@ -377,7 +437,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: {
@@ -430,7 +490,7 @@ describe("initCommand", () => {
       );
     });
 
-    it("--dirs で無効なディレクトリ名を指定するとエラー", async () => {
+    it("--dirs で無効なディレクトリ名を指定すると InvalidArgument", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -446,7 +506,10 @@ describe("initCommand", () => {
           rawArgs: [],
           cmd: initCommand,
         }),
-      ).rejects.toThrow(ZikuError);
+      ).rejects.toMatchObject({
+        _tag: "ZikuFailure",
+        reason: { kind: "InvalidArgument", argument: "--dirs", value: "invalid-dir" },
+      });
 
       expect(mockFetchTemplates).not.toHaveBeenCalled();
     });
@@ -476,37 +539,7 @@ describe("initCommand", () => {
       );
     });
 
-    it("--dirs と --overwrite-strategy の組み合わせ", async () => {
-      vol.fromJSON({
-        "/test": null,
-      });
-
-      mockFetchTemplates.mockResolvedValue([]);
-
-      await (initCommand.run as any)({
-        args: {
-          dir: "/test",
-          force: false,
-          yes: false,
-          dirs: "Root files",
-          "overwrite-strategy": "skip",
-        },
-        rawArgs: [],
-        cmd: initCommand,
-      });
-
-      expect(mockSelectDirectories).not.toHaveBeenCalled();
-      expect(mockFetchTemplates).toHaveBeenCalledWith(
-        expect.objectContaining({
-          patterns: expect.objectContaining({
-            include: expect.arrayContaining([".mcp.json", ".mise.toml"]),
-          }),
-          overwriteStrategy: "skip",
-        }),
-      );
-    });
-
-    it("--overwrite-strategy に無効な値を指定するとエラー", async () => {
+    it("--overwrite-strategy に無効な値を指定すると InvalidArgument", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -522,7 +555,14 @@ describe("initCommand", () => {
           rawArgs: [],
           cmd: initCommand,
         }),
-      ).rejects.toThrow(ZikuError);
+      ).rejects.toMatchObject({
+        _tag: "ZikuFailure",
+        reason: {
+          kind: "InvalidArgument",
+          argument: "--overwrite-strategy",
+          value: "invalid",
+        },
+      });
 
       expect(mockFetchTemplates).not.toHaveBeenCalled();
     });
@@ -532,7 +572,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
 
       mockFetchTemplates.mockResolvedValue([]);
 
@@ -579,7 +619,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -598,7 +638,7 @@ describe("initCommand", () => {
       // downloadTemplateToTemp にカスタムソースが渡される
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),
-        "gh:my-org/my-templates",
+        "gh:my-org/my-templates#main",
       );
     });
 
@@ -607,7 +647,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -626,7 +666,7 @@ describe("initCommand", () => {
       // checkRepoExists がデフォルトで Exists を返すため、先頭の .ziku が使われる
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),
-        "gh:my-org/.ziku",
+        "gh:my-org/.ziku#main",
       );
     });
 
@@ -641,7 +681,7 @@ describe("initCommand", () => {
         .mockResolvedValueOnce(false) // .ziku
         .mockResolvedValueOnce(true); // .github
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
       mockFetchTemplates.mockResolvedValue([]);
 
@@ -654,7 +694,7 @@ describe("initCommand", () => {
       // セットアップ済みの .github が選ばれる
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),
-        "gh:my-org/.github",
+        "gh:my-org/.github#main",
       );
     });
 
@@ -669,7 +709,7 @@ describe("initCommand", () => {
         .mockResolvedValueOnce({ _tag: "NotFound" }); // .github
       mockCheckRepoSetup.mockResolvedValueOnce(false); // .ziku はセットアップ未完了
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
       mockFetchTemplates.mockResolvedValue([]);
 
@@ -681,7 +721,7 @@ describe("initCommand", () => {
 
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),
-        "gh:my-org/.ziku",
+        "gh:my-org/.ziku#main",
       );
     });
 
@@ -696,7 +736,7 @@ describe("initCommand", () => {
         repo: ".github",
       });
 
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -710,7 +750,7 @@ describe("initCommand", () => {
       // detected-org/.github が使われる
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),
-        "gh:detected-org/.github",
+        "gh:detected-org/.github#main",
       );
     });
 
@@ -726,7 +766,7 @@ describe("initCommand", () => {
       // ユーザーが custom-org/templates を入力
       mockInputTemplateSource.mockResolvedValueOnce("custom-org/templates");
       mockCheckRepoExists.mockResolvedValueOnce({ _tag: "Exists" });
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json", ".mise.toml"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json", ".mise.toml"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
 
       mockFetchTemplates.mockResolvedValue([]);
@@ -740,11 +780,11 @@ describe("initCommand", () => {
       expect(mockInputTemplateSource).toHaveBeenCalled();
       expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
         expect.any(String),
-        "gh:custom-org/templates",
+        "gh:custom-org/templates#main",
       );
     });
 
-    it(".ziku/lock.json に baseHashes が含まれる", async () => {
+    it(".ziku/lock.json に同期ベースのハッシュが含まれる", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -755,7 +795,10 @@ describe("initCommand", () => {
       };
       mockHashFiles.mockResolvedValueOnce(expectedHashes);
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([
+        { action: "copied", path: repoRelPath(".mcp.json") },
+        { action: "copied", path: repoRelPath(".mise.toml") },
+      ]);
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: true },
@@ -763,28 +806,59 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
-      // hashFiles がテンプレートディレクトリとパターンで呼ばれる
+      // ベースはテンプレートディレクトリを、配置したパターンの範囲で走査して作る。走査用の
+      // include には ziku 自身の設定ファイルが入る（これが落ちるとパターンの同期が始まらない）。
       expect(mockHashFiles).toHaveBeenCalledWith(
         "/tmp/template",
-        expect.any(Array),
-        expect.any(Array),
+        expect.objectContaining({
+          scan: expect.objectContaining({
+            include: expect.arrayContaining([ZIKU_CONFIG_FILE]),
+            exclude: expect.any(Array),
+          }),
+        }),
       );
 
       // saveLock により .ziku/lock.json がファイルシステムに書き出される
       expect(vol.existsSync("/test/.ziku/lock.json")).toBe(true);
-      const lockContent = JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string);
-      expect(lockContent.baseHashes).toEqual(expectedHashes);
+      const lockContent = lockSchema.parse(
+        JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string),
+      );
+      // テンプレート由来のファイルに加え、init 自身が書いたファイルもベースに載る。
+      expect(baseHashesOf(lockContent)).toMatchObject(expectedHashes);
     });
 
-    it("テンプレに ziku.jsonc があれば baseHashes に ziku.jsonc の base が記録される", async () => {
+    it("init が生成したファイルもテンプレート由来と同じくベースに載る", async () => {
+      vol.fromJSON({ "/test": null });
+
+      // テンプレートには devcontainer.env.example が無い（init が組み立てて書く）。
+      mockHashFiles.mockResolvedValueOnce(hashMap({ ".mcp.json": "abc123hash" }));
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      const lockContent = lockSchema.parse(
+        JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string),
+      );
+      // ベースに載らないと次回の分類が localOnly になり、`push --yes` が ziku 自身の
+      // 生成物をテンプレートへ送って全プロジェクトへ配ってしまう。
+      expect(
+        baseHashesOf(lockContent)[repoRelPath(".devcontainer/devcontainer.env.example")],
+      ).toEqual(expect.any(String));
+    });
+
+    it("テンプレに ziku.jsonc があれば同期ベースに ziku.jsonc の base が記録される", async () => {
       vol.fromJSON({
         "/test": null,
       });
 
       // テンプレに ziku.jsonc が存在する状況（hashFiles が ziku.jsonc を返す）
-      mockHashFiles.mockResolvedValueOnce({ ".ziku/ziku.jsonc": "template-config-hash" });
+      mockHashFiles.mockResolvedValueOnce(hashMap({ ".ziku/ziku.jsonc": "template-config-hash" }));
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: true },
@@ -793,15 +867,20 @@ describe("initCommand", () => {
       });
 
       expect(vol.existsSync("/test/.ziku/lock.json")).toBe(true);
-      const lockContent = JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string);
+      const lockContent = lockSchema.parse(
+        JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string),
+      );
       // base はローカル subset 由来のハッシュで記録される（テンプレ保護のため）
-      expect(lockContent.baseHashes).toBeDefined();
-      expect(lockContent.baseHashes[".ziku/ziku.jsonc"]).toEqual(expect.any(String));
+      expect(baseHashesOf(lockContent)[repoRelPath(".ziku/ziku.jsonc")]).toEqual(
+        expect.any(String),
+      );
       // テンプレ側ハッシュではなくローカル内容のハッシュ
-      expect(lockContent.baseHashes[".ziku/ziku.jsonc"]).not.toBe("template-config-hash");
+      expect(baseHashesOf(lockContent)[repoRelPath(".ziku/ziku.jsonc")]).not.toBe(
+        "template-config-hash",
+      );
     });
 
-    it("テンプレに ziku.jsonc が無ければ baseHashes に ziku.jsonc を記録しない（誤削除防止 / codex P1）", async () => {
+    it("テンプレに ziku.jsonc が無くても、init が書いた本文をベースにする", async () => {
       vol.fromJSON({
         "/test": null,
       });
@@ -809,7 +888,7 @@ describe("initCommand", () => {
       // テンプレに ziku.jsonc が無い状況（hashFiles が ziku.jsonc を返さない）
       mockHashFiles.mockResolvedValueOnce({});
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: true },
@@ -817,9 +896,225 @@ describe("initCommand", () => {
         cmd: initCommand,
       });
 
-      const lockContent = JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string);
-      // base を記録しない（記録すると次回 pull で deletedFiles 判定→制御ファイル削除になる）
-      expect(lockContent.baseHashes?.[".ziku/ziku.jsonc"]).toBeUndefined();
+      const lockContent = lockSchema.parse(
+        JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string),
+      );
+      // 設定ファイルの削除は方向を問わず伝播しない（`sync-plan.ts` の `zikuConfigActions`）ので、
+      // ベースに載せても pull がローカルの制御ファイルを消すことはない。
+      expect(baseHashesOf(lockContent)[repoRelPath(".ziku/ziku.jsonc")]).toEqual(
+        expect.any(String),
+      );
+    });
+  });
+
+  describe("配置したファイルの由来と lock に記録する SHA は同じブランチを指す", () => {
+    it("既定ブランチが master のリポジトリでも、取得先とベースの問い合わせ先が揃う", async () => {
+      vol.fromJSON({ "/test": null });
+      mockFetchDefaultBranch.mockResolvedValueOnce({ _tag: "Resolved", name: "master" });
+      mockFetchTemplates.mockResolvedValue([]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(mockDownloadTemplateToTemp).toHaveBeenCalledWith(
+        expect.any(String),
+        "gh:test-org/.ziku#master",
+      );
+      expect(mockResolveSourceCommitSha).toHaveBeenCalledWith("test-org", ".ziku", {
+        kind: "branch",
+        name: "master",
+      });
+    });
+
+    it("既定ブランチは lock へ控えるが source.ref には固定しない", async () => {
+      vol.fromJSON({ "/test": null });
+      mockFetchDefaultBranch.mockResolvedValueOnce({ _tag: "Resolved", name: "master" });
+      mockFetchTemplates.mockResolvedValue([]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      const lockContent = lockSchema.parse(
+        JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string),
+      );
+      expect(lockContent.source).toEqual({
+        kind: "github",
+        owner: "test-org",
+        repo: ".ziku",
+        defaultBranch: "master",
+      });
+    });
+
+    it("既定ブランチを引けなければ、テンプレートを取得せずに中断する", async () => {
+      vol.fromJSON({ "/test": null });
+      mockFetchDefaultBranch.mockResolvedValueOnce({
+        _tag: "Unresolved",
+        reason: "rate limit exceeded",
+      });
+
+      await expect(
+        (initCommand.run as any)({
+          args: { dir: "/test", force: false, yes: true },
+          rawArgs: [],
+          cmd: initCommand,
+        }),
+      ).rejects.toMatchObject({
+        _tag: "ZikuFailure",
+        reason: { kind: "DefaultBranchUnresolved", repo: "test-org/.ziku" },
+      });
+
+      expect(mockDownloadTemplateToTemp).not.toHaveBeenCalled();
+      expect(vol.existsSync("/test/.ziku/lock.json")).toBe(false);
+    });
+
+    it("--from-dir は GitHub へ問い合わせずにローカルディレクトリを使う", async () => {
+      vol.fromJSON({ "/test": null });
+      mockFetchTemplates.mockResolvedValue([]);
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true, "from-dir": "/local/template" },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(mockFetchDefaultBranch).not.toHaveBeenCalled();
+      expect(mockDownloadTemplateToTemp).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("ziku.jsonc の同期ベースは init が書いたときだけ載る", () => {
+    /**
+     * テンプレート側の `ziku.jsonc`。init が組み立てる本文とは書式が異なる（コメント付き）。
+     *
+     * 生成した本文とテンプレートの本文を別物にしておかないと、ベースを取り違えても
+     * 3-way 比較の結果が変わらず、取り違え自体をテストが見逃す。
+     */
+    const templateConfigContent = [
+      "{",
+      "  // テンプレート側の同期対象",
+      '  "include": [".claude/**", ".mcp.json"],',
+      '  "exclude": []',
+      "}",
+      "",
+    ].join("\n");
+
+    /** 既に初期化済みのプロジェクトが持つ `ziku.jsonc`（テンプレより少ないパターン）。 */
+    const existingConfigContent = generateZikuJsonc({
+      include: globPatterns([".mcp.json"]),
+      exclude: [],
+    });
+
+    const configPath = "/test/.ziku/ziku.jsonc";
+    const readDisk = (): string => vol.readFileSync(configPath, "utf-8") as string;
+    const readLockBases = (): HashMap =>
+      baseHashesOf(
+        lockSchema.parse(JSON.parse(vol.readFileSync("/test/.ziku/lock.json", "utf-8") as string)),
+      );
+    const readLockBase = (): string | undefined => readLockBases()[repoRelPath(".ziku/ziku.jsonc")];
+
+    beforeEach(() => {
+      // 実装と同じ判定（新規作成 / 上書き / スキップ）を memfs 上で再現する。既定のモックは
+      // 常に created を返すため、既存ファイルを保持する経路がこのテストでは動かない。
+      mockWriteFileWithStrategy.mockImplementation(
+        ({ destPath, content, strategy, relativePath, dryRun }) => {
+          const write = (): void => {
+            if (dryRun === true) return;
+            vol.mkdirSync(dirname(destPath), { recursive: true });
+            vol.writeFileSync(destPath, content);
+          };
+          if (!vol.existsSync(destPath)) {
+            write();
+            return Promise.resolve({ action: "created" as const, path: relativePath });
+          }
+          return Promise.resolve(
+            match(strategy)
+              .with("overwrite", () => {
+                write();
+                return { action: "overwritten" as const, path: relativePath };
+              })
+              .with("skip", "prompt", () => ({ action: "skipped" as const, path: relativePath }))
+              .exhaustive(),
+          );
+        },
+      );
+      mockFetchTemplates.mockResolvedValue([]);
+      mockHashFiles.mockResolvedValue(
+        hashMap({ ".ziku/ziku.jsonc": hashContent(templateConfigContent) }),
+      );
+    });
+
+    it("--yes で既存 ziku.jsonc を保持したら、ベースを記録しない", async () => {
+      vol.fromJSON({ [configPath]: existingConfigContent });
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      // --yes は既存ファイルを上書きしない
+      expect(readDisk()).toBe(existingConfigContent);
+      // 保持した内容をベースにすると、次の pull がテンプレートの本文へ確認なく寄せる
+      expect(readLockBase()).toBeUndefined();
+    });
+
+    it("--force で上書きしたら、ベースは書いた内容のハッシュになる", async () => {
+      vol.fromJSON({ [configPath]: existingConfigContent });
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: true, yes: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(readDisk()).not.toBe(existingConfigContent);
+      expect(readLockBase()).toBe(hashContent(readDisk()));
+    });
+
+    it("未初期化なら、ベースは生成した本文のハッシュになる", async () => {
+      vol.fromJSON({ "/test": null });
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      expect(readLockBase()).toBe(hashContent(readDisk()));
+    });
+
+    it("初期化済みへの --yes の直後、保持した ziku.jsonc は union で解決される", async () => {
+      vol.fromJSON({ [configPath]: existingConfigContent });
+
+      await (initCommand.run as any)({
+        args: { dir: "/test", force: false, yes: true },
+        rawArgs: [],
+        cmd: initCommand,
+      });
+
+      // status / push が使う 3-way 比較へ、書き込まれた lock のベースをそのまま渡す。
+      const plan = partitionSyncPlan(
+        classifyFiles({
+          baseHashes: readLockBases(),
+          localHashes: hashMap({ ".ziku/ziku.jsonc": hashContent(readDisk()) }),
+          templateHashes: hashMap({ ".ziku/ziku.jsonc": hashContent(templateConfigContent) }),
+        }),
+      );
+
+      // 保持した本文はテンプレートと足並みが揃っていないので、未解決として扱われる。
+      expect(plan.config).toEqual({ _tag: "Tracked", category: "conflicts" });
+      // 設定ファイルの解決は加法 union なので、保持したローカルのパターンは失われない。
+      expect(zikuConfigPullAction(plan.config)).toEqual({ _tag: "UnionMerge" });
+      // ローカルにしか無いパターンが無いので、push はテンプレートへ何も送らず、取り込みだけを勧める。
+      expect(
+        zikuConfigPushOutcome(plan.config, { pullRelevant: true, pushRelevant: false }),
+      ).toEqual({ _tag: "PullToSync" });
     });
   });
 
@@ -829,7 +1124,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: true, dryRun: true },
@@ -848,7 +1143,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: true, dryRun: true },
@@ -867,7 +1162,7 @@ describe("initCommand", () => {
     it("存在しないターゲットディレクトリを作成しない", async () => {
       vol.fromJSON({});
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/nonexistent-target", force: false, yes: true, dryRun: true },
@@ -886,16 +1181,16 @@ describe("initCommand", () => {
 
       // giget は tempDir (targetDir/.ziku-temp) 作成時に targetDir 自体も
       // 再帰的に作成する。この副作用をモックで再現する。
-      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: string) => {
+      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: AbsPath) => {
         vol.mkdirSync(`${targetDir}/.ziku-temp`, { recursive: true });
         return {
-          templateDir: `${targetDir}/.ziku-temp`,
+          templateDir: absPath(`${targetDir}/.ziku-temp`),
           cleanup: () => {
             vol.rmSync(`${targetDir}/.ziku-temp`, { recursive: true, force: true });
           },
         };
       });
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/nonexistent-remote-target", force: false, yes: true, dryRun: true },
@@ -911,16 +1206,16 @@ describe("initCommand", () => {
 
       // targetDir (/existing-root/new-parent/project) の祖先 new-parent も
       // 未作成のケース。giget は recursive:true で両方まとめて作成する。
-      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: string) => {
+      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: AbsPath) => {
         vol.mkdirSync(`${targetDir}/.ziku-temp`, { recursive: true });
         return {
-          templateDir: `${targetDir}/.ziku-temp`,
+          templateDir: absPath(`${targetDir}/.ziku-temp`),
           cleanup: () => {
             vol.rmSync(`${targetDir}/.ziku-temp`, { recursive: true, force: true });
           },
         };
       });
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: {
@@ -946,7 +1241,7 @@ describe("initCommand", () => {
       // giget は tempDir 作成後にダウンロード/展開に失敗することがある。
       // 失敗時も tempDir 自体は giget 側で削除されるが（downloadTemplateToTemp の
       // 実装）、targetDir は giget が作った副作用のまま残る想定を再現する。
-      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: string) => {
+      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: AbsPath) => {
         vol.mkdirSync(targetDir, { recursive: true });
         throw new Error("network error during extraction");
       });
@@ -967,16 +1262,16 @@ describe("initCommand", () => {
         "/existing-target/.gitkeep": "",
       });
 
-      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: string) => {
+      mockDownloadTemplateToTemp.mockImplementationOnce(async (targetDir: AbsPath) => {
         vol.mkdirSync(`${targetDir}/.ziku-temp`, { recursive: true });
         return {
-          templateDir: `${targetDir}/.ziku-temp`,
+          templateDir: absPath(`${targetDir}/.ziku-temp`),
           cleanup: () => {
             vol.rmSync(`${targetDir}/.ziku-temp`, { recursive: true, force: true });
           },
         };
       });
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/existing-target", force: false, yes: true, dryRun: true },
@@ -993,7 +1288,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: true, dryRun: true },
@@ -1009,7 +1304,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/test", force: false, yes: true, dryRun: true },
@@ -1026,7 +1321,7 @@ describe("initCommand", () => {
         "/test": null,
       });
 
-      mockSelectDirectories.mockResolvedValueOnce([".devcontainer/**"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".devcontainer/**"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("prompt");
       mockFetchTemplates.mockResolvedValue([]);
 
@@ -1048,7 +1343,10 @@ describe("initCommand", () => {
 
 describe("generateZikuJsonc", () => {
   it("include と $schema を含む JSON を生成する", () => {
-    const content = generateZikuJsonc({ include: [".mcp.json", ".devcontainer/**"], exclude: [] });
+    const content = generateZikuJsonc({
+      include: globPatterns([".mcp.json", ".devcontainer/**"]),
+      exclude: [],
+    });
     const parsed = JSON.parse(content);
     expect(parsed.$schema).toBeDefined();
     expect(parsed.include).toBeDefined();
@@ -1057,41 +1355,9 @@ describe("generateZikuJsonc", () => {
   });
 
   it("デフォルト生成に include パターンがある", () => {
-    const content = generateZikuJsonc({ include: [".mcp.json"], exclude: [] });
+    const content = generateZikuJsonc({ include: globPatterns([".mcp.json"]), exclude: [] });
     const parsed = JSON.parse(content);
     expect(Array.isArray(parsed.include)).toBe(true);
     expect(parsed.include.length).toBeGreaterThan(0);
-  });
-});
-
-describe("resolveConfigBaseHash（テンプレ保護の安全装置）", () => {
-  it("ローカル(部分集合) の内容ハッシュを base にする（テンプレを削らないため）", () => {
-    const localContent = generateZikuJsonc({ include: [".claude/**"], exclude: [] });
-    const result = resolveConfigBaseHash({
-      localConfigContent: localContent,
-      templateConfigHash: hashContent("different-template-content"),
-    });
-    // base = ローカル内容のハッシュ（テンプレ側のハッシュではない）
-    expect(result).toBe(hashContent(localContent));
-  });
-
-  it("テンプレ側ハッシュが undefined でもローカル内容から base を決められる", () => {
-    const localContent = generateZikuJsonc({ include: [".mcp.json"], exclude: [] });
-    const result = resolveConfigBaseHash({
-      localConfigContent: localContent,
-      templateConfigHash: undefined,
-    });
-    expect(result).toBe(hashContent(localContent));
-  });
-
-  it("ローカルが完全集合（テンプレと同一）なら base はテンプレと一致する", () => {
-    const content = generateZikuJsonc({ include: [".claude/**", ".mcp.json"], exclude: [] });
-    const templateHash = hashContent(content);
-    const result = resolveConfigBaseHash({
-      localConfigContent: content,
-      templateConfigHash: templateHash,
-    });
-    // local == template のときは base も一致 → push/pull とも no-op
-    expect(result).toBe(templateHash);
   });
 });

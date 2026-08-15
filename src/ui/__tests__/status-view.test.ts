@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { recommendationLine, renderStatusLong, type StatusViewModel } from "../status-view";
+import type { ZikuConfigStatus } from "../../utils/merge/sync-plan";
 import type { Recommendation, StatusBuckets, StatusEntry } from "../../utils/status";
+import { repoRelPath } from "../../__tests__/brands";
 
 function entry(
   path: string,
@@ -8,7 +10,7 @@ function entry(
   category: StatusEntry["category"],
   isDestructive = false,
 ): StatusEntry {
-  return { path, direction, category, isDestructive };
+  return { path: repoRelPath(path), direction, category, isDestructive };
 }
 
 function buckets(partial: Partial<StatusBuckets> = {}): StatusBuckets {
@@ -21,6 +23,7 @@ function buckets(partial: Partial<StatusBuckets> = {}): StatusBuckets {
 }
 
 const DEFAULT_REC: Recommendation = { kind: "inSync" };
+const SYNCED_CONFIG: ZikuConfigStatus = { _tag: "Categorized", category: "unchanged" };
 
 function model(
   partial: Partial<StatusViewModel> = {},
@@ -30,6 +33,7 @@ function model(
     buckets: partial.buckets ?? buckets(),
     untracked: partial.untracked ?? [],
     recommendation: partial.recommendation ?? recommendation,
+    config: partial.config ?? SYNCED_CONFIG,
   };
 }
 
@@ -88,28 +92,19 @@ describe("status-view", () => {
       expect(line).toContain("2");
     });
 
-    it("pullOnly with pullCount=0 は patterns sync 用文言になる (no-op 防止)", () => {
-      const line = strip(recommendationLine({ kind: "pullOnly", pullCount: 0 }));
-      expect(line).toContain("ziku pull");
-      expect(line).toContain("template patterns");
-      // "0 incoming change(s)" のような無意味な数字を出さない
-      expect(line).not.toMatch(/\b0 incoming/);
+    it("localOnlyConfigPatterns は in sync と言わず、届け方を案内する", () => {
+      const line = strip(recommendationLine({ kind: "localOnlyConfigPatterns" }));
+      expect(line).not.toContain("In sync");
+      expect(line).toContain(".ziku/ziku.jsonc");
+      expect(line).toContain("push");
     });
 
-    it("pullThenPush with pullCount=0 は patterns sync 文言 + push 案内", () => {
-      const line = strip(recommendationLine({ kind: "pullThenPush", pullCount: 0, pushCount: 2 }));
-      expect(line).toContain("ziku pull");
-      expect(line).toContain("template patterns");
-      expect(line).toContain("ziku push");
-      expect(line).toContain("2");
-    });
-
-    it("continueMerge with conflictCount=0 は stale lock のクリアを案内する", () => {
-      const line = strip(recommendationLine({ kind: "continueMerge", conflictCount: 0 }));
-      expect(line).toContain("Stale merge state");
+    it("continueMerge は解決すべき件数と `pull --continue` を案内する", () => {
+      // 件数が 0 の縮退状態は lock の型が排除するので、分岐は 1 本だけになる。
+      const line = strip(recommendationLine({ kind: "continueMerge", conflictCount: 3 }));
+      expect(line).toContain("Merge paused");
+      expect(line).toContain("3 conflict(s)");
       expect(line).toContain("ziku pull --continue");
-      // 0 件と表示しないことを保証（混乱回避）
-      expect(line).not.toMatch(/\b0 conflict/);
     });
   });
 
@@ -159,10 +154,10 @@ describe("status-view", () => {
       expect(out).toContain(".claude/rules/draft.md");
     });
 
-    it("pendingMerge 中（continueMerge）はバケツが空でも in sync バナーを出さない", () => {
-      // バグ再現: bucket/untracked が全部空でも pendingMerge があれば
+    it("解決待ち中（continueMerge）はバケツが空でも in sync バナーを出さない", () => {
+      // バグ再現: bucket/untracked が全部空でも解決待ちがあれば
       // outro で `pull --continue` を案内するため、"Tracked files are in sync"
-      // と矛盾するメッセージを同時に出してはいけない (codex review #71 より)
+      // と矛盾するメッセージを同時に出してはいけない
       const out = strip(
         renderStatusLong(
           model(
@@ -174,7 +169,7 @@ describe("status-view", () => {
       expect(out).not.toContain("Tracked files are in sync");
     });
 
-    it("conflict セクションのヒントは pendingMerge 中だと 'pull --continue' に切り替わる (codex P2)", () => {
+    it("conflict セクションのヒントは解決待ち中だと 'pull --continue' に切り替わる", () => {
       const conflictEntry = entry("c.txt", "conflict", "conflicts");
       const out = strip(
         renderStatusLong(
@@ -188,7 +183,7 @@ describe("status-view", () => {
       expect(out).not.toContain("start a 3-way merge");
     });
 
-    it("conflict セクションのヒントは pendingMerge 無しなら従来の '3-way merge を始める' のまま", () => {
+    it("conflict セクションのヒントは解決待ちが無ければ従来の '3-way merge を始める' のまま", () => {
       const conflictEntry = entry("c.txt", "conflict", "conflicts");
       const out = strip(
         renderStatusLong(
@@ -200,37 +195,6 @@ describe("status-view", () => {
       );
       expect(out).toContain("start a 3-way merge");
       expect(out).not.toContain("--continue");
-    });
-
-    it("pattern-only pull (recommendation=pullOnly with pullCount=0) のとき in sync バナーを出さない (codex P2 #2)", () => {
-      // codex review #71 のさらなる P2: テンプレが新パターンを追加して
-      // ファイル差分はゼロ。decideRecommendation は pullOnly with pullCount=0 を返すが、
-      // 旧 isClean は「全バケツ空 + untracked 空 + continueMerge でない」なので true になり、
-      // 「Tracked files are in sync」を出してしまっていた。
-      // recommendation.kind === "inSync" を SSOT として参照すれば矛盾しない。
-      const out = strip(
-        renderStatusLong(
-          model({ buckets: buckets({ inSyncCount: 5 }) }, { kind: "pullOnly", pullCount: 0 }),
-        ),
-      );
-      expect(out).not.toContain("Tracked files are in sync");
-    });
-
-    it("pattern-only pull + push (pullThenPush with pullCount=0) でも in sync バナーを出さない", () => {
-      const out = strip(
-        renderStatusLong(
-          model(
-            {
-              buckets: buckets({
-                push: [entry("local.txt", "push", "localOnly")],
-                inSyncCount: 5,
-              }),
-            },
-            { kind: "pullThenPush", pullCount: 0, pushCount: 1 },
-          ),
-        ),
-      );
-      expect(out).not.toContain("Tracked files are in sync");
     });
 
     it("untracked のみ存在しても recommendation=inSync なら in sync バナーは出る (新仕様)", () => {
@@ -265,6 +229,23 @@ describe("status-view", () => {
         ),
       );
       expect(out).not.toContain("Tracked files are in sync");
+    });
+
+    it("ローカルにしか無いパターンは、届け方と一緒に見せる", () => {
+      const out = strip(
+        renderStatusLong(
+          model(
+            { buckets: buckets({ inSyncCount: 3 }), config: { _tag: "LocalOnlyPatterns" } },
+            { kind: "localOnlyConfigPatterns" },
+          ),
+        ),
+      );
+
+      // 「同期済み」とは言わず、テンプレートへ届いていない事実と次の操作を示す。
+      expect(out).not.toContain("Tracked files are in sync");
+      expect(out).toContain("Local-only patterns");
+      expect(out).toContain(".ziku/ziku.jsonc");
+      expect(out).toContain("push");
     });
   });
 });

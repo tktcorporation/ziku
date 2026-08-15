@@ -21,6 +21,8 @@ OPTIONS
 
        --remote    Create a PR to set up a remote template repository instead of local (Default: false)
   --from=<from>    Remote template repository as owner/repo (used with --remote)
+   -n, --dryRun    Preview what would be created, without writing files or opening a PR (Default: false)
+      -y, --yes    Skip prompts (with --remote, the PR is opened without asking to confirm) (Default: false)
 ```
 
 ## `init`
@@ -38,8 +40,8 @@ ARGUMENTS
 
 OPTIONS
 
-                                        --force    Overwrite existing files (Default: false)
-                                      -y, --yes    Non-interactive mode (accept all defaults) (Default: false)
+                                        --force    Approve overwriting existing files with the template version (Default: false)
+                                      -y, --yes    Skip prompts (apply every template directory; existing files are kept, not overwritten) (Default: false)
                               -d, --dirs=<dirs>    Comma-separated directory names to apply (non-interactive)
   -s, --overwrite-strategy=<overwrite_strategy>    Overwrite strategy: overwrite, skip, or prompt
                                   --from=<from>    Template source as owner/repo (e.g., my-org/my-templates)
@@ -64,7 +66,7 @@ OPTIONS
 
              -n, --dryRun    Preview only, don't push (Default: false)
   -m, --message=<message>    PR title (GitHub only)
-            -y, -f, --yes    Skip confirmation prompts (Default: false)
+                -y, --yes    Skip prompts (untracked files are reported and left out instead of being selected for tracking) (Default: false)
                    --edit    Edit PR title and description before creating (GitHub only) (Default: false)
           --files=<files>    Comma-separated file paths to include (skips file selection prompt)
        --includeDeletions    Include locally deleted files (default: unselected in interactive mode) (Default: false)
@@ -85,8 +87,9 @@ ARGUMENTS
 
 OPTIONS
 
-   -f, --force    Skip confirmations (Default: false)
-    --continue    Continue after resolving merge conflicts (Default: false)
+   -f, --force    Approve deleting local files that were removed from the template (Default: false)
+     -y, --yes    Skip prompts (files removed from the template are kept, not deleted) (Default: false)
+    --continue    Continue a paused merge (asks which version to keep for files that could not be auto-merged) (Default: false)
   -n, --dryRun    Preview changes without applying them (Default: false)
 ```
 

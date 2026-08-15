@@ -10,7 +10,9 @@
  */
 import { match } from "ts-pattern";
 import pc from "picocolors";
+import type { ZikuConfigStatus } from "../utils/merge/sync-plan";
 import type { EntryCategory, Recommendation, StatusBuckets, StatusEntry } from "../utils/status";
+import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
 
 /**
  * カテゴリごとのラベルとカラーの SSOT。
@@ -25,6 +27,7 @@ const CATEGORY_LABEL: Record<EntryCategory, string> = {
   localOnly: "modified:",
   deletedLocally: "deleted: ",
   conflicts: "both modified:",
+  deletedWithLocalEdits: "deleted in template, edited locally:",
 };
 
 function colorForEntry(entry: StatusEntry): (s: string) => string {
@@ -63,41 +66,39 @@ function renderSection(
 /**
  * Recommendation を1行ヒントに変換する。`git status` の
  * "(use \"git push\" to publish your local commits)" の感覚。
- *
- * `continueMerge` は conflictCount で2分岐:
- *   - count > 0: 通常の merge resume
- *   - count === 0: 縮退（stale lock）。`pull --continue` でクリアを案内
  */
 export function recommendationLine(rec: Recommendation): string {
   return match(rec)
     .with({ kind: "inSync" }, () => `${pc.green("✓")} In sync — nothing to do.`)
-    .with({ kind: "pullOnly" }, ({ pullCount }) =>
-      pullCount === 0
-        ? // patternsUpdated 由来 (テンプレが新パターン追加、ファイル差分はゼロ)。
-          // 「0 incoming change(s)」と書くと無意味な操作に見えるので別文言にする。
-          `${pc.cyan("→")} Run ${pc.cyan("`ziku pull`")} to sync new template patterns into your config.`
-        : `${pc.cyan("→")} Run ${pc.cyan("`ziku pull`")} to apply ${pullCount} incoming change(s).`,
+    .with(
+      { kind: "localOnlyConfigPatterns" },
+      () =>
+        `${pc.yellow("⚠")} ${pc.yellow(ZIKU_CONFIG_FILE)} has patterns the template does not have — push a file matching them to send them along.`,
+    )
+    .with(
+      { kind: "pullOnly" },
+      ({ pullCount }) =>
+        `${pc.cyan("→")} Run ${pc.cyan("`ziku pull`")} to apply ${pullCount} incoming change(s).`,
     )
     .with(
       { kind: "pushOnly" },
       ({ pushCount }) =>
         `${pc.green("→")} Run ${pc.green("`ziku push`")} to send ${pushCount} local change(s) to the template.`,
     )
-    .with({ kind: "pullThenPush" }, ({ pullCount, pushCount }) =>
-      pullCount === 0
-        ? // 同上: ファイル差分ゼロでもパターンの取り込みが必要。
-          `${pc.yellow("→")} Run ${pc.cyan("`ziku pull`")} to sync new template patterns, then ${pc.green("`ziku push`")} (${pushCount}).`
-        : `${pc.yellow("→")} Run ${pc.cyan("`ziku pull`")} (${pullCount}), then ${pc.green("`ziku push`")} (${pushCount}).`,
+    .with(
+      { kind: "pullThenPush" },
+      ({ pullCount, pushCount }) =>
+        `${pc.yellow("→")} Run ${pc.cyan("`ziku pull`")} (${pullCount}), then ${pc.green("`ziku push`")} (${pushCount}).`,
     )
     .with(
       { kind: "resolveConflict" },
       ({ conflictCount }) =>
         `${pc.yellow("⚠")} Run ${pc.cyan("`ziku pull`")} to start a 3-way merge for ${conflictCount} conflict(s).`,
     )
-    .with({ kind: "continueMerge" }, ({ conflictCount }) =>
-      conflictCount === 0
-        ? `${pc.yellow("⏸")} Stale merge state in lock — run ${pc.cyan("`ziku pull --continue`")} to clear it (push will be blocked otherwise).`
-        : `${pc.yellow("⏸")} Merge paused — resolve ${conflictCount} conflict(s) and run ${pc.cyan("`ziku pull --continue`")}.`,
+    .with(
+      { kind: "continueMerge" },
+      ({ conflictCount }) =>
+        `${pc.yellow("⏸")} Merge paused — resolve ${conflictCount} conflict(s) and run ${pc.cyan("`ziku pull --continue`")}.`,
     )
     .exhaustive();
 }
@@ -110,6 +111,11 @@ export interface StatusViewModel {
   readonly buckets: StatusBuckets;
   readonly untracked: ReadonlyArray<UntrackedGroup>;
   readonly recommendation: Recommendation;
+  /**
+   * 設定ファイルの状態。バケツへ載る状態（`Categorized`）は `buckets` 側に現れるので、
+   * ここを読むのは載せられない状態を案内するためだけ。
+   */
+  readonly config: ZikuConfigStatus;
 }
 
 /**
@@ -123,6 +129,18 @@ export function renderStatusLong(model: StatusViewModel): string {
   const { buckets, untracked, recommendation } = model;
   const untrackedFiles = untracked.flatMap((g) => g.files);
 
+  // 設定ファイルがバケツに載らない状態は、専用の区画で見せる。バケツへ載せると「実行しても
+  // 何も起きないコマンド」を勧めることになり、載せなければ黙って消える。
+  const configLines: string[] = match(model.config)
+    .with({ _tag: "Categorized" }, (): string[] => [])
+    .with({ _tag: "LocalOnlyPatterns" }, () => [
+      `  ${pc.yellow("!")} ${pc.bold("Local-only patterns")} — the template does not have them yet`,
+      `    ${pc.dim(`(sent with the next file you push that matches; or add them to the template's ${ZIKU_CONFIG_FILE})`)}`,
+      `    ${pc.yellow(ZIKU_CONFIG_FILE)}`,
+      "",
+    ])
+    .exhaustive();
+
   const untrackedLines: string[] =
     untrackedFiles.length === 0
       ? []
@@ -135,21 +153,18 @@ export function renderStatusLong(model: StatusViewModel): string {
 
   // isClean は decideRecommendation の結論をそのまま尊重する SSOT 設計。
   //
-  // recommendation.kind === "inSync" はすでに「全バケツ空 + pendingMerge 無し +
-  // patternsUpdated 無し」を意味する (decideRecommendation 側で集約済み)。
-  // ここで bucket や untracked を再評価すると、新しい pull-pending 信号
-  // (例: patternsUpdated, pendingMerge) を decideRecommendation に追加するたびに
-  // この条件式も同期更新する必要が出てしまい、矛盾の温床になる
-  // (codex review #71 — pendingMerge 中の "in sync" 矛盾、pattern-only pull の
-  //  "in sync" 矛盾、いずれも本質はビューが SSOT を信用していなかったこと)。
+  // recommendation.kind === "inSync" はすでに「全バケツ空 + 解決待ち無し」を意味する
+  // (decideRecommendation 側で集約済み)。ここで bucket や untracked を再評価すると、
+  // 新しい pull-pending 信号 (例: コンフリクト解決待ち) を decideRecommendation に
+  // 追加するたびにこの条件式も同期更新する必要が出てしまい、矛盾の温床になる。
   //
   // untracked は「Tracked files are in sync」というメッセージとは独立。
   // 「追跡対象は in sync、それ以外は別途」という直交した情報なので、両方表示してよい。
   const isClean = recommendation.kind === "inSync";
 
   // conflict section のアクションヒントは recommendation 種別で出し分ける。
-  // pendingMerge 中の場合は新規 merge ではなく `pull --continue` を案内する
-  // (codex review #71 P2 で指摘された矛盾を防ぐ)。
+  // 解決待ち中の場合は新規 merge ではなく `pull --continue` を案内する
+  // (解決待ちなのに「3-way merge を始めろ」と促す矛盾したヒントを出さないため)。
   const conflictHint =
     recommendation.kind === "continueMerge"
       ? `(resolve and run "ziku pull --continue")`
@@ -174,6 +189,7 @@ export function renderStatusLong(model: StatusViewModel): string {
       buckets.push,
     ),
     ...renderSection("⚠", "Conflict — both sides changed", conflictHint, buckets.conflict),
+    ...configLines,
     ...untrackedLines,
     ...cleanLines,
   ].join("\n");

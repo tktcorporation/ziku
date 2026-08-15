@@ -7,54 +7,59 @@
  */
 import { Effect } from "effect";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { parse } from "jsonc-parser";
-import { join } from "pathe";
-import { zikuConfigSchema } from "../modules/schemas";
-import type { ZikuConfig } from "../modules/schemas";
-import { ParseError, TemplateNotConfiguredError } from "../errors";
-import { ZIKU_CONFIG_FILE } from "./ziku-config";
+import { match } from "ts-pattern";
+import type { AbsPath, GlobPattern, ZikuConfig } from "../modules/schemas";
+import { ParseError, TemplateNotConfiguredError, ValidationError } from "../errors";
+import { joinAbs } from "./paths";
+import { ZIKU_CONFIG_FILE, readZikuConfig } from "./ziku-config";
 
 /**
  * テンプレートの .ziku/ziku.jsonc を読み込む。
  *
  * テンプレートリポジトリの include/exclude パターンを取得する。
  * init 時にどのディレクトリを同期するか選択するためのデータソース。
+ *
+ * 読めなければパターン無しとして扱わず失敗を返す。この戻り値は「テンプレートが同期対象と
+ * 定めた範囲」そのものであり、欠けた範囲は下流で「テンプレートがそう決めた」と読まれるため。
+ * init は取り込むディレクトリの選択肢をここから作るので、エラー回復が拾えた分だけの部分的な
+ * パターンを返すと、利用者はテンプレートの一部だけを取り込んだプロジェクトを、全部取り込んだ
+ * つもりで作ることになる。壊れている事実を報告すれば、テンプレート側を直すという行動が取れる。
+ *
+ * 失敗の分類は {@link readZikuConfig} が持つ。構文の破綻（`ParseError`）とスキーマ違反
+ * （`ValidationError`）を分けるのは、ローカル側の入口（`loadZikuConfig`）と同じ理由で、
+ * 潰すと利用者が壊れていない JSONC の中で構文ミスを探すことになるため。
  */
 export function loadTemplateConfig(
-  templateDir: string,
-): Effect.Effect<ZikuConfig, TemplateNotConfiguredError | ParseError> {
-  return Effect.gen(function* () {
-    const configPath = join(templateDir, ZIKU_CONFIG_FILE);
+  templateDir: AbsPath,
+): Effect.Effect<ZikuConfig, TemplateNotConfiguredError | ParseError | ValidationError> {
+  const configPath = joinAbs(templateDir, ZIKU_CONFIG_FILE);
 
-    if (!existsSync(configPath)) {
-      return yield* new TemplateNotConfiguredError({ templateDir });
-    }
-
-    const content = yield* Effect.tryPromise({
-      try: () => readFile(configPath, "utf-8"),
-      catch: () => new ParseError({ path: configPath, cause: "Failed to read file" }),
-    });
-
-    const parsed = yield* Effect.try({
-      try: () => parse(content),
-      catch: (e) => new ParseError({ path: configPath, cause: e }),
-    });
-
-    const validated = yield* Effect.try({
-      try: () => zikuConfigSchema.parse(parsed),
-      catch: (e) => new ParseError({ path: configPath, cause: e }),
-    });
-
-    return validated;
-  });
+  return Effect.promise(() => readZikuConfig(templateDir)).pipe(
+    Effect.flatMap(
+      (
+        read,
+      ): Effect.Effect<ZikuConfig, TemplateNotConfiguredError | ParseError | ValidationError> =>
+        match(read)
+          .with({ _tag: "NotFound" }, () =>
+            Effect.fail(new TemplateNotConfiguredError({ templateDir })),
+          )
+          .with({ _tag: "Unparsable" }, ({ detail }) =>
+            Effect.fail(new ParseError({ path: configPath, cause: new SyntaxError(detail) })),
+          )
+          .with({ _tag: "Invalid" }, ({ issues }) =>
+            Effect.fail(new ValidationError({ path: configPath, issues })),
+          )
+          .with({ _tag: "Ok" }, ({ config }) => Effect.succeed(config))
+          .exhaustive(),
+    ),
+  );
 }
 
 /**
  * テンプレートに .ziku/ziku.jsonc が存在するか確認する。
  */
-export function templateConfigExists(templateDir: string): boolean {
-  return existsSync(join(templateDir, ZIKU_CONFIG_FILE));
+export function templateConfigExists(templateDir: AbsPath): boolean {
+  return existsSync(joinAbs(templateDir, ZIKU_CONFIG_FILE));
 }
 
 /**
@@ -72,10 +77,10 @@ export function templateConfigExists(templateDir: string): boolean {
  *     ]
  */
 export function extractDirectoryEntries(
-  includePatterns: string[],
-): Array<{ label: string; patterns: string[] }> {
-  const dirMap = new Map<string, string[]>();
-  const rootFiles: string[] = [];
+  includePatterns: readonly GlobPattern[],
+): Array<{ label: string; patterns: GlobPattern[] }> {
+  const dirMap = new Map<string, GlobPattern[]>();
+  const rootFiles: GlobPattern[] = [];
 
   for (const pattern of includePatterns) {
     const slashIndex = pattern.indexOf("/");
@@ -92,7 +97,7 @@ export function extractDirectoryEntries(
     }
   }
 
-  const entries: Array<{ label: string; patterns: string[] }> = [];
+  const entries: Array<{ label: string; patterns: GlobPattern[] }> = [];
 
   // ディレクトリをアルファベット順でソート
   for (const [dir, patterns] of [...dirMap.entries()].toSorted(([a], [b]) => a.localeCompare(b))) {

@@ -20,7 +20,14 @@ vi.mock("node:child_process", () => ({
 
 import { execFileSync } from "node:child_process";
 import * as p from "@clack/prompts";
-import type { FileDiff } from "../../modules/schemas";
+import { P, match } from "ts-pattern";
+import type { ChangedFileDiff, PushFile, PushSend } from "../../commands/push-plan";
+import { pushPayloadOf } from "../../commands/push-plan";
+import type { DeletablePath, FileDiff, RepoRelPath } from "../../modules/schemas";
+import { asDeletablePath, asPushContent } from "../../modules/schemas";
+import { classifySyncPath } from "../../utils/ziku-config";
+import type { FileSelectionMarks } from "../file-select-with-diff";
+import { NO_FILE_SELECTION_MARKS } from "../file-select-with-diff";
 import {
   confirmAction,
   confirmRetryConflictResolution,
@@ -35,15 +42,80 @@ import {
   selectOverwriteStrategy,
   selectPushFiles,
 } from "../prompts";
+import { globPatterns, repoRelPath, repoRelPaths } from "../../__tests__/brands";
+
+/** 検証したい印だけを指定して {@link FileSelectionMarks} を組む。 */
+function marksWith(overrides: Partial<FileSelectionMarks>): FileSelectionMarks {
+  return { ...NO_FILE_SELECTION_MARKS, ...overrides };
+}
+
+/** バイナリの内容を差分の string チャネルへ載せた形（バイト保存の latin1）。 */
+function asBinaryContent(bytes: number[]): string {
+  return Buffer.from(bytes).toString("latin1");
+}
+
+/**
+ * 削除として送れるパスを組み立てる。設定ファイルは削除として送れないので、フィクスチャに
+ * 混ざったらテストの前提の誤りとして落とす。
+ */
+function deletablePath(path: RepoRelPath): DeletablePath {
+  const deletable = asDeletablePath(classifySyncPath(path));
+  if (deletable === undefined) throw new Error(`fixture must be deletable: ${path}`);
+  return deletable;
+}
+
+/**
+ * PR の文面の入力になる送信対象を組み立てる。
+ *
+ * 選ばれた差分と実際に送る内容の両方を載せる。文面の行は payload から導かれる
+ * （`pushSummaryRows`）ので、片方だけでは検証したい状態を作れない。
+ */
+function sendOf(params: {
+  changes: readonly ChangedFileDiff[];
+  /** 選択によらず ziku が付け足したファイル（README の組み直しなど）。 */
+  autoUpdated?: readonly { path: RepoRelPath; content: string }[];
+}): PushSend {
+  const files: PushFile[] = [];
+  const deletions: { path: DeletablePath }[] = [];
+
+  for (const change of params.changes) {
+    match(change)
+      .with({ type: "deleted" }, (deleted) => {
+        deletions.push({ path: deletablePath(deleted.path) });
+      })
+      .with({ type: P.union("added", "modified") }, (changed) => {
+        files.push({
+          path: changed.path,
+          content: asPushContent(changed.localContent),
+          origin: { _tag: "LocalContent" },
+        });
+      })
+      .exhaustive();
+  }
+
+  for (const auto of params.autoUpdated ?? []) {
+    files.push({
+      path: auto.path,
+      content: asPushContent(auto.content),
+      origin: { _tag: "Synthesized" },
+    });
+  }
+
+  return {
+    payload: pushPayloadOf({ files, deletions }),
+    pushableFiles: params.changes,
+    restoresTemplateDeletion: new Set(),
+  };
+}
 
 const testEntries = [
   {
     label: ".devcontainer",
-    patterns: [".devcontainer/**"],
+    patterns: globPatterns([".devcontainer/**"]),
   },
   {
     label: ".github",
-    patterns: [".github/**"],
+    patterns: globPatterns([".github/**"]),
   },
 ];
 
@@ -102,29 +174,47 @@ describe("prompts", () => {
   describe("selectPushFiles", () => {
     it("should filter files by selection", async () => {
       const files = [
-        { path: "a.ts", type: "added" as const },
-        { path: "b.ts", type: "modified" as const },
+        { path: repoRelPath("a.ts"), type: "added" as const, localContent: "local" },
+        {
+          path: repoRelPath("b.ts"),
+          type: "modified" as const,
+          localContent: "local",
+          templateContent: "template",
+        },
       ];
       vi.mocked(p.multiselect).mockResolvedValue(["a.ts"]);
-      const result = await selectPushFiles(files);
+      const result = await selectPushFiles(files, NO_FILE_SELECTION_MARKS);
       expect(result).toHaveLength(1);
       expect(result[0].path).toBe("a.ts");
     });
 
     it("should return empty array when nothing selected", async () => {
-      const files = [{ path: "a.ts", type: "added" as const }];
+      const files = [{ path: repoRelPath("a.ts"), type: "added" as const, localContent: "local" }];
       vi.mocked(p.multiselect).mockResolvedValue([]);
-      const result = await selectPushFiles(files);
+      const result = await selectPushFiles(files, NO_FILE_SELECTION_MARKS);
       expect(result).toHaveLength(0);
     });
 
     it("conflictedPaths のファイルは初期選択から除外され conflict と表示される", async () => {
       const files = [
-        { path: "a.ts", type: "modified" as const },
-        { path: "bad.ts", type: "modified" as const },
+        {
+          path: repoRelPath("a.ts"),
+          type: "modified" as const,
+          localContent: "local",
+          templateContent: "template",
+        },
+        {
+          path: repoRelPath("bad.ts"),
+          type: "modified" as const,
+          localContent: "local",
+          templateContent: "template",
+        },
       ];
       vi.mocked(p.multiselect).mockResolvedValue([]);
-      await selectPushFiles(files, { conflictedPaths: new Set(["bad.ts"]) });
+      await selectPushFiles(
+        files,
+        marksWith({ conflictedPaths: new Set(repoRelPaths(["bad.ts"])) }),
+      );
 
       const callArg = vi.mocked(p.multiselect).mock.calls[0][0] as {
         initialValues: string[];
@@ -136,6 +226,48 @@ describe("prompts", () => {
       // 衝突ファイルは hint で明示される
       const badOption = callArg.options.find((o) => o.value === "bad.ts");
       expect(badOption?.hint).toContain("conflict");
+    });
+
+    it("テンプレートの削除を取り消すファイルは初期選択から除外され、その旨が表示される", async () => {
+      // 見た目は新規追加と同じ `+` なので、注記が無いと「テンプレートが消したファイルを
+      // 復活させる」操作だと一覧から分からない。
+      const files = [
+        { path: repoRelPath("a.ts"), type: "added" as const, localContent: "local" },
+        { path: repoRelPath("restored.ts"), type: "added" as const, localContent: "local" },
+      ];
+      vi.mocked(p.multiselect).mockResolvedValue([]);
+      await selectPushFiles(
+        files,
+        marksWith({ restoresTemplateDeletion: new Set(repoRelPaths(["restored.ts"])) }),
+      );
+
+      const callArg = vi.mocked(p.multiselect).mock.calls[0][0] as {
+        initialValues: string[];
+        options: Array<{ value: string; hint?: string }>;
+      };
+      expect(callArg.initialValues).toContain("a.ts");
+      expect(callArg.initialValues).not.toContain("restored.ts");
+      const restoredOption = callArg.options.find((o) => o.value === "restored.ts");
+      expect(restoredOption?.hint).toContain("restores file deleted in template");
+    });
+
+    it("バイナリの hint は行数ではなく (binary) を出す", async () => {
+      const files: FileDiff[] = [
+        {
+          path: repoRelPath("assets/icon.png"),
+          type: "modified",
+          templateContent: asBinaryContent([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]),
+          localContent: asBinaryContent([0x89, 0x50, 0x4e, 0x47, 0x00, 0x02]),
+        },
+      ];
+      vi.mocked(p.multiselect).mockResolvedValue([]);
+      await selectPushFiles(files, NO_FILE_SELECTION_MARKS);
+
+      const callArg = vi.mocked(p.multiselect).mock.calls[0][0] as {
+        options: Array<{ value: string; hint?: string }>;
+      };
+      // バイナリは増減行数を持たないので、0 行を根拠に hint ごと落とすと種別が伝わらない
+      expect(callArg.options[0].hint).toContain("binary");
     });
   });
 
@@ -168,36 +300,91 @@ describe("prompts", () => {
 
   describe("generatePrTitle", () => {
     it("should generate feat prefix for added-only files", () => {
-      const files: FileDiff[] = [{ path: ".devcontainer/devcontainer.json", type: "added" }];
-      expect(generatePrTitle(files)).toBe("feat: add .devcontainer config");
+      const send = sendOf({
+        changes: [
+          {
+            path: repoRelPath(".devcontainer/devcontainer.json"),
+            type: "added",
+            localContent: "local",
+          },
+        ],
+      });
+      expect(generatePrTitle(send)).toBe("feat: add .devcontainer config");
     });
 
     it("should generate chore prefix for modified files", () => {
-      const files: FileDiff[] = [{ path: ".github/workflows/ci.yml", type: "modified" }];
-      expect(generatePrTitle(files)).toBe("chore: update .github config");
+      const send = sendOf({
+        changes: [
+          {
+            path: repoRelPath(".github/workflows/ci.yml"),
+            type: "modified",
+            localContent: "local",
+            templateContent: "template",
+          },
+        ],
+      });
+      expect(generatePrTitle(send)).toBe("chore: update .github config");
     });
 
     it("should generate chore prefix for mixed changes", () => {
-      const files: FileDiff[] = [
-        { path: ".devcontainer/devcontainer.json", type: "added" },
-        { path: ".github/workflows/ci.yml", type: "modified" },
-      ];
-      expect(generatePrTitle(files)).toBe("chore: update .devcontainer, .github config");
+      const send = sendOf({
+        changes: [
+          {
+            path: repoRelPath(".devcontainer/devcontainer.json"),
+            type: "added",
+            localContent: "local",
+          },
+          {
+            path: repoRelPath(".github/workflows/ci.yml"),
+            type: "modified",
+            localContent: "local",
+            templateContent: "template",
+          },
+        ],
+      });
+      expect(generatePrTitle(send)).toBe("chore: update .devcontainer, .github config");
     });
 
     it("should use generic title for many modules", () => {
-      const files: FileDiff[] = [
-        { path: ".devcontainer/a.json", type: "added" },
-        { path: ".github/b.yml", type: "added" },
-        { path: ".claude/c.md", type: "added" },
-        { path: ".mcp/d.json", type: "added" },
-      ];
-      expect(generatePrTitle(files)).toBe("feat: update template configuration");
+      const send = sendOf({
+        changes: [
+          { path: repoRelPath(".devcontainer/a.json"), type: "added", localContent: "local" },
+          { path: repoRelPath(".github/b.yml"), type: "added", localContent: "local" },
+          { path: repoRelPath(".claude/c.md"), type: "added", localContent: "local" },
+          { path: repoRelPath(".mcp/d.json"), type: "added", localContent: "local" },
+        ],
+      });
+      expect(generatePrTitle(send)).toBe("feat: update template configuration");
     });
 
     it("should handle root-level files", () => {
-      const files: FileDiff[] = [{ path: ".mcp.json", type: "modified" }];
-      expect(generatePrTitle(files)).toBe("chore: update .mcp.json config");
+      const send = sendOf({
+        changes: [
+          {
+            path: repoRelPath(".mcp.json"),
+            type: "modified",
+            localContent: "local",
+            templateContent: "template",
+          },
+        ],
+      });
+      expect(generatePrTitle(send)).toBe("chore: update .mcp.json config");
+    });
+
+    it("自動更新されたファイルはタイトルのモジュール名に混ぜない", () => {
+      // 導出物（README の組み直し）は、その push が何をするものかを表さない
+      const send = sendOf({
+        changes: [
+          {
+            path: repoRelPath(".github/workflows/ci.yml"),
+            type: "modified",
+            localContent: "local",
+            templateContent: "template",
+          },
+        ],
+        autoUpdated: [{ path: repoRelPath("README.md"), content: "# Template\n" }],
+      });
+      expect(generatePrTitle(send)).toBe("chore: update .github config");
     });
   });
 
@@ -223,32 +410,104 @@ describe("prompts", () => {
 
   describe("generatePrBody", () => {
     it("should list added files", () => {
-      const files: FileDiff[] = [{ path: ".devcontainer/devcontainer.json", type: "added" }];
-      const body = generatePrBody(files);
+      const body = generatePrBody(
+        sendOf({
+          changes: [
+            {
+              path: repoRelPath(".devcontainer/devcontainer.json"),
+              type: "added",
+              localContent: "local",
+            },
+          ],
+        }),
+      );
       expect(body).toContain("**Added:**");
       expect(body).toContain("`.devcontainer/devcontainer.json`");
     });
 
     it("should list modified files", () => {
-      const files: FileDiff[] = [{ path: ".github/workflows/ci.yml", type: "modified" }];
-      const body = generatePrBody(files);
+      const body = generatePrBody(
+        sendOf({
+          changes: [
+            {
+              path: repoRelPath(".github/workflows/ci.yml"),
+              type: "modified",
+              localContent: "local",
+              templateContent: "template",
+            },
+          ],
+        }),
+      );
       expect(body).toContain("**Modified:**");
       expect(body).toContain("`.github/workflows/ci.yml`");
     });
 
     it("should list both added and modified", () => {
-      const files: FileDiff[] = [
-        { path: "a.json", type: "added" },
-        { path: "b.yml", type: "modified" },
-      ];
-      const body = generatePrBody(files);
+      const body = generatePrBody(
+        sendOf({
+          changes: [
+            { path: repoRelPath("a.json"), type: "added", localContent: "local" },
+            {
+              path: repoRelPath("b.yml"),
+              type: "modified",
+              localContent: "local",
+              templateContent: "template",
+            },
+          ],
+        }),
+      );
       expect(body).toContain("**Added:**");
       expect(body).toContain("**Modified:**");
     });
 
+    it("削除は Deleted として並べる", () => {
+      const body = generatePrBody(
+        sendOf({
+          changes: [
+            { path: repoRelPath("gone.txt"), type: "deleted", templateContent: "template" },
+          ],
+        }),
+      );
+      expect(body).toContain("**Deleted:**");
+      expect(body).toContain("`gone.txt`");
+    });
+
+    it("選択によらず付け足したファイルは Auto-updated として並べる", () => {
+      const body = generatePrBody(
+        sendOf({
+          changes: [{ path: repoRelPath("a.json"), type: "added", localContent: "local" }],
+          autoUpdated: [{ path: repoRelPath("README.md"), content: "# Template\n" }],
+        }),
+      );
+      expect(body).toContain("**Auto-updated:**");
+      expect(body).toContain("`README.md`");
+      // 利用者が選んだ変更と混ざらない
+      expect(body.indexOf("`README.md`")).toBeGreaterThan(body.indexOf("`a.json`"));
+    });
+
+    it("送る内容がテンプレートと同一になったファイルは本文に出さない", () => {
+      // 端末サマリと同じ規則（送る集合から導く）で本文が作られることを見る
+      const body = generatePrBody(
+        sendOf({
+          changes: [
+            {
+              path: repoRelPath("same.json"),
+              type: "modified",
+              localContent: "template",
+              templateContent: "template",
+            },
+          ],
+        }),
+      );
+      expect(body).not.toContain("`same.json`");
+    });
+
     it("should include ziku attribution", () => {
-      const files: FileDiff[] = [{ path: "a.json", type: "added" }];
-      const body = generatePrBody(files);
+      const body = generatePrBody(
+        sendOf({
+          changes: [{ path: repoRelPath("a.json"), type: "added", localContent: "local" }],
+        }),
+      );
       expect(body).toContain("ziku");
     });
   });
@@ -315,7 +574,7 @@ describe("prompts", () => {
 
   describe("selectDeletedFiles", () => {
     it("should call clack.multiselect with file options", async () => {
-      const files = ["a.ts", "b.ts"];
+      const files = repoRelPaths(["a.ts", "b.ts"]);
       vi.mocked(p.multiselect).mockResolvedValue(["a.ts"]);
       const result = await selectDeletedFiles(files);
       expect(result).toEqual(["a.ts"]);
@@ -332,7 +591,7 @@ describe("prompts", () => {
 
     it("should return empty array when nothing selected", async () => {
       vi.mocked(p.multiselect).mockResolvedValue([]);
-      const result = await selectDeletedFiles(["a.ts"]);
+      const result = await selectDeletedFiles(repoRelPaths(["a.ts"]));
       expect(result).toEqual([]);
     });
   });

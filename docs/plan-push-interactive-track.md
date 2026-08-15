@@ -119,7 +119,7 @@ if (!args.yes) {
 - `addIncludePattern` が重複でノーオペ（既に同パターンが存在）→ 追記スキップ、push 対象判定は実ファイルベースで継続。
 - `.gitignore` 対象ファイル → `detectUntrackedFiles` が既に除外済み。
 - 追記したが diff に変化が出ない（テンプレ側と同一内容）→ `pushableFiles.length === 0` の既存分岐に乗る。
-- **追記の永続化と push の順序（レビュー M2 反映）**: `resolveConflicts` は未解決衝突で `ZikuError` を throw して push 全体を中断する（`push.ts:616-630`）。また `pushToGitHub`/`pushToLocal` も失敗しうる（`push.ts:150, 220`）。「先に `ziku.jsonc` を書き込み → 後で push 失敗」だと **`ziku.jsonc` だけ追記された状態が残り**、「暗黙の部分適用を避ける」意図と矛盾する。対策として **`include` のマージはメモリ上で行い再計算に使い、`saveZikuConfig` による永続化は push 成功後に実行する**（失敗時はファイルを書き換えない）。これにより C1 の「同一 push に乗せる（メモリ上の patterns で計算）」と M2 の「失敗時に副作用を残さない」を両立する。
+- **追記の永続化と push の順序（レビュー M2 反映）**: `resolveConflicts` は未解決衝突で `ZikuFailure` を throw して push 全体を中断する（`push.ts:616-630`）。また `pushToGitHub`/`pushToLocal` も失敗しうる（`push.ts:150, 220`）。「先に `ziku.jsonc` を書き込み → 後で push 失敗」だと **`ziku.jsonc` だけ追記された状態が残り**、「暗黙の部分適用を避ける」意図と矛盾する。対策として **`include` のマージはメモリ上で行い再計算に使い、`saveZikuConfig` による永続化は push 成功後に実行する**（失敗時はファイルを書き換えない）。これにより C1 の「同一 push に乗せる（メモリ上の patterns で計算）」と M2 の「失敗時に副作用を残さない」を両立する。
 - `ziku.jsonc` 書き込み失敗（push 成功後の永続化段階）→ Effect のエラー型で扱い、ユーザーに「ファイルはテンプレートへ push 済みだが `ziku.jsonc` 追記に失敗。`ziku track` で手動追加を」と案内（部分適用を明示）。
 - **pendingMerge 中の push（レビュー m4 反映）**: `push.ts:365-372` の pendingMerge ブロックが前段で early-throw するため、未追跡フローには到達しない。既存の中断が優先され、本フローと衝突しない。
 

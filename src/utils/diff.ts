@@ -1,210 +1,159 @@
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { createPatch } from "diff";
-import { join } from "pathe";
-import pc from "picocolors";
 import { match } from "ts-pattern";
-import type { DiffResult, DiffType, FileDiff } from "../modules/schemas";
-import { filterByGitignore, loadMergedGitignore } from "./gitignore";
-import type { FlatPatterns } from "./patterns";
+import type { AbsPath, DiffResult, FileDiff, RepoRelPath } from "../modules/schemas";
+import { isBinaryFileDiff, readFileContent, toTransportText } from "./file-content";
+import { joinAbs } from "./paths";
 import { resolvePatterns } from "./patterns";
-import { ZIKU_CONFIG_FILE } from "./ziku-config";
+import type { SyncScope } from "./sync-scope";
+import { withinScope } from "./sync-scope";
 
 export interface DiffOptions {
-  targetDir: string;
-  templateDir: string;
-  patterns: FlatPatterns;
+  targetDir: AbsPath;
+  templateDir: AbsPath;
+  /**
+   * 走査範囲。分類（{@link import("./sync-analysis").analyzeSync}）と同じものを渡す。
+   * 別々に決めると、分類では変更ありと出たファイルが差分に現れず、送信候補から黙って
+   * 落ちる。
+   */
+  scope: SyncScope;
 }
 
 /**
  * ローカルとテンプレート間の差分を検出
  */
 export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
-  const { targetDir, templateDir, patterns } = options;
+  const { targetDir, templateDir, scope } = options;
 
   const files: FileDiff[] = [];
-  let added = 0;
-  let modified = 0;
-  let deleted = 0;
-  let unchanged = 0;
 
-  // ローカルとテンプレート両方の .gitignore をマージして読み込み
-  const gitignore = await loadMergedGitignore([targetDir, templateDir]);
-
-  // フラットパターンでファイル一覧を取得し、gitignore でフィルタリング
-  const templateFiles = filterByGitignore(
-    resolvePatterns(templateDir, patterns.include, patterns.exclude),
-    gitignore,
+  const templateFiles = withinScope(
+    resolvePatterns(templateDir, scope.scan.include, scope.scan.exclude),
+    scope,
   );
-  const localFiles = filterByGitignore(
-    resolvePatterns(targetDir, patterns.include, patterns.exclude),
-    gitignore,
+  const localFiles = withinScope(
+    resolvePatterns(targetDir, scope.scan.include, scope.scan.exclude),
+    scope,
   );
 
-  const allFiles = new Set([...templateFiles, ...localFiles]);
+  const allFiles = new Set<RepoRelPath>([...templateFiles, ...localFiles]);
 
-  // ziku.jsonc は ziku 自身の制御ファイル（追跡対象の SSOT）。プロジェクトや
-  // テンプレートが `.ziku/` を gitignore していても、パターン同期のために必ず
-  // 差分対象に含める。これをしないと `ziku track` の変更がテンプレへ届かない（codex P2）。
-  for (const dir of [targetDir, templateDir]) {
-    if (existsSync(join(dir, ZIKU_CONFIG_FILE))) {
-      allFiles.add(ZIKU_CONFIG_FILE);
-    }
+  // 常に追跡するファイルは ziku 自身の制御ファイル（追跡対象の SSOT）。プロジェクトや
+  // テンプレートが `.ziku/` を gitignore していても、パターン同期のために必ず差分対象に
+  // 含める。これをしないと `ziku track` の変更がテンプレへ届かない。
+  for (const path of scope.alwaysTracked) {
+    allFiles.add(path);
   }
 
   for (const filePath of allFiles) {
-    const localPath = join(targetDir, filePath);
-    const templatePath = join(templateDir, filePath);
+    const localPath = joinAbs(targetDir, filePath);
+    const templatePath = joinAbs(templateDir, filePath);
 
     const localExists = existsSync(localPath);
     const templateExists = existsSync(templatePath);
 
-    let type: DiffType;
-    let localContent: string | undefined;
-    let templateContent: string | undefined;
-
-    if (localExists) {
-      localContent = await readFile(localPath, "utf-8");
-    }
-    if (templateExists) {
-      templateContent = await readFile(templatePath, "utf-8");
-    }
-
+    // 内容の読み取りは種別が決まってから行う。「存在する側だけを読む」ことを
+    // 分岐と一体にしておかないと、読めなかった側を後から埋める処理が必要になる。
     if (localExists && templateExists) {
-      // 両方に存在 → 内容比較
-      if (localContent === templateContent) {
-        type = "unchanged";
-        unchanged++;
-      } else {
-        type = "modified";
-        modified++;
-      }
-    } else if (localExists && !templateExists) {
+      const localContent = await readContent(localPath);
+      const templateContent = await readContent(templatePath);
+      files.push(
+        localContent === templateContent
+          ? { path: filePath, type: "unchanged", localContent, templateContent }
+          : { path: filePath, type: "modified", localContent, templateContent },
+      );
+    } else if (localExists) {
       // ローカルのみ → 追加（テンプレートにはない）
-      type = "added";
-      added++;
-    } else {
+      files.push({
+        path: filePath,
+        type: "added",
+        localContent: await readContent(localPath),
+      });
+    } else if (templateExists) {
       // テンプレートのみ → 削除（ローカルにはない）
-      type = "deleted";
-      deleted++;
+      files.push({
+        path: filePath,
+        type: "deleted",
+        templateContent: await readContent(templatePath),
+      });
     }
-
-    files.push({
-      path: filePath,
-      type,
-      localContent,
-      templateContent,
-    });
+    // どちらにも存在しないパスは差分ではない。パターン解決は実在するファイルだけを
+    // 返すため通常は起きないが、列挙後に消えた場合はここで落とす。
   }
 
-  return {
-    files: files.toSorted((a, b) => a.path.localeCompare(b.path)),
-    summary: { added, modified, deleted, unchanged },
-  };
+  return { files: files.toSorted((a, b) => a.path.localeCompare(b.path)) };
 }
 
 /**
- * 差分をフォーマットして表示用文字列を生成
+ * 差分の 1 ファイル分の内容を読む。
+ *
+ * バイト列として読んでから種別を判定する。バイナリを utf-8 としてデコードすると不正バイトが
+ * U+FFFD へ潰れ、内容の違うファイルが同じ文字列になって「差分なし」と判定される。差分の型
+ * （`FileDiff`）は内容を `string` で持つので、バイナリはバイト列を保つエンコードで載せる
+ * （`src/utils/file-content.ts`）。
  */
-export function formatDiff(diff: DiffResult, verbose = false): string {
-  const lines: string[] = [];
-
-  // サマリー表示
-  const summaryParts: string[] = [];
-  if (diff.summary.added > 0) {
-    summaryParts.push(pc.green(`+${diff.summary.added} added`));
-  }
-  if (diff.summary.modified > 0) {
-    summaryParts.push(pc.yellow(`~${diff.summary.modified} modified`));
-  }
-  if (diff.summary.deleted > 0) {
-    summaryParts.push(pc.red(`-${diff.summary.deleted} deleted`));
-  }
-  if (diff.summary.unchanged > 0) {
-    summaryParts.push(pc.dim(`${diff.summary.unchanged} unchanged`));
-  }
-
-  if (summaryParts.length > 0) {
-    lines.push(`  ${summaryParts.join(pc.dim(" │ "))}`);
-    lines.push("");
-  }
-
-  // 詳細
-  const changedFiles = diff.files.filter((f) => f.type !== "unchanged");
-  if (changedFiles.length > 0) {
-    for (const file of changedFiles) {
-      const { icon, color } = getStatusStyle(file.type);
-      lines.push(`  ${icon} ${color(file.path)}`);
-
-      if (verbose && file.type === "modified") {
-        lines.push(pc.dim("    └─ Content differs from template"));
-      }
-    }
-  } else {
-    lines.push(pc.dim("  No changes detected"));
-  }
-
-  return lines.join("\n");
-}
-
-interface StatusStyle {
-  icon: string;
-  color: (s: string) => string;
-}
-
-function getStatusStyle(type: DiffType): StatusStyle {
-  return match(type)
-    .with("added", () => ({ icon: pc.green("+"), color: pc.green }))
-    .with("modified", () => ({ icon: pc.yellow("~"), color: pc.yellow }))
-    .with("deleted", () => ({ icon: pc.red("-"), color: pc.red }))
-    .with("unchanged", () => ({ icon: pc.dim(" "), color: pc.dim }))
-    .exhaustive();
-}
-
-/**
- * push 対象のファイルのみをフィルタリング
- * (ローカルで追加・変更されたファイル)
- */
-export function getPushableFiles(diff: DiffResult): FileDiff[] {
-  return diff.files.filter((f) => f.type === "added" || f.type === "modified");
+async function readContent(path: AbsPath): Promise<string> {
+  return toTransportText(await readFileContent(path));
 }
 
 /**
  * 差分があるかどうかを判定
  */
 export function hasDiff(diff: DiffResult): boolean {
-  return diff.summary.added > 0 || diff.summary.modified > 0 || diff.summary.deleted > 0;
+  return diff.files.some((file) => file.type !== "unchanged");
 }
 
 /**
- * FileDiff から unified diff 形式の文字列を生成
+ * unified diff のハンク前後に付ける文脈行数。
+ *
+ * git の既定値と揃える。jsdiff の既定は 4 行で、そのままだと同じ変更でも
+ * `git diff` よりハンクが広くなり、両者を見比べたときに変更範囲が食い違って見える。
+ */
+const DIFF_CONTEXT_LINES = 3;
+
+/**
+ * FileDiff から unified diff 形式の文字列を生成する。
+ *
+ * 差分の向きは常にテンプレート → ローカルで、ローカル側が「変更後」になる。
+ * deleted（テンプレートにのみ存在する）は、テンプレート側の全行が削除される
+ * patch として表す。削除をテンプレートへ push するかどうかを、内容を見てから
+ * 判断できるようにするため。
+ * unchanged は表示すべき差分が無いので空文字列を返す。
  */
 export function generateUnifiedDiff(fileDiff: FileDiff): string {
-  const { path, type, localContent, templateContent } = fileDiff;
+  const options = { context: DIFF_CONTEXT_LINES };
 
-  return match(type)
-    .with("added", () => createPatch(path, "", localContent || "", "template", "local"))
-    .with("modified", () =>
-      createPatch(path, templateContent || "", localContent || "", "template", "local"),
+  // 空文字列を渡すのは「その側にファイルが無い」ことを patch として表すため。
+  // 内容が読めなかった場合の穴埋めではない。
+  return match(fileDiff)
+    .with({ type: "added" }, (f) =>
+      isBinaryFileDiff(f)
+        ? binaryNotice(MISSING_SIDE, `local/${f.path}`)
+        : createPatch(f.path, "", f.localContent, "template", "local", options),
     )
-    .otherwise(() => "");
+    .with({ type: "modified" }, (f) =>
+      isBinaryFileDiff(f)
+        ? binaryNotice(`template/${f.path}`, `local/${f.path}`)
+        : createPatch(f.path, f.templateContent, f.localContent, "template", "local", options),
+    )
+    .with({ type: "deleted" }, (f) =>
+      isBinaryFileDiff(f)
+        ? binaryNotice(`template/${f.path}`, MISSING_SIDE)
+        : createPatch(f.path, f.templateContent, "", "template", "local", options),
+    )
+    .with({ type: "unchanged" }, () => "")
+    .exhaustive();
 }
 
+/** 片側にファイルが無いことを示す名前。git が同じ状況で使う表記に揃える。 */
+const MISSING_SIDE = "/dev/null";
+
 /**
- * unified diff にカラーを適用
- * (テスト互換性のため、直接 ANSI エスケープシーケンスを使用)
+ * バイナリの差分を 1 行で示す。
+ *
+ * 内容は出さない。バイナリを行として並べても読めず、端末の表示も壊れる。
+ * git が同じ状況で出す `Binary files ... differ` と同じ形にして、意味を推測させない。
  */
-export function colorizeUnifiedDiff(diff: string): string {
-  return diff
-    .split("\n")
-    .map((line) => {
-      if (line.startsWith("+++") || line.startsWith("---")) {
-        return `\u001B[1m${line}\u001B[0m`; // Bold
-      }
-      if (line.startsWith("+")) return `\u001B[32m${line}\u001B[0m`; // Green
-      if (line.startsWith("-")) return `\u001B[31m${line}\u001B[0m`; // Red
-      if (line.startsWith("@@")) return `\u001B[36m${line}\u001B[0m`; // Cyan
-      return line;
-    })
-    .join("\n");
+function binaryNotice(from: string, to: string): string {
+  return `Binary files ${from} and ${to} differ\n`;
 }

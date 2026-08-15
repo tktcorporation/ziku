@@ -1,0 +1,382 @@
+/**
+ * 種別ごとの扱いが 1 箇所に集約されていることを、その 1 箇所に対して検証する。
+ *
+ * 「常に追跡する / 加法 union でマージする / 削除は伝播しない」という `ziku.jsonc` の規則が
+ * コマンドへ散らばっていないことは、コマンドを経由せずここだけで仕様を固定できる形で表れる。
+ */
+import { describe, expect, it } from "vitest";
+import { match } from "ts-pattern";
+import { repoRelPath, repoRelPaths } from "../../__tests__/brands";
+import type { RepoRelPath } from "../../modules/schemas";
+import type { FileCategory, FileClassification } from "../merge/types";
+import type { ZikuConfigPushOutcome, ZikuConfigState, ZikuConfigStatus } from "../merge/sync-plan";
+import {
+  partitionSyncPlan,
+  withZikuConfigStatus,
+  zikuConfigActions,
+  zikuConfigPullAction,
+  zikuConfigPushAction,
+  zikuConfigPushOutcome,
+  zikuConfigStatus,
+} from "../merge/sync-plan";
+import type { ConfigDrift } from "../config-merge";
+import { directionOfCategory, isEntryCategory } from "../status";
+import { ZIKU_CONFIG_FILE } from "../ziku-config";
+
+const ALL_CATEGORIES: readonly FileCategory[] = [
+  "autoUpdate",
+  "localOnly",
+  "conflicts",
+  "newFiles",
+  "deletedFiles",
+  "deletedWithLocalEdits",
+  "deletedLocally",
+  "unchanged",
+];
+
+/** 分類に現れうる ziku.jsonc の位置づけの全パターン。 */
+const ALL_STATES: readonly ZikuConfigState[] = [
+  { _tag: "Untracked" },
+  ...ALL_CATEGORIES.map((category): ZikuConfigState => ({ _tag: "Tracked", category })),
+];
+
+/** union 観点の実差分の全パターン。 */
+const ALL_DRIFTS: readonly ConfigDrift[] = [
+  { pullRelevant: false, pushRelevant: false },
+  { pullRelevant: true, pushRelevant: false },
+  { pullRelevant: false, pushRelevant: true },
+  { pullRelevant: true, pushRelevant: true },
+];
+
+function emptyClassification(): FileClassification {
+  return {
+    autoUpdate: [],
+    localOnly: [],
+    conflicts: [],
+    newFiles: [],
+    deletedFiles: [],
+    deletedWithLocalEdits: [],
+    deletedLocally: [],
+    unchanged: [],
+  };
+}
+
+/** 指定カテゴリに ziku.jsonc と通常ファイルが 1 つずつ入った分類結果。 */
+function classificationWith(category: FileCategory): FileClassification {
+  const classification = emptyClassification();
+  classification[category].push(ZIKU_CONFIG_FILE, repoRelPath("a.txt"));
+  return classification;
+}
+
+/** 分類結果の全カテゴリを平坦化する。 */
+function allPaths(classification: FileClassification): RepoRelPath[] {
+  return ALL_CATEGORIES.flatMap((category) => classification[category]);
+}
+
+describe("partitionSyncPlan", () => {
+  it.each(ALL_CATEGORIES)(
+    "%s に入った ziku.jsonc は files から外れて config へ移る",
+    (category) => {
+      const plan = partitionSyncPlan(classificationWith(category));
+
+      expect(allPaths(plan.files)).toEqual(["a.txt"]);
+      expect(plan.config).toEqual({ _tag: "Tracked", category });
+    },
+  );
+
+  it("ziku.jsonc が分類に現れなければ Untracked", () => {
+    const plan = partitionSyncPlan({
+      ...emptyClassification(),
+      localOnly: repoRelPaths(["a.txt"]),
+    });
+
+    expect(plan.config).toEqual({ _tag: "Untracked" });
+    expect(plan.files.localOnly).toEqual(["a.txt"]);
+  });
+
+  it("通常ファイルの並びは変えない", () => {
+    const plan = partitionSyncPlan({
+      ...emptyClassification(),
+      conflicts: [repoRelPath("b.txt"), ZIKU_CONFIG_FILE, repoRelPath("a.txt")],
+    });
+
+    expect(plan.files.conflicts).toEqual(["b.txt", "a.txt"]);
+  });
+});
+
+describe("zikuConfigPullAction", () => {
+  it("テンプレ側に取り込む余地があるときだけ union マージする", () => {
+    expect(zikuConfigPullAction({ _tag: "Tracked", category: "autoUpdate" })).toEqual({
+      _tag: "UnionMerge",
+    });
+    expect(zikuConfigPullAction({ _tag: "Tracked", category: "conflicts" })).toEqual({
+      _tag: "UnionMerge",
+    });
+  });
+
+  it.each(["deletedFiles", "deletedWithLocalEdits"] as const)(
+    "テンプレ側の削除（%s）は伝播せず、ベースも据え置く",
+    (category) => {
+      // ローカルの制御ファイルを消すと、以降のコマンドがプロジェクトを未初期化として扱う。
+      // ベースをテンプレ側（エントリ無し）へ進めると、次の分類が localOnly に化けて
+      // push --yes が確認なしにテンプレートへ設定ファイルを復活させる。
+      expect(zikuConfigPullAction({ _tag: "Tracked", category })).toEqual({ _tag: "RetainBase" });
+    },
+  );
+
+  it.each(["localOnly", "newFiles", "deletedLocally", "unchanged"] as const)(
+    "取り込むものが無い %s では内容を触らず、ベースはテンプレ側の走査結果に従う",
+    (category) => {
+      expect(zikuConfigPullAction({ _tag: "Tracked", category })).toEqual({
+        _tag: "FollowTemplate",
+      });
+    },
+  );
+
+  it("分類に現れなければ何もしない", () => {
+    expect(zikuConfigPullAction({ _tag: "Untracked" })).toEqual({ _tag: "FollowTemplate" });
+  });
+});
+
+describe("zikuConfigPushAction", () => {
+  it.each(["localOnly", "conflicts"] as const)(
+    "ローカル側に伝えるものがある %s では union を送る",
+    (category) => {
+      expect(zikuConfigPushAction({ _tag: "Tracked", category })).toEqual({
+        _tag: "SendUnion",
+        restoresTemplateDeletion: false,
+      });
+    },
+  );
+
+  it("テンプレが削除した設定ファイルを送るときは削除の取り消しとして印を付ける", () => {
+    expect(zikuConfigPushAction({ _tag: "Tracked", category: "deletedWithLocalEdits" })).toEqual({
+      _tag: "SendUnion",
+      restoresTemplateDeletion: true,
+    });
+  });
+
+  it("テンプレ側だけが変わっているときは push 対象にせず pull を促す", () => {
+    expect(zikuConfigPushAction({ _tag: "Tracked", category: "autoUpdate" })).toEqual({
+      _tag: "TemplateOnly",
+    });
+  });
+
+  it.each(["newFiles", "unchanged", "deletedFiles"] as const)(
+    "送るものが無い %s では何もしない",
+    (category) => {
+      expect(zikuConfigPushAction({ _tag: "Tracked", category })).toEqual({ _tag: "Skip" });
+    },
+  );
+
+  it("ローカルで設定ファイルが消えていても、削除もパターンもテンプレートへ送らない", () => {
+    // union はテンプレートの内容と一致する（ローカルに足せるパターンが無い）。テンプレートの
+    // 設定ファイルが消えると、そのテンプレートを使う全プロジェクトが同期できなくなる。
+    expect(zikuConfigPushAction({ _tag: "Tracked", category: "deletedLocally" })).toEqual({
+      _tag: "Skip",
+    });
+  });
+
+  it("分類に現れなければ何もしない", () => {
+    expect(zikuConfigPushAction({ _tag: "Untracked" })).toEqual({ _tag: "Skip" });
+  });
+});
+
+describe("zikuConfigPushOutcome", () => {
+  it("テンプレート側の追加を pull が取り込めるときは pull を案内する", () => {
+    expect(
+      zikuConfigPushOutcome(
+        { _tag: "Tracked", category: "autoUpdate" },
+        { pullRelevant: true, pushRelevant: false },
+      ),
+    ).toEqual({ _tag: "PullToSync" });
+  });
+
+  it("テンプレートがパターンを削除しローカルが未変更なら pull を案内しない", () => {
+    // union はローカルの内容と一致するので pull は何も書き換えない。案内すると、実行しても
+    // 何も起きない操作を勧めることになる。
+    expect(
+      zikuConfigPushOutcome(
+        { _tag: "Tracked", category: "autoUpdate" },
+        { pullRelevant: false, pushRelevant: true },
+      ),
+    ).toEqual({ _tag: "Skip" });
+  });
+
+  it.each(["localOnly", "conflicts", "deletedWithLocalEdits"] as const)(
+    "テンプレートに無いパターンがあるときだけ %s の union を送る",
+    (category) => {
+      const restoresTemplateDeletion = category === "deletedWithLocalEdits";
+
+      expect(
+        zikuConfigPushOutcome(
+          { _tag: "Tracked", category },
+          { pullRelevant: false, pushRelevant: true },
+        ),
+      ).toEqual({ _tag: "SendUnion", restoresTemplateDeletion });
+
+      // 送ってもテンプレートのパターンが 1 つも増えない状態。送ると、中身の変わらない
+      // `ziku.jsonc` だけの PR が立つ。
+      expect(
+        zikuConfigPushOutcome(
+          { _tag: "Tracked", category },
+          { pullRelevant: false, pushRelevant: false },
+        ),
+      ).toEqual({ _tag: "Skip" });
+    },
+  );
+
+  it("送るものが無く、pull が取り込める追加があるなら pull を案内する", () => {
+    expect(
+      zikuConfigPushOutcome(
+        { _tag: "Tracked", category: "conflicts" },
+        { pullRelevant: true, pushRelevant: false },
+      ),
+    ).toEqual({ _tag: "PullToSync" });
+  });
+
+  it.each(ALL_DRIFTS)("分類に現れなければ drift によらず何もしない（%o）", (drift) => {
+    expect(zikuConfigPushOutcome({ _tag: "Untracked" }, drift)).toEqual({ _tag: "Skip" });
+  });
+});
+
+describe("zikuConfigStatus", () => {
+  it("双方に取り込む余地があれば conflict として見せる", () => {
+    expect(
+      zikuConfigStatus(
+        { _tag: "Tracked", category: "conflicts" },
+        { pullRelevant: true, pushRelevant: true },
+      ),
+    ).toEqual({ _tag: "Categorized", category: "conflicts" });
+  });
+
+  it("pull だけが内容を書き換えるなら pull 方向", () => {
+    expect(
+      zikuConfigStatus(
+        { _tag: "Tracked", category: "autoUpdate" },
+        { pullRelevant: true, pushRelevant: false },
+      ),
+    ).toEqual({ _tag: "Categorized", category: "autoUpdate" });
+  });
+
+  it("push だけが内容を書き換えるなら push 方向", () => {
+    expect(
+      zikuConfigStatus(
+        { _tag: "Tracked", category: "localOnly" },
+        { pullRelevant: false, pushRelevant: true },
+      ),
+    ).toEqual({ _tag: "Categorized", category: "localOnly" });
+  });
+
+  it("どちらのコマンドも書き換えないが、ローカルにしか無いパターンが残るなら同期済みと言わない", () => {
+    // `ziku track` で足したパターンを pull の union が base まで進めた後の状態。push はこの
+    // ファイルを送らない（テンプレートの削除を復活させないため）が、テンプレートには届いて
+    // いないので終端ではない。
+    expect(
+      zikuConfigStatus(
+        { _tag: "Tracked", category: "autoUpdate" },
+        { pullRelevant: false, pushRelevant: true },
+      ),
+    ).toEqual({ _tag: "LocalOnlyPatterns" });
+  });
+
+  it("ローカルがパターンを削除しテンプレートが未変更なら同期済みとして扱う", () => {
+    // union はテンプレートの内容と一致するので push は送らず、ローカルの削除も伝播しない。
+    // どちらのコマンドも何もしない終端状態。
+    expect(
+      zikuConfigStatus(
+        { _tag: "Tracked", category: "localOnly" },
+        { pullRelevant: true, pushRelevant: false },
+      ),
+    ).toEqual({ _tag: "Categorized", category: "unchanged" });
+  });
+
+  it("分類に現れず、どちらにも届いていないパターンが無ければ同期済みとして扱う", () => {
+    expect(
+      zikuConfigStatus({ _tag: "Untracked" }, { pullRelevant: true, pushRelevant: false }),
+    ).toEqual({ _tag: "Categorized", category: "unchanged" });
+  });
+});
+
+describe("status が見せる状態と、push が実際に取る結論", () => {
+  // status が pull だけを勧めた状態で push が PR を作る、のような食い違いは、片方の分岐だけを
+  // 直したときに生まれる。位置づけ × drift の全組み合わせで対応表どおりかを突き合わせる。
+  const statusesOfOutcome: Record<ZikuConfigPushOutcome["_tag"], readonly ZikuConfigStatus[]> = {
+    // 送るなら、status も push 待ちとして見せる（pull にも取り込む余地があれば conflicts）。
+    SendUnion: [
+      { _tag: "Categorized", category: "localOnly" },
+      { _tag: "Categorized", category: "conflicts" },
+    ],
+    PullToSync: [{ _tag: "Categorized", category: "autoUpdate" }],
+    // 送らないなら操作待ちには見せない。ローカルにしか無いパターンが残るかで終端かが決まる。
+    Skip: [{ _tag: "Categorized", category: "unchanged" }, { _tag: "LocalOnlyPatterns" }],
+  };
+
+  const combinations = ALL_STATES.flatMap((state) => ALL_DRIFTS.map((drift) => ({ state, drift })));
+
+  it.each(combinations)("%o は status と push が同じ判断をする", ({ state, drift }) => {
+    const outcome = zikuConfigPushOutcome(state, drift);
+
+    expect(statusesOfOutcome[outcome._tag]).toContainEqual(zikuConfigStatus(state, drift));
+  });
+});
+
+describe("status が見せる方向と、pull / push が実際に行う操作", () => {
+  // 個別のケースを並べても、どれか 1 つの組み合わせで食い違ったことに気付けない。
+  // 位置づけ × drift の全組み合わせで「見せた方向 == 実際に内容が変わる方向」を突き合わせる。
+  const combinations = ALL_STATES.flatMap((state) => ALL_DRIFTS.map((drift) => ({ state, drift })));
+
+  it.each(combinations)("%o は勧めた操作だけが実際に動く", ({ state, drift }) => {
+    const status = zikuConfigStatus(state, drift);
+    const { pull, push } = zikuConfigActions(state);
+
+    // 加法 union は片側にしか無いパターンを足すだけなので、足すものがある（drift）ときだけ
+    // 内容が変わる。アクションが Skip / TemplateOnly ならそもそも読み書きしない。
+    const changes = {
+      pull: pull._tag === "UnionMerge" && drift.pullRelevant,
+      push: push._tag === "SendUnion" && drift.pushRelevant,
+    };
+
+    // どのコマンドも動かない状態（LocalOnlyPatterns）はバケツに載らないので、方向も見せない。
+    const direction = match(status)
+      .with({ _tag: "Categorized" }, ({ category }) =>
+        isEntryCategory(category) ? directionOfCategory(category) : undefined,
+      )
+      .with({ _tag: "LocalOnlyPatterns" }, () => undefined)
+      .exhaustive();
+    const shown = {
+      pull: direction === "pull" || direction === "conflict",
+      push: direction === "push" || direction === "conflict",
+    };
+
+    expect(shown).toEqual(changes);
+  });
+});
+
+describe("withZikuConfigStatus", () => {
+  it("仕分けで外した設定ファイルを指定カテゴリへ戻す", () => {
+    const plan = partitionSyncPlan(classificationWith("deletedFiles"));
+    const restored = withZikuConfigStatus(plan.files, {
+      _tag: "Categorized",
+      category: "localOnly",
+    });
+
+    expect(restored.localOnly).toEqual([ZIKU_CONFIG_FILE]);
+    expect(restored.deletedFiles).toEqual(["a.txt"]);
+  });
+
+  it("どのカテゴリにも載らない状態では設定ファイルを戻さない", () => {
+    // 操作待ちのバケツにも、テンプレートと一致した数にも入らない。表示は専用の案内で行う。
+    const plan = partitionSyncPlan(classificationWith("autoUpdate"));
+    const restored = withZikuConfigStatus(plan.files, { _tag: "LocalOnlyPatterns" });
+
+    expect(allPaths(restored)).toEqual(["a.txt"]);
+  });
+
+  it("元の分類結果を破壊しない", () => {
+    const files = { ...emptyClassification(), localOnly: repoRelPaths(["a.txt"]) };
+    withZikuConfigStatus(files, { _tag: "Categorized", category: "localOnly" });
+
+    expect(files.localOnly).toEqual(["a.txt"]);
+  });
+});

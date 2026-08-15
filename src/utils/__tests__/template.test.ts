@@ -1,8 +1,9 @@
 import { Effect } from "effect";
 import { vol } from "memfs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { absPath, commitSha, repoRelPath } from "../../__tests__/brands";
 import type { CopyResult } from "../template";
-import { buildTemplateSource } from "../template";
+import { buildCommitPinnedSource, buildTemplateSource } from "../template";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -63,19 +64,64 @@ const mockGetGitHubToken = vi.mocked(github.getGitHubToken);
 
 describe("buildTemplateSource", () => {
   it("owner/repo から giget 形式の文字列を構築", () => {
-    expect(buildTemplateSource({ owner: "my-org", repo: "my-templates" })).toBe(
+    expect(buildTemplateSource({ kind: "github", owner: "my-org", repo: "my-templates" })).toBe(
       "gh:my-org/my-templates",
     );
   });
 
-  it("ref が指定されている場合は #ref を付与", () => {
-    expect(buildTemplateSource({ owner: "my-org", repo: "repo", ref: "develop" })).toBe(
-      "gh:my-org/repo#develop",
-    );
+  it("ブランチ ref は #<ブランチ名> になる", () => {
+    expect(
+      buildTemplateSource({
+        kind: "github",
+        owner: "my-org",
+        repo: "repo",
+        ref: { kind: "branch", name: "develop" },
+      }),
+    ).toBe("gh:my-org/repo#develop");
+  });
+
+  it("タグ ref は #<タグ名> になる", () => {
+    expect(
+      buildTemplateSource({
+        kind: "github",
+        owner: "my-org",
+        repo: "repo",
+        ref: { kind: "tag", name: "v1.2.3" },
+      }),
+    ).toBe("gh:my-org/repo#v1.2.3");
+  });
+
+  it("コミット ref は #<SHA> になる", () => {
+    expect(
+      buildTemplateSource({
+        kind: "github",
+        owner: "my-org",
+        repo: "repo",
+        ref: { kind: "commit", sha: commitSha("abc123def") },
+      }),
+    ).toBe("gh:my-org/repo#abc123def");
   });
 
   it("ref が undefined の場合は付与しない", () => {
-    expect(buildTemplateSource({ owner: "x", repo: "y", ref: undefined })).toBe("gh:x/y");
+    expect(buildTemplateSource({ kind: "github", owner: "x", repo: "y", ref: undefined })).toBe(
+      "gh:x/y",
+    );
+  });
+});
+
+describe("buildCommitPinnedSource", () => {
+  it("source の ref を無視してコミット SHA へ固定する", () => {
+    expect(
+      buildCommitPinnedSource(
+        {
+          kind: "github",
+          owner: "my-org",
+          repo: "repo",
+          ref: { kind: "branch", name: "develop" },
+        },
+        commitSha("deadbeef"),
+      ),
+    ).toBe("gh:my-org/repo#deadbeef");
   });
 });
 
@@ -94,11 +140,16 @@ describe("copyFile", () => {
         "/src/file.txt": "source content",
       });
 
-      const result = await copyFile("/src/file.txt", "/dest/file.txt", "skip", "file.txt");
+      const result = await copyFile(
+        absPath("/src/file.txt"),
+        absPath("/dest/file.txt"),
+        "skip",
+        repoRelPath("file.txt"),
+      );
 
       expect(result).toEqual<CopyResult>({
         action: "copied",
-        path: "file.txt",
+        path: repoRelPath("file.txt"),
       });
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("source content");
     });
@@ -108,7 +159,12 @@ describe("copyFile", () => {
         "/src/file.txt": "source content",
       });
 
-      await copyFile("/src/file.txt", "/dest/nested/dir/file.txt", "skip", "nested/dir/file.txt");
+      await copyFile(
+        absPath("/src/file.txt"),
+        absPath("/dest/nested/dir/file.txt"),
+        "skip",
+        repoRelPath("nested/dir/file.txt"),
+      );
 
       expect(vol.existsSync("/dest/nested/dir")).toBe(true);
       expect(vol.readFileSync("/dest/nested/dir/file.txt", "utf8")).toBe("source content");
@@ -122,11 +178,16 @@ describe("copyFile", () => {
         "/dest/file.txt": "old content",
       });
 
-      const result = await copyFile("/src/file.txt", "/dest/file.txt", "overwrite", "file.txt");
+      const result = await copyFile(
+        absPath("/src/file.txt"),
+        absPath("/dest/file.txt"),
+        "overwrite",
+        repoRelPath("file.txt"),
+      );
 
       expect(result).toEqual<CopyResult>({
         action: "overwritten",
-        path: "file.txt",
+        path: repoRelPath("file.txt"),
       });
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("new content");
     });
@@ -139,11 +200,16 @@ describe("copyFile", () => {
         "/dest/file.txt": "old content",
       });
 
-      const result = await copyFile("/src/file.txt", "/dest/file.txt", "skip", "file.txt");
+      const result = await copyFile(
+        absPath("/src/file.txt"),
+        absPath("/dest/file.txt"),
+        "skip",
+        repoRelPath("file.txt"),
+      );
 
       expect(result).toEqual<CopyResult>({
         action: "skipped",
-        path: "file.txt",
+        path: repoRelPath("file.txt"),
       });
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("old content");
     });
@@ -158,11 +224,16 @@ describe("copyFile", () => {
 
       mockConfirm.mockResolvedValueOnce(true);
 
-      const result = await copyFile("/src/file.txt", "/dest/file.txt", "prompt", "file.txt");
+      const result = await copyFile(
+        absPath("/src/file.txt"),
+        absPath("/dest/file.txt"),
+        "prompt",
+        repoRelPath("file.txt"),
+      );
 
       expect(result).toEqual<CopyResult>({
         action: "overwritten",
-        path: "file.txt",
+        path: repoRelPath("file.txt"),
       });
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("new content");
       expect(mockConfirm).toHaveBeenCalledWith({
@@ -179,11 +250,16 @@ describe("copyFile", () => {
 
       mockConfirm.mockResolvedValueOnce(false);
 
-      const result = await copyFile("/src/file.txt", "/dest/file.txt", "prompt", "file.txt");
+      const result = await copyFile(
+        absPath("/src/file.txt"),
+        absPath("/dest/file.txt"),
+        "prompt",
+        repoRelPath("file.txt"),
+      );
 
       expect(result).toEqual<CopyResult>({
         action: "skipped",
-        path: "file.txt",
+        path: repoRelPath("file.txt"),
       });
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("old content");
     });
@@ -195,9 +271,15 @@ describe("copyFile", () => {
         "/src/file.txt": "source content",
       });
 
-      const result = await copyFile("/src/file.txt", "/dest/file.txt", "skip", "file.txt", true);
+      const result = await copyFile(
+        absPath("/src/file.txt"),
+        absPath("/dest/file.txt"),
+        "skip",
+        repoRelPath("file.txt"),
+        true,
+      );
 
-      expect(result).toEqual<CopyResult>({ action: "copied", path: "file.txt" });
+      expect(result).toEqual<CopyResult>({ action: "copied", path: repoRelPath("file.txt") });
       expect(vol.existsSync("/dest/file.txt")).toBe(false);
     });
 
@@ -208,14 +290,14 @@ describe("copyFile", () => {
       });
 
       const result = await copyFile(
-        "/src/file.txt",
-        "/dest/file.txt",
+        absPath("/src/file.txt"),
+        absPath("/dest/file.txt"),
         "overwrite",
-        "file.txt",
+        repoRelPath("file.txt"),
         true,
       );
 
-      expect(result).toEqual<CopyResult>({ action: "overwritten", path: "file.txt" });
+      expect(result).toEqual<CopyResult>({ action: "overwritten", path: repoRelPath("file.txt") });
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("old content");
     });
 
@@ -225,9 +307,15 @@ describe("copyFile", () => {
         "/dest/file.txt": "old content",
       });
 
-      const result = await copyFile("/src/file.txt", "/dest/file.txt", "prompt", "file.txt", true);
+      const result = await copyFile(
+        absPath("/src/file.txt"),
+        absPath("/dest/file.txt"),
+        "prompt",
+        repoRelPath("file.txt"),
+        true,
+      );
 
-      expect(result).toEqual<CopyResult>({ action: "skipped", path: "file.txt" });
+      expect(result).toEqual<CopyResult>({ action: "skipped", path: repoRelPath("file.txt") });
       expect(mockConfirm).not.toHaveBeenCalled();
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("old content");
     });
@@ -245,15 +333,15 @@ describe("writeFileWithStrategy", () => {
       vol.fromJSON({});
 
       const result = await writeFileWithStrategy({
-        destPath: "/dest/file.txt",
+        destPath: absPath("/dest/file.txt"),
         content: "new content",
         strategy: "skip",
-        relativePath: "file.txt",
+        relativePath: repoRelPath("file.txt"),
       });
 
       expect(result).toEqual<FileOperationResult>({
         action: "created",
-        path: "file.txt",
+        path: repoRelPath("file.txt"),
       });
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("new content");
     });
@@ -262,10 +350,10 @@ describe("writeFileWithStrategy", () => {
       vol.fromJSON({});
 
       await writeFileWithStrategy({
-        destPath: "/dest/nested/dir/file.txt",
+        destPath: absPath("/dest/nested/dir/file.txt"),
         content: "new content",
         strategy: "skip",
-        relativePath: "nested/dir/file.txt",
+        relativePath: repoRelPath("nested/dir/file.txt"),
       });
 
       expect(vol.existsSync("/dest/nested/dir")).toBe(true);
@@ -280,15 +368,15 @@ describe("writeFileWithStrategy", () => {
       });
 
       const result = await writeFileWithStrategy({
-        destPath: "/dest/file.txt",
+        destPath: absPath("/dest/file.txt"),
         content: "new content",
         strategy: "overwrite",
-        relativePath: "file.txt",
+        relativePath: repoRelPath("file.txt"),
       });
 
       expect(result).toEqual<FileOperationResult>({
         action: "overwritten",
-        path: "file.txt",
+        path: repoRelPath("file.txt"),
       });
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("new content");
     });
@@ -301,15 +389,15 @@ describe("writeFileWithStrategy", () => {
       });
 
       const result = await writeFileWithStrategy({
-        destPath: "/dest/file.txt",
+        destPath: absPath("/dest/file.txt"),
         content: "new content",
         strategy: "skip",
-        relativePath: "file.txt",
+        relativePath: repoRelPath("file.txt"),
       });
 
       expect(result).toEqual<FileOperationResult>({
         action: "skipped",
-        path: "file.txt",
+        path: repoRelPath("file.txt"),
       });
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("old content");
     });
@@ -324,15 +412,15 @@ describe("writeFileWithStrategy", () => {
       mockConfirm.mockResolvedValueOnce(true);
 
       const result = await writeFileWithStrategy({
-        destPath: "/dest/file.txt",
+        destPath: absPath("/dest/file.txt"),
         content: "new content",
         strategy: "prompt",
-        relativePath: "file.txt",
+        relativePath: repoRelPath("file.txt"),
       });
 
       expect(result).toEqual<FileOperationResult>({
         action: "overwritten",
-        path: "file.txt",
+        path: repoRelPath("file.txt"),
       });
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("new content");
       expect(mockConfirm).toHaveBeenCalledWith({
@@ -349,15 +437,15 @@ describe("writeFileWithStrategy", () => {
       mockConfirm.mockResolvedValueOnce(false);
 
       const result = await writeFileWithStrategy({
-        destPath: "/dest/file.txt",
+        destPath: absPath("/dest/file.txt"),
         content: "new content",
         strategy: "prompt",
-        relativePath: "file.txt",
+        relativePath: repoRelPath("file.txt"),
       });
 
       expect(result).toEqual<FileOperationResult>({
         action: "skipped",
-        path: "file.txt",
+        path: repoRelPath("file.txt"),
       });
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("old content");
     });
@@ -368,14 +456,17 @@ describe("writeFileWithStrategy", () => {
       vol.fromJSON({});
 
       const result = await writeFileWithStrategy({
-        destPath: "/dest/file.txt",
+        destPath: absPath("/dest/file.txt"),
         content: "new content",
         strategy: "skip",
-        relativePath: "file.txt",
+        relativePath: repoRelPath("file.txt"),
         dryRun: true,
       });
 
-      expect(result).toEqual<FileOperationResult>({ action: "created", path: "file.txt" });
+      expect(result).toEqual<FileOperationResult>({
+        action: "created",
+        path: repoRelPath("file.txt"),
+      });
       expect(vol.existsSync("/dest/file.txt")).toBe(false);
     });
 
@@ -385,14 +476,17 @@ describe("writeFileWithStrategy", () => {
       });
 
       const result = await writeFileWithStrategy({
-        destPath: "/dest/file.txt",
+        destPath: absPath("/dest/file.txt"),
         content: "new content",
         strategy: "overwrite",
-        relativePath: "file.txt",
+        relativePath: repoRelPath("file.txt"),
         dryRun: true,
       });
 
-      expect(result).toEqual<FileOperationResult>({ action: "overwritten", path: "file.txt" });
+      expect(result).toEqual<FileOperationResult>({
+        action: "overwritten",
+        path: repoRelPath("file.txt"),
+      });
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("old content");
     });
 
@@ -402,14 +496,17 @@ describe("writeFileWithStrategy", () => {
       });
 
       const result = await writeFileWithStrategy({
-        destPath: "/dest/file.txt",
+        destPath: absPath("/dest/file.txt"),
         content: "new content",
         strategy: "prompt",
-        relativePath: "file.txt",
+        relativePath: repoRelPath("file.txt"),
         dryRun: true,
       });
 
-      expect(result).toEqual<FileOperationResult>({ action: "skipped", path: "file.txt" });
+      expect(result).toEqual<FileOperationResult>({
+        action: "skipped",
+        path: repoRelPath("file.txt"),
+      });
       expect(mockConfirm).not.toHaveBeenCalled();
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("old content");
     });

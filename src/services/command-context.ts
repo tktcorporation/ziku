@@ -5,30 +5,58 @@
  * Effect の Service として DRY 化する。各コマンドは loadCommandContext を yield* するだけで
  * 設定・lock・テンプレートディレクトリが手に入る。
  *
- * isLocalSource/isGitHubSource の分岐もここで吸収し、
- * resolveBaseRef で透過的にベースリビジョンを解決する。
+ * ソース種別の分岐もここで吸収し、resolveBaseRef で透過的にベースリビジョンを解決する。
  */
 import { Cause, Context, Effect, Exit, Layer, Option, Scope } from "effect";
-import type { ZikuConfig, LockState, TemplateSource } from "../modules/schemas";
-import { isGitHubSource } from "../modules/schemas";
-import { FileNotFoundError, ParseError, ZikuError } from "../errors";
-import type { TemplateError } from "../errors";
-import { loadZikuConfig, zikuConfigExists } from "../utils/ziku-config";
-import { loadLock } from "../utils/lock";
+import { match } from "ts-pattern";
+import type { AbsPath, CommitSha, ZikuConfig, LockState, TemplateSource } from "../modules/schemas";
+import { withRecordedDefaultBranch } from "../modules/schemas";
+import { zikuFailure } from "../errors";
+import type {
+  DefaultBranchUnresolvedError,
+  FileNotFoundError,
+  GitHubAuthRejectedError,
+  ParseError,
+  TemplateError,
+  ValidationError,
+  ZikuFailure,
+} from "../errors";
+import { loadZikuConfig } from "../utils/ziku-config";
+import { loadLock, saveLock } from "../utils/lock";
+import type { ResolvedTemplate } from "../utils/template-resolve";
 import { resolveTemplateDirScoped } from "../utils/template-resolve";
-import { resolveLatestCommitSha } from "../utils/github";
+import type { CommitShaResolution } from "../utils/github";
+import { resolveSourceCommit } from "../utils/github";
 
 // ─── Service 定義 ───
 
 export interface CommandContextShape {
   /** ziku.jsonc のパターン定義 */
   readonly config: ZikuConfig;
-  /** lock.json の同期状態（source 含む） */
+  /**
+   * lock.json の同期状態（source 含む）。
+   *
+   * 既定ブランチを GitHub から引けたときは、その名前を `source.defaultBranch` へ控え直した
+   * 状態で渡す（{@link loadCommandContext}）。lock を書き出すコマンドはこれを起点に次の
+   * 状態を作ること。
+   */
   readonly lock: LockState;
   /** テンプレートの取得元（lock.source のエイリアス） */
   readonly source: TemplateSource;
-  /** 解決済みテンプレートディレクトリのパス */
-  readonly templateDir: string;
+  /**
+   * この実行が確定させたテンプレートの取得先。
+   *
+   * GitHub ソースのときだけ、取得に使った参照（`pinned`）と引けた既定ブランチ名を持つ
+   * （{@link ResolvedTemplate}）。ローカルソースには既定ブランチの概念が無いので、その値も
+   * 型として存在しない。
+   *
+   * 既定ブランチを要する後段（push の PR 宛先）はこの値を読むこと。lock の `source.ref` から
+   * 引き直すと、未指定のときに GitHub への問い合わせが実行ごとに二度走り、控えへ倒れるかが
+   * 問い合わせごとに変わりうる。
+   */
+  readonly resolved: ResolvedTemplate;
+  /** 解決済みテンプレートディレクトリのパス（`resolved.dir` のエイリアス） */
+  readonly templateDir: AbsPath;
   /**
    * テンプレートの一時ディレクトリを削除する関数。
    *
@@ -40,12 +68,12 @@ export interface CommandContextShape {
   /**
    * テンプレートの最新コミット SHA を解決する。
    *
-   * GitHub ソースの場合は API で最新 SHA を取得。
-   * ローカルソースの場合は undefined を返す。
-   * isGitHubSource/isLocalSource の分岐を吸収し、呼び出し元は
-   * ソース種別を意識せずに使える。
+   * GitHub ソースの場合は API で SHA を取得。ローカルソースの場合は None を返す。
+   * ソース種別の分岐を吸収し、呼び出し元はソース種別を意識せずに使える。
+   *
+   * 失敗するのはトークンが拒否されたときだけ。振り分けの理由は {@link toBaseRef} を参照。
    */
-  readonly resolveBaseRef: Effect.Effect<Option.Option<string>>;
+  readonly resolveBaseRef: Effect.Effect<Option.Option<CommitSha>, ZikuFailure>;
 }
 
 /**
@@ -56,22 +84,45 @@ export class CommandContext extends Context.Tag("CommandContext")<
   CommandContextShape
 >() {}
 
+/**
+ * この実行が lock をディスクへ書き出してよいか。
+ *
+ * 控え直した既定ブランチが残るのは lock を書き出したときだけなので、書き出す判断は控えを
+ * 作る {@link loadCommandContext} が持つ。コマンドは実行ごとにこの方針を 1 回だけ宣言し、
+ * 個別の return 地点では判断しない。真偽値ではなく名前の付いた 2 値にするのは、呼び出し側で
+ * どちらの約束を選んだかが読めるようにするため。
+ */
+export type LockWritePolicy =
+  /** 控えが変わっていたら lock を書き出す。lock を更新する実行（pull / push）が選ぶ。 */
+  | "persist"
+  /** ディスクへ書かない。読むだけの実行（diff / status）と `--dry-run` が選ぶ。 */
+  | "readOnly";
+
+/** loadCommandContext / loadLock が返しうる、ユーティリティ層の失敗。 */
+export type ContextLoadError =
+  | FileNotFoundError
+  | ParseError
+  | ValidationError
+  | TemplateError
+  | DefaultBranchUnresolvedError
+  | GitHubAuthRejectedError;
+
 // ─── Effect ヘルパー ───
 
 /**
  * コマンドのエントリポイントで Effect を実行する。
  *
- * 背景: Effect.runPromise は失敗を FiberFailure でラップするため、
- * 既存の ZikuError catch パターン（index.ts のトップレベルハンドラ）と相性が悪い。
- * この関数は Exit から ZikuError を取り出して re-throw することで、
- * 既存のエラーハンドリングフローを維持する。
+ * Effect.runPromise は失敗を FiberFailure でラップするため、そのままでは
+ * トップレベルハンドラ（index.ts）が失敗の種類を判別できない。この関数は Exit から
+ * 失敗値を取り出して素通しで再スローし、`ZikuFailure` の `reason` と `cause` を
+ * 呼び出し元まで届ける。
  *
  * 使い方:
  *   await runCommandEffect(
- *     loadCommandContext(targetDir).pipe(Effect.mapError(toZikuError)),
+ *     loadCommandContext(targetDir, "readOnly").pipe(Effect.mapError(toZikuFailure)),
  *   );
  */
-export async function runCommandEffect<A>(effect: Effect.Effect<A, ZikuError>): Promise<A> {
+export async function runCommandEffect<A>(effect: Effect.Effect<A, ZikuFailure>): Promise<A> {
   const exit = await Effect.runPromiseExit(effect);
   if (Exit.isSuccess(exit)) return exit.value;
 
@@ -88,25 +139,18 @@ export async function runCommandEffect<A>(effect: Effect.Effect<A, ZikuError>): 
  * 2. .ziku/lock.json を読み込み（source + 同期状態）
  * 3. source からテンプレートディレクトリを解決
  * 4. resolveBaseRef を source 種別に応じて構築
+ * 5. 控え直した既定ブランチを、`lockWrite` が許すなら lock へ書き出す
+ *
+ * @param lockWrite 控えをディスクへ残してよいか（{@link LockWritePolicy}）。
  */
 export function loadCommandContext(
-  targetDir: string,
-): Effect.Effect<CommandContextShape, FileNotFoundError | ParseError | TemplateError> {
+  targetDir: AbsPath,
+  lockWrite: LockWritePolicy,
+): Effect.Effect<CommandContextShape, ContextLoadError> {
   return Effect.gen(function* () {
-    if (!zikuConfigExists(targetDir)) {
-      return yield* new FileNotFoundError({ path: ".ziku/ziku.jsonc" });
-    }
-    const { config } = yield* Effect.tryPromise({
-      try: () => loadZikuConfig(targetDir),
-      catch: (e) => new ParseError({ path: ".ziku/ziku.jsonc", cause: e }),
-    });
+    const { config } = yield* loadZikuConfig(targetDir);
 
-    const lock = yield* Effect.tryPromise({
-      try: () => loadLock(targetDir),
-      catch: () => new FileNotFoundError({ path: ".ziku/lock.json" }),
-    });
-
-    const source = lock.source;
+    const loadedLock = yield* loadLock(targetDir);
 
     // テンプレート取得を Scope に紐づける。
     //
@@ -119,50 +163,137 @@ export function loadCommandContext(
     // finalizer (tracker 登録解除 + rmSync) を走らせる。これがないと
     // process exit まで temp dir と tracker 状態が残る。
     //
-    // 成功時: 呼び出し側 (各コマンド) は従来どおり withFinally(work, cleanup) で使える。
+    // 成功時: 呼び出し側 (各コマンド) は withCleanup に cleanup を渡す。
     // cleanup を呼び忘れた場合でも、登録された tempDir は temp-tracker の
     // process.on('exit') で同期削除される (二重防衛)。
     const scope = yield* Scope.make();
-    const templateDir = yield* resolveTemplateDirScoped(source, targetDir).pipe(
+    const template = yield* resolveTemplateDirScoped(loadedLock.source, targetDir).pipe(
       Scope.extend(scope),
       Effect.onError(() => Scope.close(scope, Exit.void)),
     );
     const cleanup = (): Promise<void> => Effect.runPromise(Scope.close(scope, Exit.void));
 
-    // resolveBaseRef: ソース種別の分岐を吸収
-    // resolveLatestCommitSha は Promise<string | undefined> を返すため、
-    // Option.fromNullable で undefined → None に正規化してから返す
-    const resolveBaseRef = isGitHubSource(source)
-      ? Effect.tryPromise(() => resolveLatestCommitSha(source.owner, source.repo)).pipe(
-          Effect.map(Option.fromNullable),
-          Effect.orElseSucceed(() => Option.none<string>()),
-        )
-      : Effect.succeed(Option.none<string>());
+    // resolveBaseRef: ソース種別の分岐を吸収する。
+    //
+    // 取得に使った ref をそのまま渡す理由: テンプレートを取得した ref とベースの SHA が
+    // 食い違うと、3-way マージのベースが別ブランチのツリーになる。lock の source.ref から
+    // 引き直すと、未指定のときに既定ブランチの解決が二度走り、取得側だけが控えのブランチ名へ
+    // 倒れた場合に両者が別のブランチを指す。
+    //
+    // Effect.promise を使うのは、resolveSourceCommit が失敗を戻り値で表すため。
+    // reject するのは実装の不具合なので、defect として運ぶ。
+    const resolveBaseRef = match(template)
+      .with({ kind: "github" }, (t) =>
+        Effect.promise(() => resolveSourceCommit(t.pinned.owner, t.pinned.repo, t.pinned.ref)).pipe(
+          Effect.flatMap(toBaseRef),
+        ),
+      )
+      .with({ kind: "local" }, () => Effect.succeed(Option.none<CommitSha>()))
+      .exhaustive();
 
-    return { config, lock, source, templateDir, cleanup, resolveBaseRef };
+    // 引けた既定ブランチ名を lock へ控え直す。lock を書き出すコマンド（pull / push）は
+    // ctx.lock を起点に次の状態を作るので、ここで載せておけば控えが GitHub 側の改名に
+    // 追随する。
+    const lock = match(template)
+      .with({ kind: "github" }, (t) => withRecordedDefaultBranch(loadedLock, t.defaultBranch))
+      .with({ kind: "local" }, () => loadedLock)
+      .exhaustive();
+
+    // 控えをここで書き切る。書き出す判断をコマンド側の return 地点へ置くと、書くものが無いと
+    // 判断して戻る経路が控えを捨て、次に GitHub へ問い合わせられないときの取得先が存在しない
+    // ブランチを指す。判断がこの 1 箇所に集まっていれば、コマンドに戻り口が増えても控えは残る。
+    //
+    // 書き込みの失敗は defect として運ぶ。控えの保存はどのコマンドの主目的でもなく、呼び出し元が
+    // 選び直せる分岐が無いので `ContextLoadError` の分類に居場所が無い。失敗したときは scope を
+    // 閉じ、テンプレートの一時ディレクトリを残さない。
+    yield* match(lockWrite)
+      .with("persist", () =>
+        // 同一なら控えは変わっていない（`withRecordedDefaultBranch` は値が同じなら元を返す）。
+        lock === loadedLock
+          ? Effect.void
+          : Effect.promise(() => saveLock(targetDir, lock)).pipe(
+              Effect.onError(() => Scope.close(scope, Exit.void)),
+            ),
+      )
+      .with("readOnly", () => Effect.void)
+      .exhaustive();
+
+    return {
+      config,
+      lock,
+      source: lock.source,
+      resolved: template,
+      templateDir: template.dir,
+      cleanup,
+      resolveBaseRef,
+    };
   });
+}
+
+/**
+ * コミット SHA の解決結果を、同期ベースとして使える形へ変換する。
+ *
+ * 失敗として返すのは認証拒否だけ。トークンが拒否されている間は何度取り直しても SHA は
+ * 取れないので、記録済みの古いベースへ黙って倒すと、共通祖先が実際のテンプレートから
+ * 離れたまま 3-way マージが動き続ける。ユーザーはトークンを直せば復帰できるので、
+ * その判断材料を失敗として渡す。
+ *
+ * それ以外（ネットワーク断・レート制限・ref が見つからない）は None を返し、呼び出し側が
+ * 記録済みのベースへ倒せるようにする。時間を置けば解消しうる失敗でコマンド全体を止めると、
+ * SHA を引けないだけで取り込み自体は成功している実行まで巻き添えになる。
+ */
+function toBaseRef(
+  resolution: CommitShaResolution,
+): Effect.Effect<Option.Option<CommitSha>, ZikuFailure> {
+  return match(resolution)
+    .with({ _tag: "Resolved" }, (r) => Effect.succeedSome(r.sha))
+    .with({ _tag: "AuthRejected" }, (r) =>
+      Effect.fail(zikuFailure({ kind: "GitHubAuthRejected", detail: r.detail })),
+    )
+    .with({ _tag: "Unresolved" }, () => Effect.succeed(Option.none<CommitSha>()))
+    .exhaustive();
 }
 
 /**
  * CommandContext の Layer を構築する。
  */
 export function makeCommandContextLayer(
-  targetDir: string,
-): Layer.Layer<CommandContext, FileNotFoundError | ParseError | TemplateError> {
-  return Layer.effect(CommandContext, loadCommandContext(targetDir));
+  targetDir: AbsPath,
+  lockWrite: LockWritePolicy,
+): Layer.Layer<CommandContext, ContextLoadError> {
+  return Layer.effect(CommandContext, loadCommandContext(targetDir, lockWrite));
 }
 
 /**
- * loadCommandContext のエラーを ZikuError に変換するヘルパー。
+ * ユーティリティ層の失敗を `FailureReason` へ分類する。
  *
- * 各コマンドで繰り返される mapError パターンを DRY 化。
+ * スキーマ違反（ValidationError）はファイル不在と別ケースにする。読めない設定ファイルを
+ * 「見つからない」と報告すると、ユーザーは存在するファイルを探し続けることになる。
+ *
+ * 元の例外は cause で繋ぐ。分類しても発生源を追えるようにするため。
  */
-export function toZikuError(err: FileNotFoundError | ParseError | TemplateError): ZikuError {
-  if (err._tag === "FileNotFoundError") {
-    return new ZikuError(`${err.path} not found.`, "Run 'ziku init' first.");
-  }
-  if (err._tag === "ParseError") {
-    return new ZikuError("Failed to parse configuration", String(err.cause));
-  }
-  return new ZikuError("Failed to load template", err.message);
+export function toZikuFailure(err: ContextLoadError): ZikuFailure {
+  return match(err)
+    .with({ _tag: "FileNotFoundError" }, (e) =>
+      zikuFailure({ kind: "NotInitialized", path: e.path }),
+    )
+    .with({ _tag: "ParseError" }, (e) =>
+      zikuFailure(
+        { kind: "ConfigUnparsable", path: e.path, detail: String(e.cause) },
+        { cause: e.cause },
+      ),
+    )
+    .with({ _tag: "ValidationError" }, (e) =>
+      zikuFailure({ kind: "ConfigInvalid", path: e.path, issues: e.issues }),
+    )
+    .with({ _tag: "TemplateError" }, (e) =>
+      zikuFailure({ kind: "TemplateUnavailable", detail: e.message }, { cause: e.cause }),
+    )
+    .with({ _tag: "DefaultBranchUnresolvedError" }, (e) =>
+      zikuFailure({ kind: "DefaultBranchUnresolved", repo: `${e.owner}/${e.repo}` }, { cause: e }),
+    )
+    .with({ _tag: "GitHubAuthRejectedError" }, (e) =>
+      zikuFailure({ kind: "GitHubAuthRejected", detail: e.detail }),
+    )
+    .exhaustive();
 }

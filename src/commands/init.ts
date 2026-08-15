@@ -1,19 +1,27 @@
 import { existsSync, mkdirSync, readdirSync, rmdirSync } from "node:fs";
 import { defineCommand } from "citty";
 import { Effect } from "effect";
-import { dirname, join, resolve } from "pathe";
-import { withFinally } from "../effect-helpers";
+import { dirname } from "pathe";
+import { withCleanup } from "../effect-helpers";
+import { runCommandEffect, toZikuFailure } from "../services/command-context";
 import { loadTemplateConfig, extractDirectoryEntries } from "../utils/template-config";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 import type {
+  AbsPath,
+  CommitSha,
   FileOperationResult,
-  LockState,
+  GitHubSource,
+  HashMap,
   OverwriteStrategy,
+  RepoRelPath,
+  TemplateRef,
   TemplateSource,
+  ZikuConfig,
 } from "../modules/schemas";
-import { P, match } from "ts-pattern";
-import { ZikuError } from "../errors";
+import { match } from "ts-pattern";
+import { zikuFailure } from "../errors";
+import type { ZikuFailure } from "../errors";
 import {
   inputTemplateSource,
   selectMissingTemplateAction,
@@ -22,33 +30,61 @@ import {
   selectTemplateCandidate,
 } from "../ui/prompts";
 import type { TemplateCandidate } from "../ui/prompts";
-import {
-  DEFAULT_TEMPLATE_REPO,
-  DEFAULT_TEMPLATE_REPOS,
-  detectGitHubOwner,
-} from "../utils/git-remote";
+import { DEFAULT_TEMPLATE_REPOS, detectGitHubOwner } from "../utils/git-remote";
 import {
   checkRepoExists,
   checkRepoSetup,
   getAuthenticatedUserLogin,
   getGitHubToken,
   rateLimitedError,
-  resolveLatestCommitSha,
+  resolveSourceCommitSha,
   scaffoldTemplateRepo,
   unauthorizedError,
 } from "../utils/github";
 import type { RepoExistence } from "../utils/github";
-import { hashContent, hashFiles } from "../utils/hash";
+import { hashFiles } from "../utils/hash";
+import { resolveDeclaredScope } from "../utils/sync-scope";
+import { absPath, joinAbs, repoRelPath } from "../utils/paths";
 import { LOCK_FILE, saveLock } from "../utils/lock";
+import { ZIKU_CONFIG_FILE, generateZikuJsonc, zikuConfigExists } from "../utils/ziku-config";
 import {
-  ZIKU_CONFIG_FILE,
-  generateZikuJsonc,
-  withConfigTracked,
-  zikuConfigExists,
-} from "../utils/ziku-config";
-import { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy } from "../utils/template";
+  buildTemplateSource,
+  downloadTemplateToTemp,
+  fetchTemplates,
+  writeFileWithStrategy,
+} from "../utils/template";
+import { resolveGitHubFetchSource } from "../utils/template-resolve";
 import type { FlatPatterns } from "../utils/patterns";
 import { intro, log, logFileResults, outro, pc, withSpinner } from "../ui/renderer";
+import {
+  asNonEmpty,
+  buildInitialLock,
+  buildOwnerCandidates,
+  decideRepoProbe,
+  deduplicateByOwner,
+  gateProbeResults,
+  orderProbedCandidates,
+  planDirectorySelection,
+  planFromArg,
+  planInitOutcome,
+  planInteractiveSource,
+  planLockBaseHashes,
+  planMissingTemplateAction,
+  planNonInteractiveSource,
+  planOverwriteStrategy,
+  preferReadyCandidate,
+  requiresDevcontainerEnvExample,
+  selectedFlatPatterns,
+  splitOwnerRepo,
+  withReadyFlags,
+} from "./init-plan";
+import type {
+  BlockingExistence,
+  FromArgPlan,
+  InitOutcome,
+  ProbeGate,
+  UnverifiedExistence,
+} from "./init-plan";
 
 // ビルド時に置換される定数
 declare const __VERSION__: string;
@@ -67,7 +103,7 @@ export const initUserLifecycle: CommandLifecycle = {
       file: ZIKU_CONFIG_FILE,
       location: "template",
       op: "read",
-      note: "テンプレートの include パターンを取得",
+      note: "テンプレートの include パターンを取得し、ディレクトリ選択 UI の候補にする",
     },
     {
       file: ZIKU_CONFIG_FILE,
@@ -94,6 +130,44 @@ export const initUserLifecycle: CommandLifecycle = {
   ],
 };
 
+/** CLI から読み取った init の実行条件。判断は `init-plan.ts` がこの値だけを見て行う。 */
+interface InitArgs {
+  readonly force: boolean;
+  readonly yes: boolean;
+  readonly dirs: string | undefined;
+  readonly overwriteStrategy: string | undefined;
+  readonly from: string | undefined;
+  readonly fromDir: string | undefined;
+  readonly dryRun: boolean;
+}
+
+/** テンプレートの実体と、それをどこから得たか。 */
+interface AcquiredTemplate {
+  readonly templateDir: AbsPath;
+  /**
+   * lock の `source` に記録する取得元。GitHub ソースで ref を指定しなかった場合は、解決した
+   * ブランチ名を `ref` へ書き戻さず未指定のまま残す。未指定は「そのリポジトリの既定ブランチを
+   * 追う」という指定であり、解決結果で固定すると既定ブランチが改名されたときに追随できなくなる。
+   * 解決したブランチ名は `defaultBranch` の控えとしてだけ載せる（追随はやめず、GitHub へ
+   * 問い合わせられないときの取得先だけを決める）。
+   */
+  readonly source: TemplateSource;
+  /**
+   * 配置したファイルが実際に由来する ref。GitHub ソースで ref を指定しなかった場合は、取得に
+   * 使った既定ブランチが入る。lock の `base.ref` に載せる SHA はここから引く（`source.ref` から
+   * 引き直すと、解決が二重になったうえ取得したツリーと別のブランチを指しうる）。
+   */
+  readonly fetchedRef: TemplateRef | undefined;
+  /** 一時ディレクトリの後始末。ローカルソースでは何もしない。 */
+  readonly cleanup: () => void;
+}
+
+/** GitHub 上のテンプレートリポジトリの所在。 */
+interface GitHubTemplateRef {
+  readonly sourceOwner: string;
+  readonly sourceRepo: string;
+}
+
 export const initCommand = defineCommand({
   meta: {
     name: "ziku",
@@ -108,13 +182,14 @@ export const initCommand = defineCommand({
     },
     force: {
       type: "boolean",
-      description: "Overwrite existing files",
+      description: "Approve overwriting existing files with the template version",
       default: false,
     },
     yes: {
       type: "boolean",
       alias: "y",
-      description: "Non-interactive mode (accept all defaults)",
+      description:
+        "Skip prompts (apply every template directory; existing files are kept, not overwritten)",
       default: false,
     },
     dirs: {
@@ -143,220 +218,357 @@ export const initCommand = defineCommand({
     },
   },
   async run({ args }) {
-    // ヘッダー表示
     intro();
 
-    // "init" という引数は無視して現在のディレクトリを使用
-    const dir = args.dir === "init" ? "." : args.dir;
-    const targetDir = resolve(dir);
-    const dryRun = args.dryRun as boolean;
-    // targetDir 自身だけでなく、存在しない祖先ディレクトリも giget が recursive:true で
-    // まとめて作ってしまう（例: targetDir が /tmp/new-parent/project で new-parent も
-    // 未作成の場合、両方が副作用で作られる）。dryRun 終了後にどこまで後始末してよいかの
-    // 基準点として、実行前から存在していた最も近い祖先を記録しておく。
-    const existingAncestor = findExistingAncestor(targetDir);
-    const targetDirPreexisted = existingAncestor === targetDir;
+    const initArgs: InitArgs = {
+      force: args.force,
+      yes: args.yes,
+      dirs: args.dirs as string | undefined,
+      overwriteStrategy: args["overwrite-strategy"] as string | undefined,
+      from: args.from as string | undefined,
+      fromDir: args["from-dir"] as string | undefined,
+      dryRun: args.dryRun,
+    };
+    const targetDir = absPath(args.dir);
 
     log.info(`Target: ${pc.cyan(targetDir)}`);
-    if (dryRun) {
+    if (initArgs.dryRun) {
       log.info("Dry run mode");
     }
 
-    // ディレクトリ作成。dryRun 中は作成しない — giget や writeFileWithStrategy は
-    // 書き込み時に親ディレクトリを自動作成するため targetDir の事前存在は不要で、
-    // ここで作成すると「何も書き込まなかった」という dryRun の保証に反してしまう。
-    if (!targetDirPreexisted) {
-      if (dryRun) {
-        log.message(pc.dim(`Would create directory: ${targetDir}`));
-      } else {
-        mkdirSync(targetDir, { recursive: true });
-        log.message(pc.dim(`Created directory: ${targetDir}`));
-      }
-    }
+    await initProject(targetDir, initArgs);
+  },
+});
 
-    // ─── 入り口: テンプレートソースの解決 ───
-    const fromDir = args["from-dir"] as string | undefined;
+/**
+ * テンプレートの取得から適用までを進める。
+ *
+ * 何を配置し・既存ファイルをどう扱い・lock に何を書くかの判断は `init-plan.ts` の計算に
+ * 委ね、ここは I/O とユーザーへの問い合わせ、および両者の受け渡しだけを行う。
+ */
+async function initProject(targetDir: AbsPath, args: InitArgs): Promise<void> {
+  // targetDir 自身だけでなく、存在しない祖先ディレクトリも giget が recursive:true で
+  // まとめて作ってしまう（例: targetDir が /tmp/new-parent/project で new-parent も
+  // 未作成の場合、両方が副作用で作られる）。dryRun 終了後にどこまで後始末してよいかの
+  // 基準点として、実行前から存在していた最も近い祖先を記録しておく。
+  const existingAncestor = findExistingAncestor(targetDir);
+  createTargetDir(targetDir, existingAncestor, args.dryRun);
 
-    let templateDir: string;
-    let cleanup: () => void;
-    let source: TemplateSource;
+  const template = await acquireTemplate(targetDir, args, existingAncestor);
 
-    if (fromDir) {
-      // ローカルディレクトリをテンプレートとして使用（ダウンロード不要）
-      templateDir = resolve(fromDir);
-      cleanup = () => {};
-      source = { path: templateDir };
-      log.info(`Template: ${pc.cyan(templateDir)} (local)`);
-    } else {
-      // GitHub リポジトリからダウンロード
-      const resolved = await resolveTemplateSourceWithCheck(
-        args.from as string | undefined,
-        args.yes as boolean,
-        dryRun,
-      );
-      source = { owner: resolved.sourceOwner, repo: resolved.sourceRepo };
+  // dryRun で targetDir やその祖先が存在しなかった場合、giget のダウンロード
+  // （tempDir 作成）がそれらを副作用的に作ってしまうことがある。テンプレート側の
+  // cleanup（tempDir 削除）の後に、existingAncestor に達するまで空のディレクトリを
+  // 削除する。
+  const cleanupWithTargetDir = (): void => {
+    template.cleanup();
+    removeEmptyDryRunDirs(targetDir, args.dryRun, existingAncestor);
+  };
 
-      log.info(`Template: ${pc.cyan(`${resolved.sourceOwner}/${resolved.sourceRepo}`)}`);
+  // 本体を Effect.promise で包む理由: 本体はテンプレート展開・プロンプト・ファイル書き込みを
+  // Promise で連ねており、失敗は型に現れず throw で抜ける。Effect.tryPromise の catch で
+  // 拾うとエラーチャネルが unknown に潰れるので、defect として運び runCommandEffect が
+  // 投げられた値をそのまま再スローする。
+  await runCommandEffect(
+    withCleanup(
+      Effect.promise(() => applyTemplate(targetDir, args, template)),
+      cleanupWithTargetDir,
+    ),
+  );
+}
 
-      log.step("Fetching template...");
-      // giget は tempDir (targetDir/.ziku-temp) の親ディレクトリも再帰的に作成するため、
-      // dryRun かつ targetDir が未作成だった場合、ここで targetDir 自体が副作用的に
-      // 作られてしまう。ダウンロードが失敗した場合も同じ副作用は起きているのに、
-      // 失敗時は cleanupWithTargetDir の構築（このブロックの外）まで到達せず後始末が
-      // 漏れるため、ここでも失敗経路を捕まえて同じ後始末を行う（try/catch は
-      // ast-grep で禁止のため Promise.then(onFulfilled, onRejected) を使う）。
-      const downloaded = await withSpinner("Downloading template from GitHub...", () =>
-        downloadTemplateToTemp(targetDir, `gh:${resolved.sourceOwner}/${resolved.sourceRepo}`),
-      ).then(
-        (result) => result,
-        (error: unknown) => {
-          removeEmptyDryRunDirs(targetDir, dryRun, existingAncestor);
-          throw error;
-        },
-      );
-      templateDir = downloaded.templateDir;
-      cleanup = downloaded.cleanup;
-    }
+/**
+ * ターゲットディレクトリを用意する。
+ *
+ * dryRun 中は作成しない — giget や writeFileWithStrategy は書き込み時に親ディレクトリを
+ * 自動作成するため targetDir の事前存在は不要で、ここで作成すると「何も書き込まなかった」
+ * という dryRun の保証に反してしまう。
+ */
+function createTargetDir(targetDir: AbsPath, existingAncestor: string, dryRun: boolean): void {
+  if (existingAncestor === targetDir) return;
 
-    // dryRun で targetDir やその祖先が存在しなかった場合、giget のダウンロード
-    // （tempDir 作成）がそれらを副作用的に作ってしまうことがある。テンプレート側の
-    // cleanup（tempDir 削除）の後に、existingAncestor に達するまで空のディレクトリを
-    // 削除する。
-    const cleanupWithTargetDir = (): void => {
-      cleanup();
-      removeEmptyDryRunDirs(targetDir, dryRun, existingAncestor);
+  if (dryRun) {
+    log.message(pc.dim(`Would create directory: ${targetDir}`));
+    return;
+  }
+  mkdirSync(targetDir, { recursive: true });
+  log.message(pc.dim(`Created directory: ${targetDir}`));
+}
+
+/**
+ * テンプレートの実体を用意する。
+ *
+ * `--from-dir` はローカルディレクトリをそのまま使うのでダウンロードが要らない。GitHub
+ * ソースはソースを確定させてから一時ディレクトリへ展開する。
+ */
+async function acquireTemplate(
+  targetDir: AbsPath,
+  args: InitArgs,
+  existingAncestor: string,
+): Promise<AcquiredTemplate> {
+  const fromDir = args.fromDir;
+  if (fromDir) {
+    const templateDir = absPath(fromDir);
+    log.info(`Template: ${pc.cyan(templateDir)} (local)`);
+    return {
+      templateDir,
+      source: { kind: "local", path: templateDir },
+      fetchedRef: undefined,
+      cleanup: () => {},
     };
+  }
 
-    // ─── 共通処理: テンプレート適用 ───
-    await withFinally(async () => {
-      // テンプレートの ziku.jsonc を Effect で読み込む
-      const templateConfig = await Effect.runPromise(
-        loadTemplateConfig(templateDir).pipe(
-          Effect.catchTag("TemplateNotConfiguredError", (_err) => {
-            const hint = match(source)
-              .with({ path: P.string }, (s) => `Add .ziku/ziku.jsonc to ${s.path}`)
-              .with(
-                { owner: P.string, repo: P.string },
-                (s) => `Add .ziku/ziku.jsonc to ${s.owner}/${s.repo}`,
-              )
-              .exhaustive();
-            return Effect.fail(new ZikuError(`Template has no .ziku/ziku.jsonc`, hint));
-          }),
-          Effect.catchTag("ParseError", (err) =>
-            Effect.fail(
-              new ZikuError(`Failed to parse template .ziku/ziku.jsonc`, String(err.cause)),
-            ),
-          ),
-        ),
-      );
+  const resolved = await resolveTemplateSourceWithCheck(args.from, args.yes, args.dryRun);
+  log.info(`Template: ${pc.cyan(`${resolved.sourceOwner}/${resolved.sourceRepo}`)}`);
 
-      const flatPatterns = await resolveTemplatePatterns(
-        templateConfig,
-        args.yes as boolean,
-        args.dirs as string | undefined,
-      );
+  const repo: GitHubSource = {
+    kind: "github",
+    owner: resolved.sourceOwner,
+    repo: resolved.sourceRepo,
+  };
+  // 取得先の決め方と、決まらないときに止める理由は resolveGitHubFetchSource を参照。
+  // ここで止まってもディスクには何も足されていない（giget を呼ぶのはこの後）。
+  const fetched = await runCommandEffect(
+    resolveGitHubFetchSource(repo).pipe(Effect.mapError(toZikuFailure)),
+  );
 
-      if (flatPatterns.include.length === 0) {
-        log.warn("No patterns to apply");
-        return;
-      }
+  // 引けた既定ブランチ名を lock へ控える。init が控えを残さないと、以降の実行はレート制限に
+  // かかった時点で取得先を決められなくなる（gitHubSourceSchema の defaultBranch）。
+  const source: GitHubSource =
+    fetched.defaultBranch === undefined ? repo : { ...repo, defaultBranch: fetched.defaultBranch };
 
-      // 上書き戦略の解決
-      const effectiveStrategy: OverwriteStrategy = await resolveEffectiveStrategy(
-        args.force as boolean,
-        args["overwrite-strategy"] as string | undefined,
-        args.yes as boolean,
-        zikuConfigExists(targetDir),
-      );
+  log.step("Fetching template...");
+  // giget は tempDir (targetDir/.ziku-temp) の親ディレクトリも再帰的に作成するため、
+  // dryRun かつ targetDir が未作成だった場合、ここで targetDir 自体が副作用的に
+  // 作られてしまう。ダウンロードが失敗した場合も同じ副作用は起きているのに、
+  // 失敗時は initProject の cleanupWithTargetDir の構築まで到達せず後始末が漏れるため、
+  // ここでも失敗経路を捕まえて同じ後始末を行う（try/catch は ast-grep で禁止のため
+  // Promise.then(onFulfilled, onRejected) を使う）。
+  const downloaded = await withSpinner("Downloading template from GitHub...", () =>
+    downloadTemplateToTemp(targetDir, buildTemplateSource(fetched.pinned)),
+  ).then(
+    (result) => result,
+    (error: unknown) => {
+      removeEmptyDryRunDirs(targetDir, args.dryRun, existingAncestor);
+      throw error;
+    },
+  );
 
-      // Step 2: ファイルをコピー
-      log.step("Applying templates...");
+  return {
+    templateDir: downloaded.templateDir,
+    source,
+    fetchedRef: fetched.pinned.ref,
+    cleanup: downloaded.cleanup,
+  };
+}
 
-      const templateResults = await fetchTemplates({
-        targetDir,
-        overwriteStrategy: effectiveStrategy,
-        patterns: flatPatterns,
-        templateDir,
-        dryRun,
-      });
+/**
+ * テンプレートを適用し、`.ziku/ziku.jsonc` と `.ziku/lock.json` を書き出す。
+ */
+async function applyTemplate(
+  targetDir: AbsPath,
+  args: InitArgs,
+  template: AcquiredTemplate,
+): Promise<void> {
+  const templateConfig = await runCommandEffect(
+    loadInitTemplateConfig(template.templateDir, template.source),
+  );
 
-      const allResults: FileOperationResult[] = [...templateResults];
+  const flatPatterns = await chooseDirectories(templateConfig, args);
+  if (flatPatterns.include.length === 0) {
+    log.warn("No patterns to apply");
+    return;
+  }
 
-      // devcontainer.env.example を戦略に従って作成
-      const hasDevcontainer = flatPatterns.include.some((p) => p.startsWith(".devcontainer/"));
-      if (hasDevcontainer) {
-        const envResult = await createEnvExample(targetDir, effectiveStrategy, dryRun);
-        allResults.push(envResult);
-      }
+  const strategy = await chooseOverwriteStrategy(args, targetDir);
 
-      // テンプレートファイルのハッシュを計算（pull 時の差分検出用）。
-      // ziku.jsonc 自体も追跡ファイルになったため withConfigTracked で含める。
-      const baseHashes = await hashFiles(
-        templateDir,
-        withConfigTracked(flatPatterns.include),
-        flatPatterns.exclude,
-      );
+  log.step("Applying templates...");
+  const allResults: FileOperationResult[] = [
+    ...(await fetchTemplates({
+      targetDir,
+      overwriteStrategy: strategy,
+      patterns: flatPatterns,
+      templateDir: template.templateDir,
+      dryRun: args.dryRun,
+    })),
+  ];
 
-      // ziku.jsonc の base（共通祖先）を決める。init は「テンプレートのパターンの部分集合」
-      // だけを選んで導入できるため、ローカル ziku.jsonc はテンプレより少ないことがある。
-      // base をどちらに置くかで初回 push/pull の安全性が決まる → resolveConfigBaseHash が
-      // そのポリシーを担う（テンプレートを壊さないための安全装置）。
-      //
-      // ただしテンプレートに ziku.jsonc が存在する場合（= hashFiles が値を返した場合）のみ
-      // base を記録する。テンプレに無いのに base を記録すると、次回 pull で
-      // {base 有・local 有・template 無} → deletedFiles と判定され、ローカルの制御ファイル
-      // ziku.jsonc が削除されてしまう（codex P1）。テンプレに無い場合は base 未記録のまま
-      // にしておき、ziku.jsonc は localOnly 扱いになる。
-      if (baseHashes[ZIKU_CONFIG_FILE] !== undefined) {
-        const localConfigContent = generateZikuJsonc({
-          include: flatPatterns.include,
-          exclude: flatPatterns.exclude,
-        });
-        baseHashes[ZIKU_CONFIG_FILE] = resolveConfigBaseHash({
-          localConfigContent,
-          templateConfigHash: baseHashes[ZIKU_CONFIG_FILE],
-        });
-      }
+  const writesEnvExample = requiresDevcontainerEnvExample(flatPatterns.include);
+  if (writesEnvExample) {
+    allResults.push(await createEnvExample(targetDir, strategy, args.dryRun));
+  }
 
-      // baseRef: GitHub ソースの場合のみコミット SHA を取得
-      const baseRef = await match(source)
-        .with({ owner: P.string, repo: P.string }, (s) => resolveLatestCommitSha(s.owner, s.repo))
-        .with({ path: P.string }, () => Promise.resolve(undefined))
+  // テンプレートファイルのハッシュを計算（pull 時の差分検出用）。走査範囲は配置した
+  // パターン、つまりユーザーが選んだ範囲に限る。テンプレート側のパターンをここで取り込むと、
+  // 選ばなかったディレクトリのファイルまでベースに載り、次の pull がユーザーの既存ファイルを
+  // 確認なく置き換える（resolveDeclaredScope の JSDoc）。取り込みは pull / status が
+  // resolveSyncScope で行うので、選ばなかったパターンも次の同期でユーザーへ提示される。
+  const scope = await resolveDeclaredScope({
+    targetDir,
+    templateDir: template.templateDir,
+    include: flatPatterns.include,
+    exclude: flatPatterns.exclude,
+  });
+  const templateHashes = await hashFiles(template.templateDir, scope);
+  const generatedConfigContent = generateZikuJsonc({
+    include: flatPatterns.include,
+    exclude: flatPatterns.exclude,
+  });
+
+  // .ziku/ziku.jsonc を書き出し（パターン定義のみ、source なし）。
+  // lock のベースには書き込み後の中身が要るので、lock より先に書く。
+  allResults.push(
+    await writeFileWithStrategy({
+      destPath: joinAbs(targetDir, ZIKU_CONFIG_FILE),
+      content: generatedConfigContent,
+      strategy,
+      relativePath: ZIKU_CONFIG_FILE,
+      dryRun: args.dryRun,
+    }),
+  );
+
+  // init が自分で組み立てて書くファイルの本文。テンプレートに同じパスがあっても、書き込みが
+  // 起きた後のディスクにはこちらの本文が載る。
+  const generatedContents = new Map<RepoRelPath, string>([
+    [ZIKU_CONFIG_FILE, generatedConfigContent],
+    ...(writesEnvExample ? [[ENV_EXAMPLE_PATH, ENV_EXAMPLE_CONTENT] as const] : []),
+  ]);
+
+  const baseHashes = planLockBaseHashes({
+    templateHashes,
+    generatedContents,
+    results: allResults,
+  });
+
+  // ベースのコミット SHA: GitHub ソースの場合のみ取得。
+  // テンプレートを取得した ref とベースの SHA が食い違うと、3-way マージのベースが
+  // 別ブランチのツリーになるため、取得に使った ref をそのまま渡す。
+  const baseCommit = await match(template.source)
+    .with({ kind: "github" }, (s) => resolveSourceCommitSha(s.owner, s.repo, template.fetchedRef))
+    .with({ kind: "local" }, () => Promise.resolve(undefined))
+    .exhaustive();
+
+  // .ziku/lock.json を書き出し（source + 同期状態）
+  allResults.push(
+    await writeLockFile(targetDir, {
+      source: template.source,
+      baseHashes,
+      baseCommit,
+      dryRun: args.dryRun,
+    }),
+  );
+
+  reportOutcome(planInitOutcome({ summary: logFileResults(allResults), dryRun: args.dryRun }));
+}
+
+/**
+ * テンプレートの `.ziku/ziku.jsonc` を読み込む。
+ *
+ * 読めない理由（未セットアップ / 壊れている）をそのまま利用者向けの失敗へ変換する。
+ * どのテンプレートの話かはソース種別で表記が変わるので、ここで文字列に落とす。
+ */
+function loadInitTemplateConfig(
+  templateDir: AbsPath,
+  source: TemplateSource,
+): Effect.Effect<ZikuConfig, ZikuFailure> {
+  return loadTemplateConfig(templateDir).pipe(
+    Effect.catchTag("TemplateNotConfiguredError", () => {
+      const templateRef = match(source)
+        .with({ kind: "local" }, (s) => s.path)
+        .with({ kind: "github" }, (s) => `${s.owner}/${s.repo}`)
         .exhaustive();
+      return Effect.fail(zikuFailure({ kind: "TemplateNotConfigured", templateRef }));
+    }),
+    Effect.catchTag("ParseError", (err) =>
+      Effect.fail(
+        zikuFailure(
+          { kind: "ConfigUnparsable", path: err.path, detail: String(err.cause) },
+          { cause: err.cause },
+        ),
+      ),
+    ),
+    Effect.catchTag("ValidationError", (err) =>
+      Effect.fail(zikuFailure({ kind: "ConfigInvalid", path: err.path, issues: err.issues })),
+    ),
+  );
+}
 
-      // .ziku/ziku.jsonc を書き出し（パターン定義のみ、source なし）
-      const zikuJsoncResult = await writeZikuJsonc(targetDir, {
-        patterns: flatPatterns,
-        strategy: effectiveStrategy,
-        dryRun,
+/**
+ * 配置するディレクトリを決める。
+ *
+ * include パターンをトップレベルディレクトリでグループ化し、選択の単位にする。
+ */
+async function chooseDirectories(
+  templateConfig: ZikuConfig,
+  args: InitArgs,
+): Promise<FlatPatterns> {
+  const entries = extractDirectoryEntries(templateConfig.include);
+
+  const selected = await match(
+    planDirectorySelection(entries, { yes: args.yes, dirsArg: args.dirs }),
+  )
+    .with({ _tag: "SelectAll" }, ({ patterns, directoryCount }) => {
+      log.info(`Selected ${pc.cyan(directoryCount.toString())} directories`);
+      return patterns;
+    })
+    .with({ _tag: "SelectNamed" }, ({ patterns }) => patterns)
+    .with({ _tag: "UnknownDirs" }, ({ unknown, available }): never => {
+      throw zikuFailure({
+        kind: "InvalidArgument",
+        argument: "--dirs",
+        value: unknown.join(", "),
+        expected: `one of ${available.join(", ")}`,
       });
-      allResults.push(zikuJsoncResult);
+    })
+    .with({ _tag: "AskUser" }, () => {
+      log.step("Selecting directories...");
+      return selectDirectories(entries);
+    })
+    .exhaustive();
 
-      // .ziku/lock.json を書き出し（source + 同期状態）
-      const lockResult = await writeLockFile(targetDir, { source, baseHashes, baseRef, dryRun });
-      allResults.push(lockResult);
+  return selectedFlatPatterns(templateConfig, selected);
+}
 
-      // ファイル操作結果を表示（サマリー含む）
-      const summary = logFileResults(allResults);
+/** 既存ファイルの扱いを決める。対話が必要なときだけユーザーに聞く。 */
+function chooseOverwriteStrategy(args: InitArgs, targetDir: AbsPath): Promise<OverwriteStrategy> {
+  return match(
+    planOverwriteStrategy({
+      force: args.force,
+      strategyArg: args.overwriteStrategy,
+      yes: args.yes,
+    }),
+  )
+    .with({ _tag: "Decided" }, ({ strategy }) => Promise.resolve(strategy))
+    .with({ _tag: "InvalidStrategy" }, ({ value }): never => {
+      throw zikuFailure({
+        kind: "InvalidArgument",
+        argument: "--overwrite-strategy",
+        value,
+        expected: "overwrite, skip, or prompt",
+      });
+    })
+    .with({ _tag: "AskUser" }, () =>
+      selectOverwriteStrategy({ isReinit: zikuConfigExists(targetDir) }),
+    )
+    .exhaustive();
+}
 
-      // 変更がない場合
-      if (summary.added === 0 && summary.updated === 0) {
-        log.info("No changes were made");
-        return;
-      }
-
-      if (dryRun) {
-        outro(
-          [
-            "Dry run complete — no files were written.",
-            "",
-            pc.dim("Run the same command without --dryRun to apply these changes."),
-          ].join("\n"),
-        );
-        return;
-      }
-
-      // 成功メッセージと次のステップ
+/** 適用の結果をユーザーへ伝える。 */
+function reportOutcome(outcome: InitOutcome): void {
+  match(outcome)
+    .with({ _tag: "NoChanges" }, () => {
+      log.info("No changes were made");
+    })
+    .with({ _tag: "DryRunPreview" }, () => {
+      outro(
+        [
+          "Dry run complete — no files were written.",
+          "",
+          pc.dim("Run the same command without --dryRun to apply these changes."),
+        ].join("\n"),
+      );
+    })
+    .with({ _tag: "Applied" }, () => {
       outro(
         [
           "Setup complete!",
@@ -368,9 +580,12 @@ export const initCommand = defineCommand({
           `  ${pc.dim("Check for updates from upstream")}`,
         ].join("\n"),
       );
-    }, cleanupWithTargetDir);
-  },
-});
+    })
+    .exhaustive();
+}
+
+/** devcontainer の環境変数サンプルの置き場所。lock のベースを決めるときも同じ定数を使う。 */
+const ENV_EXAMPLE_PATH: RepoRelPath = repoRelPath(".devcontainer/devcontainer.env.example");
 
 const ENV_EXAMPLE_CONTENT = `# 環境変数サンプル
 # このファイルを devcontainer.env にコピーして値を設定してください
@@ -411,10 +626,14 @@ function findExistingAncestor(dir: string): string {
  * ダウンロード成功時・失敗時の両方から呼ばれる（失敗時に呼ばないと、途中まで
  * 作られたディレクトリが残ってしまう）。
  */
-function removeEmptyDryRunDirs(targetDir: string, dryRun: boolean, existingAncestor: string): void {
+function removeEmptyDryRunDirs(
+  targetDir: AbsPath,
+  dryRun: boolean,
+  existingAncestor: string,
+): void {
   if (!dryRun) return;
 
-  let current = targetDir;
+  let current: string = targetDir;
   while (current !== existingAncestor) {
     if (!existsSync(current) || readdirSync(current).length > 0) return;
     rmdirSync(current);
@@ -423,71 +642,16 @@ function removeEmptyDryRunDirs(targetDir: string, dryRun: boolean, existingAnces
 }
 
 function createEnvExample(
-  targetDir: string,
+  targetDir: AbsPath,
   strategy: OverwriteStrategy,
   dryRun = false,
 ): Promise<FileOperationResult> {
   return writeFileWithStrategy({
-    destPath: resolve(targetDir, ".devcontainer/devcontainer.env.example"),
+    destPath: joinAbs(targetDir, ENV_EXAMPLE_PATH),
     content: ENV_EXAMPLE_CONTENT,
     strategy,
-    relativePath: ".devcontainer/devcontainer.env.example",
+    relativePath: ENV_EXAMPLE_PATH,
     dryRun,
-  });
-}
-
-/**
- * init 時に `lock.baseHashes[".ziku/ziku.jsonc"]` へ記録するベースハッシュを決める。
- *
- * ## なぜ専用ロジックが必要か
- * `ziku.jsonc` を「他の追跡ファイルと同じ 3-way マージ対象」にしたことで、共通祖先
- * （base）を何にするかが初回 push/pull の挙動を左右する。init はテンプレートのパターンの
- * **部分集合**だけを選んで導入できる（ユーザーが dir を選択）ため、ローカル `ziku.jsonc`
- * はテンプレより少ないことがある。
- *
- * ## トレードオフ（2 つの妥当なポリシー）
- * - base = テンプレートの ziku.jsonc ハッシュ:
- *     local(部分集合) != base(full) == template → push が「local がパターンを削除した」と
- *     解釈し、**テンプレートからパターンを削ってしまう**（全下流プロジェクトに波及する事故）。
- * - base = ローカル(部分集合) の ziku.jsonc ハッシュ:
- *     local == base → push 対象外（テンプレート安全）。
- *     pull 時は template != base==local → autoUpdate でテンプレの full 設定が降りてくる。
- *
- * @param opts.localConfigContent  init で書き出すローカル ziku.jsonc の中身
- * @param opts.templateConfigHash  テンプレートの ziku.jsonc のハッシュ（無い場合 undefined）
- * @returns lock.baseHashes[".ziku/ziku.jsonc"] に入れるハッシュ値
- */
-export function resolveConfigBaseHash(opts: {
-  localConfigContent: string;
-  templateConfigHash: string | undefined;
-}): string {
-  // テンプレート保護のため base はローカル（部分集合）側に置く。
-  // これにより local == base となり、初回 push でテンプレのパターンを削らない。
-  return hashContent(opts.localConfigContent);
-}
-
-/**
- * .ziku/ziku.jsonc を書き出す（パターン定義のみ、source は lock.json に分離）
- */
-function writeZikuJsonc(
-  targetDir: string,
-  opts: {
-    patterns: FlatPatterns;
-    strategy: OverwriteStrategy;
-    dryRun?: boolean;
-  },
-): Promise<FileOperationResult> {
-  const content = generateZikuJsonc({
-    include: opts.patterns.include,
-    exclude: opts.patterns.exclude,
-  });
-
-  return writeFileWithStrategy({
-    destPath: resolve(targetDir, ZIKU_CONFIG_FILE),
-    content,
-    strategy: opts.strategy,
-    relativePath: ZIKU_CONFIG_FILE,
-    dryRun: opts.dryRun,
   });
 }
 
@@ -498,25 +662,23 @@ function writeZikuJsonc(
  * 経由しない。dryRun: true の場合は判定結果（created/overwritten）だけ返し、saveLock は呼ばない。
  */
 async function writeLockFile(
-  targetDir: string,
+  targetDir: AbsPath,
   opts: {
     source: TemplateSource;
-    baseHashes?: Record<string, string>;
-    baseRef?: string;
+    baseHashes: HashMap;
+    baseCommit: CommitSha | undefined;
     dryRun?: boolean;
   },
 ): Promise<FileOperationResult> {
-  const lock: LockState = {
+  const lock = buildInitialLock({
     version,
     installedAt: new Date().toISOString(),
     source: opts.source,
-    ...(opts.baseRef ? { baseRef: opts.baseRef } : {}),
-    ...(opts.baseHashes && Object.keys(opts.baseHashes).length > 0
-      ? { baseHashes: opts.baseHashes }
-      : {}),
-  };
+    baseHashes: opts.baseHashes,
+    baseCommit: opts.baseCommit,
+  });
 
-  const isNew = !existsSync(join(targetDir, LOCK_FILE));
+  const isNew = !existsSync(joinAbs(targetDir, LOCK_FILE));
   if (!opts.dryRun) {
     await saveLock(targetDir, lock);
   }
@@ -525,96 +687,6 @@ async function writeLockFile(
     action: isNew ? "created" : "overwritten",
     path: LOCK_FILE,
   };
-}
-
-/**
- * テンプレートの ziku.jsonc からパターンを解決する。
- *
- * include パターンをトップレベルディレクトリでグループ化し、
- * ユーザーにディレクトリ単位で選択させる。
- */
-async function resolveTemplatePatterns(
-  templateConfig: { include: string[]; exclude?: string[] },
-  nonInteractive: boolean,
-  dirsArg: string | undefined,
-): Promise<FlatPatterns> {
-  const allInclude = templateConfig.include;
-  const allExclude = templateConfig.exclude ?? [];
-
-  const entries = extractDirectoryEntries(allInclude);
-  const selectedPatterns = await selectDirsFromTemplate(entries, nonInteractive, dirsArg);
-
-  // 選択されたパターンに対応する exclude を絞り込む
-  // （exclude は全て適用しても安全なので、そのまま返す）
-  return {
-    include: selectedPatterns,
-    exclude: allExclude,
-  };
-}
-
-/**
- * テンプレートのディレクトリエントリからディレクトリを選択する。
- * --yes: 全ディレクトリ、--dirs: 指定ディレクトリ、それ以外: インタラクティブ選択
- */
-async function selectDirsFromTemplate(
-  entries: Array<{ label: string; patterns: string[] }>,
-  nonInteractive: boolean,
-  dirsArg: string | undefined,
-): Promise<string[]> {
-  const hasDirsArg = typeof dirsArg === "string" && dirsArg.length > 0;
-
-  if (nonInteractive && !hasDirsArg) {
-    // --yes: 全ディレクトリ選択
-    const allPatterns = entries.flatMap((e) => e.patterns);
-    log.info(`Selected ${pc.cyan(entries.length.toString())} directories`);
-    return allPatterns;
-  }
-
-  if (hasDirsArg) {
-    // --dirs: 指定ディレクトリ選択
-    const requestedLabels = dirsArg.split(",").map((s) => s.trim());
-    const validLabels = entries.map((e) => e.label);
-    const invalidLabels = requestedLabels.filter((l) => !validLabels.includes(l));
-    if (invalidLabels.length > 0) {
-      throw new ZikuError(
-        `Unknown directory(ies): ${invalidLabels.join(", ")}`,
-        `Available directories: ${validLabels.join(", ")}`,
-      );
-    }
-    return entries.filter((e) => requestedLabels.includes(e.label)).flatMap((e) => e.patterns);
-  }
-
-  // インタラクティブ: ディレクトリ選択 UI
-  log.step("Selecting directories...");
-  return await selectDirectories(entries);
-}
-
-/**
- * 上書き戦略を CLI 引数・フラグから解決する。
- *
- * 優先順位: --force > --overwrite-strategy > --yes > インタラクティブ選択
- */
-async function resolveEffectiveStrategy(
-  force: boolean,
-  strategyArg: string | undefined,
-  nonInteractive: boolean,
-  configExists: boolean,
-): Promise<OverwriteStrategy> {
-  if (force) return "overwrite";
-
-  if (strategyArg) {
-    if (strategyArg !== "overwrite" && strategyArg !== "skip" && strategyArg !== "prompt") {
-      throw new ZikuError(
-        `Invalid overwrite strategy: ${strategyArg}`,
-        "Must be: overwrite, skip, or prompt",
-      );
-    }
-    return strategyArg;
-  }
-
-  if (nonInteractive) return "overwrite";
-
-  return await selectOverwriteStrategy({ isReinit: configExists });
 }
 
 /**
@@ -630,36 +702,42 @@ async function resolveTemplateSourceWithCheck(
   from: string | undefined,
   nonInteractive: boolean,
   dryRun: boolean,
-): Promise<{
-  sourceOwner: string;
-  sourceRepo: string;
-}> {
-  // --from で明示指定
-  if (from) return resolveExplicitSource(from);
+): Promise<GitHubTemplateRef> {
+  const fromPlan = planFromArg(from);
+  if (fromPlan._tag !== "Unspecified") return resolveExplicitSource(fromPlan);
 
-  // 自動検出: 候補を収集し、存在チェック＋セットアップ状態を確認
-  const { candidateEntries, deduplicatedCandidates, existingCandidates } =
+  const { allCandidates, existingCandidates, deduplicatedCandidates } =
     await discoverTemplateCandidates();
 
   if (nonInteractive) {
-    return resolveNonInteractive(deduplicatedCandidates, candidateEntries);
+    return match(planNonInteractiveSource(deduplicatedCandidates, allCandidates))
+      .with({ _tag: "Use" }, ({ owner, repo }) => ({ sourceOwner: owner, sourceRepo: repo }))
+      .with({ _tag: "Ambiguous" }, ({ candidates }): never => {
+        throw zikuFailure({ kind: "AmbiguousTemplateSource", candidates });
+      })
+      .with({ _tag: "NotFound" }, ({ repos }): never => {
+        throw zikuFailure({ kind: "TemplateRepoNotFound", repos });
+      })
+      .with({ _tag: "Undetectable" }, (): never => {
+        throw zikuFailure({ kind: "TemplateSourceUndetectable" });
+      })
+      .exhaustive();
   }
 
-  // ─── インタラクティブモード ───
-
-  if (existingCandidates.length > 0) {
-    const selected = await selectTemplateCandidate(existingCandidates);
-    if (selected === "specify-other") return promptTemplateSource(dryRun);
-    return { sourceOwner: selected.owner, sourceRepo: selected.repo };
-  }
-
-  if (candidateEntries.length > 0) {
-    const firstCandidate = candidateEntries[0];
-    return handleMissingTemplate(firstCandidate.owner, firstCandidate.repo, dryRun);
-  }
-
-  log.warn("Could not detect template source from git remote.");
-  return promptTemplateSource(dryRun);
+  return match(planInteractiveSource(existingCandidates, allCandidates))
+    .with({ _tag: "ChooseCandidate" }, async ({ candidates }) => {
+      const selected = await selectTemplateCandidate([...candidates]);
+      if (selected === "specify-other") return promptTemplateSource(dryRun);
+      return { sourceOwner: selected.owner, sourceRepo: selected.repo };
+    })
+    .with({ _tag: "OfferCreation" }, ({ owner, repo }) =>
+      handleMissingTemplate(owner, repo, dryRun),
+    )
+    .with({ _tag: "AskInput" }, () => {
+      log.warn("Could not detect template source from git remote.");
+      return promptTemplateSource(dryRun);
+    })
+    .exhaustive();
 }
 
 /**
@@ -668,11 +746,7 @@ async function resolveTemplateSourceWithCheck(
  * Unknown は 5xx やネットワーク断など "リポジトリ無し" とは断定できないケース。
  * 呼び出し側は続行を選択できるため、ここではログだけ出して戻る。
  */
-function warnUnknownRepo(
-  owner: string,
-  repo: string,
-  u: Extract<RepoExistence, { readonly _tag: "Unknown" }>,
-): void {
+function warnUnknownRepo(owner: string, repo: string, u: UnverifiedExistence): void {
   const statusPart = u.status !== undefined ? ` (HTTP ${u.status})` : "";
   log.warn(
     `Could not verify ${owner}/${repo}${statusPart}: ${u.reason}. Proceeding and letting the download step surface any real error.`,
@@ -680,120 +754,125 @@ function warnUnknownRepo(
 }
 
 /**
- * 並列存在チェックの結果から、RateLimited / Unauthorized を即失敗にすべきか判断する。
+ * 並列存在チェックの結果を受けて、続行するか中断するかを実行する。
  *
- * 背景: `Promise.all` で複数候補を並列に問い合わせると、クォータ境界で
- * `[Exists, RateLimited]` のように混在することがある。確認済みの Exists が
- * 1 つでもあれば、RateLimited / Unauthorized は警告に降格して候補選択を続行する
- * （以前の楽観的フォールバックに近い挙動を保つ）。Exists が無ければ、判定が
- * 全く不能なので RateLimited → Unauthorized の順で即時に明確なエラーを投げる。
+ * 判定を降格して続行する場合は、何が起きたのかをユーザーへ見せる（黙って結果が変わると、
+ * 選ばれた候補が想定と違ったときに原因を追えない）。
  */
-function ensureProbeUnblocked(results: readonly RepoExistence[], context: string): void {
-  const hasExists = results.some((r) => r._tag === "Exists");
-  if (hasExists) {
-    for (const r of results) {
-      if (r._tag === "RateLimited") {
-        log.warn(
-          `Rate-limited probing ${context}, but at least one verified candidate is available — proceeding with the verified one.`,
-        );
-      } else if (r._tag === "Unauthorized") {
-        log.warn(
-          `Auth check failed probing ${context} (${r.message}), but at least one verified candidate is available — proceeding with the verified one.`,
-        );
+function applyProbeGate(gate: ProbeGate, context: string): void {
+  match(gate)
+    .with({ _tag: "Proceed" }, ({ degraded }) => {
+      for (const existence of degraded) {
+        log.warn(degradedProbeMessage(context, existence));
       }
-    }
-    return;
-  }
-  // Exists が 1 つも無い: 候補判定が不能なので即失敗
-  const rateLimited = results.find(
-    (r): r is Extract<RepoExistence, { readonly _tag: "RateLimited" }> => r._tag === "RateLimited",
-  );
-  if (rateLimited) throw rateLimitedError(rateLimited);
-  const unauthorized = results.find(
-    (r): r is Extract<RepoExistence, { readonly _tag: "Unauthorized" }> =>
-      r._tag === "Unauthorized",
-  );
-  if (unauthorized) throw unauthorizedError(unauthorized);
+    })
+    .with({ _tag: "Blocked" }, ({ existence }): never => {
+      throw blockedProbeError(existence);
+    })
+    .exhaustive();
+}
+
+function degradedProbeMessage(context: string, existence: BlockingExistence): string {
+  return match(existence)
+    .with(
+      { _tag: "RateLimited" },
+      () =>
+        `Rate-limited probing ${context}, but at least one verified candidate is available — proceeding with the verified one.`,
+    )
+    .with(
+      { _tag: "Unauthorized" },
+      (u) =>
+        `Auth check failed probing ${context} (${u.message}), but at least one verified candidate is available — proceeding with the verified one.`,
+    )
+    .exhaustive();
+}
+
+/** 存在確認そのものが成立しなかったことを、利用者向けの失敗へ変換する。 */
+function blockedProbeError(existence: BlockingExistence): ZikuFailure {
+  return match(existence)
+    .with({ _tag: "RateLimited" }, (r) => rateLimitedError(r))
+    .with({ _tag: "Unauthorized" }, (u) => unauthorizedError(u))
+    .exhaustive();
+}
+
+/** リポジトリ 1 つの存在を問い合わせ、対象と組にして返す。 */
+async function probeRepo<T>(
+  item: T,
+  owner: string,
+  repo: string,
+): Promise<{ item: T; existence: RepoExistence }> {
+  return { item, existence: await checkRepoExists(owner, repo) };
+}
+
+/** リポジトリ 1 つのセットアップ状態を問い合わせ、対象と組にして返す。 */
+async function probeSetup<T>(
+  item: T,
+  owner: string,
+  repo: string,
+): Promise<{ item: T; ready: boolean }> {
+  return { item, ready: await checkRepoSetup(owner, repo) };
 }
 
 /**
  * --from で明示指定されたソースを解決する。
  * owner/repo 形式ならそのまま存在チェック、owner のみならデフォルトリポジトリを探索。
+ *
+ * 読み取り済みの計画を受け取るのは、「指定されたか」の判定を呼び出し側と重複させないため
+ * （{@link planFromArg}）。
  */
-async function resolveExplicitSource(
-  from: string,
-): Promise<{ sourceOwner: string; sourceRepo: string }> {
-  const resolved = parseFromArg(from);
+function resolveExplicitSource(
+  plan: Exclude<FromArgPlan, { readonly _tag: "Unspecified" }>,
+): Promise<GitHubTemplateRef> {
+  return match(plan)
+    .with({ _tag: "Invalid" }, ({ value }): never => {
+      throw invalidFromArg(value);
+    })
+    .with({ _tag: "Repo" }, ({ owner, repo }) => resolveExplicitRepo(owner, repo))
+    .with({ _tag: "OwnerOnly" }, ({ owner }) => resolveDefaultRepoForOwner(owner))
+    .exhaustive();
+}
 
-  // owner/repo 形式
-  if (from.includes("/")) {
-    const existence = await checkRepoExists(resolved.sourceOwner, resolved.sourceRepo);
-    return match(existence)
-      .with({ _tag: "Exists" }, () => resolved)
-      .with({ _tag: "Unknown" }, (u) => {
-        warnUnknownRepo(resolved.sourceOwner, resolved.sourceRepo, u);
-        return resolved;
-      })
-      .with({ _tag: "NotFound" }, (): never => {
-        throw new ZikuError(
-          `Template repository "${resolved.sourceOwner}/${resolved.sourceRepo}" not found`,
-          "Check the --from value or create the repository first",
-        );
-      })
-      .with({ _tag: "RateLimited" }, (r): never => {
-        throw rateLimitedError(r);
-      })
-      .with({ _tag: "Unauthorized" }, (u): never => {
-        throw unauthorizedError(u);
-      })
-      .exhaustive();
-  }
+/** 明示された owner/repo の存在を確かめる。 */
+async function resolveExplicitRepo(owner: string, repo: string): Promise<GitHubTemplateRef> {
+  const ref: GitHubTemplateRef = { sourceOwner: owner, sourceRepo: repo };
+  return match(decideRepoProbe(await checkRepoExists(owner, repo)))
+    .with({ _tag: "Verified" }, () => ref)
+    .with({ _tag: "Unverified" }, ({ existence }) => {
+      warnUnknownRepo(owner, repo, existence);
+      return ref;
+    })
+    .with({ _tag: "Absent" }, (): never => {
+      throw zikuFailure({ kind: "TemplateRepoNotFound", repos: [`${owner}/${repo}`] });
+    })
+    .with({ _tag: "Blocked" }, ({ existence }): never => {
+      throw blockedProbeError(existence);
+    })
+    .exhaustive();
+}
 
-  // owner のみ指定 → デフォルトリポジトリ候補を順に探索（セットアップ済みを優先）
-  const results = await Promise.all(
-    DEFAULT_TEMPLATE_REPOS.map((repo) => checkRepoExists(resolved.sourceOwner, repo)),
+/** owner だけが指定されたときに、既定リポジトリ候補からセットアップ済みを優先して選ぶ。 */
+async function resolveDefaultRepoForOwner(owner: string): Promise<GitHubTemplateRef> {
+  const probes = await Promise.all(
+    DEFAULT_TEMPLATE_REPOS.map((repo) => probeRepo(repo, owner, repo)),
   );
+  applyProbeGate(gateProbeResults(probes.map((p) => p.existence)), `${owner}/<default repos>`);
 
-  // 並列チェックで Exists と RateLimited が混在しても、Exists があれば続行する。
-  // Exists が皆無のときだけ RateLimited / Unauthorized を即失敗にする。
-  ensureProbeUnblocked(results, `${resolved.sourceOwner}/<default repos>`);
-
-  // Exists または Unknown (5xx/ネットワーク断等) を「ありえる候補」として採用。
-  // NotFound のみ除外する。
-  //
-  // 並び: Exists を先頭、Unknown を末尾。末尾の readyRepo フォールバック
-  // (candidateRepos[0]) が確認済み候補を優先するようにする。
-  // 例: results=[Unknown(.ziku), Exists(.github)] の時、素朴に DEFAULT_TEMPLATE_REPOS 順
-  // にすると .ziku が先頭に来て、ready でないケースで transient な .ziku を選んでしまう。
-  // Exists/Unknown 内の相対順序は DEFAULT_TEMPLATE_REPOS の順（.ziku → .github）を保つ。
-  const candidateRepos: string[] = [];
-  for (let i = 0; i < DEFAULT_TEMPLATE_REPOS.length; i++) {
-    if (results[i]._tag === "Exists") candidateRepos.push(DEFAULT_TEMPLATE_REPOS[i]);
-  }
-  for (let i = 0; i < DEFAULT_TEMPLATE_REPOS.length; i++) {
-    if (results[i]._tag === "Unknown") candidateRepos.push(DEFAULT_TEMPLATE_REPOS[i]);
-  }
-  if (candidateRepos.length === 0) {
-    throw new ZikuError(
-      `No template repository found for "${resolved.sourceOwner}" (checked: ${DEFAULT_TEMPLATE_REPOS.join(", ")})`,
-      "Check the --from value or create the repository first",
-    );
+  const ordered = orderProbedCandidates(probes);
+  const usable = asNonEmpty(ordered.usable);
+  if (usable === undefined) {
+    throw zikuFailure({
+      kind: "TemplateRepoNotFound",
+      repos: DEFAULT_TEMPLATE_REPOS.map((repo) => `${owner}/${repo}`),
+    });
   }
 
   // Unknown のみの候補には警告を出す（ユーザーが次のステップで何が起きているか分かるように）
-  for (let i = 0; i < DEFAULT_TEMPLATE_REPOS.length; i++) {
-    const r = results[i];
-    if (r._tag === "Unknown") warnUnknownRepo(resolved.sourceOwner, DEFAULT_TEMPLATE_REPOS[i], r);
+  for (const { item, existence } of ordered.unverified) {
+    warnUnknownRepo(owner, item, existence);
   }
 
-  const setupResults = await Promise.all(
-    candidateRepos.map((repo) => checkRepoSetup(resolved.sourceOwner, repo)),
-  );
-  const readyRepo = candidateRepos.find((_, i) => setupResults[i]);
-  return {
-    sourceOwner: resolved.sourceOwner,
-    sourceRepo: readyRepo ?? candidateRepos[0],
-  };
+  const setups = await Promise.all(usable.map((repo) => probeSetup(repo, owner, repo)));
+  return { sourceOwner: owner, sourceRepo: preferReadyCandidate(setups, usable[0]) };
 }
 
 /**
@@ -801,248 +880,107 @@ async function resolveExplicitSource(
  * 存在チェックとセットアップ状態の確認を行う。
  */
 async function discoverTemplateCandidates(): Promise<{
-  candidateEntries: TemplateCandidate[];
+  /** 存在チェックを行った候補全体。1 件も存在しなかったときの案内に使う。 */
+  allCandidates: TemplateCandidate[];
+  /** 存在を確かめられた候補（セットアップ状態付き）。 */
   existingCandidates: TemplateCandidate[];
+  /** オーナー単位に絞った候補。 */
   deduplicatedCandidates: TemplateCandidate[];
 }> {
   const detectedOwner = detectGitHubOwner();
   const authenticatedUser = await getAuthenticatedUserLogin();
+  const allCandidates = buildOwnerCandidates({
+    authenticatedUser: authenticatedUser ?? undefined,
+    detectedOwner: detectedOwner ?? undefined,
+    repos: DEFAULT_TEMPLATE_REPOS,
+  });
 
-  const candidateEntries: TemplateCandidate[] = [];
-  const seen = new Set<string>();
-
-  const owners: Array<{ name: string; label: string }> = [];
-  if (authenticatedUser) owners.push({ name: authenticatedUser, label: "Your account" });
-  if (detectedOwner) owners.push({ name: detectedOwner, label: "Git remote owner" });
-
-  for (const owner of owners) {
-    for (const repo of DEFAULT_TEMPLATE_REPOS) {
-      const key = `${owner.name}/${repo}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        candidateEntries.push({ owner: owner.name, repo, label: owner.label });
-      }
-    }
-  }
-
-  const existenceResults = await Promise.all(
-    candidateEntries.map((c) => checkRepoExists(c.owner, c.repo)),
+  const probes = await Promise.all(
+    allCandidates.map((candidate) => probeRepo(candidate, candidate.owner, candidate.repo)),
   );
+  applyProbeGate(gateProbeResults(probes.map((p) => p.existence)), "auto-detected templates");
 
-  // 並列チェックで Exists と RateLimited が混在しても、Exists があれば続行する。
-  // Exists が皆無のときだけ RateLimited / Unauthorized を即失敗にする。
-  ensureProbeUnblocked(existenceResults, "auto-detected templates");
-
-  // Exists と Unknown を「ありえる候補」として扱う。Unknown は 5xx・ネットワーク断・
-  // 予期しない 403 など確認不能なケースで、除外すると transient 障害時に本来存在する
-  // リポジトリが誤って "not found" 扱いされる（非インタラクティブでエラー、
-  // インタラクティブでは既存リポを「作成しますか」と聞く）退行になる。
-  // 判別できないリポは候補に含め、実取得時に giget が本来のエラーを出す余地を残す。
-  // 警告は resolveExplicitSource 同様ユーザーに可視化する。
-  for (let i = 0; i < candidateEntries.length; i++) {
-    const r = existenceResults[i];
-    if (r._tag === "Unknown")
-      warnUnknownRepo(candidateEntries[i].owner, candidateEntries[i].repo, r);
+  const ordered = orderProbedCandidates(probes);
+  for (const { item, existence } of ordered.unverified) {
+    warnUnknownRepo(item.owner, item.repo, existence);
   }
-  // Exists を先頭、Unknown を末尾に配置。deduplicateByOwner / resolveNonInteractive は
-  // 先頭の候補を採用するため、Unknown より確認済みの Exists を優先させる。
-  // 同タグ内の相対順序（candidateEntries 順 = owner × DEFAULT_TEMPLATE_REPOS の積順）は保つ。
-  const existingCandidates: TemplateCandidate[] = [
-    ...candidateEntries.filter((_, i) => existenceResults[i]._tag === "Exists"),
-    ...candidateEntries.filter((_, i) => existenceResults[i]._tag === "Unknown"),
-  ];
 
-  const setupResults = await Promise.all(
-    existingCandidates.map((c) => checkRepoSetup(c.owner, c.repo)),
+  const setups = await Promise.all(
+    ordered.usable.map((candidate) => probeSetup(candidate, candidate.owner, candidate.repo)),
   );
-  for (let i = 0; i < existingCandidates.length; i++) {
-    existingCandidates[i].ready = setupResults[i];
-  }
+  const existingCandidates = withReadyFlags(setups);
 
-  const deduplicatedCandidates = deduplicateByOwner(existingCandidates);
-
-  return { candidateEntries, existingCandidates, deduplicatedCandidates };
-}
-
-/**
- * non-interactive モードでのテンプレートソース解決。
- * 候補が1つなら使用、複数なら曖昧エラー、0ならエラー。
- */
-function resolveNonInteractive(
-  deduplicatedCandidates: TemplateCandidate[],
-  candidateEntries: TemplateCandidate[],
-): { sourceOwner: string; sourceRepo: string } {
-  if (deduplicatedCandidates.length === 1) {
-    return {
-      sourceOwner: deduplicatedCandidates[0].owner,
-      sourceRepo: deduplicatedCandidates[0].repo,
-    };
-  }
-  if (deduplicatedCandidates.length > 1) {
-    const candidateList = deduplicatedCandidates.map((c) => `${c.owner}/${c.repo}`).join(", ");
-    throw new ZikuError(
-      `Multiple template candidates found: ${candidateList}`,
-      "Specify --from <owner> or --from <owner/repo> to disambiguate",
-    );
-  }
-  if (candidateEntries.length > 0) {
-    const firstCandidate = candidateEntries[0];
-    throw new ZikuError(
-      `Template repository "${firstCandidate.owner}/${firstCandidate.repo}" not found`,
-      "Create it first, or specify --from <owner> or --from <owner/repo>",
-    );
-  }
-  throw new ZikuError(
-    "Cannot detect template source: no git remote origin found",
-    "Specify --from <owner> or --from <owner/repo>",
-  );
+  return {
+    allCandidates,
+    existingCandidates,
+    deduplicatedCandidates: deduplicateByOwner(existingCandidates),
+  };
 }
 
 /**
  * ユーザーにテンプレートソースを入力させ、存在チェックを行う
  */
-async function promptTemplateSource(
-  dryRun: boolean,
-): Promise<{ sourceOwner: string; sourceRepo: string }> {
-  const source = await inputTemplateSource();
-  const slashIndex = source.indexOf("/");
-  const owner = source.slice(0, slashIndex);
-  const repo = source.slice(slashIndex + 1);
+async function promptTemplateSource(dryRun: boolean): Promise<GitHubTemplateRef> {
+  const { owner, repo } = splitOwnerRepo(await inputTemplateSource());
+  const ref: GitHubTemplateRef = { sourceOwner: owner, sourceRepo: repo };
 
-  const existence = await checkRepoExists(owner, repo);
-  return match(existence)
-    .with({ _tag: "Exists" }, () => ({ sourceOwner: owner, sourceRepo: repo }))
-    .with({ _tag: "Unknown" }, (u) => {
-      warnUnknownRepo(owner, repo, u);
-      return { sourceOwner: owner, sourceRepo: repo };
+  return match(decideRepoProbe(await checkRepoExists(owner, repo)))
+    .with({ _tag: "Verified" }, () => ref)
+    .with({ _tag: "Unverified" }, ({ existence }) => {
+      warnUnknownRepo(owner, repo, existence);
+      return ref;
     })
-    .with({ _tag: "NotFound" }, () => handleMissingTemplate(owner, repo, dryRun))
-    .with({ _tag: "RateLimited" }, (r): never => {
-      throw rateLimitedError(r);
-    })
-    .with({ _tag: "Unauthorized" }, (u): never => {
-      throw unauthorizedError(u);
+    .with({ _tag: "Absent" }, () => handleMissingTemplate(owner, repo, dryRun))
+    .with({ _tag: "Blocked" }, ({ existence }): never => {
+      throw blockedProbeError(existence);
     })
     .exhaustive();
 }
 
 /**
  * テンプレートリポジトリが見つからない場合のインタラクティブハンドリング。
- *
- * dryRun: true では "create-repo" を選んでも実際には作成しない。リポジトリ作成は
- * ローカルの取り消し不能な変更ではなく GitHub 上への実書き込みで、他の dryRun 分岐
- * （ファイル書き込みの省略）と違って「実行したふり」ができない。プレビューを続行
- * するための有効なソースを作れないため、ここで中断してユーザーに選択肢を示す。
  */
 async function handleMissingTemplate(
   owner: string,
   repo: string,
   dryRun: boolean,
-): Promise<{ sourceOwner: string; sourceRepo: string }> {
+): Promise<GitHubTemplateRef> {
   const action = await selectMissingTemplateAction(owner, repo);
 
-  return match(action)
-    .with("create-repo", async () => {
-      if (dryRun) {
-        throw new ZikuError(
-          `Would create template repository ${owner}/${repo}, but --dryRun prevents remote changes`,
-          "Run without --dryRun to create it, or specify an existing template with --from",
-        );
-      }
-
-      const token = getGitHubToken();
-      if (!token) {
-        throw new ZikuError(
-          "GitHub token required to create a repository",
-          "Set GITHUB_TOKEN or GH_TOKEN, or run: gh auth login",
-        );
-      }
-
-      log.step(`Creating ${pc.cyan(`${owner}/${repo}`)}...`);
-      const { url } = await scaffoldTemplateRepo(token, owner, repo);
-      log.success(`Created template repository: ${pc.cyan(url)}`);
-      log.info(pc.dim("Waiting for repository to be ready..."));
-      await new Promise((done) => {
-        setTimeout(done, 5000);
-      });
-
-      return { sourceOwner: owner, sourceRepo: repo };
+  return match(planMissingTemplateAction(action, { owner, repo, dryRun }))
+    .with({ _tag: "CreationBlocked" }, ({ operation }): never => {
+      throw zikuFailure({ kind: "DryRunBlocked", operation });
     })
-    .with("specify-source", () => promptTemplateSource(dryRun))
+    .with({ _tag: "CreateRepo" }, () => createTemplateRepo(owner, repo))
+    .with({ _tag: "AskInput" }, () => promptTemplateSource(dryRun))
     .exhaustive();
 }
 
-/**
- * --from 引数をパースする。
- *
- * - "owner/repo" → { sourceOwner: "owner", sourceRepo: "repo" }
- * - "owner" (/ なし) → { sourceOwner: "owner", sourceRepo: ".github" }
- */
-function parseFromArg(from: string): { sourceOwner: string; sourceRepo: string } {
-  const slashIndex = from.indexOf("/");
-  if (slashIndex === -1) {
-    // オーナー名のみ → デフォルトの .github リポジトリを補完
-    if (!from.trim()) {
-      throw new ZikuError(
-        `Invalid --from format: "${from}"`,
-        "Expected: owner or owner/repo (e.g., my-org or my-org/my-templates)",
-      );
-    }
-    return {
-      sourceOwner: from,
-      sourceRepo: DEFAULT_TEMPLATE_REPO,
-    };
+/** テンプレートリポジトリを新規作成し、取得できる状態になるまで待つ。 */
+async function createTemplateRepo(owner: string, repo: string): Promise<GitHubTemplateRef> {
+  const token = getGitHubToken();
+  if (!token) {
+    throw zikuFailure({ kind: "GitHubTokenMissing", operation: "create a repository" });
   }
-  if (slashIndex === 0 || slashIndex === from.length - 1) {
-    throw new ZikuError(
-      `Invalid --from format: "${from}"`,
-      "Expected: owner or owner/repo (e.g., my-org or my-org/my-templates)",
-    );
-  }
-  return {
-    sourceOwner: from.slice(0, slashIndex),
-    sourceRepo: from.slice(slashIndex + 1),
-  };
+
+  log.step(`Creating ${pc.cyan(`${owner}/${repo}`)}...`);
+  const { url } = await scaffoldTemplateRepo(token, owner, repo);
+  log.success(`Created template repository: ${pc.cyan(url)}`);
+  log.info(pc.dim("Waiting for repository to be ready..."));
+  // 作成直後のリポジトリは取得に失敗することがあるため、初期化が終わるのを待ってから進む。
+  await new Promise((done) => {
+    setTimeout(done, 5000);
+  });
+
+  return { sourceOwner: owner, sourceRepo: repo };
 }
 
-/**
- * 同一オーナーの候補を重複排除する。
- * セットアップ済み（ready=true）の候補を優先し、同順ならリスト順（.ziku → .github）で選択する。
- */
-function deduplicateByOwner(candidates: TemplateCandidate[]): TemplateCandidate[] {
-  const byOwner = new Map<string, TemplateCandidate>();
-  for (const c of candidates) {
-    const key = c.owner.toLowerCase();
-    const existing = byOwner.get(key);
-    if (!existing) {
-      byOwner.set(key, c);
-    } else if (c.ready && !existing.ready) {
-      // セットアップ済みの候補を優先
-      byOwner.set(key, c);
-    }
-  }
-  return [...byOwner.values()];
-}
-
-/**
- * テンプレートソースを解決する（純粋な解決ロジック、存在チェックなし）。
- * 存在チェックなしのため、デフォルトリポジトリ候補の先頭（.ziku）を使用する。
- */
-export function resolveTemplateSource(from: string | undefined): {
-  sourceOwner: string;
-  sourceRepo: string;
-} | null {
-  if (from) {
-    return parseFromArg(from);
-  }
-
-  const detectedOwner = detectGitHubOwner();
-  if (detectedOwner) {
-    return {
-      sourceOwner: detectedOwner,
-      sourceRepo: DEFAULT_TEMPLATE_REPO,
-    };
-  }
-
-  return null;
+/** `--from` の値が owner / owner/repo のどちらとしても読めないときの失敗。 */
+function invalidFromArg(from: string): ZikuFailure {
+  return zikuFailure({
+    kind: "InvalidArgument",
+    argument: "--from",
+    value: from,
+    expected: "owner or owner/repo (e.g., my-org or my-org/my-templates)",
+  });
 }

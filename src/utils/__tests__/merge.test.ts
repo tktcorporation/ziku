@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { hashMap, repoRelPath } from "../../__tests__/brands";
 import {
+  UNKNOWN_MARKER_SIZE,
   asBaseContent,
   asLocalContent,
   asTemplateContent,
   classifyFiles,
-  hasConflictMarkers,
+  findConflictRegions,
+  knownMarkerSize,
   threeWayMerge,
 } from "../merge";
 
@@ -14,36 +17,38 @@ function merge(base: string, local: string, template: string, filePath?: string)
     base: asBaseContent(base),
     local: asLocalContent(local),
     template: asTemplateContent(template),
-    filePath,
+    filePath: filePath === undefined ? undefined : repoRelPath(filePath),
   });
 }
 
 describe("merge", () => {
   describe("classifyFiles", () => {
-    it("全7カテゴリに正しく分類する", () => {
+    it("全カテゴリに正しく分類する", () => {
       const result = classifyFiles({
-        baseHashes: {
+        baseHashes: hashMap({
           "unchanged.txt": "aaa",
           "auto-update.txt": "bbb",
           "local-only.txt": "ccc",
           "conflict.txt": "ddd",
           "deleted.txt": "eee",
           "deleted-locally.txt": "fff",
-        },
-        localHashes: {
+          "deleted-with-edits.txt": "ggg",
+        }),
+        localHashes: hashMap({
           "unchanged.txt": "aaa",
           "auto-update.txt": "bbb",
           "local-only.txt": "ccc-modified",
           "conflict.txt": "ddd-local",
-        },
-        templateHashes: {
+          "deleted-with-edits.txt": "ggg-edited",
+        }),
+        templateHashes: hashMap({
           "unchanged.txt": "aaa",
           "auto-update.txt": "bbb-updated",
           "local-only.txt": "ccc",
           "conflict.txt": "ddd-template",
           "new-file.txt": "fff",
           "deleted-locally.txt": "fff", // base と同じ → クリーン削除
-        },
+        }),
       });
 
       expect(result.unchanged).toContain("unchanged.txt");
@@ -53,6 +58,38 @@ describe("merge", () => {
       expect(result.newFiles).toContain("new-file.txt");
       expect(result.deletedFiles).toContain("deleted.txt");
       expect(result.deletedLocally).toContain("deleted-locally.txt");
+      expect(result.deletedWithLocalEdits).toContain("deleted-with-edits.txt");
+    });
+
+    // conflicts の要素はテンプレート内容をマージの片側として読むため、テンプレート側に
+    // 存在しないファイルが混ざると mergeOneFile が defect でクラッシュする。
+    it("conflicts に入るファイルはすべてテンプレート側に存在する（mergeOneFile の不変条件）", () => {
+      const result = classifyFiles({
+        baseHashes: hashMap({
+          "both-changed.txt": "aaa",
+          "local-deleted.txt": "bbb",
+          "template-deleted.txt": "ccc",
+          "template-deleted-clean.txt": "ddd",
+          "gone-everywhere.txt": "eee",
+        }),
+        localHashes: hashMap({
+          "both-changed.txt": "aaa-local",
+          "template-deleted.txt": "ccc-edited",
+          "template-deleted-clean.txt": "ddd",
+          "local-new.txt": "fff",
+        }),
+        templateHashes: hashMap({
+          "both-changed.txt": "aaa-template",
+          "local-deleted.txt": "bbb-updated",
+          "template-new.txt": "ggg",
+        }),
+      });
+
+      const templatePaths = new Set(["both-changed.txt", "local-deleted.txt", "template-new.txt"]);
+      expect(result.conflicts.length).toBeGreaterThan(0);
+      for (const file of result.conflicts) {
+        expect(templatePaths.has(file)).toBe(true);
+      }
     });
 
     it("空のハッシュマップを処理する", () => {
@@ -68,13 +105,14 @@ describe("merge", () => {
       expect(result.conflicts).toEqual([]);
       expect(result.newFiles).toEqual([]);
       expect(result.deletedFiles).toEqual([]);
+      expect(result.deletedWithLocalEdits).toEqual([]);
       expect(result.deletedLocally).toEqual([]);
     });
 
     it("ローカルのみに存在するファイルを localOnly に分類する", () => {
       const result = classifyFiles({
         baseHashes: {},
-        localHashes: { "my-file.txt": "abc" },
+        localHashes: hashMap({ "my-file.txt": "abc" }),
         templateHashes: {},
       });
 
@@ -83,9 +121,9 @@ describe("merge", () => {
 
     it("ローカルで削除されたファイルを deletedLocally に分類する", () => {
       const result = classifyFiles({
-        baseHashes: { "removed.txt": "abc" },
+        baseHashes: hashMap({ "removed.txt": "abc" }),
         localHashes: {},
-        templateHashes: { "removed.txt": "abc" },
+        templateHashes: hashMap({ "removed.txt": "abc" }),
       });
 
       expect(result.deletedLocally).toContain("removed.txt");
@@ -97,9 +135,9 @@ describe("merge", () => {
 
     it("テンプレートも更新されローカルで削除 → delete/modify conflict（git 準拠）", () => {
       const result = classifyFiles({
-        baseHashes: { "removed.txt": "abc" },
+        baseHashes: hashMap({ "removed.txt": "abc" }),
         localHashes: {},
-        templateHashes: { "removed.txt": "def" },
+        templateHashes: hashMap({ "removed.txt": "def" }),
       });
 
       // テンプレートが変更されている場合は conflict（delete/modify）
@@ -107,9 +145,35 @@ describe("merge", () => {
       expect(result.deletedLocally).not.toContain("removed.txt");
     });
 
+    it("テンプレートで削除されローカルが編集済み → deletedWithLocalEdits", () => {
+      const result = classifyFiles({
+        baseHashes: hashMap({ "rules.md": "abc" }),
+        localHashes: hashMap({ "rules.md": "abc-edited" }),
+        templateHashes: {},
+      });
+
+      // 「削除するか編集を残すか」の二択であって、テキストマージの対象ではない。
+      // テンプレート側にファイルが無いので conflicts にも入れられない。
+      expect(result.deletedWithLocalEdits).toContain("rules.md");
+      expect(result.conflicts).not.toContain("rules.md");
+      expect(result.deletedFiles).not.toContain("rules.md");
+    });
+
+    it("テンプレートで削除されローカルが base のまま → deletedFiles", () => {
+      const result = classifyFiles({
+        baseHashes: hashMap({ "rules.md": "abc" }),
+        localHashes: hashMap({ "rules.md": "abc" }),
+        templateHashes: {},
+      });
+
+      expect(result.deletedFiles).toContain("rules.md");
+      expect(result.deletedWithLocalEdits).not.toContain("rules.md");
+      expect(result.conflicts).not.toContain("rules.md");
+    });
+
     it("base とテンプレート両方で削除されたファイルは deletedFiles に分類する（deletedLocally ではない）", () => {
       const result = classifyFiles({
-        baseHashes: { "removed.txt": "abc" },
+        baseHashes: hashMap({ "removed.txt": "abc" }),
         localHashes: {},
         templateHashes: {},
       });
@@ -120,9 +184,9 @@ describe("merge", () => {
 
     it("両方が同じ内容に変更された場合は unchanged に分類する", () => {
       const result = classifyFiles({
-        baseHashes: { "file.txt": "old" },
-        localHashes: { "file.txt": "new" },
-        templateHashes: { "file.txt": "new" },
+        baseHashes: hashMap({ "file.txt": "old" }),
+        localHashes: hashMap({ "file.txt": "new" }),
+        templateHashes: hashMap({ "file.txt": "new" }),
       });
 
       expect(result.unchanged).toContain("file.txt");
@@ -137,7 +201,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toContain("local-added");
       expect(result.content).toContain("template-added");
     });
@@ -150,7 +214,7 @@ describe("merge", () => {
       const result = merge(base, local, template);
 
       // diff3Merge が同じ行の異なる変更を検出してコンフリクトマーカーを挿入する
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
       expect(result.content).toContain("=======");
       expect(result.content).toContain(">>>>>>> TEMPLATE");
@@ -163,7 +227,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toBe("same modified content\n");
     });
 
@@ -174,7 +238,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toBe("updated by template\n");
     });
 
@@ -185,7 +249,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toBe("modified locally\n");
     });
 
@@ -196,7 +260,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
     });
 
     it("JSON ファイルでも行レベルの 3-way マージが適用される", () => {
@@ -206,14 +270,12 @@ describe("merge", () => {
 
       const result = merge(base, local, template, "config.json");
 
-      // 行レベルの 3-way マージで異なる箇所への追加が正しくマージされるか、
-      // コンフリクトマーカーで明示される
-      if (!result.hasConflicts) {
-        expect(result.content).toContain('"c": 3');
-        expect(result.content).toContain('"d": 4');
-      } else {
-        expect(result.content).toContain("<<<<<<< LOCAL");
-      }
+      // 両側が同じ末尾行（"b": 2）を書き換えて別のキーを足しているため、
+      // 行レベルでは同じ領域の変更として conflict になる
+      expect(result._tag).toBe("Conflicted");
+      expect(result.content).toContain("<<<<<<< LOCAL");
+      expect(result.content).toContain('"c": 3');
+      expect(result.content).toContain('"d": 4');
     });
 
     it("filePath なしの場合はテキストマージを使用する", () => {
@@ -223,7 +285,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
     });
   });
 
@@ -236,7 +298,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toContain("header-modified");
       expect(result.content).toContain("footer-updated");
     });
@@ -271,7 +333,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template);
 
-      if (result.hasConflicts) {
+      if (result._tag === "Conflicted") {
         // マーカーが含まれるが、変更されていない行（line3〜line9）も結果に含まれる
         expect(result.content).toContain("<<<<<<< LOCAL");
         expect(result.content).toContain(">>>>>>> TEMPLATE");
@@ -282,9 +344,9 @@ describe("merge", () => {
     });
   });
 
-  describe("threeWayMerge - local/template の非対称性（#148 回帰テスト）", () => {
+  describe("threeWayMerge - local/template の非対称性（回帰テスト）", () => {
     it("コンフリクト時にコンフリクトマーカーを挿入する", () => {
-      // 背景: #148 で引数が逆転し、テンプレート側をベースにしたためローカルのコメントが消えた
+      // 背景: 引数が逆転してテンプレート側がベースになると、ローカルのコメントが消える
       // テキストマージではコメントは通常の行として扱われるため、コンフリクト時はマーカーで保護される
       const base = '{\n  "version": "1.0"\n}';
       const local = '{\n  "version": "2.0-user"\n}';
@@ -292,7 +354,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template, "package.json");
 
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
       expect(result.content).toContain("=======");
       expect(result.content).toContain(">>>>>>> TEMPLATE");
@@ -311,8 +373,8 @@ describe("merge", () => {
       // 逆の順序
       const reversed = merge(base, templateValue, localValue, "test.json");
 
-      expect(correct.hasConflicts).toBe(true);
-      expect(reversed.hasConflicts).toBe(true);
+      expect(correct._tag).toBe("Conflicted");
+      expect(reversed._tag).toBe("Conflicted");
 
       // どちらもコンフリクトマーカーが含まれる
       expect(correct.content).toContain("<<<<<<< LOCAL");
@@ -328,7 +390,7 @@ describe("merge", () => {
 
       const result = merge(base, local, template, "config.toml");
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toContain('python = "3.12"');
       expect(result.content).toContain("quiet = true");
     });
@@ -342,28 +404,255 @@ describe("merge", () => {
 
       const result = merge(base, local, template, "config.yml");
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toContain("author: me");
       expect(result.content).toContain("key: updated");
     });
   });
 
   describe("threeWayMerge - テキストマージ後のバリデーション", () => {
+    // 行レベルではクリーンにマージできるが、結果が JSON として壊れる組み合わせ。
+    // ローカルが閉じ括弧を失っており、テンプレートは離れた行だけを変更している。
+    const brokenJson = {
+      base: '{\n  "a": 1,\n  "b": 2,\n  "c": 3,\n  "d": 4,\n  "e": 5\n}\n',
+      local: '{\n  "a": 1,\n  "b": 2,\n  "c": 3,\n  "d": 4,\n  "e": 5\n',
+      template: '{\n  "a": 10,\n  "b": 2,\n  "c": 3,\n  "d": 4,\n  "e": 5\n}\n',
+    };
+
+    it("テキストマージ自体は行レベルでクリーンに通る（バリデーションの前提）", () => {
+      const result = merge(brokenJson.base, brokenJson.local, brokenJson.template);
+
+      expect(result._tag).toBe("Clean");
+      expect(result.content).not.toContain("<<<<<<<");
+    });
+
     it("テキストマージが壊れた構造ファイルを生成した場合、コンフリクトマーカーにフォールバック", () => {
-      // 構造ファイルとして壊れた内容のテキストマージ
-      const base = "not valid toml but\nline1\nline2\n";
-      const local = "not valid toml but\nline1-modified\nline2\n";
-      const template = "not valid toml but\nline1\nline2-modified\n";
+      const result = merge(brokenJson.base, brokenJson.local, brokenJson.template, "config.json");
 
-      const result = merge(base, local, template, "config.toml");
+      expect(result._tag).toBe("Conflicted");
+      expect(result.content).toContain("<<<<<<< LOCAL");
+      expect(result.content).toContain("||||||| BASE");
+      expect(result.content).toContain(">>>>>>> TEMPLATE");
+      // 両側の内容がそのまま残っている（どちらかが欠けたら解決できない）
+      expect(result.content).toContain('"a": 1,');
+      expect(result.content).toContain('"a": 10,');
+    });
 
-      // テキストマージの結果（成功またはマーカー）
-      expect(result).toBeDefined();
+    it("ファイル全体フォールバックが末尾改行を保ち、マーカー直前に空行を入れない", () => {
+      const result = merge(brokenJson.base, brokenJson.local, brokenJson.template, "config.json");
+
+      expect(result.content.endsWith(">>>>>>> TEMPLATE\n")).toBe(true);
+      expect(result.content).not.toContain("\n\n|||||||");
+      expect(result.content).not.toContain("\n\n=======");
+      expect(result.content).not.toContain("\n\n>>>>>>>");
+    });
+
+    it("構造が壊れていない JSON はクリーンマージのまま確定する", () => {
+      const base = '{\n  "a": 1,\n  "b": 2,\n  "c": 3,\n  "d": 4,\n  "e": 5\n}\n';
+      const local = '{\n  "a": 1,\n  "b": 2,\n  "c": 3,\n  "d": 4,\n  "e": 50\n}\n';
+      const template = '{\n  "a": 10,\n  "b": 2,\n  "c": 3,\n  "d": 4,\n  "e": 5\n}\n';
+
+      const result = merge(base, local, template, "config.json");
+
+      expect(result._tag).toBe("Clean");
+      expect(JSON.parse(result.content)).toEqual({ a: 10, b: 2, c: 3, d: 4, e: 50 });
     });
   });
 
-  describe("hasConflictMarkers", () => {
-    it("コンフリクトマーカーを含む内容を検出する", () => {
+  describe("threeWayMerge - コンフリクトマーカーの生成", () => {
+    it("base セクションを出力する（git の diff3 conflict style 相当）", () => {
+      const base = "line1\noriginal\nline3\n";
+      const local = "line1\nlocal-change\nline3\n";
+      const template = "line1\ntemplate-change\nline3\n";
+
+      const result = merge(base, local, template);
+
+      expect(result._tag).toBe("Conflicted");
+      const markerOrder = result.content
+        .split("\n")
+        .filter((line) => /^[<|=>]{7}/.test(line))
+        .map((line) => line.slice(0, 7));
+      expect(markerOrder).toEqual(["<<<<<<<", "|||||||", "=======", ">>>>>>>"]);
+      // base セクションに共通祖先の行が入る
+      expect(result.content).toContain("||||||| BASE\noriginal\n=======");
+    });
+
+    it("既にマーカーを含む内容をマージするとマーカーが伸長される", () => {
+      const withMarkers = [
+        "intro",
+        "<<<<<<< LOCAL",
+        "unresolved local",
+        "=======",
+        "unresolved template",
+        ">>>>>>> TEMPLATE",
+        "outro",
+        "",
+      ].join("\n");
+      const base = withMarkers;
+      const local = withMarkers.replace("intro", "intro-local");
+      const template = withMarkers.replace("intro", "intro-template");
+
+      const result = merge(base, local, template);
+
+      expect(result._tag).toBe("Conflicted");
+      // 生成されたマーカーは 3 種とも 8 文字。既存の 7 文字マーカーは内容として残る
+      expect(result.content).toContain("<<<<<<<< LOCAL");
+      expect(result.content).toContain("|||||||| BASE");
+      expect(result.content).toContain("\n========\n");
+      expect(result.content).toContain(">>>>>>>> TEMPLATE");
+      expect(result.content).toContain("<<<<<<< LOCAL");
+    });
+  });
+
+  describe("threeWayMerge - 改行コードと BOM", () => {
+    it("CRLF のファイルはマージ後も CRLF のまま", () => {
+      const base = "line1\r\noriginal\r\nline3\r\n";
+      const local = "line1\r\nlocal-change\r\nline3\r\n";
+      const template = "line1\r\noriginal\r\nline3\r\ntemplate-added\r\n";
+
+      const result = merge(base, local, template);
+
+      expect(result._tag).toBe("Clean");
+      expect(result.content).toBe("line1\r\nlocal-change\r\nline3\r\ntemplate-added\r\n");
+      expect(result.content).not.toMatch(/[^\r]\n/);
+    });
+
+    it("改行コードだけが違う両側は差分にならず、内容の変更だけがマージされる", () => {
+      const base = "line1\r\nline2\r\n";
+      const local = "line1\r\nline2\r\n";
+      const template = "line1\nline2\ntemplate-added\n";
+
+      const result = merge(base, local, template);
+
+      // 全行が衝突するのではなく、テンプレートが加えた 1 行だけが反映される
+      expect(result._tag).toBe("Clean");
+      expect(result.content).toBe("line1\r\nline2\r\ntemplate-added\r\n");
+    });
+
+    it("両側の内容が同一で改行コードだけ違う場合はローカルの改行コードを保つ", () => {
+      const result = merge("line1\n", "line1\r\n", "line1\n");
+
+      expect(result._tag).toBe("Clean");
+      expect(result.content).toBe("line1\r\n");
+    });
+
+    it("生成するコンフリクトマーカーもファイルの改行コードに合わせる", () => {
+      const base = "line1\r\noriginal\r\n";
+      const local = "line1\r\nlocal-change\r\n";
+      const template = "line1\r\ntemplate-change\r\n";
+
+      const result = merge(base, local, template);
+
+      expect(result._tag).toBe("Conflicted");
+      expect(result.content).toContain("<<<<<<< LOCAL\r\n");
+      expect(result.content).toContain(">>>>>>> TEMPLATE\r\n");
+      expect(result.content).not.toMatch(/[^\r]\n/);
+    });
+
+    it("BOM 付きのファイルはマージ後も BOM を保つ", () => {
+      const base = "\uFEFFline1\nline2\nline3\n";
+      const local = "\uFEFFline1\nlocal-change\nline3\n";
+      const template = "line1\nline2\nline3\ntemplate-added\n";
+
+      const result = merge(base, local, template);
+
+      expect(result._tag).toBe("Clean");
+      expect(result.content.startsWith("\uFEFF")).toBe(true);
+      // BOM は 1 つだけで、内容の途中には現れない
+      expect(result.content.slice(1)).not.toContain("\uFEFF");
+      expect(result.content).toContain("local-change");
+      expect(result.content).toContain("template-added");
+    });
+
+    it("BOM の有無だけが違う両側は差分にならない", () => {
+      const result = merge("line1\n", "\uFEFFline1\n", "line1\nadded\n");
+
+      expect(result._tag).toBe("Clean");
+      expect(result.content).toBe("\uFEFFline1\nadded\n");
+    });
+
+    it("ローカルが削除されている場合はテンプレートの改行コードを保つ", () => {
+      const base = "line1\r\nline2\r\n";
+      const template = "line1\r\nline2\r\ntemplate-added\r\n";
+
+      const result = merge(base, "", template);
+
+      expect(result.content).toContain("\r\n");
+      expect(result.content).not.toMatch(/[^\r]\n/);
+    });
+
+    it("ローカルが削除されている場合はテンプレートの BOM を保つ", () => {
+      const result = merge("\uFEFFline1\n", "", "\uFEFFline1\ntemplate-added\n");
+
+      expect(result.content.startsWith("\uFEFF")).toBe(true);
+      expect(result.content.slice(1)).not.toContain("\uFEFF");
+    });
+
+    it("ローカルもテンプレートも空なら結果も空", () => {
+      const result = merge("line1\r\n", "", "");
+
+      expect(result._tag).toBe("Clean");
+      expect(result.content).toBe("");
+    });
+
+    it("BOM 付きファイルの 1 行目から始まるコンフリクトも未解決として検出される", () => {
+      const base = "\uFEFForiginal\ntail\n";
+      const local = "\uFEFFlocal-change\ntail\n";
+      const template = "\uFEFFtemplate-change\ntail\n";
+
+      const result = merge(base, local, template);
+
+      expect(result._tag).toBe("Conflicted");
+      if (result._tag !== "Conflicted") return;
+      expect(result.regions[0].startLine).toBe(1);
+      // BOM はファイル先頭に戻り、マーカーの内側には入らない
+      expect(result.content.startsWith("\uFEFF<<<<<<< LOCAL")).toBe(true);
+    });
+  });
+
+  describe("MergeOutcome", () => {
+    it("コンフリクトしたマージは Conflicted になり、regions が実際のマーカー位置を指す", () => {
+      const base = "line1\nline2\nline3\n";
+      const local = "line1\nlocal-change\nline3\n";
+      const template = "line1\ntemplate-change\nline3\n";
+
+      const result = merge(base, local, template);
+
+      if (result._tag !== "Conflicted") throw new Error(`expected Conflicted, got ${result._tag}`);
+      const startLines = result.regions.map((r) => r.startLine);
+      expect(startLines.length).toBeGreaterThan(0);
+      // 各 startLine が実際に開始マーカーの行を指している
+      const lines = result.content.split("\n");
+      for (const startLine of startLines) {
+        expect(lines[startLine - 1]).toMatch(/^<{7,} /);
+      }
+    });
+
+    it("両側が離れた行を変更したマージは Clean になる", () => {
+      const base = "line1\nline2\nline3\nline4\nline5\n";
+      const local = "line1-local\nline2\nline3\nline4\nline5\n";
+      const template = "line1\nline2\nline3\nline4\nline5-template\n";
+
+      const result = merge(base, local, template);
+
+      expect(result._tag).toBe("Clean");
+      expect(result.content).toContain("line1-local");
+      expect(result.content).toContain("line5-template");
+    });
+
+    it("ローカルとテンプレートが同一でも、未解決マーカーが残っていれば Conflicted", () => {
+      // 内容が一致していてもマーカー入りのテキストは解決済みではない。Clean として
+      // 素通しすると、そのままテンプレートへの PR に載る。
+      const unresolved = ["<<<<<<< LOCAL", "a", "=======", "b", ">>>>>>> TEMPLATE", ""].join("\n");
+
+      const result = merge("base\n", unresolved, unresolved);
+
+      expect(result._tag).toBe("Conflicted");
+    });
+  });
+
+  describe("findConflictRegions", () => {
+    it("コンフリクトマーカーを含む内容を検出し、ブロックの開始行を返す", () => {
       const content = `line1
 <<<<<<< LOCAL
 local content
@@ -372,28 +661,355 @@ template content
 >>>>>>> TEMPLATE
 line2`;
 
-      const result = hasConflictMarkers(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
-      expect(result.found).toBe(true);
-      expect(result.lines).toEqual([2, 4, 6]);
+      expect(regions).toEqual([{ startLine: 2 }]);
+    });
+
+    it("base セクション付き（diff3 形式）のブロックを検出する", () => {
+      const content = [
+        "<<<<<<< LOCAL",
+        "local content",
+        "||||||| BASE",
+        "base content",
+        "=======",
+        "template content",
+        ">>>>>>> TEMPLATE",
+        "",
+      ].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions).toEqual([{ startLine: 1 }]);
+    });
+
+    it("伸長されたマーカーのブロックを検出する", () => {
+      const content = [
+        "<<<<<<<< LOCAL",
+        "local content",
+        "|||||||| BASE",
+        "base content",
+        "========",
+        "template content",
+        ">>>>>>>> TEMPLATE",
+        "",
+      ].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions).toEqual([{ startLine: 1 }]);
+    });
+
+    it("複数ブロックをすべて検出する", () => {
+      const content = [
+        "<<<<<<< LOCAL",
+        "a",
+        "=======",
+        "b",
+        ">>>>>>> TEMPLATE",
+        "middle",
+        "<<<<<<< LOCAL",
+        "c",
+        "=======",
+        "d",
+        ">>>>>>> TEMPLATE",
+        "",
+      ].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions.map((r) => r.startLine)).toEqual([1, 7]);
     });
 
     it("コンフリクトマーカーがない場合", () => {
       const content = "normal line1\nnormal line2\nnormal line3\n";
 
-      const result = hasConflictMarkers(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
-      expect(result.found).toBe(false);
-      expect(result.lines).toEqual([]);
+      expect(regions).toEqual([]);
     });
 
-    it("部分的なマーカー（<<<<<<< のみ）を検出する", () => {
-      const content = "line1\n<<<<<<< LOCAL\nsome content\n";
+    it("Markdown の setext 見出しと区切り線を未解決と誤検出しない", () => {
+      const content = [
+        "Document Title",
+        "==============",
+        "",
+        "本文",
+        "",
+        "Section",
+        "=======",
+        "",
+        "本文",
+        "",
+      ].join("\n");
 
-      const result = hasConflictMarkers(content);
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
 
-      expect(result.found).toBe(true);
-      expect(result.lines).toEqual([2]);
+      expect(regions).toEqual([]);
+    });
+
+    it("ラベルの無い `<<<<<<<` は、対応する `=======` / `>>>>>>>` が無ければ未解決とみなさない", () => {
+      // 誤検出すると `pull --continue` が永久に通らず、lock を手編集する以外に
+      // 復旧手段が無くなる。ziku のラベルも並びも無い行は本文として扱う。
+      const content = "line1\n<<<<<<<\nsome content\n";
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions).toEqual([]);
+    });
+
+    it("閉じ側のマーカーだけを消したブロックは未解決のまま", () => {
+      // 数えないと `pull --continue` が通り、開始マーカーと区切り行が残ったまま
+      // 同期ベースへ載って、以後テンプレートへ送られる。
+      const content = ["<<<<<<< LOCAL", "a", "=======", "b", ""].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions.map((r) => r.startLine)).toEqual([1]);
+    });
+
+    it("`|||||||` まで進んで閉じないブロックも未解決のまま", () => {
+      const content = ["<<<<<<< LOCAL", "a", "||||||| BASE", "o", ""].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions.map((r) => r.startLine)).toEqual([1]);
+    });
+
+    it("閉じたブロックの後ろに開きかけのブロックが残る場合は両方数える", () => {
+      const content = [
+        "<<<<<<< LOCAL",
+        "a",
+        "=======",
+        "b",
+        ">>>>>>> TEMPLATE",
+        "<<<<<<< LOCAL",
+        "c",
+        "=======",
+        "d",
+        "",
+      ].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions.map((r) => r.startLine)).toEqual([1, 6]);
+    });
+
+    it("`=======` だけを消したブロックも未解決のまま", () => {
+      // `>>>>>>>` で打ち切られてファイル末尾に到達しないため、末尾の検査だけでは拾えない。
+      const content = ["<<<<<<< LOCAL", "a", "||||||| BASE", "o", ">>>>>>> TEMPLATE", ""].join(
+        "\n",
+      );
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions.map((r) => r.startLine)).toEqual([1]);
+    });
+
+    it("開きかけのブロックの途中で次のブロックが始まっても両方数える", () => {
+      const content = [
+        "<<<<<<< LOCAL",
+        "a",
+        "=======",
+        "b",
+        "<<<<<<< LOCAL",
+        "c",
+        "=======",
+        "d",
+        ">>>>>>> TEMPLATE",
+        "",
+      ].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions.map((r) => r.startLine)).toEqual([1, 5]);
+    });
+
+    it("`<<<<<<< LOCAL` と `>>>>>>> TEMPLATE` だけが残った並びを未解決として数える", () => {
+      // ziku が書いたラベルが残っている以上、並びが崩れていても残骸である。
+      const content = ["<<<<<<< LOCAL", "a", ">>>>>>> TEMPLATE", ""].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions.map((r) => r.startLine)).toEqual([1]);
+    });
+
+    it("ラベルの無い `<<<<<<<` と `>>>>>>>` だけの並びは本文として扱う", () => {
+      // ラベルが無く、区切りも base マーカーも無い並びは、コンフリクトの残骸と言い切れない。
+      const content = ["<<<<<<<", "a", ">>>>>>>", ""].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions).toEqual([]);
+    });
+
+    it("`||||||| BASE` だけが残った場合を数える", () => {
+      const content = ["a", "||||||| BASE", "b", ""].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions.map((r) => r.startLine)).toEqual([2]);
+    });
+
+    it("`>>>>>>> TEMPLATE` だけが残った場合を数える", () => {
+      const content = ["a", ">>>>>>> TEMPLATE", "b", ""].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions.map((r) => r.startLine)).toEqual([2]);
+    });
+
+    it("ラベルの付かない `>>>>>>>`（深い引用）を未解決とみなさない", () => {
+      const content = ["本文", ">>>>>>> some quoted text", "本文", ""].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions).toEqual([]);
+    });
+
+    it("git が書いたマーカー（ブランチ名ラベル）だけの行を未解決とみなさない", () => {
+      // ziku のラベルは側の名前だけで、git はブランチ名を載せる。ラベルを根拠に数えるのは
+      // ziku 自身が書いた行に限る。
+      const content = ["本文", ">>>>>>> feature/my-branch", "本文", ""].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions).toEqual([]);
+    });
+
+    it("開始マーカーだけを消した残骸を未解決として数える", () => {
+      // 数えないと `pull --continue` が通り、マーカー断片を載せた内容が同期ベースへ
+      // 確定して以後テンプレートへ送られる。
+      const content = ["a", "||||||| BASE", "o", "=======", "b", ">>>>>>> TEMPLATE", ""].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions.map((r) => r.startLine)).toEqual([2]);
+    });
+
+    it("`=======` から `>>>>>>>` だけの並びも未解決として数える", () => {
+      const content = ["a", "=======", "b", ">>>>>>> TEMPLATE", ""].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions.map((r) => r.startLine)).toEqual([2]);
+    });
+
+    it("単独の `|||||||`（空セルだけのテーブル行）を未解決とみなさない", () => {
+      const content = ["| a | b |", "| --- | --- |", "|||||||", "", "本文", ""].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions).toEqual([]);
+    });
+
+    it("単独の `>>>>>>>`（深くネストした引用）を未解決とみなさない", () => {
+      const content = ["本文", ">>>>>>> quoted", "本文", ""].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions).toEqual([]);
+    });
+
+    it("`=======` で終わってファイルが終わる並びを未解決とみなさない", () => {
+      // 閉じ側まで揃わない並びは、setext 見出しの下線と区別できない。
+      const content = ["Section", "=======", "", "本文", ""].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions).toEqual([]);
+    });
+
+    it("マージ結果に残るブロックだけを数え、内容中の短いマーカーは本文として扱う", () => {
+      const withMarkers = ["intro", "<<<<<<< LOCAL", "a", "=======", "b", ">>>>>>> TEMPLATE", ""];
+      const base = withMarkers.join("\n");
+      const local = base.replace("intro", "intro-local");
+      const template = base.replace("intro", "intro-template");
+
+      const merged = merge(base, local, template);
+      const regions = findConflictRegions(
+        merged.content,
+        merged._tag === "Conflicted" ? merged.markerSize : UNKNOWN_MARKER_SIZE,
+      );
+
+      // 生成された 8 文字ブロック（1 行目）と、未解決のまま残る 7 文字ブロックの両方。
+      // 後者は生成長より短いのでラベルでは数えず、並びが揃っていることで数える。
+      expect(regions.map((r) => r.startLine)).toEqual([1, 8]);
+    });
+
+    it("4 本のマーカーをどう消しても、ラベル付きの行が 1 本でも残れば数える", () => {
+      // 崩れ方を 1 つずつ列挙して塞ぐと、列挙から漏れた形で取りこぼす。消し方の全組み合わせで
+      // 判定を固定する。
+      const block = ["<<<<<<< LOCAL", "a", "||||||| BASE", "o", "=======", "b", ">>>>>>> TEMPLATE"];
+      const markerLines = [0, 2, 4, 6];
+      const labeledLines = [0, 2, 6];
+
+      for (let mask = 0; mask < 2 ** markerLines.length; mask++) {
+        const removed = new Set(markerLines.filter((_, k) => (mask >> k) % 2 === 1));
+        const kept = block.filter((_, i) => !removed.has(i));
+        const remainsLabeled = labeledLines.some((i) => !removed.has(i));
+
+        const regions = findConflictRegions(kept.join("\n"), UNKNOWN_MARKER_SIZE);
+
+        // ラベル付きの行が 1 本も残らないのは、`=======` だけが残る形と全部消した形。
+        // 前者は setext 見出しの下線と区別できないので数えない。
+        expect({ mask, detected: regions.length > 0 }).toEqual({ mask, detected: remainsLabeled });
+      }
+    });
+
+    it("生成長より短いラベル付きマーカーは、本文に書かれた例として扱う", () => {
+      // マーカーの書き方を説明する文書を同期していると、解決し終えた後もこの行は残る。
+      // 数えると `pull --continue` が永久に通らず、正当な記述を消す以外の復旧手段が無くなる。
+      const content = [
+        "コンフリクトの開始行はこう書かれる:",
+        "",
+        "<<<<<<< LOCAL",
+        "",
+        "以上。",
+        "",
+      ].join("\n");
+
+      const regions = findConflictRegions(content, knownMarkerSize(8));
+
+      expect(regions).toEqual([]);
+    });
+
+    it("生成長以上のラベル付きマーカーは、本文に同じ形の例があっても数える", () => {
+      const content = [
+        "コンフリクトの開始行はこう書かれる:",
+        "",
+        "<<<<<<< LOCAL",
+        "",
+        "<<<<<<<< LOCAL",
+        "残骸",
+        "",
+      ].join("\n");
+
+      const regions = findConflictRegions(content, knownMarkerSize(8));
+
+      expect(regions.map((r) => r.startLine)).toEqual([5]);
+    });
+
+    it("生成長が分からなければ、ラベル付きマーカーを長さによらず数える", () => {
+      // ziku が書いた行かを見分ける手がかりが無い以上、取りこぼすより多めに数える側へ倒す。
+      const content = ["コンフリクトの開始行はこう書かれる:", "", "<<<<<<< LOCAL", ""].join("\n");
+
+      const regions = findConflictRegions(content, UNKNOWN_MARKER_SIZE);
+
+      expect(regions.map((r) => r.startLine)).toEqual([3]);
+    });
+
+    it("マージ結果は、囲むのに使ったマーカーの長さを持つ", () => {
+      // この長さが `--continue` の走査へ渡り、本文のマーカー例と残骸を分ける根拠になる。
+      const withMarkers = ["intro", "<<<<<<< LOCAL", "a", "=======", "b", ">>>>>>> TEMPLATE", ""];
+      const base = withMarkers.join("\n");
+
+      const merged = merge(base, base.replace("intro", "local"), base.replace("intro", "template"));
+
+      expect(merged._tag === "Conflicted" ? merged.markerSize : undefined).toEqual({
+        kind: "known",
+        size: 8,
+      });
     });
   });
 
@@ -401,28 +1017,23 @@ line2`;
   // 契約検証: threeWayMerge の結果が正しいことを保証するテスト
   // ====================================================================
   //
-  // 契約: threeWayMerge が hasConflicts: false を返す場合、
+  // 契約: threeWayMerge が Clean を返す場合、
   // result.content にはテンプレート側の変更が反映されていなければならない。
   // ローカル側の変更も保持されていなければならない。
   // どちらかが消失している場合はバグ。
 
-  describe("契約検証: hasConflicts: false ならテンプレート変更が反映されている", () => {
-    it("JSON: 両方が異なるキーを追加 → テンプレートのキーが結果に含まれる", () => {
+  describe("契約検証: Clean ならテンプレート変更が反映されている", () => {
+    it("JSON: 両方が同じ末尾行へ別のキーを追加 → 両側の変更がマーカー内に残る", () => {
       const base = JSON.stringify({ a: 1 }, null, 2);
       const local = JSON.stringify({ a: 1, localKey: "local" }, null, 2);
       const template = JSON.stringify({ a: 1, templateKey: "template" }, null, 2);
 
       const result = merge(base, local, template, "settings.json");
 
-      if (!result.hasConflicts) {
-        // Auto-merged なら両方の変更が含まれるべき
-        expect(result.content).toContain("localKey");
-        expect(result.content).toContain("templateKey");
-      }
-      // hasConflicts: true ならマーカーが必須
-      if (result.hasConflicts) {
-        expect(result.content).toContain("<<<<<<< LOCAL");
-      }
+      expect(result._tag).toBe("Conflicted");
+      expect(result.content).toContain("<<<<<<< LOCAL");
+      expect(result.content).toContain("localKey");
+      expect(result.content).toContain("templateKey");
     });
 
     it("JSON: 同じキーを異なる値に変更 → 必ずコンフリクトになる", () => {
@@ -432,8 +1043,8 @@ line2`;
 
       const result = merge(base, local, template, "package.json");
 
-      // 同じキーを異なる値に変更 → 必ずコンフリクト（hasConflicts: true）であるべき
-      expect(result.hasConflicts).toBe(true);
+      // 同じキーを異なる値に変更 → 必ずコンフリクトであるべき
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
       expect(result.content).toContain("2.0-local");
       expect(result.content).toContain("2.0-template");
@@ -455,7 +1066,7 @@ line2`;
       const result = merge(base, local, template, ".claude/settings.json");
 
       // 配列の同じ位置を異なる内容に変更 → コンフリクト
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
       expect(result.content).toContain("pnpm");
       expect(result.content).toContain("git");
@@ -480,15 +1091,12 @@ line2`;
 
       const result = merge(base, local, template, "config.json");
 
-      // テキストマージでは行レベルで処理されるため、
-      // コンフリクトマーカーで両側の変更が可視化される
-      if (!result.hasConflicts) {
-        expect(result.content).toContain('"updated"');
-        expect(result.content).toContain("localOnly");
-      }
-      if (result.hasConflicts) {
-        expect(result.content).toContain("<<<<<<< LOCAL");
-      }
+      // 変更が隣接する行に集中しているため 1 つのブロックにまとまり、
+      // 両側の変更がマーカー内に可視化される
+      expect(result._tag).toBe("Conflicted");
+      expect(result.content).toContain("<<<<<<< LOCAL");
+      expect(result.content).toContain('"updated"');
+      expect(result.content).toContain("localOnly");
     });
 
     it("Markdown: 同じ行を異なる内容に変更 → コンフリクトマーカーが挿入される", () => {
@@ -498,7 +1106,7 @@ line2`;
 
       const result = merge(base, local, template, "rules/pr-workflow.md");
 
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
       expect(result.content).toContain("Local modified");
       expect(result.content).toContain("Template modified");
@@ -514,7 +1122,7 @@ line2`;
 
       const result = merge(base, local, template, "rules/pr-workflow.md");
 
-      if (!result.hasConflicts) {
+      if (result._tag === "Clean") {
         expect(result.content).toContain("Local change in section 1");
         expect(result.content).toContain("Template change in section 3");
       }
@@ -529,7 +1137,7 @@ line2`;
 
       const result = merge(base, local, template);
 
-      if (!result.hasConflicts) {
+      if (result._tag === "Clean") {
         expect(result.content).toContain("2.0-local");
       }
     });
@@ -541,7 +1149,7 @@ line2`;
 
       const result = merge(base, local, template);
 
-      if (result.hasConflicts) {
+      if (result._tag === "Conflicted") {
         expect(result.content).toContain("<<<<<<< LOCAL");
       } else {
         expect(result.content).toContain("LOCAL");
@@ -584,7 +1192,7 @@ line2`;
       const result = merge(base, local, template, "settings.json");
 
       // permissions.allow 配列を両側が異なる内容に変更 → コンフリクトであるべき
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
     });
 
@@ -596,7 +1204,7 @@ line2`;
       const result = merge(base, local, template, "config.toml");
 
       // node を両側が変更 → コンフリクト
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
     });
 
@@ -608,7 +1216,7 @@ line2`;
       const result = merge(base, local, template, "config.yml");
 
       // version を両側が変更 → コンフリクト
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
     });
   });
@@ -623,12 +1231,12 @@ line2`;
 
       // 正しい結果: ローカルの内容がそのまま保持される
       // (テンプレートの a→10 は既に反映済み、ローカルの b→20 はローカル独自の変更)
-      if (!result.hasConflicts) {
+      if (result._tag === "Clean") {
         const parsed = JSON.parse(result.content);
         expect(parsed.a).toBe(10);
         expect(parsed.b).toBe(20);
       }
-      if (result.hasConflicts) {
+      if (result._tag === "Conflicted") {
         expect(result.content).toContain("<<<<<<< LOCAL");
       }
     });
@@ -640,7 +1248,7 @@ line2`;
 
       const result = merge(base, local, template, "config.toml");
 
-      if (!result.hasConflicts) {
+      if (result._tag === "Clean") {
         expect(result.content).toContain("python");
         expect(result.content).toContain('"22"');
       }
@@ -654,7 +1262,7 @@ line2`;
       const result = merge(base, local, template, "settings.json");
 
       // base === template → テンプレート側に変更なし → ローカルをそのまま返すのが正しい
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toBe(local);
     });
 
@@ -665,15 +1273,15 @@ line2`;
 
       const result = merge(base, local, template, ".mise.toml");
 
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
       expect(result.content).toContain(">>>>>>> TEMPLATE");
     });
   });
 
-  describe("3-way merge #51 回帰テスト: サイレント上書き・内容二重化の防止", () => {
+  describe("3-way merge の回帰テスト: サイレント上書き・内容二重化の防止", () => {
     it("settings.json: ローカルの true がテンプレートの false で上書きされない", () => {
-      // #51 の再現: base/template で false、local で true に変更
+      // base/template で false、local で true に変更した状態
       const base = JSON.stringify(
         {
           enabledPlugins: {
@@ -713,7 +1321,7 @@ line2`;
 
       // ローカルの true 値がサイレントに上書きされてはならない
       // コンフリクトマーカーで明示されるか、ローカル値が保持される
-      if (result.hasConflicts) {
+      if (result._tag === "Conflicted") {
         // コンフリクト内にローカルの true が含まれるべき
         expect(result.content).toContain("true");
         expect(result.content).toContain("<<<<<<< LOCAL");
@@ -731,7 +1339,7 @@ line2`;
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("<<<<<<< LOCAL");
       expect(result.content).toContain("local-value");
       expect(result.content).toContain("template-value");
@@ -762,7 +1370,7 @@ line2`;
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toBe("same content\n");
     });
 
@@ -773,7 +1381,7 @@ line2`;
 
       const result = merge(base, local, template);
 
-      expect(result.hasConflicts).toBe(false);
+      expect(result._tag).toBe("Clean");
       expect(result.content).toContain("header-modified");
       expect(result.content).toContain("footer-updated");
     });
@@ -785,7 +1393,7 @@ line2`;
 
       const result = merge(base, local, template, "package.json");
 
-      expect(result.hasConflicts).toBe(true);
+      expect(result._tag).toBe("Conflicted");
       expect(result.content).toContain("2.0-local");
       expect(result.content).toContain("2.0-template");
     });
@@ -805,7 +1413,7 @@ line2`;
 
       // debug = true（ローカルの変更）が結果に含まれるか、
       // コンフリクトマーカーの LOCAL 側に含まれること
-      if (result.hasConflicts) {
+      if (result._tag === "Conflicted") {
         expect(result.content).toContain("debug = true");
       } else {
         expect(result.content).toContain("debug = true");

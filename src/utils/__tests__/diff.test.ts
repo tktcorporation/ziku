@@ -1,15 +1,23 @@
-import { describe, expect, it } from "vitest";
-import type { FileDiff } from "../../modules/schemas";
-import { colorizeUnifiedDiff, generateUnifiedDiff } from "../diff";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "pathe";
+import { afterEach, describe, expect, it } from "vitest";
+import { absPath, repoRelPath, syncScope } from "../../__tests__/brands";
+import type { AbsPath, FileDiff } from "../../modules/schemas";
+import { detectDiff, generateUnifiedDiff } from "../diff";
+
+/** バイナリの内容を差分の string チャネルへ載せた形（バイト保存の latin1）。 */
+function asDiffContent(bytes: number[]): string {
+  return Buffer.from(bytes).toString("latin1");
+}
 
 describe("diff", () => {
   describe("generateUnifiedDiff", () => {
     it("added タイプのファイルで unified diff を生成する", () => {
       const fileDiff: FileDiff = {
-        path: "new-file.txt",
+        path: repoRelPath("new-file.txt"),
         type: "added",
         localContent: "line1\nline2\nline3\n",
-        templateContent: undefined,
       };
 
       const result = generateUnifiedDiff(fileDiff);
@@ -23,7 +31,7 @@ describe("diff", () => {
 
     it("modified タイプのファイルで unified diff を生成する", () => {
       const fileDiff: FileDiff = {
-        path: "existing-file.txt",
+        path: repoRelPath("existing-file.txt"),
         type: "modified",
         localContent: "line1\nmodified line\nline3\n",
         templateContent: "line1\noriginal line\nline3\n",
@@ -37,22 +45,25 @@ describe("diff", () => {
       expect(result).toContain("+modified line");
     });
 
-    it("deleted タイプのファイルでは空文字列を返す", () => {
+    it("deleted タイプはテンプレート側の内容が全行削除される patch を返す", () => {
       const fileDiff: FileDiff = {
-        path: "deleted-file.txt",
+        path: repoRelPath("deleted-file.txt"),
         type: "deleted",
-        localContent: undefined,
-        templateContent: "content\n",
+        templateContent: "first\nsecond\n",
       };
 
       const result = generateUnifiedDiff(fileDiff);
 
-      expect(result).toBe("");
+      expect(result).toContain("--- deleted-file.txt");
+      expect(result).toContain("-first");
+      expect(result).toContain("-second");
+      // ローカルには存在しないので追加行は出ない
+      expect(result.split("\n").some((l) => l.startsWith("+") && !l.startsWith("+++"))).toBe(false);
     });
 
     it("unchanged タイプのファイルでは空文字列を返す", () => {
       const fileDiff: FileDiff = {
-        path: "unchanged-file.txt",
+        path: repoRelPath("unchanged-file.txt"),
         type: "unchanged",
         localContent: "same content\n",
         templateContent: "same content\n",
@@ -65,10 +76,9 @@ describe("diff", () => {
 
     it("空のファイルを追加する場合", () => {
       const fileDiff: FileDiff = {
-        path: "empty-file.txt",
+        path: repoRelPath("empty-file.txt"),
         type: "added",
         localContent: "",
-        templateContent: undefined,
       };
 
       const result = generateUnifiedDiff(fileDiff);
@@ -77,23 +87,9 @@ describe("diff", () => {
       expect(result).toContain("+++ empty-file.txt");
     });
 
-    it("内容が undefined の場合でも正しく処理する", () => {
-      const fileDiff: FileDiff = {
-        path: "file.txt",
-        type: "added",
-        localContent: undefined,
-        templateContent: undefined,
-      };
-
-      const result = generateUnifiedDiff(fileDiff);
-
-      // エラーなく空の diff が生成される
-      expect(result).toContain("--- file.txt");
-    });
-
     it("複数行の変更を含む diff を生成する", () => {
       const fileDiff: FileDiff = {
-        path: "config.json",
+        path: repoRelPath("config.json"),
         type: "modified",
         localContent: `{
   "name": "new-name",
@@ -114,75 +110,125 @@ describe("diff", () => {
       expect(result).toContain('-  "version": "1.0.0"');
       expect(result).toContain('+  "version": "2.0.0"');
     });
+
+    it("文脈行は git と同じ 3 行になる", () => {
+      // 前後に十分な行を置き、中央 1 行だけを変更する
+      const templateLines = Array.from({ length: 21 }, (_, i) => `line${i}`);
+      const localLines = [...templateLines];
+      localLines[10] = "changed";
+
+      const fileDiff: FileDiff = {
+        path: repoRelPath("context.txt"),
+        type: "modified",
+        templateContent: `${templateLines.join("\n")}\n`,
+        localContent: `${localLines.join("\n")}\n`,
+      };
+
+      const contextLines = generateUnifiedDiff(fileDiff)
+        .split("\n")
+        .filter((l) => l.startsWith(" "));
+
+      // 変更行の前後に 3 行ずつ
+      expect(contextLines).toEqual([" line7", " line8", " line9", " line11", " line12", " line13"]);
+    });
   });
+  describe("generateUnifiedDiff - バイナリ", () => {
+    it("バイナリの変更は内容を出さず 1 行で示す", () => {
+      const fileDiff: FileDiff = {
+        path: repoRelPath("assets/icon.png"),
+        type: "modified",
+        templateContent: asDiffContent([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]),
+        localContent: asDiffContent([0x89, 0x50, 0x4e, 0x47, 0x00, 0x02]),
+      };
 
-  describe("colorizeUnifiedDiff", () => {
-    it("追加行を緑色にする", () => {
-      const diff = "+added line";
+      const result = generateUnifiedDiff(fileDiff);
 
-      const result = colorizeUnifiedDiff(diff);
-
-      expect(result).toBe("\u001B[32m+added line\u001B[0m");
+      expect(result).toBe(
+        "Binary files template/assets/icon.png and local/assets/icon.png differ\n",
+      );
+      expect(result).not.toContain("\u0000");
+      expect(result).not.toContain("@@");
     });
 
-    it("削除行を赤色にする", () => {
-      const diff = "-removed line";
+    it("ローカルにだけあるバイナリは追加として 1 行で示す", () => {
+      const fileDiff: FileDiff = {
+        path: repoRelPath("assets/font.woff2"),
+        type: "added",
+        localContent: asDiffContent([0x77, 0x4f, 0x46, 0x32, 0x00]),
+      };
 
-      const result = colorizeUnifiedDiff(diff);
-
-      expect(result).toBe("\u001B[31m-removed line\u001B[0m");
+      expect(generateUnifiedDiff(fileDiff)).toBe(
+        "Binary files /dev/null and local/assets/font.woff2 differ\n",
+      );
     });
 
-    it("ハンク行をシアン色にする", () => {
-      const diff = "@@ -1,3 +1,4 @@";
+    it("テンプレートにだけあるバイナリは削除として 1 行で示す", () => {
+      const fileDiff: FileDiff = {
+        path: repoRelPath("assets/font.woff2"),
+        type: "deleted",
+        templateContent: asDiffContent([0x77, 0x4f, 0x46, 0x32, 0x00]),
+      };
 
-      const result = colorizeUnifiedDiff(diff);
-
-      expect(result).toBe("\u001B[36m@@ -1,3 +1,4 @@\u001B[0m");
+      expect(generateUnifiedDiff(fileDiff)).toBe(
+        "Binary files template/assets/font.woff2 and /dev/null differ\n",
+      );
     });
 
-    it("ヘッダー行をボールドにする", () => {
-      const diff = "--- file.txt\n+++ file.txt";
+    it("内容が同じバイナリには差分を出さない", () => {
+      const content = asDiffContent([0x00, 0x01, 0x02]);
+      const fileDiff: FileDiff = {
+        path: repoRelPath("assets/icon.png"),
+        type: "unchanged",
+        templateContent: content,
+        localContent: content,
+      };
 
-      const result = colorizeUnifiedDiff(diff);
+      expect(generateUnifiedDiff(fileDiff)).toBe("");
+    });
+  });
+  describe("detectDiff - バイナリ", () => {
+    const tempDirs: AbsPath[] = [];
 
-      expect(result).toContain("\u001B[1m--- file.txt\u001B[0m");
-      expect(result).toContain("\u001B[1m+++ file.txt\u001B[0m");
+    afterEach(async () => {
+      for (const dir of tempDirs) await rm(dir, { recursive: true, force: true });
+      tempDirs.length = 0;
     });
 
-    it("コンテキスト行はそのまま", () => {
-      const diff = " unchanged line";
+    async function dirs(): Promise<{ targetDir: AbsPath; templateDir: AbsPath }> {
+      const root = absPath(await mkdtemp(join(tmpdir(), "ziku-test-diff-binary-")));
+      tempDirs.push(root);
+      const targetDir = absPath(join(root, "local"));
+      const templateDir = absPath(join(root, "template"));
+      await mkdir(targetDir, { recursive: true });
+      await mkdir(templateDir, { recursive: true });
+      return { targetDir, templateDir };
+    }
 
-      const result = colorizeUnifiedDiff(diff);
+    const scope = syncScope({ include: ["**"] });
 
-      expect(result).toBe(" unchanged line");
+    it("内容の違うバイナリを modified として検出する", async () => {
+      const { targetDir, templateDir } = await dirs();
+      // utf-8 デコードを挟むと、どちらの不正バイトも U+FFFD へ潰れて同じ内容に見える
+      await writeFile(join(targetDir, "icon.png"), Buffer.from([0x00, 0xff, 0x41]));
+      await writeFile(join(templateDir, "icon.png"), Buffer.from([0x00, 0xfe, 0x41]));
+
+      const result = await detectDiff({ targetDir, templateDir, scope });
+
+      expect(result.files.map((f) => [f.path, f.type])).toEqual([["icon.png", "modified"]]);
+      expect(generateUnifiedDiff(result.files[0])).toBe(
+        "Binary files template/icon.png and local/icon.png differ\n",
+      );
     });
 
-    it("複数行の diff を正しくカラー化する", () => {
-      const diff = `--- file.txt
-+++ file.txt
-@@ -1,3 +1,3 @@
- line1
--old line
-+new line
- line3`;
+    it("同一バイト列のバイナリは unchanged として検出する", async () => {
+      const { targetDir, templateDir } = await dirs();
+      const bytes = Buffer.from([0x00, 0xff, 0x41]);
+      await writeFile(join(targetDir, "icon.png"), bytes);
+      await writeFile(join(templateDir, "icon.png"), bytes);
 
-      const result = colorizeUnifiedDiff(diff);
+      const result = await detectDiff({ targetDir, templateDir, scope });
 
-      const lines = result.split("\n");
-      expect(lines[0]).toBe("\u001B[1m--- file.txt\u001B[0m");
-      expect(lines[1]).toBe("\u001B[1m+++ file.txt\u001B[0m");
-      expect(lines[2]).toBe("\u001B[36m@@ -1,3 +1,3 @@\u001B[0m");
-      expect(lines[3]).toBe(" line1");
-      expect(lines[4]).toBe("\u001B[31m-old line\u001B[0m");
-      expect(lines[5]).toBe("\u001B[32m+new line\u001B[0m");
-      expect(lines[6]).toBe(" line3");
-    });
-
-    it("空の diff を処理する", () => {
-      const result = colorizeUnifiedDiff("");
-
-      expect(result).toBe("");
+      expect(result.files.map((f) => [f.path, f.type])).toEqual([["icon.png", "unchanged"]]);
     });
   });
 });

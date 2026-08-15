@@ -13,7 +13,11 @@ vi.mock("node:fs/promises", async () => {
 });
 
 // モック後にインポート
-const { generateReadme, updateReadmeFile, detectAndUpdateReadme } = await import("../readme");
+const { MARKERS, generateReadme, updateReadmeFile, renderTemplateReadme, updateSection } =
+  await import("../readme");
+
+const CONFIG_DIR = "/project";
+const CONFIG_PATH = `${CONFIG_DIR}/.ziku/ziku.jsonc`;
 
 describe("generateReadme", () => {
   beforeEach(() => {
@@ -25,7 +29,7 @@ describe("generateReadme", () => {
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.ziku/modules.jsonc",
+      configDir: CONFIG_DIR,
     });
 
     expect(result.updated).toBe(false);
@@ -36,19 +40,19 @@ describe("generateReadme", () => {
     const originalReadme = "# My Project\n\nSome content";
     vol.fromJSON({
       "/project/README.md": originalReadme,
-      "/project/.ziku/modules.jsonc": JSON.stringify({ include: [] }),
+      [CONFIG_PATH]: JSON.stringify({ include: [] }),
     });
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.ziku/modules.jsonc",
+      configDir: CONFIG_DIR,
     });
 
     expect(result.updated).toBe(false);
     expect(result.content).toBe(originalReadme);
   });
 
-  it("FEATURES マーカー間のコンテンツを更新する", async () => {
+  it("ziku.jsonc の include から FEATURES マーカー間を更新する", async () => {
     const readme = `# My Project
 
 <!-- FEATURES:START -->
@@ -57,19 +61,17 @@ Old content
 
 Other content`;
 
-    // フラット形式
-    const modulesJson = JSON.stringify({
-      include: [".devcontainer/devcontainer.json"],
-    });
-
     vol.fromJSON({
       "/project/README.md": readme,
-      "/project/.ziku/modules.jsonc": modulesJson,
+      [CONFIG_PATH]: JSON.stringify({
+        $schema: "https://example.test/ziku.json",
+        include: [".devcontainer/devcontainer.json"],
+      }),
     });
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.ziku/modules.jsonc",
+      configDir: CONFIG_DIR,
     });
 
     expect(result.updated).toBe(true);
@@ -77,57 +79,23 @@ Other content`;
     expect(result.content).not.toContain("Old content");
   });
 
-  it("モジュール形式の modules.jsonc も読める（後方互換）", async () => {
-    const readme = `# My Project
-
-<!-- FEATURES:START -->
-Old content
-<!-- FEATURES:END -->`;
-
-    // モジュール形式
-    const modulesJson = JSON.stringify({
-      modules: [
-        {
-          name: "DevContainer",
-          description: "Docker 開発環境",
-          include: [".devcontainer/devcontainer.json"],
-        },
-      ],
-    });
-
-    vol.fromJSON({
-      "/project/README.md": readme,
-      "/project/.ziku/modules.jsonc": modulesJson,
-    });
-
-    const result = await generateReadme({
-      readmePath: "/project/README.md",
-      modulesPath: "/project/.ziku/modules.jsonc",
-    });
-
-    expect(result.updated).toBe(true);
-    expect(result.content).toContain(".devcontainer");
-  });
-
-  it("FILES マーカー間のコンテンツを更新する", async () => {
+  it("ziku.jsonc の include から FILES マーカー間を更新する", async () => {
     const readme = `# My Project
 
 <!-- FILES:START -->
 Old files
 <!-- FILES:END -->`;
 
-    const modulesJson = JSON.stringify({
-      include: [".devcontainer/devcontainer.json"],
-    });
-
     vol.fromJSON({
       "/project/README.md": readme,
-      "/project/.ziku/modules.jsonc": modulesJson,
+      [CONFIG_PATH]: JSON.stringify({
+        include: [".devcontainer/devcontainer.json"],
+      }),
     });
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.ziku/modules.jsonc",
+      configDir: CONFIG_DIR,
     });
 
     expect(result.updated).toBe(true);
@@ -135,7 +103,29 @@ Old files
     expect(result.content).not.toContain("Old files");
   });
 
-  it("modules.jsonc が存在しない場合は空のパターンリストとして扱う", async () => {
+  it("コメント付き JSONC を読める", async () => {
+    const readme = `# My Project
+
+<!-- FILES:START -->
+<!-- FILES:END -->`;
+
+    vol.fromJSON({
+      "/project/README.md": readme,
+      [CONFIG_PATH]: `{
+  // 同期対象
+  "include": [".mcp.json"],
+}`,
+    });
+
+    const result = await generateReadme({
+      readmePath: "/project/README.md",
+      configDir: CONFIG_DIR,
+    });
+
+    expect(result.content).toContain(".mcp.json");
+  });
+
+  it("ziku.jsonc が存在しない場合はマーカー間を書き換えない", async () => {
     const readme = `# My Project
 
 <!-- FEATURES:START -->
@@ -148,11 +138,32 @@ Old content
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.ziku/modules.jsonc",
+      configDir: CONFIG_DIR,
     });
 
-    // パターンがないので更新されない
     expect(result.updated).toBe(false);
+    expect(result.content).toContain("Old content");
+  });
+
+  it("ziku.jsonc の形式が不正な場合はマーカー間を書き換えない", async () => {
+    const readme = `# My Project
+
+<!-- FEATURES:START -->
+Old content
+<!-- FEATURES:END -->`;
+
+    vol.fromJSON({
+      "/project/README.md": readme,
+      [CONFIG_PATH]: JSON.stringify({ include: "not-an-array" }),
+    });
+
+    const result = await generateReadme({
+      readmePath: "/project/README.md",
+      configDir: CONFIG_DIR,
+    });
+
+    expect(result.updated).toBe(false);
+    expect(result.content).toContain("Old content");
   });
 
   it("COMMANDS マーカーをカスタム関数で更新する", async () => {
@@ -164,12 +175,12 @@ Old commands
 
     vol.fromJSON({
       "/project/README.md": readme,
-      "/project/.ziku/modules.jsonc": JSON.stringify({ include: [] }),
+      [CONFIG_PATH]: JSON.stringify({ include: [] }),
     });
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.ziku/modules.jsonc",
+      configDir: CONFIG_DIR,
       generateCommandsSection: async () => "## Commands\n\n- `pnpm dev`\n",
     });
 
@@ -191,22 +202,20 @@ Some text
 Old files
 <!-- FILES:END -->`;
 
-    const modulesJson = JSON.stringify({
-      include: [".mcp.json"],
-    });
-
     vol.fromJSON({
       "/project/README.md": readme,
-      "/project/.ziku/modules.jsonc": modulesJson,
+      [CONFIG_PATH]: JSON.stringify({ include: [".mcp.json"] }),
     });
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.ziku/modules.jsonc",
+      configDir: CONFIG_DIR,
     });
 
     expect(result.updated).toBe(true);
     expect(result.content).toContain(".mcp.json");
+    expect(result.content).not.toContain("Old features");
+    expect(result.content).not.toContain("Old files");
   });
 
   it("glob パターンを持つファイルに (パターン) ラベルを付ける", async () => {
@@ -215,18 +224,14 @@ Old files
 <!-- FILES:START -->
 <!-- FILES:END -->`;
 
-    const modulesJson = JSON.stringify({
-      include: [".devcontainer/*.sh"],
-    });
-
     vol.fromJSON({
       "/project/README.md": readme,
-      "/project/.ziku/modules.jsonc": modulesJson,
+      [CONFIG_PATH]: JSON.stringify({ include: [".devcontainer/*.sh"] }),
     });
 
     const result = await generateReadme({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.ziku/modules.jsonc",
+      configDir: CONFIG_DIR,
     });
 
     expect(result.content).toContain("(パターン)");
@@ -244,18 +249,14 @@ describe("updateReadmeFile", () => {
 <!-- FEATURES:START -->
 <!-- FEATURES:END -->`;
 
-    const modulesJson = JSON.stringify({
-      include: [".mcp.json"],
-    });
-
     vol.fromJSON({
       "/project/README.md": readme,
-      "/project/.ziku/modules.jsonc": modulesJson,
+      [CONFIG_PATH]: JSON.stringify({ include: [".mcp.json"] }),
     });
 
     const result = await updateReadmeFile({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.ziku/modules.jsonc",
+      configDir: CONFIG_DIR,
     });
 
     expect(result.updated).toBe(true);
@@ -269,12 +270,12 @@ describe("updateReadmeFile", () => {
 
     vol.fromJSON({
       "/project/README.md": readme,
-      "/project/.ziku/modules.jsonc": JSON.stringify({ include: [] }),
+      [CONFIG_PATH]: JSON.stringify({ include: [] }),
     });
 
     await updateReadmeFile({
       readmePath: "/project/README.md",
-      modulesPath: "/project/.ziku/modules.jsonc",
+      configDir: CONFIG_DIR,
     });
 
     const savedContent = vol.readFileSync("/project/README.md", "utf8");
@@ -282,54 +283,109 @@ describe("updateReadmeFile", () => {
   });
 });
 
-describe("detectAndUpdateReadme", () => {
+/**
+ * 配る内容から README を組み直す経路のテスト。
+ *
+ * README も `ziku.jsonc` も同じ変更で書き換わるので、ディスク上の内容から組むと配る
+ * README が導出元と食い違う。渡した内容が優先されることを確かめる。
+ */
+describe("renderTemplateReadme", () => {
+  const TEMPLATE_README = "# Template\n\n<!-- FILES:START -->\n<!-- FILES:END -->\n";
+
   beforeEach(() => {
     vol.reset();
   });
 
-  it("README が存在しない場合は null を返す", async () => {
-    vol.fromJSON({});
-
-    const result = await detectAndUpdateReadme("/project", "/template");
-
-    expect(result).toBeNull();
-  });
-
-  it("マーカーがない README の場合は null を返す", async () => {
+  it("渡した ziku.jsonc のパターンを反映する（ディスク上の内容は見ない）", async () => {
     vol.fromJSON({
-      "/project/README.md": "# My Project\n\nNo markers",
+      "/template/README.md": TEMPLATE_README,
+      "/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"] }),
     });
 
-    const result = await detectAndUpdateReadme("/project", "/template");
-
-    expect(result).toBeNull();
-  });
-
-  it("FEATURES マーカーがあれば更新する", async () => {
-    vol.fromJSON({
-      "/project/README.md": "# My Project\n\n<!-- FEATURES:START -->\n<!-- FEATURES:END -->",
-      "/template/.ziku/modules.jsonc": JSON.stringify({
-        include: [".mcp.json"],
-      }),
+    const result = await renderTemplateReadme({
+      templateDir: "/template",
+      readme: undefined,
+      config: JSON.stringify({ include: [".mcp.json", "docs/new.md"] }),
     });
 
-    const result = await detectAndUpdateReadme("/project", "/template");
-
-    expect(result).not.toBeNull();
     expect(result?.updated).toBe(true);
+    expect(result?.content).toContain("docs/new.md");
   });
 
-  it("FILES マーカーがあれば更新する", async () => {
+  it("渡した README を土台にして、マーカー間だけを組み直す", async () => {
     vol.fromJSON({
-      "/project/README.md": "# My Project\n\n<!-- FILES:START -->\n<!-- FILES:END -->",
-      "/template/.ziku/modules.jsonc": JSON.stringify({
-        include: [".mcp.json"],
-      }),
+      "/template/README.md": TEMPLATE_README,
+      "/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"] }),
     });
 
-    const result = await detectAndUpdateReadme("/project", "/template");
+    const result = await renderTemplateReadme({
+      templateDir: "/template",
+      readme: `# Rewritten by the user\n\n<!-- FILES:START -->\n<!-- FILES:END -->\n`,
+      config: undefined,
+    });
 
-    expect(result).not.toBeNull();
-    expect(result?.updated).toBe(true);
+    // マーカー外はユーザーの文章のまま残り、マーカー間だけが ziku.jsonc から入る
+    expect(result?.content).toContain("# Rewritten by the user");
+    expect(result?.content).toContain(".mcp.json");
+  });
+
+  it("マーカーが無い README には触れない", async () => {
+    vol.fromJSON({
+      "/template/README.md": "# Template\n\nNo markers\n",
+      "/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"] }),
+    });
+
+    expect(
+      await renderTemplateReadme({
+        templateDir: "/template",
+        readme: undefined,
+        config: undefined,
+      }),
+    ).toBeNull();
+  });
+
+  it("テンプレートに README が無く、配る内容にも無ければ null", async () => {
+    vol.fromJSON({ "/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"] }) });
+
+    expect(
+      await renderTemplateReadme({
+        templateDir: "/template",
+        readme: undefined,
+        config: undefined,
+      }),
+    ).toBeNull();
+  });
+
+  it("ディスクへは書き込まない", async () => {
+    vol.fromJSON({
+      "/template/README.md": TEMPLATE_README,
+      "/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"] }),
+    });
+
+    await renderTemplateReadme({ templateDir: "/template", readme: undefined, config: undefined });
+
+    expect(vol.readFileSync("/template/README.md", "utf8")).toBe(TEMPLATE_README);
+  });
+});
+
+describe("updateSection", () => {
+  it("マーカー間を差し替えた内容を返す", () => {
+    const readme = `# P\n\n${MARKERS.features.start}\nOld\n${MARKERS.features.end}\n`;
+
+    const result = updateSection(readme, MARKERS.features.start, MARKERS.features.end, "New");
+
+    expect(result).toEqual({
+      _tag: "Replaced",
+      content: `# P\n\n${MARKERS.features.start}\n\nNew\n${MARKERS.features.end}\n`,
+      updated: true,
+    });
+  });
+
+  it("マーカーが無いことを呼び出し側へ返す（元の内容を黙って返さない）", () => {
+    // 潰して元の内容を返すと、生成器が「書いたのに何も変わっていない」ことに気づけない。
+    expect(updateSection("# P\n", MARKERS.files.start, MARKERS.files.end, "New")).toEqual({
+      _tag: "MarkerNotFound",
+      startMarker: MARKERS.files.start,
+    });
   });
 });

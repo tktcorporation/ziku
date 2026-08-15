@@ -75,7 +75,7 @@ describe("temp-tracker", () => {
     expect(() => process.emit("exit", 0)).not.toThrow();
   });
 
-  it("SIGINT delegate 後、次回 registerTempDir で signal handler が再インストールされる (codex review #74)", () => {
+  it("SIGINT delegate 後、次回 registerTempDir で signal handler が再インストールされる", () => {
     // 他のリスナーを足して delegate 経路 (process.kill しない) を踏ませる
     const otherListener = vi.fn();
     process.on("SIGINT", otherListener);
