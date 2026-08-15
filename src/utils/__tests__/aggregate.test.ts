@@ -1206,6 +1206,91 @@ describe("aggregateTemplateUsage", () => {
     expect(maxInFlight).toBeGreaterThan(1);
   });
 
+  // defect の封じ込めは候補の評価フェーズと差分処理フェーズの両方に要る。片方だけを
+  // 包むと、もう片方の想定外の失敗で走査全体が落ちる。
+  it("差分処理の途中で想定外の失敗が起きても、他のリポジトリの結果は返る", async () => {
+    mockListOwnerRepos.mockResolvedValue([
+      repoInfo({ owner: "acme", repo: "boom" }),
+      repoInfo({ owner: "acme", repo: "good" }),
+    ]);
+    for (const r of ["boom", "good"]) {
+      setLockFixture(lockFixtures, "acme", r, () => Promise.resolve(Option.some(lockJson())));
+      shaFixtures.set(`acme/${r}`, sha(`${r}-sha`));
+    }
+    // boom はリポジトリ内容のダウンロード（評価フェーズの後）で想定外の失敗を起こす。
+    dirsBySource.set("gh:acme/good#good-sha", "/good-dir2");
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-proc");
+    vol.fromJSON({
+      "/good-dir2/.ziku/ziku.jsonc": JSON.stringify({ include: ["**"] }),
+      "/tmpl-dir-proc/.ziku/ziku.jsonc": JSON.stringify({ include: ["**"] }),
+    });
+    queueGlobResults([], []);
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+      }),
+    );
+
+    expect(report.repositories.map((r) => r.repo)).toEqual(["good"]);
+    expect(report.skipped.some((s) => s.repo === "boom")).toBe(true);
+  });
+
+  // リポジトリ側とファイル側の両方に同じ並列度を渡すと掛け算になり、指定値の 2 乗まで
+  // 同時リクエストが膨らむ。上限が全リポジトリ横断で効いていることを固定する。
+  it("--since 指定時、コミット日時の取得は全リポジトリ横断で concurrency を超えない", async () => {
+    const repos = ["r1", "r2"];
+    const paths = ["f1.txt", "f2.txt", "f3.txt", "f4.txt"];
+    const baseHashes = Object.fromEntries(paths.map((p) => [p, hashContent("v1")]));
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+
+    const files: Record<string, string> = {
+      "/tmpl-dir-cap/.ziku/ziku.jsonc": JSON.stringify({ include: paths }),
+    };
+    for (const p of paths) files[`/tmpl-dir-cap/${p}`] = "v1";
+    for (const r of repos) {
+      setLockFixture(lockFixtures, "acme", r, () =>
+        Promise.resolve(Option.some(lockJson({ baseHashes }))),
+      );
+      shaFixtures.set(`acme/${r}`, sha(`${r}-sha`));
+      dirsBySource.set(`gh:acme/${r}#${r}-sha`, `/${r}-dir`);
+      files[`/${r}-dir/.ziku/ziku.jsonc`] = JSON.stringify({ include: paths });
+      for (const p of paths) files[`/${r}-dir/${p}`] = "v2";
+    }
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-cap");
+    vol.fromJSON(files);
+    for (const _ of repos) queueGlobResults(paths, paths);
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+    mockGetLastCommitDate.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          setTimeout(() => {
+            inFlight -= 1;
+            resolve(Option.some("2026-08-10T00:00:00Z"));
+          }, 10);
+        }),
+    );
+
+    await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 2,
+        since: "2026-08-01T00:00:00.000Z",
+      }),
+    );
+
+    // 2 リポジトリ × 4 ファイル = 8 件を投げるが、同時に走るのは 2 件まで。
+    expect(mockGetLastCommitDate).toHaveBeenCalledTimes(8);
+    expect(maxInFlight).toBeLessThanOrEqual(2);
+  });
+
   it("skipped の reason は英語である（後段のエージェント/他の CLI 出力との一貫性）", async () => {
     mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "broken" })]);
     shaFixtures.set("acme/broken", sha("broken-sha"));

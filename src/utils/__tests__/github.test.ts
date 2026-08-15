@@ -1346,6 +1346,25 @@ describe("listOwnerRepos", () => {
 
     await expect(listOwnerRepos("someone")).rejects.toBeInstanceOf(ZikuFailure);
   });
+
+  // 素の Error のままだと呼び出し側で defect になり、owner 横断の走査全体が
+  // 「ziku のバグ」として落ちる。行動を書ける失敗に分類しておく。
+  it("/user が login を含まない場合も、分類済みの失敗として返す", async () => {
+    process.env.GITHUB_TOKEN = "ghp_valid";
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/someone") {
+        return Promise.resolve(mockResponse({ status: 404 }));
+      }
+      if (url === "https://api.github.com/user") {
+        return Promise.resolve(mockJsonResponse(200, {}));
+      }
+      return Promise.reject(new Error("must not fall back to public listing"));
+    });
+
+    const thrown = await listOwnerRepos("someone").catch((e: unknown) => e);
+    expect(thrown).toBeInstanceOf(ZikuFailure);
+    expect((thrown as ZikuFailure).reason).toMatchObject({ kind: "GitHubUnusableResponse" });
+  });
 });
 
 describe("getRepoIdentity", () => {

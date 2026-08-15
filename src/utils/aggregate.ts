@@ -136,6 +136,11 @@ export function aggregateTemplateUsage(
         );
       }
 
+      // 最終コミット日時の取得（--since 指定時）は「リポジトリごとの全差分ファイル」を相手に
+      // するので、リポジトリの並列度とは別に全体で頭打ちにする。両方に concurrency を渡すと
+      // 掛け算になり、指定した値の 2 乗まで同時リクエストが膨らむ。
+      const commitDateLimit = yield* Effect.makeSemaphore(concurrency);
+
       const allRepos = yield* tryGitHub(() => listOwnerRepos(searchOwner, { includeArchived }));
 
       // owner/repo の正規名解決（GitHub のリネーム・移管リダイレクト経由）をキャッシュする。
@@ -159,13 +164,7 @@ export function aggregateTemplateUsage(
         { concurrency },
       );
 
-      const acceptedCandidates: AcceptedCandidate[] = [];
-      const skippedFromEvaluation: SkippedRepository[] = [];
-      for (const evaluation of evaluations) {
-        if (evaluation._tag === "accepted") acceptedCandidates.push(evaluation.candidate);
-        else if (evaluation._tag === "skipped") skippedFromEvaluation.push(evaluation.skip);
-        // "excluded" (ziku 未導入 / 別テンプレート利用 / ローカルソース) は静かに捨てる
-      }
+      const { acceptedCandidates, skippedFromEvaluation } = partitionEvaluations(evaluations);
 
       // テンプレートは全リポジトリ共通の比較基準なので、この Scope に 1 度だけ取得して
       // 使い回す。リポジトリごとに取得すると同じ commit を候補数だけダウンロードすることになる。
@@ -194,22 +193,13 @@ export function aggregateTemplateUsage(
                     candidateIndex,
                     tmpBaseDir,
                     since,
-                    concurrency,
+                    commitDateLimit,
                   }),
                 ),
               { concurrency },
             );
 
-      const repositories: AggregateRepositoryReport[] = [];
-      const skippedFromProcessing: SkippedRepository[] = [];
-      let excludedBySince = 0;
-      for (const outcome of outcomes) {
-        if (outcome._tag === "ok") repositories.push(outcome.report);
-        else if (outcome._tag === "skipped") skippedFromProcessing.push(outcome.skip);
-        // "filteredBySince" は since 条件を満たさなかったリポジトリで、意図的に repositories
-        // からは除くが、件数は summary.excludedBySince に残す（buildReport 参照）。
-        else excludedBySince += 1;
-      }
+      const { repositories, skippedFromProcessing, excludedBySince } = partitionOutcomes(outcomes);
 
       return buildReport(
         template,
@@ -225,6 +215,54 @@ export function aggregateTemplateUsage(
 // ────────────────────────────────────────────────────────────────
 // 内部ヘルパー
 // ────────────────────────────────────────────────────────────────
+
+/**
+ * 候補の評価結果を「以降の差分処理へ進むもの」と「理由付きで報告するもの」へ振り分ける。
+ *
+ * `excluded`（ziku 未導入 / 別テンプレート利用 / ローカルソース）はどちらにも入れない。
+ * owner 配下の大半がこれに該当し、`skipped` に積むとレポートが読めなくなる。
+ */
+function partitionEvaluations(evaluations: readonly CandidateEvaluation[]): {
+  readonly acceptedCandidates: AcceptedCandidate[];
+  readonly skippedFromEvaluation: SkippedRepository[];
+} {
+  const acceptedCandidates: AcceptedCandidate[] = [];
+  const skippedFromEvaluation: SkippedRepository[] = [];
+  for (const evaluation of evaluations) {
+    match(evaluation)
+      .with({ _tag: "accepted" }, (e) => acceptedCandidates.push(e.candidate))
+      .with({ _tag: "skipped" }, (e) => skippedFromEvaluation.push(e.skip))
+      .with({ _tag: "excluded" }, () => undefined)
+      .exhaustive();
+  }
+  return { acceptedCandidates, skippedFromEvaluation };
+}
+
+/**
+ * 差分処理の結果を、レポートへ載せるものと報告用の件数へ振り分ける。
+ *
+ * `filteredBySince` は `since` 条件を満たさなかったリポジトリ。`repositories` からは除くが、
+ * 件数は残す。0 件の理由が「使っているリポジトリが無い」と読まれないようにするため。
+ */
+function partitionOutcomes(outcomes: readonly ProcessOutcome[]): {
+  readonly repositories: AggregateRepositoryReport[];
+  readonly skippedFromProcessing: SkippedRepository[];
+  readonly excludedBySince: number;
+} {
+  const repositories: AggregateRepositoryReport[] = [];
+  const skippedFromProcessing: SkippedRepository[] = [];
+  const filteredBySince: null[] = [];
+  for (const outcome of outcomes) {
+    match(outcome)
+      .with({ _tag: "ok" }, (o) => repositories.push(o.report))
+      .with({ _tag: "skipped" }, (o) => skippedFromProcessing.push(o.skip))
+      // 件数だけが要るが、カウンタを閉包で増やすと分岐の形が 1 つだけ揃わなくなる。
+      // 他の 2 つと同じ「配列へ積む」に揃え、件数は長さから取る。
+      .with({ _tag: "filteredBySince" }, () => filteredBySince.push(null))
+      .exhaustive();
+  }
+  return { repositories, skippedFromProcessing, excludedBySince: filteredBySince.length };
+}
 
 /** owner/repo は GitHub 上で大文字小文字を区別しないため、比較は正規化してから行う */
 function isSameRepo(
@@ -709,11 +747,11 @@ interface ProcessCandidateOptions {
   readonly tmpBaseDir: AbsPath;
   readonly since: string | undefined;
   /**
-   * `since` 指定時、変更ファイルごとのコミット日時取得（`attachLastCommittedAt`）を
-   * 同時に何件まで並列実行するか。`aggregateTemplateUsage` の `concurrency` オプションを
-   * そのまま渡す（新しいノブを増やさない）。
+   * `since` 指定時のコミット日時取得を全リポジトリ横断で頭打ちにするセマフォ。
+   * リポジトリ側の並列度とは独立に効かせる必要があるため、数値ではなく
+   * `aggregateTemplateUsage` が 1 つだけ作ったものを共有する。
    */
-  readonly concurrency: number;
+  readonly commitDateLimit: Effect.Semaphore;
 }
 
 /**
@@ -731,7 +769,7 @@ interface ProcessCandidateOptions {
  * conflict/pending を報告する原因になる。
  */
 function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessOutcome> {
-  const { templateDir, candidate, candidateIndex, tmpBaseDir, since, concurrency } = opts;
+  const { templateDir, candidate, candidateIndex, tmpBaseDir, since, commitDateLimit } = opts;
   const { repoInfo, lock, ref } = candidate;
 
   return Effect.gen(function* () {
@@ -764,8 +802,13 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
       // 「利用リポジトリ側でいつ変更されたか」という since フィルタの関心事に該当しない。
       // 対象を pendingPush/conflicts だけに絞ることで、この関数の GitHub API 呼び出し回数を
       // 増やさない。
-      const pushResult = yield* attachLastCommittedAt(repoInfo, ref, pendingPush, concurrency);
-      const conflictResult = yield* attachLastCommittedAt(repoInfo, ref, conflicts, concurrency);
+      const pushResult = yield* attachLastCommittedAt(repoInfo, ref, pendingPush, commitDateLimit);
+      const conflictResult = yield* attachLastCommittedAt(
+        repoInfo,
+        ref,
+        conflicts,
+        commitDateLimit,
+      );
       pendingPush = pushResult.entries;
       conflicts = conflictResult.entries;
 
@@ -979,22 +1022,24 @@ interface AttachLastCommittedAtResult<T> {
  * 取りこぼす（呼び出し側 `processCandidate` が `anyFetchFailed` を見て `skipped` に
  * 振り分ける）。
  *
- * 変更ファイル 1 件ごとに直列で呼ぶと差分の多いリポジトリほど遅くなり、レート制限にも
- * 当たりやすくなる。`concurrency` で並列実行し、呼び出し元（`aggregateTemplateUsage`）の
- * 並列度設定に揃える。
+ * 変更ファイル 1 件ごとに直列で呼ぶと差分の多いリポジトリほど遅くなる。並列に投げるが、
+ * 同時実行数は呼び出し元が全リポジトリ横断で 1 つだけ作ったセマフォで抑える。ここに
+ * リポジトリ側と同じ並列度の数値を置くと、外側の並列度と掛け算になって上限が効かない。
  */
 function attachLastCommittedAt<T extends { readonly path: RepoRelPath }>(
   repoInfo: OwnerRepoInfo,
   ref: CommitSha,
   entries: readonly T[],
-  concurrency: number,
+  commitDateLimit: Effect.Semaphore,
 ): Effect.Effect<AttachLastCommittedAtResult<T>> {
   return Effect.gen(function* () {
     const results = yield* Effect.forEach(
       entries,
       (entry) =>
         Effect.either(
-          tryGitHub(() => getLastCommitDate(repoInfo.owner, repoInfo.repo, entry.path, ref)),
+          commitDateLimit.withPermits(1)(
+            tryGitHub(() => getLastCommitDate(repoInfo.owner, repoInfo.repo, entry.path, ref)),
+          ),
         ).pipe(
           Effect.map((result) =>
             Either.match(result, {
@@ -1015,7 +1060,9 @@ function attachLastCommittedAt<T extends { readonly path: RepoRelPath }>(
             }),
           ),
         ),
-      { concurrency },
+      // 同時実行数はセマフォが全リポジトリ横断で抑えるので、ここでは制限しない。
+      // ここに数値を置くと、リポジトリ側の並列度と掛け算になって上限が効かなくなる。
+      { concurrency: "unbounded" },
     );
     return {
       entries: results.map((r) => r.entry),

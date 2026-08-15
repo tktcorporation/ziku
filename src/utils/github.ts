@@ -1431,7 +1431,11 @@ async function resolveAuthenticatedUserLogin(): Promise<string | undefined> {
   if (!res.ok) throw githubResponseError(res);
   const data = await parseGitHubJson<{ login?: string }>(res);
   if (!data.login) {
-    throw new Error("GitHub /user response did not include a login");
+    throw zikuFailure({
+      kind: "GitHubUnusableResponse",
+      operation: "identify the authenticated user",
+      detail: 'the "/user" response did not include a login',
+    });
   }
   return data.login;
 }
@@ -1700,7 +1704,11 @@ export function getLastCommitDate(
       const first = commits[0];
       const date = first?.commit.committer?.date ?? first?.commit.author?.date;
       if (!date) {
-        throw new Error(`Commit date unavailable for ${owner}/${repo}/${path}`);
+        throw zikuFailure({
+          kind: "GitHubUnusableResponse",
+          operation: `read the last commit date of ${owner}/${repo}/${path}`,
+          detail: "the latest commit carried neither a committer nor an author date",
+        });
       }
       // Option.some(...) は unicorn/no-array-callback-reference が Array.prototype.some との
       // 名前衝突で誤検知するため、fromNullable で同じ意味を表現する（date は直前の !date
