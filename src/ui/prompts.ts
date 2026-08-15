@@ -1,24 +1,43 @@
 /**
- * CLI プロンプト — @clack/prompts ベース
+ * CLI のプロンプトを一箇所に集める。
  *
- * 背景: prompts/init.ts + prompts/push.ts を統合。
- * @inquirer/prompts の checkbox/select/confirm/input/password を
- * @clack/prompts の multiselect/select/confirm/text/password に置き換え。
- *
- * 全プロンプトは Ctrl+C でキャンセル可能。handleCancel() で統一処理。
+ * どのコマンドから呼ばれても Ctrl+C の扱いと表示の作法が揃うようにするため、
+ * 対話の入口はここだけにする。全プロンプトは handleCancel() を通り、
+ * キャンセルされたらその場でプロセスを終える。
  */
 import { execFileSync } from "node:child_process";
 import { Effect } from "effect";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
 import { match } from "ts-pattern";
-import type { FileDiff, OverwriteStrategy } from "../modules/schemas";
+import type { PushSend } from "../commands/push-plan";
+import { pushSummaryRows } from "../commands/push-plan";
+import type {
+  GlobPattern,
+  FileDiff,
+  OverwriteStrategy,
+  RepoRelPath,
+  UnmergedConflict,
+} from "../modules/schemas";
 import type { UntrackedFilesByFolder } from "../utils/untracked";
-import { calculateDiffStats, formatStats } from "./diff-view";
-import { selectFilesWithDiffPreview } from "./file-select-with-diff";
+import { getTypeIcon } from "./diff-view";
+import type { FileSelectionMarks } from "./file-select-with-diff";
+import {
+  fileSelectionHint,
+  isPreselectedByDefault,
+  selectFilesWithDiffPreview,
+} from "./file-select-with-diff";
+import { PROJECT_URL } from "../project";
 
-/** ユーザーが Ctrl+C でキャンセルした場合の統一処理 */
-function handleCancel(value: unknown): void {
+/**
+ * ユーザーが Ctrl+C でキャンセルした場合の統一処理。
+ *
+ * clack のプロンプトはキャンセルを戻り値の symbol で表すため、戻り値の型は
+ * 常に「本来の値 | symbol」になる。この関数を通した後は symbol であれば
+ * プロセスが終わっているので、呼び出し側は本来の値だけを扱えばよい。それを
+ * 型アサーションではなく assertion signature で表し、絞り込みを型に担保させる。
+ */
+function handleCancel<T>(value: T | symbol): asserts value is T {
   if (p.isCancel(value)) {
     p.cancel("Cancelled.");
     process.exit(0);
@@ -34,8 +53,8 @@ function handleCancel(value: unknown): void {
  * ユーザーに選択させる。選択結果はパターン文字列の配列。
  */
 export async function selectDirectories(
-  entries: Array<{ label: string; patterns: string[] }>,
-): Promise<string[]> {
+  entries: Array<{ label: string; patterns: GlobPattern[] }>,
+): Promise<GlobPattern[]> {
   const selected = await p.multiselect({
     message: "Select directories to sync",
     options: entries.map((e) => ({
@@ -71,7 +90,7 @@ export async function selectOverwriteStrategy(options?: {
     ],
   });
   handleCancel(strategy);
-  return strategy as OverwriteStrategy;
+  return strategy;
 }
 
 // ─── init (template resolution) ──────────────────────────────
@@ -163,7 +182,7 @@ export async function selectMissingTemplateAction(
     ],
   });
   handleCancel(action);
-  return action as MissingTemplateAction;
+  return action;
 }
 
 /**
@@ -189,36 +208,23 @@ export async function inputTemplateSource(defaultValue?: string): Promise<string
 
 // ─── push ─────────────────────────────────────────────────────
 
-/** unified diff ベースで正確な変更行数を算出する（hint テキスト用） */
-function fileStatHint(file: FileDiff): string {
-  const stats = calculateDiffStats(file);
-  if (stats.additions === 0 && stats.deletions === 0) return "";
-  return formatStats(stats);
-}
-
 /**
  * push 対象ファイルの選択（Diff プレビュー付き）
  *
  * TTY 環境では diff プレビュー付きのカスタムセレクタを使い、
  * 非 TTY 環境（テスト・CI）では @clack/prompts のフォールバックを使う。
  */
-export function selectPushFiles(
-  files: FileDiff[],
-  options?: { preselectDeletions?: boolean; conflictedPaths?: Set<string> },
-): Promise<FileDiff[]> {
+export function selectPushFiles(files: FileDiff[], marks: FileSelectionMarks): Promise<FileDiff[]> {
   // TTY: diff プレビュー付きカスタムセレクタ
   // stdin と stdout の両方が TTY であることを確認する。
   // stdout がリダイレクトされている場合（例: ziku push > out.txt）、
   // ANSI 制御シーケンスが非対話ストリームに出力され操作不能になる。
   if (process.stdin.isTTY && process.stdout.isTTY) {
-    return selectFilesWithDiffPreview(files, {
-      preselectDeletions: options?.preselectDeletions,
-      conflictedPaths: options?.conflictedPaths,
-    });
+    return selectFilesWithDiffPreview(files, marks);
   }
 
   // 非 TTY フォールバック: @clack/prompts multiselect
-  return selectPushFilesFallback(files, options);
+  return selectPushFilesFallback(files, marks);
 }
 
 /**
@@ -228,35 +234,16 @@ export function selectPushFiles(
  */
 export async function selectPushFilesFallback(
   files: FileDiff[],
-  options?: { preselectDeletions?: boolean; conflictedPaths?: Set<string> },
+  marks: FileSelectionMarks,
 ): Promise<FileDiff[]> {
-  const conflicted = options?.conflictedPaths ?? new Set<string>();
-  const typeIcon = (type: string) =>
-    match(type)
-      .with("added", () => pc.green("+"))
-      .with("modified", () => pc.yellow("~"))
-      .with("deleted", () => pc.red("-"))
-      .otherwise(() => " ");
-
   const selected = await p.multiselect({
     message: "Select files to include in PR",
-    options: files.map((f) => {
-      const hint = conflicted.has(f.path)
-        ? pc.red("conflict — resolve with ziku pull")
-        : fileStatHint(f);
-      return {
-        value: f.path,
-        label: `${typeIcon(f.type)} ${f.path}`,
-        hint: hint || undefined,
-      };
-    }),
-    // 既定で未選択にするもの: 削除ファイル（安全側、--include-deletions で全選択）と
-    // 未解決の衝突ファイル（選ぶと push が中断するため、誤って既定で含めない）。
-    initialValues: files
-      .filter(
-        (f) => !conflicted.has(f.path) && (options?.preselectDeletions || f.type !== "deleted"),
-      )
-      .map((f) => f.path),
+    options: files.map((f) => ({
+      value: f.path,
+      label: `${getTypeIcon(f.type)} ${f.path}`,
+      hint: fileSelectionHint(f, marks) || undefined,
+    })),
+    initialValues: files.filter((f) => isPreselectedByDefault(f, marks)).map((f) => f.path),
     required: false,
   });
   handleCancel(selected);
@@ -275,7 +262,7 @@ export async function selectPushFilesFallback(
  */
 export async function selectUntrackedToTrack(
   untrackedByFolder: UntrackedFilesByFolder[],
-): Promise<string[]> {
+): Promise<RepoRelPath[]> {
   const options = untrackedByFolder.flatMap((group) =>
     group.files.map((file) => ({
       value: file.path,
@@ -292,7 +279,7 @@ export async function selectUntrackedToTrack(
     required: false,
   });
   handleCancel(selected);
-  return selected as string[];
+  return selected;
 }
 
 /**
@@ -344,12 +331,60 @@ export async function inputPrTitle(defaultTitle?: string): Promise<string> {
 }
 
 /**
- * 変更ファイル一覧から PR タイトルを自動生成する。
+ * PR の文面が使うファイル一覧を、種別ごとに分けたもの。
  */
-export function generatePrTitle(files: FileDiff[]): string {
-  const added = files.filter((f) => f.type === "added");
-  const modified = files.filter((f) => f.type === "modified");
-  const deleted = files.filter((f) => f.type === "deleted");
+interface PrFileGroups {
+  readonly added: readonly RepoRelPath[];
+  readonly modified: readonly RepoRelPath[];
+  readonly deleted: readonly RepoRelPath[];
+  /** 選択によらず ziku が付け足したファイル。 */
+  readonly autoUpdated: readonly RepoRelPath[];
+}
+
+/**
+ * 送信対象を、PR の文面が使うグループへ振り分ける。
+ *
+ * 種別は選択時の差分ではなく、実際に送る内容から決め直したもの（{@link pushSummaryRows}）を
+ * 使う。端末のサマリと PR の文面が同じ行から作られるので、同じ push について両者が別の
+ * ファイル一覧を示すことがない。
+ */
+function groupPrFiles(send: PushSend): PrFileGroups {
+  const added: RepoRelPath[] = [];
+  const modified: RepoRelPath[] = [];
+  const deleted: RepoRelPath[] = [];
+  const autoUpdated: RepoRelPath[] = [];
+
+  for (const row of pushSummaryRows(send)) {
+    match(row)
+      .with({ _tag: "Change" }, ({ diff }) => {
+        match(diff.type)
+          .with("added", () => added.push(diff.path))
+          .with("modified", () => modified.push(diff.path))
+          .with("deleted", () => deleted.push(diff.path))
+          .exhaustive();
+      })
+      .with({ _tag: "AutoUpdated" }, ({ path }) => {
+        autoUpdated.push(path);
+      })
+      .exhaustive();
+  }
+
+  return { added, modified, deleted, autoUpdated };
+}
+
+/**
+ * 送信対象から PR タイトルを組み立てる。
+ *
+ * 引数を {@link PushSend} に限るのは、PR の文面を「実際に送る集合」以外から組み立てられ
+ * ないようにするため。選択そのものを受け取れると、送信直前に足したファイルが載らない・
+ * 送るのをやめたファイルが載る、という食い違いを型が止められない。
+ *
+ * 名前に採るのは ziku が付け足したファイルではなく、利用者が変えたファイルのモジュール名。
+ * 付け足す側は導出物（`ziku.jsonc` から組み直す README など）で、その push が何をする
+ * ものかを表さない。
+ */
+export function generatePrTitle(send: PushSend): string {
+  const { added, modified, deleted } = groupPrFiles(send);
 
   // 変更種別に応じた prefix
   const prefix =
@@ -357,8 +392,8 @@ export function generatePrTitle(files: FileDiff[]): string {
 
   // ファイルパスからモジュール名（トップディレクトリ）を抽出
   const moduleNames = new Set<string>();
-  for (const f of files) {
-    const firstSegment = f.path.split("/")[0];
+  for (const path of [...added, ...modified, ...deleted]) {
+    const firstSegment = path.split("/")[0];
     moduleNames.add(firstSegment);
   }
 
@@ -367,7 +402,7 @@ export function generatePrTitle(files: FileDiff[]): string {
     const action = added.length > 0 && modified.length === 0 ? "add" : "update";
     return `${prefix}: ${action} ${names[0]} config`;
   }
-  if (names.length <= 3) {
+  if (names.length > 0 && names.length <= 3) {
     return `${prefix}: update ${names.join(", ")} config`;
   }
   return `${prefix}: update template configuration`;
@@ -388,45 +423,37 @@ export async function inputPrBody(defaultBody?: string): Promise<string | undefi
 }
 
 /**
- * 変更ファイル一覧から PR 本文を自動生成する。
+ * 送信対象から PR 本文を組み立てる。
+ *
+ * 引数を {@link PushSend} に限る理由は {@link generatePrTitle} と同じ。本文は端末サマリと
+ * 同格の「送る内容の提示」なので、同じ集合からしか作れないようにする。
+ *
+ * 選択によらず ziku が付け足したファイルは `Auto-updated` として別に並べる。利用者が
+ * 選んだ変更と混ぜると、テンプレート側のレビュアーがどれを人が書いたものとして読むべきか
+ * 判断できない。
  */
-export function generatePrBody(files: FileDiff[]): string {
-  const added = files.filter((f) => f.type === "added");
-  const modified = files.filter((f) => f.type === "modified");
-  const deleted = files.filter((f) => f.type === "deleted");
+export function generatePrBody(send: PushSend): string {
+  const { added, modified, deleted, autoUpdated } = groupPrFiles(send);
 
   const sections: string[] = ["## Changes", ""];
 
-  if (added.length > 0) {
-    sections.push("**Added:**");
-    for (const f of added) {
-      sections.push(`- \`${f.path}\``);
-    }
-    sections.push("");
-  }
-
-  if (modified.length > 0) {
-    sections.push("**Modified:**");
-    for (const f of modified) {
-      sections.push(`- \`${f.path}\``);
-    }
-    sections.push("");
-  }
-
-  if (deleted.length > 0) {
-    sections.push("**Deleted:**");
-    for (const f of deleted) {
-      sections.push(`- \`${f.path}\``);
-    }
-    sections.push("");
-  }
+  appendFileList(sections, "**Added:**", added);
+  appendFileList(sections, "**Modified:**", modified);
+  appendFileList(sections, "**Deleted:**", deleted);
+  appendFileList(sections, "**Auto-updated:**", autoUpdated);
 
   sections.push("---");
-  sections.push(
-    "Generated by [ziku](https://github.com/tktcorporation/.github/tree/main/packages/ziku)",
-  );
+  sections.push(`Generated by [ziku](${PROJECT_URL})`);
 
   return sections.join("\n");
+}
+
+/** 見出しとファイル一覧を本文へ足す。空のグループは見出しごと出さない。 */
+function appendFileList(sections: string[], heading: string, paths: readonly RepoRelPath[]): void {
+  if (paths.length === 0) return;
+  sections.push(heading);
+  for (const path of paths) sections.push(`- \`${path}\``);
+  sections.push("");
 }
 
 /** GitHub トークン入力 */
@@ -491,26 +518,94 @@ export async function confirmRetryConflictResolution(): Promise<boolean> {
   return result;
 }
 
-/**
- * テンプレートで削除されたファイルの中から、ローカルでも削除するものを選択する。
- */
-export async function selectDeletedFiles(files: string[]): Promise<string[]> {
-  const result = await p.multiselect({
-    message: "These files were deleted in template. Select to delete locally:",
-    options: files.map((f) => ({ value: f, label: f })),
-    required: false,
-  });
+/** 削除候補ファイルの multiselect。選択されなかったファイルはローカルに残る。 */
+async function selectFilesToDelete(
+  message: string,
+  options: Array<{ value: RepoRelPath; label: string; hint?: string }>,
+): Promise<RepoRelPath[]> {
+  const result = await p.multiselect({ message, options, required: false });
   if (p.isCancel(result)) {
     p.cancel("Operation cancelled.");
     process.exit(0);
   }
-  return result as string[];
+  return result as RepoRelPath[];
+}
+
+/**
+ * テンプレートで削除されたファイルの中から、ローカルでも削除するものを選択する。
+ */
+export function selectDeletedFiles(files: readonly RepoRelPath[]): Promise<RepoRelPath[]> {
+  return selectFilesToDelete(
+    "These files were deleted in template. Select to delete locally:",
+    files.map((f) => ({ value: f, label: f })),
+  );
+}
+
+/**
+ * テンプレートで削除され、かつローカルに編集があるファイルの削除対象を選択する。
+ *
+ * 削除するとローカルの編集が失われる。選択を省略できる操作にしないため、
+ * `--force` を含むどの経路でもこのプロンプトを通す。
+ */
+export function selectDeletedFilesWithLocalEdits(
+  files: readonly RepoRelPath[],
+): Promise<RepoRelPath[]> {
+  return selectFilesToDelete(
+    "These files were deleted in template but you edited them locally. Select to delete (your edits will be lost):",
+    files.map((f) => ({ value: f, label: f, hint: "locally edited" })),
+  );
+}
+
+/**
+ * 自動マージできなかったファイルについて、どちらの内容を残すか。
+ *
+ * どちらを選んでも同期ベースはテンプレート側へ前進する。`keepLocal` は git の `--ours` と
+ * 同じく「テンプレートの変更を意図して拒否した」という意思表示になる。
+ */
+export type UnmergedResolution = "keepLocal" | "takeTemplate";
+
+/**
+ * 自動マージできなかった 1 ファイルの扱いを選ばせる。
+ *
+ * ziku がこのファイルに何も書いていないため、ローカルの内容だけでは「解決済みか」を
+ * 判定できない。既定はローカル維持で、テンプレートの内容を取る側だけがファイルを
+ * 上書きする（失って困るのはユーザーが書いた内容のほう）。
+ */
+export async function selectUnmergedResolution(
+  conflict: UnmergedConflict,
+): Promise<UnmergedResolution> {
+  const why = match(conflict.reason)
+    .with(
+      "noBase",
+      () => "the base version is unavailable, so local and template changes can't be told apart",
+    )
+    .with("binary", () => "binary files have no lines to merge")
+    .exhaustive();
+
+  const resolution = await p.select({
+    message: `${pc.cyan(conflict.path)} — ${why}. Which version should stay?`,
+    initialValue: "keepLocal" as UnmergedResolution,
+    options: [
+      {
+        value: "keepLocal" as const,
+        label: "Keep my local version",
+        hint: "rejects the template's change for this file",
+      },
+      {
+        value: "takeTemplate" as const,
+        label: "Take the template version",
+        hint: "overwrites your local file",
+      },
+    ],
+  });
+  handleCancel(resolution);
+  return resolution;
 }
 
 /**
  * コンフリクトのあるファイルを $EDITOR で開く。
  */
-export function openEditorForConflicts(filePaths: string[]): void {
+export function openEditorForConflicts(filePaths: readonly string[]): void {
   const editor = process.env.VISUAL || process.env.EDITOR || "vi";
   for (const filePath of filePaths) {
     // エディタ起動失敗は None → スキップ（呼び出し側で対処不要な fire-and-forget）

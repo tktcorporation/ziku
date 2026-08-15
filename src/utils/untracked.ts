@@ -1,13 +1,12 @@
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import ignore, { type Ignore } from "ignore";
-import { join } from "pathe";
-import { globSync } from "tinyglobby";
-import type { FlatPatterns } from "./patterns";
-import { resolvePatterns } from "./patterns";
+import { glob } from "tinyglobby";
+import type { AbsPath, RepoRelPath } from "../modules/schemas";
+import { repoRelPaths } from "./paths";
+import { getBaseDirsFromPatterns, resolvePatterns } from "./patterns";
+import { UNSCANNED_GLOBS } from "./scan-exclusions";
+import { isExcludedFromScope, type DeclaredPatterns, type SyncScope } from "./sync-scope";
 
 export interface UntrackedFile {
-  path: string;
+  path: RepoRelPath;
   folder: string;
 }
 
@@ -19,7 +18,7 @@ export interface UntrackedFilesByFolder {
 /**
  * ファイルパスから表示用フォルダ名を取得
  */
-export function getDisplayFolderFromPath(filePath: string): string {
+export function getDisplayFolderFromPath(filePath: RepoRelPath): string {
   const parts = filePath.split("/");
   if (parts.length === 1) {
     return "root";
@@ -28,124 +27,111 @@ export function getDisplayFolderFromPath(filePath: string): string {
 }
 
 /**
- * include パターンからベースディレクトリを抽出
- */
-function getBaseDirsFromPatterns(include: string[]): {
-  dirs: string[];
-  hasRootPatterns: boolean;
-} {
-  const dirs = new Set<string>();
-  let hasRootPatterns = false;
-
-  for (const pattern of include) {
-    const firstSegment = pattern.split("/")[0];
-    if (pattern.includes("/") && firstSegment) {
-      dirs.add(firstSegment);
-    } else {
-      hasRootPatterns = true;
-    }
-  }
-
-  return { dirs: [...dirs], hasRootPatterns };
-}
-
-/**
  * ディレクトリ内の全ファイルを取得
  */
-export function getAllFilesInDirs(baseDir: string, dirs: string[]): string[] {
+export async function getAllFilesInDirs(
+  baseDir: AbsPath,
+  dirs: readonly string[],
+): Promise<RepoRelPath[]> {
   if (dirs.length === 0) return [];
 
   const patterns = dirs.map((d) => `${d}/**/*`);
-  return globSync(patterns, {
+  const files = await glob(patterns, {
     cwd: baseDir,
     dot: true,
     onlyFiles: true,
-  }).toSorted();
+    // 同期の対象になりえないディレクトリは歩かない。モノレポでは起点の配下にも
+    // `node_modules` が現れるので、起点を絞っただけでは避けられない。
+    ignore: [...UNSCANNED_GLOBS],
+  });
+  return repoRelPaths(files.toSorted());
+}
+
+/**
+ * 追跡候補を探すディレクトリを決める。
+ *
+ * 「利用者が既に同期しているディレクトリの中で、まだ追跡していないファイル」を勧めるのが
+ * 目的なので、起点は**実際に追跡されているファイルの位置**から採る。無視規則の探索
+ * （{@link import("./gitignore").loadMergedGitignore}）が使う `reachesWholeRepo` を
+ * ここでも使うと、`**\/*.md` のようなパターンでリポジトリ全体が候補になり、同期と無関係な
+ * ファイルまで追跡候補として並ぶ。あちらは広く歩いても判定結果が変わらないが、こちらは
+ * 利用者に見えるリストがそのまま変わる。許容誤差が逆向きなので、同じ値を共有しない。
+ *
+ * 宣言にリテラルの先頭ディレクトリがあれば、そこにまだ追跡対象のファイルが無くても起点に
+ * 含める。`.claude/**` を宣言した直後の空のディレクトリでも候補を出せるようにするため。
+ */
+function candidateRoots(
+  declared: DeclaredPatterns,
+  trackedFiles: readonly RepoRelPath[],
+): { dirs: string[]; hasRootPatterns: boolean } {
+  const { dirs: literalDirs, hasRootPatterns } = getBaseDirsFromPatterns(declared.include);
+  const dirs = new Set<string>(literalDirs);
+  let tracksRootFile = false;
+
+  for (const file of trackedFiles) {
+    const slashIndex = file.indexOf("/");
+    if (slashIndex === -1) tracksRootFile = true;
+    else dirs.add(file.slice(0, slashIndex));
+  }
+
+  return { dirs: [...dirs], hasRootPatterns: hasRootPatterns || tracksRootFile };
 }
 
 /**
  * ルート直下の隠しファイルを取得
  */
-export function getRootDotFiles(baseDir: string): string[] {
-  return globSync([".*"], {
+export async function getRootDotFiles(baseDir: AbsPath): Promise<RepoRelPath[]> {
+  const files = await glob([".*"], {
     cwd: baseDir,
     dot: true,
     onlyFiles: true,
-  }).toSorted();
+  });
+  return repoRelPaths(files.toSorted());
 }
 
 /**
- * 複数ディレクトリの .gitignore をマージして読み込み
- */
-export async function loadAllGitignores(baseDir: string, dirs: string[]): Promise<Ignore> {
-  const ig = ignore();
-
-  const rootGitignore = join(baseDir, ".gitignore");
-  if (existsSync(rootGitignore)) {
-    const content = await readFile(rootGitignore, "utf-8");
-    ig.add(content);
-  }
-
-  for (const dir of dirs) {
-    const gitignorePath = join(baseDir, dir, ".gitignore");
-    if (existsSync(gitignorePath)) {
-      const content = await readFile(gitignorePath, "utf-8");
-      const prefixedContent = content
-        .split("\n")
-        .map((line) => {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed.startsWith("#")) return line;
-          if (trimmed.startsWith("!")) {
-            return `!${dir}/${trimmed.slice(1)}`;
-          }
-          return `${dir}/${trimmed}`;
-        })
-        .join("\n");
-      ig.add(prefixedContent);
-    }
-  }
-
-  return ig;
-}
-
-/**
- * ホワイトリスト外のファイルをフォルダごとに検出
+ * ホワイトリスト外のファイルをフォルダごとに検出する。
+ *
+ * 走査範囲を {@link SyncScope} ごと受け取る。「同期の対象か」は
+ * {@link isExcludedFromScope} が唯一の答えを持つので、ここで gitignore を読み直さない。
+ * 判定が分かれると、ハッシュ計算や差分検出が範囲外として落としたファイルを追跡候補として
+ * 勧めることになり、追跡しても同期されないパターンが `ziku.jsonc` に残る。
+ *
+ * 探索の基点は {@link SyncScope.declared} と、そのパターンが実際に拾ったファイルから採る
+ * （{@link candidateRoots}）。走査用パターンを使うと、ziku が走査のために足す
+ * `.ziku/ziku.jsonc` が基点 `.ziku` を生み、同期対象ではない `.ziku/lock.json` が追跡候補
+ * として提示される。追跡すると、そのマシン固有の取得元とベースがテンプレートへ送られる。
  */
 export async function detectUntrackedFiles(options: {
-  targetDir: string;
-  patterns: FlatPatterns;
+  targetDir: AbsPath;
+  scope: SyncScope;
 }): Promise<UntrackedFilesByFolder[]> {
-  const { targetDir, patterns } = options;
+  const { targetDir, scope } = options;
+  const { declared } = scope;
 
   // フラットパターンで tracked files を算出
-  const allTrackedFiles = new Set(resolvePatterns(targetDir, patterns.include, patterns.exclude));
+  const trackedFiles = resolvePatterns(targetDir, declared.include, declared.exclude);
+  const allTrackedFiles = new Set<string>(trackedFiles);
 
-  // ベースディレクトリを抽出
-  const { dirs: allBaseDirs, hasRootPatterns } = getBaseDirsFromPatterns(patterns.include);
+  const { dirs: allBaseDirs, hasRootPatterns } = candidateRoots(declared, trackedFiles);
 
-  // gitignore を読み込み
-  const gitignore = await loadAllGitignores(targetDir, allBaseDirs);
-
-  // ディレクトリ内の全ファイルを取得
-  const allDirFiles = getAllFilesInDirs(targetDir, allBaseDirs);
-  const filteredDirFiles = allDirFiles.filter((f) => !gitignore.ignores(f));
-
-  // ルート直下のファイルを取得（ルートパターンがある場合のみ）
-  const filteredRootFiles = hasRootPatterns
-    ? getRootDotFiles(targetDir).filter((f) => !gitignore.ignores(f))
-    : [];
-
-  // 全ファイルをマージ（重複なし）
-  const allFiles = new Set([...filteredDirFiles, ...filteredRootFiles]);
+  // 走査範囲の候補（ディレクトリ配下 + ルート直下のファイルを追跡しているならルート直下）
+  const allFiles = new Set<RepoRelPath>([
+    ...(await getAllFilesInDirs(targetDir, allBaseDirs)),
+    ...(hasRootPatterns ? await getRootDotFiles(targetDir) : []),
+  ]);
 
   // フォルダごとにグループ化
   const filesByFolder = new Map<string, UntrackedFile[]>();
 
   for (const filePath of allFiles) {
     if (allTrackedFiles.has(filePath)) continue;
+    if (isExcludedFromScope(filePath, scope)) continue;
 
     const displayFolder = getDisplayFolderFromPath(filePath);
 
+    // 絞り込みは走査の起点と同じ集合で行う。片方だけを広げると、拾ったものを全部落とすか、
+    // 起点の外にあるファイルを勧めるかのどちらかになる。
     const isInScope =
       allBaseDirs.some((dir) => filePath.startsWith(`${dir}/`)) ||
       (hasRootPatterns && !filePath.includes("/"));

@@ -22,6 +22,6 @@ note: >-
   参照: .claude/rules/project/effect-ts.md — エラーは呼び出し側の責務で処理する。
 files:
   - "src/**/*.ts"
-ignoreFiles:
+ignores:
   - "src/**/__tests__/**"
   - "src/**/*.test.ts"

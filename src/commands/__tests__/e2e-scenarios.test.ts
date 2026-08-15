@@ -13,7 +13,14 @@
 import { vol } from "memfs";
 import { Effect } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ZikuError } from "../../errors";
+import type { TemplateSource } from "../../modules/schemas";
+import {
+  baseCommitSha,
+  baseHashesOf,
+  createPendingLock,
+  lockSchema,
+  markSynced,
+} from "../../modules/schemas";
 
 // ── filesystem mock ─────────────────────────────────────────────
 
@@ -42,6 +49,10 @@ vi.mock("../../utils/template", () => {
     buildTemplateSource: vi.fn(
       (source: { owner: string; repo: string }) => `gh:${source.owner}/${source.repo}`,
     ),
+    buildCommitPinnedSource: vi.fn(
+      (source: { owner: string; repo: string }, sha: string) =>
+        `gh:${source.owner}/${source.repo}#${sha}`,
+    ),
     downloadTemplateToTemp,
     // command-context は resolveTemplateDirScoped 経由でこれを呼ぶ。
     // 既存テストが mockDownloadTemplateToTemp に { templateDir, cleanup } を返すよう
@@ -67,6 +78,9 @@ vi.mock("../../utils/github", async () => {
   const actual = await vi.importActual<typeof import("../../utils/github")>("../../utils/github");
   return {
     resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123")),
+    fetchDefaultBranch: vi.fn(() => Promise.resolve({ _tag: "Resolved" as const, name: "main" })),
+    resolveSourceCommitSha: vi.fn(() => Promise.resolve("abc123")),
+    resolveSourceCommit: vi.fn(() => Promise.resolve({ _tag: "Resolved" as const, sha: "abc123" })),
     checkRepoExists: vi.fn(() => Promise.resolve({ _tag: "Exists" as const })),
     checkRepoSetup: vi.fn(() => Promise.resolve(true)),
     getGitHubToken: vi.fn(() => "ghp_test"),
@@ -75,6 +89,8 @@ vi.mock("../../utils/github", async () => {
     createPullRequest: vi.fn(() =>
       Promise.resolve({ url: "https://github.com/test/repo/pull/2", number: 2, branch: "sync" }),
     ),
+    // 既定ブランチの控えへ倒す規則は実装を通す（コマンドの挙動そのものなのでモックしない）
+    decideDefaultBranch: actual.decideDefaultBranch,
     rateLimitedError: actual.rateLimitedError,
   };
 });
@@ -86,6 +102,7 @@ vi.mock("../../ui/prompts", () => ({
   selectTemplateCandidate: vi.fn(() => Promise.resolve({ owner: "test-org", repo: ".github" })),
   inputTemplateSource: vi.fn(),
   selectDeletedFiles: vi.fn(() => Promise.resolve([])),
+  selectDeletedFilesWithLocalEdits: vi.fn(() => Promise.resolve([])),
   selectPushFiles: vi.fn(),
   confirmAction: vi.fn(() => Promise.resolve(true)),
   inputGitHubToken: vi.fn(() => Promise.resolve("ghp_test")),
@@ -173,7 +190,7 @@ vi.mock("../../ui/diff-view", () => ({
 }));
 
 vi.mock("../../utils/readme", () => ({
-  detectAndUpdateReadme: vi.fn(() => Promise.resolve({ updated: false, path: null })),
+  renderTemplateReadme: vi.fn(() => Promise.resolve(null)),
 }));
 
 vi.mock("giget", () => ({
@@ -184,31 +201,35 @@ vi.mock("../../utils/diff", () => ({
   detectDiff: vi.fn(() =>
     Promise.resolve({
       files: [],
-      summary: { added: 0, modified: 0, deleted: 0, unchanged: 0 },
       templateDir: "/tmp/template",
       targetDir: "/project",
     }),
   ),
   hasDiff: vi.fn(() => false),
-  getPushableFiles: vi.fn(() => []),
 }));
 
-vi.mock("../../utils/merge", () => ({
-  classifyFiles: vi.fn(() => ({
-    autoUpdate: [],
-    localOnly: [],
-    conflicts: [],
-    newFiles: [],
-    deletedFiles: [],
-    deletedLocally: [],
-    unchanged: [],
-  })),
-  threeWayMerge: vi.fn(() => ({ content: "merged", hasConflicts: false })),
-  asBaseContent: vi.fn((s: string) => s),
-  asLocalContent: vi.fn((s: string) => s),
-  asTemplateContent: vi.fn((s: string) => s),
-  hasConflictMarkers: vi.fn(() => ({ found: false })),
-}));
+vi.mock("../../utils/merge", async () => {
+  const effectMod = await import("effect");
+  return {
+    classifyFiles: vi.fn(() => ({
+      autoUpdate: [],
+      localOnly: [],
+      conflicts: [],
+      newFiles: [],
+      deletedFiles: [],
+      deletedWithLocalEdits: [],
+      deletedLocally: [],
+      unchanged: [],
+    })),
+    threeWayMerge: vi.fn(() => ({ _tag: "Clean", content: "merged" })),
+    asBaseContent: vi.fn((s: string) => s),
+    asLocalContent: vi.fn((s: string) => s),
+    asTemplateContent: vi.fn((s: string) => s),
+    findConflictRegions: vi.fn(() => []),
+    // ここで扱うシナリオは衝突を作らないので、常に「未解決なし」を返す。
+    mergeConflictFiles: vi.fn(() => effectMod.Effect.succeed([])),
+  };
+});
 
 vi.mock("../../utils/untracked", () => ({
   detectUntrackedFiles: vi.fn(() => Promise.resolve([])),
@@ -235,6 +256,8 @@ const { log } = await import("../../ui/renderer");
 const { detectDiff } = await import("../../utils/diff");
 const { checkRepoExists, createPullRequest } = await import("../../utils/github");
 const { classifyFiles } = await import("../../utils/merge");
+const { absPath, commitSha, globPatterns, hashMap, repoRelPath, repoRelPaths } =
+  await import("../../__tests__/brands");
 
 const mockDownloadTemplateToTemp = vi.mocked(downloadTemplateToTemp);
 const mockFetchTemplates = vi.mocked(fetchTemplates);
@@ -252,7 +275,7 @@ const mockClassifyFiles = vi.mocked(classifyFiles);
 
 // ── helpers ─────��───────────────────────────────────────────────
 
-const DEFAULT_SOURCE = { owner: "test-org", repo: ".github" };
+const DEFAULT_SOURCE: TemplateSource = { kind: "github", owner: "test-org", repo: ".github" };
 
 function createZikuJsonc(include: string[], exclude?: string[]): string {
   const content: Record<string, unknown> = { include };
@@ -260,25 +283,22 @@ function createZikuJsonc(include: string[], exclude?: string[]): string {
   return JSON.stringify(content, null, 2);
 }
 
-function _createLockJson(source = DEFAULT_SOURCE): string {
-  return JSON.stringify(
-    {
+function makeLock(source: TemplateSource, hashes: Record<string, string>, sha?: string) {
+  return markSynced(
+    createPendingLock({
       version: "0.1.0",
       installedAt: "2024-01-01T00:00:00.000Z",
       source,
-      baseHashes: {},
-    },
-    null,
-    2,
+    }),
+    { hashes: hashMap(hashes), commitSha: sha === undefined ? undefined : commitSha(sha) },
   );
 }
 
-const baseLock = {
-  version: "0.1.0",
-  installedAt: "2024-01-01T00:00:00.000Z",
-  source: DEFAULT_SOURCE,
-  baseHashes: {},
-};
+function _createLockJson(source = DEFAULT_SOURCE): string {
+  return JSON.stringify(makeLock(source, {}), null, 2);
+}
+
+const baseLock = makeLock(DEFAULT_SOURCE, {});
 
 // ═══════════════════════════════════════════════════════════════
 // E2E Scenarios
@@ -290,16 +310,19 @@ describe("E2E: multi-scenario tests", () => {
     vi.clearAllMocks();
 
     mockDownloadTemplateToTemp.mockResolvedValue({
-      templateDir: "/tmp/template",
+      templateDir: absPath("/tmp/template"),
       cleanup: vi.fn(),
     });
     mockFetchTemplates.mockResolvedValue([]);
-    mockWriteFileWithStrategy.mockResolvedValue({ action: "created", path: ".ziku/ziku.jsonc" });
+    mockWriteFileWithStrategy.mockResolvedValue({
+      action: "created",
+      path: repoRelPath(".ziku/ziku.jsonc"),
+    });
     mockHashFiles.mockResolvedValue({});
     mockCheckRepoExists.mockResolvedValue({ _tag: "Exists" });
     mockLoadTemplateConfig.mockReturnValue(
       Effect.succeed({
-        include: [".mcp.json", ".devcontainer/**"],
+        include: globPatterns([".mcp.json", ".devcontainer/**"]),
         exclude: [],
       }),
     );
@@ -313,8 +336,8 @@ describe("E2E: multi-scenario tests", () => {
     beforeEach(() => {
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".mcp.json", ".devcontainer/**", ".github/**"],
-          exclude: ["*.local"],
+          include: globPatterns([".mcp.json", ".devcontainer/**", ".github/**"]),
+          exclude: globPatterns(["*.local"]),
         }),
       );
     });
@@ -353,7 +376,7 @@ describe("E2E: multi-scenario tests", () => {
     beforeEach(() => {
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".mcp.json", ".devcontainer/**", ".github/**"],
+          include: globPatterns([".mcp.json", ".devcontainer/**", ".github/**"]),
           exclude: [],
         }),
       );
@@ -385,7 +408,7 @@ describe("E2E: multi-scenario tests", () => {
       expect(patterns.include).not.toContain(".devcontainer/**");
     });
 
-    it("--dirs に存在しないディレクトリ名 → ZikuError", async () => {
+    it("--dirs に存在しないディレクトリ名 → InvalidArgument", async () => {
       vol.fromJSON({ "/test": null });
 
       await expect(
@@ -394,7 +417,10 @@ describe("E2E: multi-scenario tests", () => {
           rawArgs: [],
           cmd: initCommand,
         }),
-      ).rejects.toThrow(ZikuError);
+      ).rejects.toMatchObject({
+        _tag: "ZikuFailure",
+        reason: { kind: "InvalidArgument", argument: "--dirs" },
+      });
     });
   });
 
@@ -406,7 +432,7 @@ describe("E2E: multi-scenario tests", () => {
     beforeEach(() => {
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".editorconfig"],
+          include: globPatterns([".editorconfig"]),
           exclude: [],
         }),
       );
@@ -431,7 +457,7 @@ describe("E2E: multi-scenario tests", () => {
       );
     });
 
-    it("--from のリポジトリが存在しない → ZikuError", async () => {
+    it("--from のリポジトリが存在しない → TemplateRepoNotFound", async () => {
       mockCheckRepoExists.mockResolvedValueOnce({ _tag: "NotFound" });
       vol.fromJSON({ "/test": null });
 
@@ -441,7 +467,10 @@ describe("E2E: multi-scenario tests", () => {
           rawArgs: [],
           cmd: initCommand,
         }),
-      ).rejects.toThrow(ZikuError);
+      ).rejects.toMatchObject({
+        _tag: "ZikuFailure",
+        reason: { kind: "TemplateRepoNotFound", repos: ["no-org/no-repo"] },
+      });
     });
   });
 
@@ -453,7 +482,7 @@ describe("E2E: multi-scenario tests", () => {
     beforeEach(() => {
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".mcp.json"],
+          include: globPatterns([".mcp.json"]),
           exclude: [],
         }),
       );
@@ -481,7 +510,7 @@ describe("E2E: multi-scenario tests", () => {
       );
     });
 
-    it("無効な --overwrite-strategy → ZikuError", async () => {
+    it("無効な --overwrite-strategy → InvalidArgument", async () => {
       vol.fromJSON({
         ...vol.toJSON(),
         "/test": null,
@@ -498,7 +527,10 @@ describe("E2E: multi-scenario tests", () => {
           rawArgs: [],
           cmd: initCommand,
         }),
-      ).rejects.toThrow(ZikuError);
+      ).rejects.toMatchObject({
+        _tag: "ZikuFailure",
+        reason: { kind: "InvalidArgument", argument: "--overwrite-strategy" },
+      });
     });
   });
 
@@ -507,7 +539,7 @@ describe("E2E: multi-scenario tests", () => {
   // ─────────────────────────────────────────────────��───────────
 
   describe("diff: エラーケース", () => {
-    it(".ziku/ziku.jsonc が存在しない → ZikuError", async () => {
+    it(".ziku/ziku.jsonc が存在しない → NotInitialized", async () => {
       vol.fromJSON({
         "/project/.ziku/lock.json": JSON.stringify(baseLock),
         // .ziku/ziku.jsonc なし
@@ -522,7 +554,7 @@ describe("E2E: multi-scenario tests", () => {
       ).rejects.toThrow();
     });
 
-    it("ziku.jsonc が存在しない → ZikuError", async () => {
+    it("ziku.jsonc が存在しない → NotInitialized", async () => {
       vol.fromJSON({
         "/project/.ziku/lock.json": JSON.stringify(baseLock),
         // .ziku/ziku.jsonc なし
@@ -549,16 +581,16 @@ describe("E2E: multi-scenario tests", () => {
         "/project/.ziku/ziku.jsonc": initial,
       });
 
-      const originalArgv = process.argv;
-      process.argv = ["node", "ziku", "track", ".github/workflows/*.yml", "--dir", "/project"];
-
       await (trackCommand.run as any)({
-        args: { dir: "/project", list: false, patterns: ".github/workflows/*.yml" },
-        rawArgs: [],
+        args: {
+          _: [".github/workflows/*.yml"],
+          dir: "/project",
+          list: false,
+          patterns: ".github/workflows/*.yml",
+        },
+        rawArgs: [".github/workflows/*.yml", "--dir", "/project"],
         cmd: trackCommand,
       });
-
-      process.argv = originalArgv;
 
       // ファイルが更新されていること
       const content = vol.readFileSync("/project/.ziku/ziku.jsonc", "utf-8") as string;
@@ -572,16 +604,11 @@ describe("E2E: multi-scenario tests", () => {
         "/project/.ziku/ziku.jsonc": createZikuJsonc([".mcp.json"]),
       });
 
-      const originalArgv = process.argv;
-      process.argv = ["node", "ziku", "track", ".mcp.json", "--dir", "/project"];
-
       await (trackCommand.run as any)({
-        args: { dir: "/project", list: false, patterns: ".mcp.json" },
-        rawArgs: [],
+        args: { _: [".mcp.json"], dir: "/project", list: false, patterns: ".mcp.json" },
+        rawArgs: [".mcp.json", "--dir", "/project"],
         cmd: trackCommand,
       });
-
-      process.argv = originalArgv;
 
       // info が呼ばれること（既に追跡済み）
       expect(mockLog.info).toHaveBeenCalledWith(expect.stringContaining("already tracked"));
@@ -596,43 +623,44 @@ describe("E2E: multi-scenario tests", () => {
       });
 
       await (trackCommand.run as any)({
-        args: { dir: "/project", list: true, patterns: "" },
-        rawArgs: [],
+        args: { _: [], dir: "/project", list: true },
+        rawArgs: ["--list", "--dir", "/project"],
         cmd: trackCommand,
       });
 
       // エラーなく完了すること
     });
 
-    it("ziku.jsonc がない場合 → ZikuError", async () => {
+    it("ziku.jsonc がない場合 → NotInitialized", async () => {
       vol.fromJSON({ "/project": null });
 
       await expect(
         (trackCommand.run as any)({
-          args: { dir: "/project", list: false, patterns: ".new-pattern" },
-          rawArgs: [],
+          args: { _: [".new-pattern"], dir: "/project", list: false, patterns: ".new-pattern" },
+          rawArgs: [".new-pattern", "--dir", "/project"],
           cmd: trackCommand,
         }),
-      ).rejects.toThrow(ZikuError);
+      ).rejects.toMatchObject({
+        _tag: "ZikuFailure",
+        reason: { kind: "NotInitialized", path: ".ziku/ziku.jsonc" },
+      });
     });
 
-    it("パターン引数な�� → ZikuError", async () => {
+    it("パターン引数な�� → MissingArgument", async () => {
       vol.fromJSON({
         "/project/.ziku/ziku.jsonc": createZikuJsonc([".mcp.json"]),
       });
 
-      const originalArgv = process.argv;
-      process.argv = ["node", "ziku", "track", "--dir", "/project"];
-
       await expect(
         (trackCommand.run as any)({
-          args: { dir: "/project", list: false, patterns: "" },
-          rawArgs: [],
+          args: { _: [], dir: "/project", list: false },
+          rawArgs: ["--dir", "/project"],
           cmd: trackCommand,
         }),
-      ).rejects.toThrow(ZikuError);
-
-      process.argv = originalArgv;
+      ).rejects.toMatchObject({
+        _tag: "ZikuFailure",
+        reason: { kind: "MissingArgument", argument: "patterns" },
+      });
     });
   });
 
@@ -641,14 +669,14 @@ describe("E2E: multi-scenario tests", () => {
   // ──────────��────────────────────��─────────────────────────────
 
   describe("pull: エラーケース", () => {
-    it(".ziku/ziku.jsonc がない → ZikuError", async () => {
+    it(".ziku/ziku.jsonc がない → 失敗する", async () => {
       vol.fromJSON({
         "/project/.ziku/lock.json": JSON.stringify(baseLock),
       });
 
       await expect(
         (pullCommand.run as any)({
-          args: { dir: "/project", force: false, continue: false },
+          args: { dir: "/project", force: false, yes: false, continue: false },
           rawArgs: [],
           cmd: pullCommand,
         }),
@@ -665,7 +693,7 @@ describe("E2E: multi-scenario tests", () => {
       // Step 1: init
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".mcp.json"],
+          include: globPatterns([".mcp.json"]),
           exclude: [],
         }),
       );
@@ -673,7 +701,7 @@ describe("E2E: multi-scenario tests", () => {
         "/project": null,
       });
 
-      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+      mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
 
       await (initCommand.run as any)({
         args: { dir: "/project", force: false, yes: true },
@@ -694,16 +722,16 @@ describe("E2E: multi-scenario tests", () => {
         "/project/.ziku/lock.json": JSON.stringify(baseLock),
       });
 
-      const originalArgv = process.argv;
-      process.argv = ["node", "ziku", "track", ".github/workflows/ci.yml", "--dir", "/project"];
-
       await (trackCommand.run as any)({
-        args: { dir: "/project", list: false, patterns: ".github/workflows/ci.yml" },
-        rawArgs: [],
+        args: {
+          _: [".github/workflows/ci.yml"],
+          dir: "/project",
+          list: false,
+          patterns: ".github/workflows/ci.yml",
+        },
+        rawArgs: [".github/workflows/ci.yml", "--dir", "/project"],
         cmd: trackCommand,
       });
-
-      process.argv = originalArgv;
 
       // ziku.jsonc が更新されたことを確認
       const updatedContent = vol.readFileSync("/project/.ziku/ziku.jsonc", "utf-8") as string;
@@ -717,11 +745,13 @@ describe("E2E: multi-scenario tests", () => {
         cmd: diffCommand,
       });
 
-      // detectDiff が更新後のパターンで呼ばれること
+      // detectDiff が更新後のパターンを含む走査範囲で呼ばれること
       expect(mockDetectDiff).toHaveBeenCalledWith(
         expect.objectContaining({
-          patterns: expect.objectContaining({
-            include: expect.arrayContaining([".mcp.json", ".github/workflows/ci.yml"]),
+          scope: expect.objectContaining({
+            scan: expect.objectContaining({
+              include: expect.arrayContaining([".mcp.json", ".github/workflows/ci.yml"]),
+            }),
           }),
         }),
       );
@@ -736,7 +766,7 @@ describe("E2E: multi-scenario tests", () => {
     it("全ファイルが skipped → 'No changes were made' メッセージ", async () => {
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".mcp.json"],
+          include: globPatterns([".mcp.json"]),
           exclude: [],
         }),
       );
@@ -794,20 +824,16 @@ describe("E2E: multi-scenario tests", () => {
   //   2. テンプレートからファイルを削除
   //   3. pull で --force 削除が同期される
   //   4. pull で selectDeletedFiles による選択的削除
-  //   5. baseHashes の更新を確認
+  //   5. 同期ベースの更新を確認
   // ─────────────────────────────────────────────────────────────
 
   describe("ファイル削除の push → pull 同期（モック版）", () => {
-    const localSource = { path: "/template" };
-    const localLock = {
-      version: "0.1.0",
-      installedAt: "2024-01-01T00:00:00.000Z",
-      source: localSource,
-      baseHashes: {
-        ".mcp.json": "hash-mcp",
-        ".claude/rules/style.md": "hash-style",
-      },
+    const localSource: TemplateSource = { kind: "local", path: absPath("/template") };
+    const localBaseHashes = {
+      ".mcp.json": "hash-mcp",
+      ".claude/rules/style.md": "hash-style",
     };
+    const localLock = makeLock(localSource, localBaseHashes);
 
     /**
      * テンプレートとプロジェクトの初期状態を構築するヘルパー。
@@ -829,7 +855,7 @@ describe("E2E: multi-scenario tests", () => {
 
       // downloadTemplateToTemp がローカルテンプレートを返す
       mockDownloadTemplateToTemp.mockResolvedValue({
-        templateDir: "/template",
+        templateDir: absPath("/template"),
         cleanup: vi.fn(),
       });
     }
@@ -844,36 +870,31 @@ describe("E2E: multi-scenario tests", () => {
 
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
-        localOnly: [".claude/rules/testing.md"],
+        localOnly: repoRelPaths([".claude/rules/testing.md"]),
         conflicts: [],
         newFiles: [],
         deletedFiles: [],
+        deletedWithLocalEdits: [],
         deletedLocally: [],
-        unchanged: [".mcp.json", ".claude/rules/style.md"],
+        unchanged: repoRelPaths([".mcp.json", ".claude/rules/style.md"]),
       });
       mockDetectDiff.mockResolvedValueOnce({
         files: [
           {
-            path: ".claude/rules/testing.md",
+            path: repoRelPath(".claude/rules/testing.md"),
             type: "added",
             localContent: "# Testing Guide",
           },
         ],
-        summary: { added: 1, modified: 0, deleted: 0, unchanged: 2 },
       } as any);
-      mockSelectPushFiles.mockResolvedValueOnce([
-        {
-          path: ".claude/rules/testing.md",
-          type: "added",
-          localContent: "# Testing Guide",
-        },
-      ] as any);
       // push 後の baseHashes 更新用
-      mockHashFiles.mockResolvedValueOnce({
-        ".mcp.json": "hash-mcp",
-        ".claude/rules/style.md": "hash-style",
-        ".claude/rules/testing.md": "hash-testing",
-      });
+      mockHashFiles.mockResolvedValueOnce(
+        hashMap({
+          ".mcp.json": "hash-mcp",
+          ".claude/rules/style.md": "hash-style",
+          ".claude/rules/testing.md": "hash-testing",
+        }),
+      );
 
       await (pushCommand.run as any)({
         args: { dir: "/project", dryRun: false, yes: true, edit: false },
@@ -883,6 +904,8 @@ describe("E2E: multi-scenario tests", () => {
 
       // テンプレートにファイルがコピーされた
       expect(vol.existsSync("/template/.claude/rules/testing.md")).toBe(true);
+      // 非対話 push（--yes）はファイル選択プロンプトを出さずに既定集合を送る
+      expect(mockSelectPushFiles).not.toHaveBeenCalled();
       // PR は作成されない（ローカルソース）
       expect(mockCreatePullRequest).not.toHaveBeenCalled();
 
@@ -894,39 +917,48 @@ describe("E2E: multi-scenario tests", () => {
 
       // テンプレート側（testing.md なし）、ローカル側（testing.md あり）
       mockHashFiles
-        .mockResolvedValueOnce({
-          ".mcp.json": "hash-mcp",
-          ".claude/rules/style.md": "hash-style",
-        })
-        .mockResolvedValueOnce({
-          ".mcp.json": "hash-mcp",
-          ".claude/rules/style.md": "hash-style",
-          ".claude/rules/testing.md": "hash-testing",
-        });
+        .mockResolvedValueOnce(
+          hashMap({
+            ".mcp.json": "hash-mcp",
+            ".claude/rules/style.md": "hash-style",
+          }),
+        )
+        .mockResolvedValueOnce(
+          hashMap({
+            ".mcp.json": "hash-mcp",
+            ".claude/rules/style.md": "hash-style",
+            ".claude/rules/testing.md": "hash-testing",
+          }),
+        );
 
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
         conflicts: [],
         newFiles: [],
-        deletedFiles: [".claude/rules/testing.md"],
+        deletedFiles: repoRelPaths([".claude/rules/testing.md"]),
+        deletedWithLocalEdits: [],
         deletedLocally: [],
-        unchanged: [".mcp.json", ".claude/rules/style.md"],
+        unchanged: repoRelPaths([".mcp.json", ".claude/rules/style.md"]),
       });
 
       // push で更新された lock を反映
-      const updatedLock = JSON.parse(
-        vol.readFileSync("/project/.ziku/lock.json", "utf8") as string,
+      const updatedLock = markSynced(
+        lockSchema.parse(
+          JSON.parse(vol.readFileSync("/project/.ziku/lock.json", "utf8") as string),
+        ),
+        {
+          hashes: hashMap({
+            ".mcp.json": "hash-mcp",
+            ".claude/rules/style.md": "hash-style",
+            ".claude/rules/testing.md": "hash-testing",
+          }),
+        },
       );
-      updatedLock.baseHashes = {
-        ".mcp.json": "hash-mcp",
-        ".claude/rules/style.md": "hash-style",
-        ".claude/rules/testing.md": "hash-testing",
-      };
       vol.writeFileSync("/project/.ziku/lock.json", JSON.stringify(updatedLock, null, 2));
 
       await (pullCommand.run as any)({
-        args: { dir: "/project", force: true, continue: false },
+        args: { dir: "/project", force: true, yes: false, continue: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -939,11 +971,13 @@ describe("E2E: multi-scenario tests", () => {
       expect(vol.existsSync("/project/.mcp.json")).toBe(true);
       expect(vol.existsSync("/project/.claude/rules/style.md")).toBe(true);
 
-      // baseHashes から testing.md が消えている
-      const finalLock = JSON.parse(vol.readFileSync("/project/.ziku/lock.json", "utf8") as string);
-      expect(finalLock.baseHashes).not.toHaveProperty(".claude/rules/testing.md");
-      expect(finalLock.baseHashes).toHaveProperty(".mcp.json");
-      expect(finalLock.baseHashes).toHaveProperty(".claude/rules/style.md");
+      // 同期ベースから testing.md が消えている
+      const finalLock = lockSchema.parse(
+        JSON.parse(vol.readFileSync("/project/.ziku/lock.json", "utf8") as string),
+      );
+      expect(baseHashesOf(finalLock)).not.toHaveProperty(".claude/rules/testing.md");
+      expect(baseHashesOf(finalLock)).toHaveProperty(".mcp.json");
+      expect(baseHashesOf(finalLock)).toHaveProperty(".claude/rules/style.md");
     });
 
     it("pull で selectDeletedFiles を通じてユーザーが選択的に削除できる", async () => {
@@ -953,44 +987,51 @@ describe("E2E: multi-scenario tests", () => {
       vol.writeFileSync("/project/.claude/rules/deprecated-a.md", "old content A");
       vol.writeFileSync("/project/.claude/rules/deprecated-b.md", "old content B");
 
-      const lockWithExtra = {
-        ...localLock,
-        baseHashes: {
-          ...localLock.baseHashes,
+      const lockWithExtra = markSynced(localLock, {
+        hashes: hashMap({
+          ...localBaseHashes,
           ".claude/rules/deprecated-a.md": "hash-dep-a",
           ".claude/rules/deprecated-b.md": "hash-dep-b",
-        },
-      };
+        }),
+      });
       vol.writeFileSync("/project/.ziku/lock.json", JSON.stringify(lockWithExtra, null, 2));
 
       // テンプレート側（deprecated ファイルなし）、ローカル側（deprecated ファイルあり）
       mockHashFiles
-        .mockResolvedValueOnce({
-          ".mcp.json": "hash-mcp",
-          ".claude/rules/style.md": "hash-style",
-        })
-        .mockResolvedValueOnce({
-          ".mcp.json": "hash-mcp",
-          ".claude/rules/style.md": "hash-style",
-          ".claude/rules/deprecated-a.md": "hash-dep-a",
-          ".claude/rules/deprecated-b.md": "hash-dep-b",
-        });
+        .mockResolvedValueOnce(
+          hashMap({
+            ".mcp.json": "hash-mcp",
+            ".claude/rules/style.md": "hash-style",
+          }),
+        )
+        .mockResolvedValueOnce(
+          hashMap({
+            ".mcp.json": "hash-mcp",
+            ".claude/rules/style.md": "hash-style",
+            ".claude/rules/deprecated-a.md": "hash-dep-a",
+            ".claude/rules/deprecated-b.md": "hash-dep-b",
+          }),
+        );
 
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
         conflicts: [],
         newFiles: [],
-        deletedFiles: [".claude/rules/deprecated-a.md", ".claude/rules/deprecated-b.md"],
+        deletedFiles: repoRelPaths([
+          ".claude/rules/deprecated-a.md",
+          ".claude/rules/deprecated-b.md",
+        ]),
+        deletedWithLocalEdits: [],
         deletedLocally: [],
-        unchanged: [".mcp.json", ".claude/rules/style.md"],
+        unchanged: repoRelPaths([".mcp.json", ".claude/rules/style.md"]),
       });
 
       // ユーザーが deprecated-a.md のみ削除を選択
-      mockSelectDeletedFiles.mockResolvedValueOnce([".claude/rules/deprecated-a.md"]);
+      mockSelectDeletedFiles.mockResolvedValueOnce(repoRelPaths([".claude/rules/deprecated-a.md"]));
 
       await (pullCommand.run as any)({
-        args: { dir: "/project", force: false, continue: false },
+        args: { dir: "/project", force: false, yes: false, continue: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -1006,18 +1047,16 @@ describe("E2E: multi-scenario tests", () => {
       expect(vol.existsSync("/project/.claude/rules/deprecated-b.md")).toBe(true);
     });
 
-    it("GitHub テンプレートでの pull 時にファイル削除と baseHashes 更新が行われる", async () => {
-      const ghLock = {
-        version: "0.1.0",
-        installedAt: "2024-01-01T00:00:00.000Z",
-        source: DEFAULT_SOURCE,
-        baseRef: "abc123",
-        baseHashes: {
+    it("GitHub テンプレートでの pull 時にファイル削除と同期ベース更新が行われる", async () => {
+      const ghLock = makeLock(
+        DEFAULT_SOURCE,
+        {
           ".mcp.json": "hash-mcp",
           ".claude/rules/style.md": "hash-style",
           "config/old.json": "hash-old",
         },
-      };
+        "abc123",
+      );
 
       vol.fromJSON({
         "/project/.ziku/ziku.jsonc": createZikuJsonc([
@@ -1035,28 +1074,33 @@ describe("E2E: multi-scenario tests", () => {
       });
 
       mockHashFiles
-        .mockResolvedValueOnce({
-          ".mcp.json": "hash-mcp",
-          ".claude/rules/style.md": "hash-style",
-        })
-        .mockResolvedValueOnce({
-          ".mcp.json": "hash-mcp",
-          ".claude/rules/style.md": "hash-style",
-          "config/old.json": "hash-old",
-        });
+        .mockResolvedValueOnce(
+          hashMap({
+            ".mcp.json": "hash-mcp",
+            ".claude/rules/style.md": "hash-style",
+          }),
+        )
+        .mockResolvedValueOnce(
+          hashMap({
+            ".mcp.json": "hash-mcp",
+            ".claude/rules/style.md": "hash-style",
+            "config/old.json": "hash-old",
+          }),
+        );
 
       mockClassifyFiles.mockReturnValueOnce({
         autoUpdate: [],
         localOnly: [],
         conflicts: [],
         newFiles: [],
-        deletedFiles: ["config/old.json"],
+        deletedFiles: repoRelPaths(["config/old.json"]),
+        deletedWithLocalEdits: [],
         deletedLocally: [],
-        unchanged: [".mcp.json", ".claude/rules/style.md"],
+        unchanged: repoRelPaths([".mcp.json", ".claude/rules/style.md"]),
       });
 
       await (pullCommand.run as any)({
-        args: { dir: "/project", force: true, continue: false },
+        args: { dir: "/project", force: true, yes: false, continue: false },
         rawArgs: [],
         cmd: pullCommand,
       });
@@ -1064,11 +1108,13 @@ describe("E2E: multi-scenario tests", () => {
       // ファイルが削除された
       expect(vol.existsSync("/project/config/old.json")).toBe(false);
 
-      // lock.json の baseHashes が更新された
-      const finalLock = JSON.parse(vol.readFileSync("/project/.ziku/lock.json", "utf8") as string);
-      expect(finalLock.baseHashes).not.toHaveProperty("config/old.json");
-      expect(finalLock.baseHashes).toHaveProperty(".mcp.json");
-      expect(finalLock.baseRef).toBe("abc123");
+      // lock.json の同期ベースが更新された
+      const finalLock = lockSchema.parse(
+        JSON.parse(vol.readFileSync("/project/.ziku/lock.json", "utf8") as string),
+      );
+      expect(baseHashesOf(finalLock)).not.toHaveProperty("config/old.json");
+      expect(baseHashesOf(finalLock)).toHaveProperty(".mcp.json");
+      expect(baseCommitSha(finalLock)).toBe("abc123");
     });
   });
 });

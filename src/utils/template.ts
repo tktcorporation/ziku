@@ -10,14 +10,24 @@ import {
 import { homedir, tmpdir } from "node:os";
 import * as p from "@clack/prompts";
 import { downloadTemplate } from "giget";
-import { dirname, join, resolve } from "pathe";
+import { dirname, resolve } from "pathe";
 import { Effect } from "effect";
 import type { Scope } from "effect";
 import { match } from "ts-pattern";
 import { TemplateError } from "../errors";
-import type { FileOperationResult, OverwriteStrategy } from "../modules/schemas";
+import type {
+  AbsPath,
+  CommitSha,
+  FileOperationResult,
+  GitHubSource,
+  OverwriteStrategy,
+  RepoRelPath,
+} from "../modules/schemas";
+import { templateRefToString } from "../modules/schemas";
 import { log } from "../ui/renderer";
+import { getGitHubToken } from "./github";
 import { loadMergedGitignore, separateByGitignore } from "./gitignore";
+import { absPath, joinAbs } from "./paths";
 import type { FlatPatterns } from "./patterns";
 import { resolvePatterns } from "./patterns";
 import {
@@ -65,18 +75,53 @@ function ensureGigetCacheDir(): void {
   );
 }
 
+/**
+ * giget にテンプレートを取り寄せさせるときのオプション。
+ *
+ * トークンがあれば `auth` に載せる。giget はこれを取得リクエストの Authorization ヘッダに
+ * するので、プライベートなテンプレートリポジトリでもアーカイブを取れる。存在確認とコミット
+ * SHA の取得（`utils/github.ts`）だけを認証しても、本体の取得が未認証のままだと
+ * 「リポジトリは在るし SHA も引けるのに、ダウンロードだけ 404」という辻褄の合わない失敗になる。
+ *
+ * トークンが無ければ `auth` を渡さない。公開リポジトリを未認証で取り寄せる経路をそのまま
+ * 残すため。
+ *
+ * `force: true` は展開先の一時ディレクトリを毎回作り直させる指定で、前回の中断で残った
+ * 中身が混ざらないようにする。
+ */
+function gigetOptions(dir: AbsPath): { dir: AbsPath; force: true; auth?: string } {
+  const token = getGitHubToken();
+  return token === undefined ? { dir, force: true } : { dir, force: true, auth: token };
+}
+
 // 後方互換性のためのエイリアス
 export type CopyResult = FileOperationResult;
 
 /**
- * ZikuConfig の source フィールドから giget 用のテンプレートソース文字列を構築する。
+ * GitHub ソースから giget 用のテンプレートソース文字列を構築する。
  *
- * 背景: giget は "gh:owner/repo" または "gh:owner/repo#ref" 形式を期待する。
- * .ziku/ziku.jsonc の source: { owner, repo, ref? } をこの形式に変換する。
+ * giget は "gh:owner/repo" または "gh:owner/repo#ref" 形式を期待する。ref の種別
+ * （ブランチ / タグ / コミット）は giget にとって区別が無く、どれも "#" の後ろに載る。
+ * その変換は `templateRefToString` に集約している。
+ *
+ * ref を持たないソースからは "#" の無い文字列ができ、giget の既定である `main` から取得
+ * される。リポジトリの既定ブランチは `main` とは限らないので、取得先を lock の `base.ref` や
+ * PR の宛先と揃える必要がある呼び出しは、この関数へ渡す前に既定ブランチを解決して ref を
+ * 埋めること（`utils/template-resolve.ts` の `resolveTemplateDirScoped`）。
  */
-export function buildTemplateSource(source: { owner: string; repo: string; ref?: string }): string {
+export function buildTemplateSource(source: GitHubSource): string {
   const base = `gh:${source.owner}/${source.repo}`;
-  return source.ref ? `${base}#${source.ref}` : base;
+  return source.ref ? `${base}#${templateRefToString(source.ref)}` : base;
+}
+
+/**
+ * コミット SHA を固定した giget ソース文字列を構築する。
+ *
+ * 3-way マージのベースツリーは「その時点のコミット」を取り直す必要があるため、
+ * source が持つ ref ではなく渡された SHA で上書きする。
+ */
+export function buildCommitPinnedSource(source: GitHubSource, sha: CommitSha): string {
+  return buildTemplateSource({ ...source, ref: { kind: "commit", sha } });
 }
 
 /**
@@ -110,12 +155,12 @@ export function buildTemplateSource(source: { owner: string; repo: string; ref?:
  * @param label 同一 targetDir で複数同時取得する場合の識別子 (例: "base")
  */
 export function acquireTempTemplate(
-  targetDir: string,
+  targetDir: AbsPath,
   source?: string,
   label?: string,
-): Effect.Effect<string, TemplateError, Scope.Scope> {
+): Effect.Effect<AbsPath, TemplateError, Scope.Scope> {
   return Effect.gen(function* () {
-    const tempDir = join(targetDir, label ? `.ziku-temp-${label}` : ".ziku-temp");
+    const tempDir = joinAbs(targetDir, label ? `.ziku-temp-${label}` : ".ziku-temp");
 
     // 順序が重要: register → addFinalizer → download
     // download が失敗・中断しても、Scope クローズ時に finalizer が走って
@@ -128,20 +173,21 @@ export function acquireTempTemplate(
     yield* Effect.sync(ensureGigetCacheDir);
 
     const result = yield* Effect.tryPromise({
-      try: () => downloadTemplate(source ?? TEMPLATE_SOURCE, { dir: tempDir, force: true }),
+      try: () => downloadTemplate(source ?? TEMPLATE_SOURCE, gigetOptions(tempDir)),
       catch: (e) => new TemplateError({ message: "Failed to download template", cause: e }),
     });
 
-    return result.dir;
+    // giget が返すのは展開先の実パス。ここが「外の世界から入ってきた絶対パス」の入口。
+    return absPath(result.dir);
   });
 }
 
 export function downloadTemplateToTemp(
-  targetDir: string,
+  targetDir: AbsPath,
   source?: string,
   label?: string,
-): Promise<{ templateDir: string; cleanup: () => void }> {
-  const tempDir = join(targetDir, label ? `.ziku-temp-${label}` : ".ziku-temp");
+): Promise<{ templateDir: AbsPath; cleanup: () => void }> {
+  const tempDir = joinAbs(targetDir, label ? `.ziku-temp-${label}` : ".ziku-temp");
 
   // 中断時 (Ctrl+C / process.exit) でも削除されるよう、ダウンロード前に登録する。
   // 通常終了は cleanup() 経由で unregister + 削除する。
@@ -149,11 +195,11 @@ export function downloadTemplateToTemp(
   ensureGigetCacheDir();
 
   // 失敗時の解放: downloadTemplate が reject すると返り値の cleanup が
-  // 作られないため、tracker に古いエントリが残る (codex review #74)。
+  // 作られないため、tracker に古いエントリが残る。
   // 後段で同名 .ziku-temp* が新規作成された場合に process exit で
   // 誤って削除されうるので、reject 経路でも unregister + rmSync する。
   // try/catch は ast-grep で禁止のため Promise.then(onFulfilled, onRejected) を使う。
-  return downloadTemplate(source ?? TEMPLATE_SOURCE, { dir: tempDir, force: true }).then(
+  return downloadTemplate(source ?? TEMPLATE_SOURCE, gigetOptions(tempDir)).then(
     ({ dir: templateDir }) => {
       const cleanup = () => {
         unregisterTempDir(tempDir);
@@ -161,7 +207,7 @@ export function downloadTemplateToTemp(
           rmSync(tempDir, { recursive: true, force: true });
         }
       };
-      return { templateDir, cleanup };
+      return { templateDir: absPath(templateDir), cleanup };
     },
     (error: unknown) => {
       unregisterTempDir(tempDir);
@@ -174,18 +220,25 @@ export function downloadTemplateToTemp(
 }
 
 export interface DownloadOptions {
-  targetDir: string;
+  targetDir: AbsPath;
   overwriteStrategy: OverwriteStrategy;
   patterns: FlatPatterns; // フラットな include/exclude パターン
-  templateDir?: string; // 事前にダウンロードしたテンプレートディレクトリ
+  templateDir?: AbsPath; // 事前にダウンロードしたテンプレートディレクトリ
   dryRun?: boolean; // true の場合、ファイルへの書き込みを行わずプレビューのみ行う
 }
 
+/**
+ * 書き込み先の指定。
+ *
+ * `destPath`（書き込む実体の場所）と `relativePath`（結果に載る同期の鍵）を別の brand に
+ * するのは、どちらも `string` だと入れ違えてもコンパイルが通り、プロジェクトルート直下に
+ * 絶対パスの見た目のファイルを作る・結果に絶対パスが載って照合が外れる、という形で失敗するため。
+ */
 export interface WriteFileOptions {
-  destPath: string;
+  destPath: AbsPath;
   content: string;
   strategy: OverwriteStrategy;
-  relativePath: string;
+  relativePath: RepoRelPath;
   dryRun?: boolean; // true の場合、判定結果は返すがディスクへは書き込まない
 }
 
@@ -257,7 +310,7 @@ export function fetchTemplates(options: DownloadOptions): Promise<FileOperationR
   } = options;
   // 事前ダウンロード済みか、新規ダウンロードか
   const shouldDownload = !preDownloadedDir;
-  const tempDir = join(targetDir, ".ziku-temp");
+  const tempDir = joinAbs(targetDir, ".ziku-temp");
 
   if (shouldDownload) {
     // 中断時 (Ctrl+C / process.exit) でも削除されるよう、ダウンロード前に登録する。
@@ -267,23 +320,21 @@ export function fetchTemplates(options: DownloadOptions): Promise<FileOperationR
 
   // 実体を IIFE で包み、Promise.finally で cleanup を保証する。
   // download / コピー処理いずれが失敗しても tracker から外して物理削除する
-  // (codex review #74 — try/finally は ast-grep で禁止のため Promise.finally で対応)。
+  // (try/finally は ast-grep で禁止のため Promise.finally で対応)。
   const work = async (): Promise<FileOperationResult[]> => {
     const allResults: FileOperationResult[] = [];
 
-    let templateDir: string;
+    let templateDir: AbsPath;
     if (shouldDownload) {
-      const result = await downloadTemplate(TEMPLATE_SOURCE, {
-        dir: tempDir,
-        force: true,
-      });
-      templateDir = result.dir;
+      const result = await downloadTemplate(TEMPLATE_SOURCE, gigetOptions(tempDir));
+      templateDir = absPath(result.dir);
     } else {
       templateDir = preDownloadedDir;
     }
 
-    // ローカルとテンプレート両方の .gitignore をマージして読み込み
-    const gitignore = await loadMergedGitignore([targetDir, templateDir]);
+    // ローカルとテンプレート両方の .gitignore をマージして読み込み。探索の範囲は
+    // コピー対象のパターンに揃える。
+    const gitignore = await loadMergedGitignore([targetDir, templateDir], patterns.include);
 
     // フラットパターンでファイルを解決
     const resolvedFiles = resolvePatterns(templateDir, patterns.include, patterns.exclude);
@@ -295,8 +346,8 @@ export function fetchTemplates(options: DownloadOptions): Promise<FileOperationR
 
     // tracked ファイルは通常通りコピー
     for (const relativePath of tracked) {
-      const srcPath = join(templateDir, relativePath);
-      const destPath = join(targetDir, relativePath);
+      const srcPath = joinAbs(templateDir, relativePath);
+      const destPath = joinAbs(targetDir, relativePath);
 
       const result = await copyFile(srcPath, destPath, overwriteStrategy, relativePath, dryRun);
       allResults.push(result);
@@ -306,8 +357,8 @@ export function fetchTemplates(options: DownloadOptions): Promise<FileOperationR
     // - ローカルに存在しない場合 → コピー
     // - ローカルに存在する場合 → スキップ（上書き防止）
     for (const relativePath of ignored) {
-      const srcPath = join(templateDir, relativePath);
-      const destPath = join(targetDir, relativePath);
+      const srcPath = joinAbs(templateDir, relativePath);
+      const destPath = joinAbs(targetDir, relativePath);
       const destExists = existsSync(destPath);
 
       if (destExists) {
@@ -346,10 +397,10 @@ export function fetchTemplates(options: DownloadOptions): Promise<FileOperationR
  * （confirm() を呼ばず `initialValue: false` 相当の「上書きしない」を既定値にする）。
  */
 export async function copyFile(
-  srcPath: string,
-  destPath: string,
+  srcPath: AbsPath,
+  destPath: AbsPath,
   strategy: OverwriteStrategy,
-  relativePath: string,
+  relativePath: RepoRelPath,
   dryRun = false,
 ): Promise<CopyResult> {
   const destExists = existsSync(destPath);

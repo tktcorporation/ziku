@@ -1,5 +1,6 @@
 import { vol } from "memfs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { absPath, globPatterns } from "../../__tests__/brands";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -83,7 +84,7 @@ describe("track command - core logic", () => {
         2,
       );
 
-      const result = addIncludePattern(rawContent, [".cloud/rules/*.md"]);
+      const result = addIncludePattern(rawContent, globPatterns([".cloud/rules/*.md"]));
 
       const parsed = JSON.parse(result);
       expect(parsed.include).toContain(".cloud/config.json");
@@ -100,7 +101,10 @@ describe("track command - core logic", () => {
         2,
       );
 
-      const result = addIncludePattern(rawContent, [".cloud/rules/*.md", ".cloud/config.json"]);
+      const result = addIncludePattern(
+        rawContent,
+        globPatterns([".cloud/rules/*.md", ".cloud/config.json"]),
+      );
 
       const parsed = JSON.parse(result);
       expect(parsed.include).toContain(".mcp.json");
@@ -125,8 +129,8 @@ describe("track command - core logic", () => {
         "/project/.ziku/ziku.jsonc": initialContent,
       });
 
-      const updated = addIncludePattern(initialContent, [".cloud/rules/*.md"]);
-      await saveZikuConfig("/project", updated);
+      const updated = addIncludePattern(initialContent, globPatterns([".cloud/rules/*.md"]));
+      await saveZikuConfig(absPath("/project"), updated);
 
       const saved = vol.readFileSync("/project/.ziku/ziku.jsonc", "utf8") as string;
       const parsed = JSON.parse(saved);
@@ -137,7 +141,7 @@ describe("track command - core logic", () => {
 
     it("ziku.jsonc が存在しない場合を検知できる", () => {
       vol.fromJSON({});
-      expect(zikuConfigExists("/project")).toBe(false);
+      expect(zikuConfigExists(absPath("/project"))).toBe(false);
     });
   });
 });
@@ -145,26 +149,27 @@ describe("track command - core logic", () => {
 // trackCommand の統合テスト
 // モック後にインポートする（既存パターンに従う）
 const { trackCommand } = await import("../track");
+const { runCommand } = await import("citty");
 
 /**
- * track コマンドを実行するテストヘルパー。
+ * track コマンドを CLI と同じ引数解釈で実行するテストヘルパー。
  *
- * track.ts の parsePatternArgs() は citty の args ではなく process.argv を直接
- * 読むため、パターン引数を渡すテストでは argv も併せてスタブする必要がある。
+ * citty の runCommand に生の引数列を渡すことで、パターン・フラグの切り分けを
+ * 実装と同じパーサーに任せる。
  */
-function runTrack(dir: string, patterns: string[], opts: { dryRun?: boolean } = {}) {
-  const originalArgv = process.argv;
-  const flagArgs = opts.dryRun ? ["--dryRun"] : [];
-  process.argv = ["node", "ziku", "track", ...patterns, "--dir", dir, ...flagArgs];
+function runTrack(rawArgs: string[]): Promise<unknown> {
+  return runCommand(trackCommand, { rawArgs });
+}
 
-  const promise = (trackCommand.run as any)({
-    args: { dir, list: false, dryRun: opts.dryRun ?? false },
-    rawArgs: [],
-    cmd: trackCommand,
-  });
+/** 追跡中の include パターンをファイルから読み出す */
+function readIncludePatterns(dir: string): string[] {
+  const saved = vol.readFileSync(`${dir}/.ziku/ziku.jsonc`, "utf8") as string;
+  return JSON.parse(saved).include;
+}
 
-  return promise.finally(() => {
-    process.argv = originalArgv;
+function seedProject(include: string[] = [".mcp.json"]): void {
+  vol.fromJSON({
+    "/project/.ziku/ziku.jsonc": JSON.stringify({ include, exclude: [] }),
   });
 }
 
@@ -174,25 +179,58 @@ describe("trackCommand", () => {
     vi.clearAllMocks();
   });
 
-  it("--list のみで patterns なしでも動作する（required: false）", async () => {
-    vol.fromJSON({
-      "/project/.ziku/ziku.jsonc": JSON.stringify({
-        include: [".mcp.json"],
-        exclude: [],
-      }),
+  describe("引数の受け取り", () => {
+    it("複数パターンを位置引数で受け取る", async () => {
+      seedProject();
+
+      await runTrack([".cloud/rules/*.md", ".cloud/config.json", "--dir", "/project"]);
+
+      expect(readIncludePatterns("/project")).toEqual([
+        ".mcp.json",
+        ".cloud/rules/*.md",
+        ".cloud/config.json",
+      ]);
     });
 
-    // エラーなく完了することを確認
-    await expect(
-      (trackCommand.run as any)({
-        args: {
-          dir: "/project",
-          list: true,
-        },
-        rawArgs: ["--list"],
-        cmd: trackCommand,
-      }),
-    ).resolves.not.toThrow();
+    it("--dir の値をパターンとして扱わない", async () => {
+      seedProject();
+
+      await runTrack([".env.example", "--dir", "/project"]);
+
+      expect(readIncludePatterns("/project")).toEqual([".mcp.json", ".env.example"]);
+    });
+
+    it("--dir=<path> 形式でも値をパターンとして扱わない", async () => {
+      seedProject();
+
+      await runTrack([".env.example", "--dir=/project"]);
+
+      expect(readIncludePatterns("/project")).toEqual([".mcp.json", ".env.example"]);
+    });
+
+    it("エイリアス -d でもディレクトリを指定できる", async () => {
+      seedProject();
+
+      await runTrack(["-d", "/project", ".env.example"]);
+
+      expect(readIncludePatterns("/project")).toEqual([".mcp.json", ".env.example"]);
+    });
+
+    it("パターン未指定ならエラーになる", async () => {
+      seedProject();
+
+      await expect(runTrack(["--dir", "/project"])).rejects.toThrow("No patterns specified");
+    });
+  });
+
+  it("--list は patterns なしで追跡中のパターンを表示する", async () => {
+    seedProject([".mcp.json", ".claude/rules/*.md"]);
+
+    await runTrack(["--list", "--dir", "/project"]);
+
+    expect(mockLog.info).toHaveBeenCalledWith("Tracked patterns:");
+    expect(mockLog.message).toHaveBeenCalledWith(expect.stringContaining(".claude/rules/*.md"));
+    expect(readIncludePatterns("/project")).toEqual([".mcp.json", ".claude/rules/*.md"]);
   });
 
   describe("dry run (--dryRun)", () => {
@@ -202,26 +240,27 @@ describe("trackCommand", () => {
     });
 
     it("--dryRun では ziku.jsonc を書き込まない", async () => {
-      vol.fromJSON({
-        "/project/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"], exclude: [] }),
-      });
+      seedProject();
 
-      await runTrack("/project", [".cloud/rules/*.md"], { dryRun: true });
+      await runTrack([".cloud/rules/*.md", "--dir", "/project", "--dryRun"]);
 
-      const saved = vol.readFileSync("/project/.ziku/ziku.jsonc", "utf8") as string;
-      const parsed = JSON.parse(saved);
-      expect(parsed.include).toEqual([".mcp.json"]);
-      expect(parsed.include).not.toContain(".cloud/rules/*.md");
+      expect(readIncludePatterns("/project")).toEqual([".mcp.json"]);
       expect(mockLog.message).toHaveBeenCalledWith(expect.stringContaining("Would add:"));
       expect(mockOutro).toHaveBeenCalledWith(expect.stringContaining("not written"));
     });
 
-    it("全パターンが既に追跡済みなら --dryRun でもその旨を伝える", async () => {
-      vol.fromJSON({
-        "/project/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"], exclude: [] }),
-      });
+    it("エイリアス -n でも書き込まない", async () => {
+      seedProject();
 
-      await runTrack("/project", [".mcp.json"], { dryRun: true });
+      await runTrack([".cloud/rules/*.md", "--dir", "/project", "-n"]);
+
+      expect(readIncludePatterns("/project")).toEqual([".mcp.json"]);
+    });
+
+    it("全パターンが既に追跡済みなら --dryRun でもその旨を伝える", async () => {
+      seedProject();
+
+      await runTrack([".mcp.json", "--dir", "/project", "--dryRun"]);
 
       expect(mockLog.info).toHaveBeenCalledWith(
         expect.stringContaining("All patterns are already tracked"),
@@ -229,23 +268,17 @@ describe("trackCommand", () => {
     });
 
     it("--dryRun 無しでは実際に ziku.jsonc へ書き込む", async () => {
-      vol.fromJSON({
-        "/project/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"], exclude: [] }),
-      });
+      seedProject();
 
-      await runTrack("/project", [".cloud/rules/*.md"]);
+      await runTrack([".cloud/rules/*.md", "--dir", "/project"]);
 
-      const saved = vol.readFileSync("/project/.ziku/ziku.jsonc", "utf8") as string;
-      const parsed = JSON.parse(saved);
-      expect(parsed.include).toContain(".cloud/rules/*.md");
+      expect(readIncludePatterns("/project")).toContain(".cloud/rules/*.md");
     });
 
     it("既存パターンと新規パターンが混在する場合、プレビューには新規分だけを表示する", async () => {
-      vol.fromJSON({
-        "/project/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"], exclude: [] }),
-      });
+      seedProject();
 
-      await runTrack("/project", [".mcp.json", ".env.example"], { dryRun: true });
+      await runTrack([".mcp.json", ".env.example", "--dir", "/project", "--dryRun"]);
 
       const messageCall = mockLog.message.mock.calls.find(
         (c) => typeof c[0] === "string" && c[0].includes("Would add:"),
@@ -255,17 +288,48 @@ describe("trackCommand", () => {
     });
 
     it("既存パターンと新規パターンが混在する場合、実行時ログにも新規分だけを表示する", async () => {
-      vol.fromJSON({
-        "/project/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"], exclude: [] }),
-      });
+      seedProject();
 
-      await runTrack("/project", [".mcp.json", ".env.example"]);
+      await runTrack([".mcp.json", ".env.example", "--dir", "/project"]);
 
       const messageCall = mockLog.message.mock.calls.find(
         (c) => typeof c[0] === "string" && c[0].includes("Added:"),
       );
       expect(messageCall?.[0]).toContain(".env.example");
       expect(messageCall?.[0]).not.toContain(".mcp.json");
+    });
+  });
+
+  describe("読めない ziku.jsonc の報告", () => {
+    /** 生の内容で ziku.jsonc を用意する（壊れた設定を書くため seedProject とは別立て） */
+    function seedRawConfig(raw: string): void {
+      vol.fromJSON({ "/project/.ziku/ziku.jsonc": raw });
+    }
+
+    it("JSONC として壊れていれば構文エラーとして報告する", async () => {
+      seedRawConfig('{ "include": [ }');
+
+      await expect(runTrack([".env.example", "--dir", "/project"])).rejects.toThrow(
+        "Failed to parse .ziku/ziku.jsonc",
+      );
+    });
+
+    it("スキーマ違反は構文エラーではなく、不正なフィールド名付きで報告する", async () => {
+      seedRawConfig('{ "include": "not-an-array" }');
+
+      await expect(runTrack([".env.example", "--dir", "/project"])).rejects.toMatchObject({
+        message: "Failed to read .ziku/ziku.jsonc",
+        hint: expect.stringContaining("include: "),
+        reason: { kind: "ConfigInvalid" },
+      });
+    });
+
+    it("--list でも同じ分類で報告する", async () => {
+      seedRawConfig('{ "include": "not-an-array" }');
+
+      await expect(runTrack(["--list", "--dir", "/project"])).rejects.toThrow(
+        "Failed to read .ziku/ziku.jsonc",
+      );
     });
   });
 });

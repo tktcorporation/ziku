@@ -25,16 +25,12 @@ import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import type { ArgsDef, CommandDef } from "citty";
+import type { CommandDef } from "citty";
 import { renderUsage } from "citty";
+import { match } from "ts-pattern";
 import { z } from "zod";
-import { diffCommand } from "../src/commands/diff";
-import { initCommand } from "../src/commands/init";
-import { pullCommand } from "../src/commands/pull";
-import { pushCommand } from "../src/commands/push";
-import { setupCommand } from "../src/commands/setup";
-import { statusCommand } from "../src/commands/status";
-import { trackCommand } from "../src/commands/track";
+import { SUBCOMMAND_NAMES, type SubCommandName } from "../src/commands/names";
+import { subCommands } from "../src/commands/registry";
 import { zikuConfigSchema } from "../src/modules/schemas";
 import {
   generateLifecycleDocument,
@@ -43,29 +39,26 @@ import {
 } from "../src/docs/lifecycle";
 import { DEFAULT_TEMPLATE_REPOS } from "../src/utils/git-remote";
 import { LOCK_FILE } from "../src/utils/lock";
+import { MARKERS, updateSection } from "../src/utils/readme";
 import { ZIKU_CONFIG_FILE, ZIKU_CONFIG_SCHEMA_URL } from "../src/utils/ziku-config";
 
 const README_PATH = resolve(import.meta.dirname, "../README.md");
 const LIFECYCLE_DOC_PATH = resolve(import.meta.dirname, "../docs/architecture/file-lifecycle.md");
 const ZIKU_SCHEMA_PATH = resolve(import.meta.dirname, "../schema/ziku.json");
 
-// Marker definitions
-const MARKERS = {
+/**
+ * この生成器が組み直す区画。
+ *
+ * FEATURES / COMMANDS / FILES は ziku 本体もテンプレートの README で書き換えるので、名前は
+ * {@link MARKERS} から取り込む。ここで名前を書き写すと、片方だけを変えたときにもう片方が
+ * 「マーカーが無い」として無言で何も書かなくなる。GETTING_STARTED / LIFECYCLE はこの
+ * リポジトリのドキュメントにしか無いので、ここだけが持つ。
+ */
+const DOC_MARKERS = {
+  ...MARKERS,
   gettingStarted: {
     start: "<!-- GETTING_STARTED:START -->",
     end: "<!-- GETTING_STARTED:END -->",
-  },
-  features: {
-    start: "<!-- FEATURES:START -->",
-    end: "<!-- FEATURES:END -->",
-  },
-  commands: {
-    start: "<!-- COMMANDS:START -->",
-    end: "<!-- COMMANDS:END -->",
-  },
-  files: {
-    start: "<!-- FILES:START -->",
-    end: "<!-- FILES:END -->",
   },
   lifecycle: {
     start: "<!-- LIFECYCLE:START -->",
@@ -228,28 +221,59 @@ function getCommandDescription(meta: unknown): string {
   return "";
 }
 
+/** 登録簿に載っているコマンド定義。args スキーマはコマンドごとに違う。 */
+type RegisteredCommand = (typeof subCommands)[SubCommandName];
+
+/**
+ * usage の描画に必要な部分だけを写した定義を返す。
+ *
+ * `CommandDef<T>` は `run` / `setup` / `cleanup` の引数を通じて `T`（args スキーマ）に反変で、
+ * コマンドごとに `T` が違うため、既定の args スキーマで `CommandDef` を受ける `renderUsage` へ
+ * そのままは渡せない。
+ * 描画が読むのは meta / args / subCommands だけなので、その 3 つを写して渡す。
+ */
+function usageDefinitionOf(cmd: RegisteredCommand): CommandDef {
+  return { meta: cmd.meta, args: cmd.args, subCommands: cmd.subCommands };
+}
+
+/**
+ * README の `## Commands` にコマンドを並べる順。
+ *
+ * テンプレートを用意する側の作業（setup）から、使う側の作業（init 以降）へ読み進められる
+ * 並びにする。`Record<SubCommandName, number>` なので、コマンドを足すと順位の指定が必須になり、
+ * 並びを決めていないコマンドが黙って末尾に落ちることがない。
+ */
+const COMMAND_DOC_ORDER: Record<SubCommandName, number> = {
+  setup: 0,
+  init: 1,
+  push: 2,
+  pull: 3,
+  diff: 4,
+  status: 5,
+  track: 6,
+};
+
 /**
  * Generate Commands section
+ *
+ * 描くコマンドはサブコマンドの登録簿（`src/commands/registry.ts`）から引く。ここで名前を
+ * 並べ直すと、CLI に登録したコマンドが README から黙って落ちる。
  */
 async function generateCommandsSection(): Promise<string> {
-  const commandSection = async <T extends ArgsDef>(name: string, cmd: CommandDef<T>) => [
+  const commandSection = async (name: SubCommandName, cmd: RegisteredCommand) => [
     `### \`${name}\`\n`,
     `${getCommandDescription(cmd.meta)}\n`,
     "```",
-    cleanUsageOutput(await renderUsage(cmd)),
+    cleanUsageOutput(await renderUsage(usageDefinitionOf(cmd))),
     "```\n",
   ];
 
-  const sections: string[] = [
-    "## Commands\n",
-    ...(await commandSection("setup", setupCommand)),
-    ...(await commandSection("init", initCommand)),
-    ...(await commandSection("push", pushCommand)),
-    ...(await commandSection("pull", pullCommand)),
-    ...(await commandSection("diff", diffCommand)),
-    ...(await commandSection("status", statusCommand)),
-    ...(await commandSection("track", trackCommand)),
-  ];
+  const sections: string[] = ["## Commands\n"];
+  for (const name of SUBCOMMAND_NAMES.toSorted(
+    (a, b) => COMMAND_DOC_ORDER[a] - COMMAND_DOC_ORDER[b],
+  )) {
+    sections.push(...(await commandSection(name, subCommands[name])));
+  }
 
   return sections.join("\n");
 }
@@ -266,26 +290,28 @@ function cleanUsageOutput(usage: string): string {
 }
 
 /**
- * Update README section between markers
+ * ドキュメントのマーカー間を差し替える。マーカーが無ければ生成漏れとして止める。
+ *
+ * 対象はこのリポジトリの README と docs で、{@link DOC_MARKERS} の区画はすべて存在する前提。
+ * 黙って元の内容を返すと、マーカー名を片方だけ変えたときに「生成は成功したのに中身が古いまま」
+ * の状態が `docs:check` まで通り、差分が出ないことを最新である証拠と読み違える。
+ *
+ * @param docPath 差し替え対象のファイル。どのドキュメントの区画が欠けているかを示す。
  */
-function updateSection(
+function replaceSection(
   content: string,
-  startMarker: string,
-  endMarker: string,
+  marker: { readonly start: string; readonly end: string },
   newSection: string,
+  docPath: string,
 ): string {
-  const startIndex = content.indexOf(startMarker);
-  const endIndex = content.indexOf(endMarker);
-
-  if (startIndex === -1 || endIndex === -1) {
-    // Marker not found - skip this section
-    return content;
-  }
-
-  const before = content.slice(0, startIndex + startMarker.length);
-  const after = content.slice(endIndex);
-
-  return `${before}\n\n${newSection}\n${after}`;
+  return match(updateSection(content, marker.start, marker.end, newSection))
+    .with({ _tag: "Replaced" }, (replaced) => replaced.content)
+    .with({ _tag: "MarkerNotFound" }, (missing) => {
+      console.error(`\n❌ ${missing.startMarker} (and its END marker) not found in ${docPath}.`);
+      console.error("   The section would be silently skipped, leaving stale content.\n");
+      process.exit(1);
+    })
+    .exhaustive();
 }
 
 /** 各ドキュメントの更新前後のスナップショット */
@@ -326,25 +352,20 @@ async function generateAndApplyDocs(): Promise<DocSnapshot> {
     }
   }
 
-  readme = updateSection(
-    readme,
-    MARKERS.gettingStarted.start,
-    MARKERS.gettingStarted.end,
-    gettingStartedSection,
-  );
-  readme = updateSection(readme, MARKERS.features.start, MARKERS.features.end, featuresSection);
-  readme = updateSection(readme, MARKERS.commands.start, MARKERS.commands.end, commandsSection);
-  readme = updateSection(readme, MARKERS.files.start, MARKERS.files.end, filesSection);
+  readme = replaceSection(readme, DOC_MARKERS.gettingStarted, gettingStartedSection, README_PATH);
+  readme = replaceSection(readme, DOC_MARKERS.features, featuresSection, README_PATH);
+  readme = replaceSection(readme, DOC_MARKERS.commands, commandsSection, README_PATH);
+  readme = replaceSection(readme, DOC_MARKERS.files, filesSection, README_PATH);
 
   const readmeUpdated = readme !== originalReadme;
 
   // Update lifecycle doc (write → format → read back canonical form)
   {
-    const tempLifecycleDoc = updateSection(
+    const tempLifecycleDoc = replaceSection(
       lifecycleDoc,
-      MARKERS.lifecycle.start,
-      MARKERS.lifecycle.end,
+      DOC_MARKERS.lifecycle,
       lifecycleSection,
+      LIFECYCLE_DOC_PATH,
     );
     await writeFile(LIFECYCLE_DOC_PATH, tempLifecycleDoc);
     execFileSync("pnpm", ["oxfmt", "--write", LIFECYCLE_DOC_PATH], { stdio: "ignore" });

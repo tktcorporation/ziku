@@ -7,7 +7,7 @@
  *
  * レイアウト:
  *   上部: カーソル位置のファイルの unified diff プレビュー（スクロール可能）
- *   下部: チェックボックス付きファイルリスト
+ *   下部: チェックボックス付きファイルリスト（カーソル追従のスクロール窓）
  *
  * 操作:
  *   ↑/↓ (k/j): ファイルリストのカーソル移動
@@ -21,21 +21,57 @@
 import * as readline from "node:readline";
 import pc from "picocolors";
 import { match } from "ts-pattern";
-import type { FileDiff } from "../modules/schemas";
+import { isDefaultSelected } from "../commands/push-plan";
+import type { FileDiff, RepoRelPath } from "../modules/schemas";
 import { generateUnifiedDiff } from "../utils/diff";
-import { applyWordDiffAndColorize, calculateDiffStats, formatStats } from "./diff-view";
+import {
+  applyWordDiffAndColorize,
+  formatStatHint,
+  getTypeIcon,
+  getTypeLabel,
+  toDiffContentLines,
+} from "./diff-view";
+import { graphemeWidth, stringWidth, toGraphemes } from "./text-width";
 
 // ─── ANSI ユーティリティ ──────────────────────────────────────
 
 /**
- * ANSI エスケープシーケンスを除去してプレーンテキストの文字幅を得る。
+ * CSI シーケンスを除去して、端末に描かれるテキストだけを取り出す。
  *
- * ESC (0x1B) + "[" + パラメータ + "m" 形式の SGR シーケンスを除去する。
+ * ESC (0x1B) + "[" + パラメータバイト + 中間バイト + 終端バイトの形をすべて対象にする。
+ * 色付けに使う SGR (`ESC[…m`) だけでなく、テンプレートファイルの中身に混入した
+ * 制御シーケンスも幅 0 として扱う必要があるため、SGR に限定しない。
+ *
  * 正規表現を文字列から構築し、no-control-regex lint ルールを回避する。
  */
-const ansiPattern = new RegExp(`${String.fromCodePoint(0x1b)}\\[[0-9;]*m`, "g");
-export function stripAnsi(str: string): string {
-  return str.replaceAll(ansiPattern, "");
+const csiPattern = new RegExp(`${String.fromCodePoint(0x1b)}\\[[0-?]*[ -/]*[@-~]`, "g");
+export function stripCsi(str: string): string {
+  return str.replaceAll(csiPattern, "");
+}
+
+/** CSI シーケンスと、端末に描かれるテキストに分けた 1 区間。 */
+interface LineToken {
+  readonly isCsi: boolean;
+  readonly text: string;
+}
+
+/** 行を CSI シーケンスと表示テキストへ分解する。幅を数える対象は後者だけになる。 */
+function tokenizeLine(line: string): LineToken[] {
+  const tokens: LineToken[] = [];
+  let plainStart = 0;
+
+  for (const csiMatch of line.matchAll(csiPattern)) {
+    const index = csiMatch.index ?? 0;
+    if (index > plainStart) {
+      tokens.push({ isCsi: false, text: line.slice(plainStart, index) });
+    }
+    tokens.push({ isCsi: true, text: csiMatch[0] });
+    plainStart = index + csiMatch[0].length;
+  }
+  if (plainStart < line.length) {
+    tokens.push({ isCsi: false, text: line.slice(plainStart) });
+  }
+  return tokens;
 }
 
 /* v8 ignore start -- ターミナル制御定数。インタラクティブプロンプト専用でユニットテスト不可。 */
@@ -59,32 +95,15 @@ function cursorUp(n: number): string {
 /**
  * FileDiff から色付きの diff 行配列を生成する。
  *
- * unified diff を生成し、隣接する -/+ ペアに word diff ハイライトを適用する。
- * unified diff ヘッダー行のみ除外する（コンテンツ行の ---/+++ は保持）。
+ * unified diff を生成し、置換ブロックに word diff ハイライトを適用する。
+ * 差分本文を持たないのは unchanged だけなので、空の diff はそのまま
+ * 「変更なし」として表示する。
  */
 export function buildColoredDiffLines(file: FileDiff): string[] {
-  if (file.type === "unchanged") return [pc.dim("(no changes)")];
-
   const raw = generateUnifiedDiff(file);
-  if (!raw) return [pc.dim("(no diff available)")];
+  if (!raw) return [pc.dim("(no changes)")];
 
-  // unified diff ヘッダーのみ除外。diff ライブラリの出力形式:
-  //   Index: <path>
-  //   ===...
-  //   --- <path>\t<label>
-  //   +++ <path>\t<label>
-  // コンテンツ行の --- や +++ を誤除去しないため、タブ文字の存在で判定する。
-  const lines = raw
-    .split("\n")
-    .filter(
-      (l) =>
-        !l.startsWith("Index:") &&
-        !l.startsWith("===") &&
-        !(l.startsWith("--- ") && l.includes("\t")) &&
-        !(l.startsWith("+++ ") && l.includes("\t")),
-    );
-
-  return applyWordDiffAndColorize(lines);
+  return applyWordDiffAndColorize(toDiffContentLines(raw));
 }
 
 // ─── ファイルリストアイテム ──────────────────────────────────────
@@ -96,27 +115,81 @@ export interface FileItem {
   readonly diffLines: string[];
 }
 
-export function buildFileItems(files: FileDiff[], conflictedPaths?: Set<string>): FileItem[] {
-  const conflicted = conflictedPaths ?? new Set<string>();
-  return files.map((file) => {
-    const icon = match(file.type)
-      .with("added", () => pc.green("+"))
-      .with("modified", () => pc.yellow("~"))
-      .with("deleted", () => pc.red("-"))
-      .otherwise(() => " ");
+/**
+ * 一覧に出す 1 行の見え方と既定チェックを決める材料。
+ *
+ * 選択画面の 2 実装（TTY のプレビュー付きセレクタと非 TTY のフォールバック）が同じ型を
+ * 受け取り、同じ関数（{@link fileSelectionHint} / {@link isPreselectedByDefault}）で
+ * 判断する。片方だけが注記や既定チェックを持つと、端末の種類で挙動が変わる。
+ */
+/**
+ * 既定チェックの判定材料は判断層と共有する（`src/commands/push-plan.ts` の
+ * {@link DefaultSelectionMarks}）。UI 側の呼び名は `preselectDeletions` だが、意味は
+ * `--include-deletions` と同じなので、判定へ渡す前に名前だけを揃える
+ * （{@link isPreselectedByDefault}）。
+ *
+ * 3 つとも必須なのは、渡し忘れた集合が空集合として扱われ、既定から外すはずのファイルが
+ * 対話実行でだけチェック済みになるのを型で止めるため。印を付けるものが無い呼び出しは
+ * {@link NO_FILE_SELECTION_MARKS} を渡す。
+ */
+export interface FileSelectionMarks {
+  /** 削除ファイルをデフォルトで選択するか */
+  readonly preselectDeletions: boolean;
+  /** 未解決の衝突ファイル。マーク表示し、デフォルト未選択にする。 */
+  readonly conflictedPaths: ReadonlySet<RepoRelPath>;
+  /**
+   * 送るとテンプレート側の削除を取り消すファイル。マーク表示し、デフォルト未選択にする。
+   *
+   * 見た目は新規追加と同じ `+` なので、注記が無いと「テンプレートが消したファイルを
+   * 復活させる」操作だと画面から分からない。
+   */
+  readonly restoresTemplateDeletion: ReadonlySet<RepoRelPath>;
+}
 
-    const stats = calculateDiffStats(file);
-    const statHint = stats.additions === 0 && stats.deletions === 0 ? "" : formatStats(stats);
-    // 未解決の衝突は hint で明示する。選ぶと push が中断する（要 ziku pull）ことを伝える。
-    const hint = conflicted.has(file.path) ? pc.red("conflict — resolve with ziku pull") : statHint;
+/** 特別扱いするファイルが 1 つも無い一覧のための印。 */
+export const NO_FILE_SELECTION_MARKS: FileSelectionMarks = {
+  preselectDeletions: false,
+  conflictedPaths: new Set(),
+  restoresTemplateDeletion: new Set(),
+};
 
-    return {
-      file,
-      label: `${icon} ${file.path}`,
-      hint,
-      diffLines: buildColoredDiffLines(file),
-    };
+/**
+ * 行に添える注記。
+ *
+ * 未解決の衝突を先に見せる。選ぶと push そのものが中断するので、他の注記より
+ * 行動への影響が大きい。
+ */
+export function fileSelectionHint(file: FileDiff, marks: FileSelectionMarks): string {
+  if (marks.conflictedPaths.has(file.path)) {
+    return pc.red("conflict — resolve with ziku pull");
+  }
+  if (marks.restoresTemplateDeletion.has(file.path)) {
+    return pc.yellow("restores file deleted in template");
+  }
+  return formatStatHint(file);
+}
+
+/**
+ * 既定でチェックを入れるか。
+ *
+ * 判定そのものは判断層の {@link isDefaultSelected} に委ねる。非対話実行の既定集合と対話の
+ * 初期チェックが同じ関数を通るので、片方だけが既定で送るという食い違いを作れない。
+ */
+export function isPreselectedByDefault(file: FileDiff, marks: FileSelectionMarks): boolean {
+  return isDefaultSelected(file, {
+    includeDeletions: marks.preselectDeletions,
+    conflictedPaths: marks.conflictedPaths,
+    restoresTemplateDeletion: marks.restoresTemplateDeletion,
   });
+}
+
+export function buildFileItems(files: FileDiff[], marks: FileSelectionMarks): FileItem[] {
+  return files.map((file) => ({
+    file,
+    label: `${getTypeIcon(file.type)} ${file.path}`,
+    hint: fileSelectionHint(file, marks),
+    diffLines: buildColoredDiffLines(file),
+  }));
 }
 
 // ─── レンダリング ──────────────────────────────────────────────
@@ -131,60 +204,194 @@ export interface RenderState {
 }
 
 /**
- * diff プレビュー領域に使える行数を計算する。
+ * diff プレビューとファイルリスト以外が消費する固定行数。
  *
- * ターミナル高さからファイルリスト・ヘッダー・フッターを引いた残りを diff に割り当てる。
- * 最低 3 行は確保し、最大でターミナル高さの 50% まで。
+ * ヘッダー(1) + 空行(1) + diff 枠上(1) + diff 枠下(1) + リスト前の空行(1)
+ * + フッター前の空行(1) + フッター(1)。
  */
-export function getDiffPreviewHeight(termRows: number, fileCount: number): number {
-  // ヘッダー(1) + 空行(1) + diff枠上(1) + diff枠下(1) + 空行(1) + ファイルリスト + フッター(2)
-  const overhead = 7;
-  const fileListHeight = fileCount;
-  const available = termRows - overhead - fileListHeight;
-  const maxHeight = Math.floor(termRows * 0.5);
-  return Math.max(3, Math.min(available, maxHeight));
+const chromeLines = 7;
+
+/** diff プレビューの最小行数。変更行とその前後 1 行ずつが見えないと差分の意味が取れない。 */
+const minDiffHeight = 3;
+
+/**
+ * ファイルリスト領域の最小行数。
+ *
+ * 窓に入りきらない項目があるとき、カーソル行と上下 2 本のインジケータ行が同時に要る。
+ */
+const minListAreaHeight = 3;
+
+/** diff プレビューが端末高さに占めてよい割合。リストが短いときに diff で埋め尽くさない。 */
+const diffHeightRatio = 0.5;
+
+/** 端末の行数を diff プレビューとファイルリストへ配分した結果。 */
+export interface ScreenLayout {
+  /** diff プレビューの内容行数 */
+  readonly diffHeight: number;
+  /** ファイルリスト領域の行数。窓外インジケータ行もここから消費する。 */
+  readonly listAreaHeight: number;
 }
 
-/** diff 行を指定幅で切り詰める */
-export function truncateLine(line: string, maxWidth: number): string {
-  const plain = stripAnsi(line);
-  if (plain.length <= maxWidth) return line;
+/**
+ * 端末の行数を diff プレビューとファイルリストに配分する。
+ *
+ * `chromeLines + diffHeight + listAreaHeight` が端末行数を超えないことを保証する。
+ * 超えると出力の上端がスクロールアウトし、再描画時のカーソル上移動が画面最上行で
+ * クランプされてクリア対象がずれるため、キー入力のたびに画面が壊れていく。
+ *
+ * ファイルリストを優先し、余りを diff に回す。全ファイルが収まらない場合は diff を
+ * 最小行数まで縮め、それでも入りきらない分をスクロール窓が吸収する。
+ *
+ * ただし端末が `chromeLines + minDiffHeight + minListAreaHeight` 行に満たない場合は
+ * 最小構成を返し、合計が端末行数を超える。この高さではどう配分しても diff とリストの
+ * どちらかが消えて選択の判断ができなくなるため、最小構成の維持を優先する。
+ */
+export function computeScreenLayout(termRows: number, fileCount: number): ScreenLayout {
+  const available = Math.max(minDiffHeight + minListAreaHeight, termRows - chromeLines);
+  const diffCap = Math.max(minDiffHeight, Math.floor(termRows * diffHeightRatio));
 
-  // ANSI コードを維持しながら文字数制限する簡易実装
-  // 完全な実装は複雑になるため、プレーンテキストベースで切り詰め
-  let visibleLen = 0;
-  let result = "";
-  let inEscape = false;
+  const diffHeight = Math.min(diffCap, Math.max(minDiffHeight, available - fileCount));
+  const listAreaHeight = Math.min(fileCount, Math.max(minListAreaHeight, available - diffHeight));
 
-  for (let ci = 0; ci < line.length; ci++) {
-    const ch = line[ci];
-    if (ch === "\u001B") {
-      inEscape = true;
-      result += ch;
-      continue;
-    }
-    if (inEscape) {
-      result += ch;
-      if (ch === "m") inEscape = false;
-      continue;
-    }
-    if (visibleLen >= maxWidth - 1) {
-      // ANSI リセットを付与し、色が後続行に漏れるのを防ぐ
-      result += `\u001B[0m${pc.dim("…")}`;
-      break;
-    }
-    result += ch;
-    visibleLen++;
+  return { diffHeight, listAreaHeight };
+}
+
+/** diff プレビュー領域に使える行数を返す。 */
+export function getDiffPreviewHeight(termRows: number, fileCount: number): number {
+  return computeScreenLayout(termRows, fileCount).diffHeight;
+}
+
+/** ファイルリストのうち実際に描画する範囲と、その外に隠れている件数。 */
+export interface ListWindow {
+  /** 描画する最初の項目の index */
+  readonly start: number;
+  /** 描画する最後の項目の次の index */
+  readonly end: number;
+  /** 窓より上に隠れている項目数 */
+  readonly hiddenAbove: number;
+  /** 窓より下に隠れている項目数 */
+  readonly hiddenBelow: number;
+}
+
+/**
+ * カーソルを中心にしたスクロール窓を決める。
+ *
+ * 全件が `listAreaHeight` に収まるなら窓で区切らない。収まらない場合は隠れた項目が
+ * あることを示すインジケータ行が同じ領域を消費するので、その分だけ項目数を減らす。
+ * カーソルは常に窓の内側に入り、リストの上下端では窓を固定してカーソルだけが動く。
+ */
+export function computeListWindow(
+  itemCount: number,
+  cursorIndex: number,
+  listAreaHeight: number,
+): ListWindow {
+  if (itemCount <= listAreaHeight) {
+    return { start: 0, end: itemCount, hiddenAbove: 0, hiddenBelow: 0 };
   }
 
-  // 切り詰めなしでもエスケープ途中で終わるケースに備えリセットを保証
-  return `${result}\u001B[0m`;
+  // 端に寄せた窓はインジケータが片側だけ、途中の窓は上下両方に出る。
+  // 領域が極端に狭くても 1 項目は描くため下限を 1 にする。
+  const edgeCapacity = Math.max(1, listAreaHeight - 1);
+  const middleCapacity = Math.max(1, listAreaHeight - 2);
+
+  let start = cursorIndex - Math.floor((middleCapacity - 1) / 2);
+  let end = start + middleCapacity;
+
+  if (start <= 0) {
+    start = 0;
+    end = edgeCapacity;
+  } else if (end >= itemCount) {
+    end = itemCount;
+    start = Math.max(0, itemCount - edgeCapacity);
+  }
+
+  return { start, end, hiddenAbove: start, hiddenBelow: itemCount - end };
+}
+
+/**
+ * 表示カラム数が `maxWidth` に収まるよう行を切り詰める。
+ *
+ * 幅は端末のカラム数で数え、全角文字は 2 カラムとして扱う。切り詰めは書記素クラスタ
+ * 境界で行うため、サロゲートペアや結合文字列は割れない。CSI シーケンスは幅 0 のまま
+ * 残し、末尾にリセットを入れて色が後続行へ漏れるのを防ぐ。
+ */
+export function truncateLine(line: string, maxWidth: number): string {
+  if (maxWidth <= 0) return "";
+  if (stringWidth(stripCsi(line)) <= maxWidth) return line;
+
+  // 省略記号 "…" が 1 カラム占めるので、本文に使えるのは maxWidth - 1 カラム。
+  const contentBudget = maxWidth - 1;
+  let result = "";
+  let width = 0;
+  let budgetExhausted = false;
+
+  for (const token of tokenizeLine(line)) {
+    if (budgetExhausted) break;
+    if (token.isCsi) {
+      result += token.text;
+      continue;
+    }
+    for (const cluster of toGraphemes(token.text)) {
+      const clusterWidth = graphemeWidth(cluster);
+      if (width + clusterWidth > contentBudget) {
+        budgetExhausted = true;
+        break;
+      }
+      result += cluster;
+      width += clusterWidth;
+    }
+  }
+
+  // 色の漏れを断つリセットを挟んでから省略記号を置く
+  return `${result}\u001B[0m${pc.dim("…")}\u001B[0m`;
 }
 
 /** テスト用にターミナルサイズを注入できるオプション */
 interface TerminalSize {
   readonly columns: number;
   readonly rows: number;
+}
+
+/**
+ * 窓外に項目があることを示すインジケータの字下げ幅。
+ *
+ * リスト行の「カーソル(1) + 空白(1) + チェックボックス(1) + 空白(1)」に揃え、
+ * ラベルと同じ位置から始める。
+ */
+const listIndicatorIndent = " ".repeat(4);
+
+/**
+ * ファイルリスト部分の行を組み立てる。
+ *
+ * 返る行数は `listAreaHeight` 以内に収まる。窓の外にある項目は件数だけを示す。
+ */
+function renderFileList(state: RenderState, listAreaHeight: number, cols: number): string[] {
+  const { items, selected, cursorIndex } = state;
+  const listWindow = computeListWindow(items.length, cursorIndex, listAreaHeight);
+  const lines: string[] = [];
+
+  if (listWindow.hiddenAbove > 0) {
+    lines.push(pc.dim(`${listIndicatorIndent}… ${listWindow.hiddenAbove} more above`));
+  }
+
+  for (let fi = listWindow.start; fi < listWindow.end; fi++) {
+    const item = items[fi];
+    const isSelected = selected.has(item.file.path);
+    const isCursor = fi === cursorIndex;
+
+    const checkbox = isSelected ? pc.green("◼") : pc.dim("◻");
+    const cursor = isCursor ? pc.cyan("›") : " ";
+    const label = isCursor ? pc.underline(item.label) : item.label;
+    const hint = item.hint ? ` ${pc.dim(item.hint)}` : "";
+
+    lines.push(truncateLine(`${cursor} ${checkbox} ${label}${hint}`, cols));
+  }
+
+  if (listWindow.hiddenBelow > 0) {
+    lines.push(pc.dim(`${listIndicatorIndent}… ${listWindow.hiddenBelow} more below`));
+  }
+
+  return lines;
 }
 
 /**
@@ -196,28 +403,29 @@ interface TerminalSize {
 export function render(state: RenderState, termSize?: TerminalSize): string {
   const cols = termSize?.columns ?? process.stdout.columns ?? 80;
   const rows = termSize?.rows ?? process.stdout.rows ?? 24;
-  const { items, selected, cursorIndex, diffScrollOffset } = state;
+  const { items, cursorIndex, diffScrollOffset } = state;
   const currentItem = items[cursorIndex];
 
   // ── ヘッダー
-  const lines: string[] = [`${pc.gray("◆")}  ${pc.bold("Select files to include in PR")}`, ""];
+  // どの行も端末幅で折り返されると 1 行が 2 行を占め、レイアウトの行数計算が崩れる。
+  // そのため可変長になりうる行はすべて cols に切り詰める。
+  const lines: string[] = [
+    truncateLine(`${pc.gray("◆")}  ${pc.bold("Select files to include in PR")}`, cols),
+    "",
+  ];
 
   // ── Diff プレビュー
-  const diffHeight = getDiffPreviewHeight(rows, items.length);
+  const { diffHeight, listAreaHeight } = computeScreenLayout(rows, items.length);
   const diffLines = currentItem.diffLines;
   const maxScroll = Math.max(0, diffLines.length - diffHeight);
   const scrollOffset = Math.min(diffScrollOffset, maxScroll);
 
   const diffTitle = ` ${currentItem.file.path} `;
-  const typeLabel = match(currentItem.file.type)
-    .with("added", () => pc.green("added"))
-    .with("modified", () => pc.yellow("modified"))
-    .with("deleted", () => pc.red("deleted"))
-    .otherwise(() => "");
+  const typeLabel = getTypeLabel(currentItem.file.type);
   const headerText = `${diffTitle}${pc.dim("—")} ${typeLabel} ${currentItem.hint}`;
 
   // diff 枠上部
-  lines.push(`${pc.dim("┌")} ${headerText}`);
+  lines.push(truncateLine(`${pc.dim("┌")} ${headerText}`, cols));
 
   // diff 内容
   const visibleDiff = diffLines.slice(scrollOffset, scrollOffset + diffHeight);
@@ -238,28 +446,20 @@ export function render(state: RenderState, termSize?: TerminalSize): string {
           ` [${scrollOffset + 1}-${Math.min(scrollOffset + diffHeight, diffLines.length)}/${diffLines.length}] ↑↓ scroll with Shift`,
         )
       : "";
-  lines.push(`${pc.dim("└")}${scrollInfo}`);
+  lines.push(truncateLine(`${pc.dim("└")}${scrollInfo}`, cols));
 
   lines.push("");
 
   // ── ファイルリスト
-  for (let fi = 0; fi < items.length; fi++) {
-    const item = items[fi];
-    const isSelected = selected.has(item.file.path);
-    const isCursor = fi === cursorIndex;
-
-    const checkbox = isSelected ? pc.green("◼") : pc.dim("◻");
-    const cursor = isCursor ? pc.cyan("›") : " ";
-    const label = isCursor ? pc.underline(item.label) : item.label;
-    const hint = item.hint ? ` ${pc.dim(item.hint)}` : "";
-
-    lines.push(`${cursor} ${checkbox} ${label}${hint}`);
-  }
+  lines.push(...renderFileList(state, listAreaHeight, cols));
 
   // ── フッター
   lines.push("");
   lines.push(
-    pc.dim("  ↑↓/jk navigate · space toggle · a all/none · enter confirm · Ctrl+C cancel"),
+    truncateLine(
+      pc.dim("  ↑↓/jk navigate · space toggle · a all/none · enter confirm · Ctrl+C cancel"),
+      cols,
+    ),
   );
 
   return lines.join("\n");
@@ -366,12 +566,7 @@ export function applyAction(state: RenderState, action: KeyAction, termRows: num
 
 // ─── メインプロンプト ──────────────────────────────────────────
 
-export interface FileSelectWithDiffOptions {
-  /** 削除ファイルをデフォルトで選択するか */
-  preselectDeletions?: boolean;
-  /** 未解決の衝突ファイル。マーク表示し、デフォルト未選択にする。 */
-  conflictedPaths?: Set<string>;
-}
+export type FileSelectWithDiffOptions = FileSelectionMarks;
 
 /**
  * Diff プレビュー付きファイル選択プロンプト。
@@ -384,22 +579,14 @@ export interface FileSelectWithDiffOptions {
 /* v8 ignore start -- readline raw mode のインタラクティブ I/O。ユニットテストでは再現不可。 */
 export function selectFilesWithDiffPreview(
   files: FileDiff[],
-  options?: FileSelectWithDiffOptions,
+  marks: FileSelectWithDiffOptions,
 ): Promise<FileDiff[]> {
   if (files.length === 0) return Promise.resolve([]);
 
-  const conflicted = options?.conflictedPaths ?? new Set<string>();
-  const items = buildFileItems(files, conflicted);
+  const items = buildFileItems(files, marks);
 
-  // 既定で未選択にするもの: 削除ファイル（--include-deletions で全選択）と
-  // 未解決の衝突ファイル（選ぶと push が中断するため、誤って既定で含めない）。
   const initialSelected = new Set<string>(
-    files
-      .filter(
-        (f) =>
-          !conflicted.has(f.path) && (options?.preselectDeletions === true || f.type !== "deleted"),
-      )
-      .map((f) => f.path),
+    files.filter((f) => isPreselectedByDefault(f, marks)).map((f) => f.path),
   );
 
   const state: RenderState = {

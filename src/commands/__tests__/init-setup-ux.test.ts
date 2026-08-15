@@ -15,6 +15,7 @@ import { vol } from "memfs";
 import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TemplateNotConfiguredError } from "../../errors";
+import { absPath, globPatterns, repoRelPath } from "../../__tests__/brands";
 
 // fs モジュールをモック
 vi.mock("node:fs", async () => {
@@ -54,14 +55,27 @@ vi.mock("../../utils/github", async () => {
   const actual = await vi.importActual<typeof import("../../utils/github")>("../../utils/github");
   return {
     resolveLatestCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
+    resolveSourceCommitSha: vi.fn(() => Promise.resolve("abc123def456")),
     checkRepoExists: vi.fn(() => Promise.resolve({ _tag: "Exists" as const })),
     checkRepoSetup: vi.fn(() => Promise.resolve(true)),
+    fetchRepoSetupState: vi.fn(() => Promise.resolve({ _tag: "NotConfigured" as const })),
+    fetchDefaultBranch: vi.fn(() => Promise.resolve({ _tag: "Resolved" as const, name: "main" })),
     getGitHubToken: vi.fn(() => {}),
     getAuthenticatedUserLogin: vi.fn(() => Promise.resolve()),
     scaffoldTemplateRepo: vi.fn(() =>
       Promise.resolve({ url: "https://github.com/detected-org/.github" }),
     ),
+    createPullRequest: vi.fn(() =>
+      Promise.resolve({
+        url: "https://github.com/org/repo/pull/1",
+        number: 1,
+        branch: "ziku/setup",
+      }),
+    ),
+    // 既定ブランチの控えへ倒す規則は実装を通す（コマンドの挙動そのものなのでモックしない）
+    decideDefaultBranch: actual.decideDefaultBranch,
     rateLimitedError: actual.rateLimitedError,
+    unauthorizedError: actual.unauthorizedError,
   };
 });
 
@@ -71,6 +85,7 @@ vi.mock("../../ui/prompts", () => ({
   selectMissingTemplateAction: vi.fn(),
   selectTemplateCandidate: vi.fn(),
   inputTemplateSource: vi.fn(),
+  confirmAction: vi.fn(),
 }));
 
 vi.mock("../../ui/renderer", () => ({
@@ -88,6 +103,7 @@ vi.mock("../../ui/renderer", () => ({
     cyan: (s: string) => s,
     bold: (s: string) => s,
     dim: (s: string) => s,
+    green: (s: string) => s,
   },
   withSpinner: vi.fn(async (_text: string, fn: () => Promise<unknown>) => fn()),
   logFileResults: vi.fn(() => ({ added: 1, updated: 0, skipped: 0 })),
@@ -96,7 +112,7 @@ vi.mock("../../ui/renderer", () => ({
 vi.mock("../../utils/template-config", () => ({
   loadTemplateConfig: vi.fn(() =>
     Effect.succeed({
-      include: [".mcp.json", ".devcontainer/**", ".github/**"],
+      include: globPatterns([".mcp.json", ".devcontainer/**", ".github/**"]),
       exclude: [],
     }),
   ),
@@ -130,7 +146,9 @@ vi.mock("../../utils/template-config", () => ({
 }));
 
 // モック後にインポート
+const { runCommand } = await import("citty");
 const { initCommand } = await import("../init");
+const { setupCommand } = await import("../setup");
 const { downloadTemplateToTemp, fetchTemplates, writeFileWithStrategy, copyFile } =
   await import("../../utils/template");
 const { detectGitHubOwner } = await import("../../utils/git-remote");
@@ -140,13 +158,17 @@ const {
   selectMissingTemplateAction,
   selectTemplateCandidate,
   inputTemplateSource,
+  confirmAction,
 } = await import("../../ui/prompts");
-const { log } = await import("../../ui/renderer");
+const { log, outro } = await import("../../ui/renderer");
 const { hashFiles } = await import("../../utils/hash");
 const {
   checkRepoExists,
   checkRepoSetup,
+  createPullRequest,
   getAuthenticatedUserLogin,
+  fetchDefaultBranch,
+  fetchRepoSetupState,
   getGitHubToken,
   scaffoldTemplateRepo,
 } = await import("../../utils/github");
@@ -166,10 +188,16 @@ const _mockLog = vi.mocked(log);
 const mockHashFiles = vi.mocked(hashFiles);
 const mockCheckRepoExists = vi.mocked(checkRepoExists);
 const mockCheckRepoSetup = vi.mocked(checkRepoSetup);
+const mockFetchRepoSetupState = vi.mocked(fetchRepoSetupState);
 const mockGetAuthenticatedUserLogin = vi.mocked(getAuthenticatedUserLogin);
 const mockGetGitHubToken = vi.mocked(getGitHubToken);
 const mockScaffoldTemplateRepo = vi.mocked(scaffoldTemplateRepo);
 const mockLoadTemplateConfig = vi.mocked(loadTemplateConfig);
+const mockCreatePullRequest = vi.mocked(createPullRequest);
+const mockFetchDefaultBranch = vi.mocked(fetchDefaultBranch);
+const mockConfirmAction = vi.mocked(confirmAction);
+const mockOutro = vi.mocked(outro);
+const mockLog = vi.mocked(log);
 
 // コマンド実行ヘルパー
 async function runInit(args: Record<string, unknown>) {
@@ -190,17 +218,17 @@ describe("init: セットアップ UX", () => {
 
     // デフォルトのモック設定
     mockDownloadTemplateToTemp.mockResolvedValue({
-      templateDir: "/tmp/template",
+      templateDir: absPath("/tmp/template"),
       cleanup: vi.fn(),
     });
-    mockFetchTemplates.mockResolvedValue([{ action: "copied", path: ".mcp.json" }]);
+    mockFetchTemplates.mockResolvedValue([{ action: "copied", path: repoRelPath(".mcp.json") }]);
     mockWriteFileWithStrategy.mockResolvedValue({
       action: "created",
-      path: ".ziku/lock.json",
+      path: repoRelPath(".ziku/lock.json"),
     });
     mockCopyFile.mockResolvedValue({
       action: "skipped",
-      path: ".ziku/ziku.jsonc",
+      path: repoRelPath(".ziku/ziku.jsonc"),
     });
     mockHashFiles.mockResolvedValue({});
     mockDetectGitHubOwner.mockReturnValue("detected-org");
@@ -211,7 +239,7 @@ describe("init: セットアップ UX", () => {
     mockSelectTemplateCandidate.mockResolvedValue({ owner: "detected-org", repo: ".github" });
     mockLoadTemplateConfig.mockReturnValue(
       Effect.succeed({
-        include: [".mcp.json", ".devcontainer/**", ".github/**"],
+        include: globPatterns([".mcp.json", ".devcontainer/**", ".github/**"]),
         exclude: [],
       }),
     );
@@ -240,7 +268,7 @@ describe("init: セットアップ UX", () => {
       mockScaffoldTemplateRepo.mockResolvedValueOnce({
         url: "https://github.com/detected-org/.ziku",
       });
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
       // リポ作成後、ziku.jsonc がないのでエラーになる（ziku setup への誘導）
@@ -294,11 +322,11 @@ describe("init: セットアップ UX", () => {
       // Template has ziku.jsonc
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".mcp.json"],
+          include: globPatterns([".mcp.json"]),
           exclude: [],
         }),
       );
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
       await runInit({});
@@ -369,11 +397,11 @@ describe("init: セットアップ UX", () => {
       // Template has ziku.jsonc
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".mcp.json"],
+          include: globPatterns([".mcp.json"]),
           exclude: [],
         }),
       );
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
       await runInit({});
@@ -399,7 +427,7 @@ describe("init: セットアップ UX", () => {
 
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".mcp.json"],
+          include: globPatterns([".mcp.json"]),
           exclude: [],
         }),
       );
@@ -422,7 +450,7 @@ describe("init: セットアップ UX", () => {
 
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".mcp.json"],
+          include: globPatterns([".mcp.json"]),
           exclude: [],
         }),
       );
@@ -442,7 +470,7 @@ describe("init: セットアップ UX", () => {
 
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".mcp.json"],
+          include: globPatterns([".mcp.json"]),
           exclude: [],
         }),
       );
@@ -480,11 +508,11 @@ describe("init: セットアップ UX", () => {
       });
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".mcp.json"],
+          include: globPatterns([".mcp.json"]),
           exclude: [],
         }),
       );
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
       await runInit({});
@@ -507,11 +535,11 @@ describe("init: セットアップ UX", () => {
       // Template has ziku.jsonc
       mockLoadTemplateConfig.mockReturnValue(
         Effect.succeed({
-          include: [".mcp.json"],
+          include: globPatterns([".mcp.json"]),
           exclude: [],
         }),
       );
-      mockSelectDirectories.mockResolvedValueOnce([".mcp.json"]);
+      mockSelectDirectories.mockResolvedValueOnce(globPatterns([".mcp.json"]));
       mockSelectOverwriteStrategy.mockResolvedValueOnce("overwrite");
 
       await runInit({});
@@ -594,6 +622,225 @@ describe("init: セットアップ UX", () => {
         expect.any(String),
         "gh:my-org/my-templates",
       );
+    });
+  });
+});
+
+describe("setup: セットアップ UX", () => {
+  /** setup コマンドを CLI と同じ引数解釈で実行する */
+  function runSetup(rawArgs: string[]): Promise<unknown> {
+    return runCommand(setupCommand, { rawArgs });
+  }
+
+  /** 生成された .ziku/ziku.jsonc の include パターン */
+  function readIncludePatterns(dir: string): string[] {
+    const saved = vol.readFileSync(`${dir}/.ziku/ziku.jsonc`, "utf8") as string;
+    return JSON.parse(saved.replaceAll(/^\s*\/\/.*$/gm, "")).include;
+  }
+
+  beforeEach(() => {
+    vol.reset();
+    vi.resetAllMocks();
+    mockDetectGitHubOwner.mockReturnValue("detected-org");
+    mockCheckRepoExists.mockResolvedValue({ _tag: "Exists" });
+    mockFetchRepoSetupState.mockResolvedValue({ _tag: "NotConfigured" });
+    mockGetGitHubToken.mockReturnValue("ghp_test_token");
+    mockFetchDefaultBranch.mockResolvedValue({ _tag: "Resolved", name: "main" });
+    mockConfirmAction.mockResolvedValue(true);
+    mockCreatePullRequest.mockResolvedValue({
+      url: "https://github.com/org/repo/pull/1",
+      number: 1,
+      branch: "ziku/setup",
+    });
+  });
+
+  describe("ローカルモード", () => {
+    it(".ziku/ziku.jsonc を作成する", async () => {
+      await runSetup(["/template"]);
+
+      expect(readIncludePatterns("/template")).toContain(".claude/rules/*.md");
+    });
+
+    it("--dryRun ではファイルを書かず、作成される内容を表示する", async () => {
+      await runSetup(["/template", "--dryRun"]);
+
+      expect(vol.existsSync("/template/.ziku/ziku.jsonc")).toBe(false);
+      expect(mockLog.message).toHaveBeenCalledWith(expect.stringContaining(".claude/rules/*.md"));
+      expect(mockOutro).toHaveBeenCalledWith(expect.stringContaining("was not written"));
+    });
+
+    it("エイリアス -n でもファイルを書かない", async () => {
+      await runSetup(["/template", "-n"]);
+
+      expect(vol.existsSync("/template/.ziku/ziku.jsonc")).toBe(false);
+    });
+
+    it("既に .ziku/ziku.jsonc があれば上書きしない", async () => {
+      vol.fromJSON({
+        "/template/.ziku/ziku.jsonc": JSON.stringify({ include: [".mcp.json"], exclude: [] }),
+      });
+
+      await runSetup(["/template"]);
+
+      expect(readIncludePatterns("/template")).toEqual([".mcp.json"]);
+    });
+  });
+
+  describe("リモートモード", () => {
+    it("PR を作成する", async () => {
+      await runSetup(["--remote", "--from", "my-org/my-templates"]);
+
+      expect(mockCreatePullRequest).toHaveBeenCalledWith(
+        "ghp_test_token",
+        expect.objectContaining({ owner: "my-org", repo: "my-templates" }),
+      );
+    });
+
+    it("既に設定済みのテンプレートには PR を作らない（--yes でも）", async () => {
+      // 既存の ziku.jsonc を規定パターンで置き換える PR を作ると、マージ時点で
+      // そのテンプレートを使う全プロジェクトの同期対象が規定値に戻る。
+      mockFetchRepoSetupState.mockResolvedValue({ _tag: "Configured" });
+
+      await runSetup(["--remote", "--from", "my-org/my-templates", "--yes"]);
+
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+      expect(mockOutro).toHaveBeenCalledWith("Template repository is already configured.");
+    });
+
+    it("--dryRun でも設定済みなら PR の予告を出さない", async () => {
+      mockFetchRepoSetupState.mockResolvedValue({ _tag: "Configured" });
+
+      await runSetup(["--remote", "--from", "my-org/my-templates", "--dryRun"]);
+
+      expect(mockOutro).toHaveBeenCalledWith("Template repository is already configured.");
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
+    it("設定済みか確かめられなければ、警告して進み、置き換えない指定で PR を作る", async () => {
+      // 一時的な障害で作業を止めない代わりに、既存を置き換える PR は作成の直前で止まる。
+      mockFetchRepoSetupState.mockResolvedValue({ _tag: "Unknown", reason: "HTTP 503" });
+
+      await runSetup(["--remote", "--from", "my-org/my-templates", "--yes"]);
+
+      expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining("HTTP 503"));
+      expect(mockCreatePullRequest).toHaveBeenCalledWith(
+        "ghp_test_token",
+        expect.objectContaining({ onExistingFiles: "fail" }),
+      );
+    });
+
+    it("--yes は確認プロンプトを出さずに PR を作る", async () => {
+      // 対話端末を持たない実行（CI）で入力待ちのまま止まらないようにする。
+      await runSetup(["--remote", "--from", "my-org/my-templates", "--yes"]);
+
+      expect(mockConfirmAction).not.toHaveBeenCalled();
+      expect(mockCreatePullRequest).toHaveBeenCalledWith(
+        "ghp_test_token",
+        expect.objectContaining({ owner: "my-org", repo: "my-templates" }),
+      );
+    });
+
+    it("エイリアス -y でも確認プロンプトを出さない", async () => {
+      await runSetup(["--remote", "--from", "my-org/my-templates", "-y"]);
+
+      expect(mockConfirmAction).not.toHaveBeenCalled();
+      expect(mockCreatePullRequest).toHaveBeenCalled();
+    });
+
+    it("--yes が無ければ確認プロンプトを出し、断られたら PR を作らない", async () => {
+      mockConfirmAction.mockResolvedValue(false);
+
+      await runSetup(["--remote", "--from", "my-org/my-templates"]);
+
+      expect(mockConfirmAction).toHaveBeenCalled();
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
+    it("--yes でも既定ブランチを取得できなければ PR を作らない", async () => {
+      // --yes は対話の省略であって、宛先が定まらないまま作成へ進む指定ではない。
+      mockFetchDefaultBranch.mockResolvedValue({ _tag: "Unresolved", reason: "HTTP 503" });
+
+      await expect(
+        runSetup(["--remote", "--from", "my-org/my-templates", "--yes"]),
+      ).rejects.toThrow("Cannot determine the default branch of my-org/my-templates");
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
+    it("PR はリポジトリの既定ブランチへ向ける", async () => {
+      // 既定が master のテンプレートで main を宛先にすると、GitHub API が存在しない
+      // ブランチとして 404 を返し、原因の分からない失敗になる。
+      mockFetchDefaultBranch.mockResolvedValue({ _tag: "Resolved", name: "master" });
+
+      await runSetup(["--remote", "--from", "my-org/my-templates"]);
+
+      expect(mockCreatePullRequest).toHaveBeenCalledWith(
+        "ghp_test_token",
+        expect.objectContaining({ baseBranch: "master" }),
+      );
+    });
+
+    it("既定ブランチを取得できなければ main を仮定せず失敗する", async () => {
+      mockFetchDefaultBranch.mockResolvedValue({ _tag: "Unresolved", reason: "HTTP 503" });
+
+      await expect(runSetup(["--remote", "--from", "my-org/my-templates"])).rejects.toThrow(
+        "Cannot determine the default branch of my-org/my-templates",
+      );
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
+    it("トークンを拒否されたときは、トークンを直す案内で失敗する", async () => {
+      // setup にはまだ lock ファイルが無いので、`source.ref` を書き換える案内
+      // （DefaultBranchUnresolved）は実行できない。取る行動はトークンの入れ直し。
+      mockFetchDefaultBranch.mockResolvedValue({ _tag: "AuthRejected", detail: "Bad credentials" });
+
+      const thrown = await runSetup(["--remote", "--from", "my-org/my-templates"]).then(
+        () => expect.unreachable("PR が作成されてしまった"),
+        (error: unknown) => error,
+      );
+
+      expect(thrown).toMatchObject({
+        reason: { kind: "GitHubAuthRejected", detail: "Bad credentials" },
+      });
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+    });
+
+    it("--dryRun では PR を作らず、作成される内容を表示する", async () => {
+      await runSetup(["--remote", "--from", "my-org/my-templates", "--dryRun"]);
+
+      expect(mockCreatePullRequest).not.toHaveBeenCalled();
+      expect(mockConfirmAction).not.toHaveBeenCalled();
+      expect(mockLog.message).toHaveBeenCalledWith(expect.stringContaining("my-org/my-templates"));
+      expect(mockLog.message).toHaveBeenCalledWith(expect.stringContaining(".claude/rules/*.md"));
+      expect(mockOutro).toHaveBeenCalledWith(expect.stringContaining("no PR was created"));
+    });
+
+    it("--dryRun でも対象リポジトリの不在はエラーにする", async () => {
+      mockCheckRepoExists.mockResolvedValue({ _tag: "NotFound" });
+
+      await expect(runSetup(["--remote", "--from", "my-org/gone", "--dryRun"])).rejects.toThrow(
+        "not found",
+      );
+    });
+  });
+
+  describe("--from の検証", () => {
+    it("owner のみならデフォルトリポジトリを補完する", async () => {
+      await runSetup(["--remote", "--from", "my-org", "--dryRun"]);
+
+      expect(mockCheckRepoExists).toHaveBeenCalledWith("my-org", ".ziku");
+    });
+
+    it.each(["a/", "/b", "", "a/b/c"])('不正な値 "%s" はエラーになる', async (from) => {
+      await expect(runSetup(["--remote", "--from", from, "--dryRun"])).rejects.toThrow(
+        "Invalid --from:",
+      );
+      expect(mockCheckRepoExists).not.toHaveBeenCalled();
+    });
+
+    it("--from 未指定なら git remote から owner を検出する", async () => {
+      await runSetup(["--remote", "--dryRun"]);
+
+      expect(mockCheckRepoExists).toHaveBeenCalledWith("detected-org", ".ziku");
     });
   });
 });

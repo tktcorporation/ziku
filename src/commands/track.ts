@@ -1,6 +1,7 @@
 import { defineCommand } from "citty";
-import { resolve } from "pathe";
-import { ZikuError } from "../errors";
+import { Effect } from "effect";
+import { zikuFailure } from "../errors";
+import { runCommandEffect, toZikuFailure } from "../services/command-context";
 import { intro, log, outro, pc } from "../ui/renderer";
 import {
   ZIKU_CONFIG_FILE,
@@ -11,6 +12,8 @@ import {
   zikuConfigExists,
 } from "../utils/ziku-config";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
+import type { AbsPath, ZikuConfig } from "../modules/schemas";
+import { absPath, globPatterns } from "../utils/paths";
 
 /**
  * track コマンドのファイル操作メタデータ。
@@ -38,12 +41,22 @@ export const trackLifecycle: CommandLifecycle = {
   ],
 };
 
+/**
+ * 追跡パターンを ziku.jsonc の include に追加するコマンド。
+ *
+ * パターンを位置引数、プロジェクトディレクトリを `--dir` で受け取る。他コマンドが
+ * ディレクトリを位置引数に置いているのとは非対称だが、track の主役は可変長のパターン列で、
+ * 先頭の位置引数をディレクトリに割り当てると `ziku track '.claude/rules/*.md'` の
+ * パターンがディレクトリとして解釈されてしまう。パターン側を位置引数に取る。
+ */
 export const trackCommand = defineCommand({
   meta: {
     name: "track",
     description: "Add file patterns to the tracking whitelist in ziku.jsonc",
   },
   args: {
+    // citty は位置引数の定義 1 つにつき 1 値しか束縛しないため、この定義は usage 表示用。
+    // 実際に使うパターン列は run() の args._（パース済み位置引数の全件）から取る。
     patterns: {
       type: "positional",
       description: "File paths or glob patterns to track (e.g., .cloud/rules/*.md)",
@@ -71,13 +84,10 @@ export const trackCommand = defineCommand({
   async run({ args }) {
     intro("track");
 
-    const targetDir = resolve(args.dir);
+    const targetDir = absPath(args.dir);
 
     if (!zikuConfigExists(targetDir)) {
-      throw new ZikuError(
-        ".ziku/ziku.jsonc not found.",
-        "Run 'ziku init' first to set up the project.",
-      );
+      throw zikuFailure({ kind: "NotInitialized", path: ZIKU_CONFIG_FILE });
     }
 
     if (args.list) {
@@ -85,16 +95,21 @@ export const trackCommand = defineCommand({
       return;
     }
 
-    const patterns = parsePatternArgs();
+    // args._ には citty がパースした位置引数だけが入る。`--dir foo` のようなフラグの値も
+    // citty 側で取り除かれるため、パース規則をコマンド側に持たなくてよい。
+    // CLI 引数はパターンの入口。ここで brand してから設定ファイル側の処理へ渡す。
+    const patterns = globPatterns(args._);
 
     if (patterns.length === 0) {
-      throw new ZikuError(
-        "No patterns specified.",
-        "Usage: ziku track <patterns...>\nExample: ziku track '.cloud/rules/*.md' '.cloud/config.json'",
-      );
+      throw zikuFailure({
+        kind: "MissingArgument",
+        argument: "patterns",
+        usage:
+          "Usage: ziku track <patterns...>\nExample: ziku track '.cloud/rules/*.md' '.cloud/config.json'",
+      });
     }
 
-    const { config, rawContent } = await loadZikuConfig(targetDir);
+    const { config, rawContent } = await readConfig(targetDir);
 
     const updatedContent = addIncludePattern(rawContent, patterns);
 
@@ -124,11 +139,21 @@ export const trackCommand = defineCommand({
   },
 });
 
+/**
+ * `.ziku/ziku.jsonc` を読み、失敗を分類済みの `ZikuFailure` として投げる。
+ *
+ * 素の `Effect.runPromise` だと失敗が FiberFailure に包まれ、不在 / 構文エラー /
+ * スキーマ違反の区別がトップレベルまで届かない。
+ */
+function readConfig(targetDir: AbsPath): Promise<{ config: ZikuConfig; rawContent: string }> {
+  return runCommandEffect(loadZikuConfig(targetDir).pipe(Effect.mapError(toZikuFailure)));
+}
+
 /** --list モード: 現在追跡中のパターン一覧を表示する */
-async function listTrackedPatterns(targetDir: string): Promise<void> {
+async function listTrackedPatterns(targetDir: AbsPath): Promise<void> {
   const {
     config: { include, exclude: excludeRaw },
-  } = await loadZikuConfig(targetDir);
+  } = await readConfig(targetDir);
   const exclude = excludeRaw ?? [];
   log.info("Tracked patterns:");
   for (const pattern of include) {
@@ -141,41 +166,4 @@ async function listTrackedPatterns(targetDir: string): Promise<void> {
     }
   }
   outro("Done.");
-}
-
-/**
- * process.argv から track サブコマンド以降のパターン引数を抽出する。
- * フラグ引数（--list, --dir 等）は除外する。
- */
-function parsePatternArgs(): string[] {
-  const rawArgs = process.argv.slice(2);
-  const trackIdx = rawArgs.indexOf("track");
-  const argsAfterTrack = trackIdx === -1 ? rawArgs : rawArgs.slice(trackIdx + 1);
-
-  const patterns: string[] = [];
-  let i = 0;
-  while (i < argsAfterTrack.length) {
-    const arg = argsAfterTrack[i];
-    if (
-      arg === "--list" ||
-      arg === "-l" ||
-      arg === "--help" ||
-      arg === "-h" ||
-      arg === "--dryRun" ||
-      arg === "-n"
-    ) {
-      i++;
-      continue;
-    }
-    if (arg === "--dir" || arg === "-d") {
-      i += 2;
-      continue;
-    }
-    if (!arg.startsWith("-")) {
-      patterns.push(arg);
-    }
-    i++;
-  }
-
-  return patterns;
 }

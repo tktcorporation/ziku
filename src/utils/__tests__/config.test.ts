@@ -1,5 +1,18 @@
+import { Cause, Effect, Exit, Option } from "effect";
 import { vol } from "memfs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ParseError, ValidationError } from "../../errors";
+import type { LockState, ZikuConfig } from "../../modules/schemas";
+import { baseCommitSha, baseHashesOf, markSynced } from "../../modules/schemas";
+import { toZikuFailure } from "../../services/command-context";
+import {
+  absPath,
+  commitSha,
+  globPatterns,
+  hashMap,
+  pathAsPattern,
+  repoRelPath,
+} from "../../__tests__/brands";
 
 // fs モジュールをモック
 vi.mock("node:fs/promises", async () => {
@@ -19,7 +32,11 @@ const {
   zikuConfigExists,
   generateZikuJsonc,
   addIncludePattern,
+  alwaysTrackedPathsIn,
+  classifySyncPath,
+  isZikuConfigPath,
   withConfigTracked,
+  SPECIAL_SYNC_PATHS,
   ZIKU_CONFIG_FILE,
 } = await import("../ziku-config");
 
@@ -34,6 +51,13 @@ describe("loadZikuConfig", () => {
     vol.reset();
   });
 
+  const runLoad = (dir: string): Promise<{ config: ZikuConfig; rawContent: string }> =>
+    Effect.runPromise(loadZikuConfig(absPath(dir)));
+  const loadFailure = async (dir: string): Promise<unknown> => {
+    const exit = await Effect.runPromiseExit(loadZikuConfig(absPath(dir)));
+    return Exit.isFailure(exit) ? Cause.failureOption(exit.cause) : undefined;
+  };
+
   it("正常な .ziku/ziku.jsonc を読み込める", async () => {
     const config = {
       include: [".github/**"],
@@ -43,7 +67,7 @@ describe("loadZikuConfig", () => {
       "/project/.ziku/ziku.jsonc": JSON.stringify(config),
     });
 
-    const result = await loadZikuConfig("/project");
+    const result = await runLoad("/project");
     expect(result.config).toEqual(config);
     expect(typeof result.rawContent).toBe("string");
   });
@@ -59,7 +83,7 @@ describe("loadZikuConfig", () => {
       "/project/.ziku/ziku.jsonc": JSON.stringify(config),
     });
 
-    const result = await loadZikuConfig("/project");
+    const result = await runLoad("/project");
     expect(result.config.$schema).toBe("https://example.com/schema.json");
     expect(result.config.exclude).toEqual(["*.secret"]);
   });
@@ -74,30 +98,75 @@ describe("loadZikuConfig", () => {
       "/project/.ziku/ziku.jsonc": jsonc,
     });
 
-    const result = await loadZikuConfig("/project");
+    const result = await runLoad("/project");
     expect(result.config.include).toEqual([".github/**"]);
     expect(result.rawContent).toBe(jsonc);
   });
 
-  it("ファイルが存在しない場合はエラー", async () => {
-    vol.fromJSON({});
-    await expect(loadZikuConfig("/project")).rejects.toThrow();
-  });
-
-  it("不正な JSON の場合はエラー", async () => {
+  it("末尾カンマ付きの JSONC を読み込める", async () => {
     vol.fromJSON({
-      "/project/.ziku/ziku.jsonc": "{ invalid json }",
+      "/project/.ziku/ziku.jsonc": '{ "include": [".github/**",], }',
     });
-    await expect(loadZikuConfig("/project")).rejects.toThrow();
+
+    const result = await runLoad("/project");
+    expect(result.config.include).toEqual([".github/**"]);
   });
 
-  it("スキーマに合わない場合はエラー (include が欠けている)", async () => {
+  it("ファイルが存在しない場合は FileNotFoundError", async () => {
+    vol.fromJSON({});
+    expect(await loadFailure("/project")).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "FileNotFoundError" })),
+    );
+  });
+
+  it("JSONC として壊れている場合は ParseError", async () => {
+    vol.fromJSON({
+      "/project/.ziku/ziku.jsonc": '{ "include": [ }',
+    });
+
+    const failure = await loadFailure("/project");
+    expect(failure).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "ParseError", path: ZIKU_CONFIG_FILE })),
+    );
+
+    // 構文エラーとして報告され、ファイルのどこが壊れているかが hint に残ること
+    const parseError = Option.getOrThrow(failure as Option.Option<ParseError>);
+    const zikuFailure = toZikuFailure(parseError);
+    expect(zikuFailure.reason).toMatchObject({ kind: "ConfigUnparsable", path: ZIKU_CONFIG_FILE });
+    expect(zikuFailure.hint).toContain("line 1, column");
+  });
+
+  it("スキーマに合わない場合は ValidationError (include が欠けている)", async () => {
     vol.fromJSON({
       "/project/.ziku/ziku.jsonc": JSON.stringify({
         exclude: ["*.secret"],
       }),
     });
-    await expect(loadZikuConfig("/project")).rejects.toThrow();
+    expect(await loadFailure("/project")).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "ValidationError" })),
+    );
+  });
+
+  it("型の違う include は、構文エラーではなく検証失敗としてフィールド名付きで報告される", async () => {
+    vol.fromJSON({
+      "/project/.ziku/ziku.jsonc": JSON.stringify({ include: "not-an-array" }),
+    });
+
+    const failure = await loadFailure("/project");
+    expect(failure).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "ValidationError", path: ZIKU_CONFIG_FILE })),
+    );
+
+    const validationError = Option.getOrThrow(failure as Option.Option<ValidationError>);
+    expect(validationError.issues).toEqual([expect.stringContaining("include: ")]);
+    expect(validationError.issues[0]).toContain("array");
+
+    // 「パースに失敗」ではなく「読めない設定」として、作り直しを促すこと
+    const failureValue = toZikuFailure(validationError);
+    expect(failureValue.reason).toMatchObject({ kind: "ConfigInvalid", path: ZIKU_CONFIG_FILE });
+    expect(failureValue.message).toBe(`Failed to read ${ZIKU_CONFIG_FILE}`);
+    expect(failureValue.hint).toContain("include: ");
+    expect(failureValue.hint).toContain("ziku init");
   });
 });
 
@@ -111,7 +180,7 @@ describe("saveZikuConfig", () => {
 
     const content =
       '{\n  "source": { "owner": "test", "repo": "test" },\n  "include": [".github/**"]\n}\n';
-    await saveZikuConfig("/project", content);
+    await saveZikuConfig(absPath("/project"), content);
 
     const saved = vol.readFileSync("/project/.ziku/ziku.jsonc", "utf8") as string;
     expect(saved).toBe(content);
@@ -121,7 +190,7 @@ describe("saveZikuConfig", () => {
     vol.fromJSON({ "/project": null });
 
     const content = '{ "source": { "owner": "a", "repo": "b" }, "include": [] }';
-    await saveZikuConfig("/project", content);
+    await saveZikuConfig(absPath("/project"), content);
 
     const saved = vol.readFileSync("/project/.ziku/ziku.jsonc", "utf8") as string;
     expect(saved).toBe(content);
@@ -137,19 +206,19 @@ describe("zikuConfigExists", () => {
     vol.fromJSON({
       "/project/.ziku/ziku.jsonc": "{}",
     });
-    expect(zikuConfigExists("/project")).toBe(true);
+    expect(zikuConfigExists(absPath("/project"))).toBe(true);
   });
 
   it("ファイルが存在しない場合は false", () => {
     vol.fromJSON({});
-    expect(zikuConfigExists("/project")).toBe(false);
+    expect(zikuConfigExists(absPath("/project"))).toBe(false);
   });
 });
 
 describe("generateZikuJsonc", () => {
   it("include のみの設定を生成できる", () => {
     const result = generateZikuJsonc({
-      include: [".github/**"],
+      include: globPatterns([".github/**"]),
       exclude: [],
     });
 
@@ -163,8 +232,8 @@ describe("generateZikuJsonc", () => {
 
   it("exclude が指定されている場合は含まれる", () => {
     const result = generateZikuJsonc({
-      include: [".github/**"],
-      exclude: ["*.secret"],
+      include: globPatterns([".github/**"]),
+      exclude: globPatterns(["*.secret"]),
     });
 
     const parsed = JSON.parse(result);
@@ -186,7 +255,7 @@ describe("generateZikuJsonc", () => {
 describe("addIncludePattern", () => {
   it("新しいパターンを include に追加できる", () => {
     const raw = '{\n  "source": { "owner": "a", "repo": "b" },\n  "include": [".github/**"]\n}\n';
-    const result = addIncludePattern(raw, ["docs/**"]);
+    const result = addIncludePattern(raw, globPatterns(["docs/**"]));
 
     const parsed = JSON.parse(result);
     expect(parsed.include).toContain(".github/**");
@@ -195,14 +264,14 @@ describe("addIncludePattern", () => {
 
   it("既に存在するパターンは追加しない", () => {
     const raw = '{\n  "source": { "owner": "a", "repo": "b" },\n  "include": [".github/**"]\n}\n';
-    const result = addIncludePattern(raw, [".github/**"]);
+    const result = addIncludePattern(raw, globPatterns([".github/**"]));
 
     expect(result).toBe(raw);
   });
 
   it("複数パターンを一度に追加できる", () => {
     const raw = '{\n  "source": { "owner": "a", "repo": "b" },\n  "include": []\n}\n';
-    const result = addIncludePattern(raw, ["a/**", "b/**"]);
+    const result = addIncludePattern(raw, globPatterns(["a/**", "b/**"]));
 
     const parsed = JSON.parse(result);
     expect(parsed.include).toEqual(["a/**", "b/**"]);
@@ -211,16 +280,16 @@ describe("addIncludePattern", () => {
 
 describe("withConfigTracked", () => {
   it("ziku.jsonc を追跡対象として include 末尾に追加する", () => {
-    const result = withConfigTracked([".claude/**", ".mcp.json"]);
+    const result = withConfigTracked(globPatterns([".claude/**", ".mcp.json"]));
     expect(result).toEqual([".claude/**", ".mcp.json", ZIKU_CONFIG_FILE]);
   });
 
   it("既に ziku.jsonc が含まれていれば重複追加しない", () => {
-    const input = [".claude/**", ZIKU_CONFIG_FILE];
+    const input = globPatterns([".claude/**"]).concat(pathAsPattern(ZIKU_CONFIG_FILE));
     const result = withConfigTracked(input);
     expect(result).toEqual(input);
     // 重複しないこと
-    expect(result.filter((p) => p === ZIKU_CONFIG_FILE)).toHaveLength(1);
+    expect(result.filter((p) => p === pathAsPattern(ZIKU_CONFIG_FILE))).toHaveLength(1);
   });
 
   it("空配列でも ziku.jsonc だけは追跡対象になる", () => {
@@ -228,9 +297,75 @@ describe("withConfigTracked", () => {
   });
 
   it("元の配列を破壊しない（イミュータブル）", () => {
-    const input = [".claude/**"];
+    const input = globPatterns([".claude/**"]);
     withConfigTracked(input);
     expect(input).toEqual([".claude/**"]);
+  });
+});
+
+describe("classifySyncPath", () => {
+  it("ziku.jsonc だけを zikuConfig 種別として扱う", () => {
+    expect(classifySyncPath(ZIKU_CONFIG_FILE)).toEqual({
+      kind: "zikuConfig",
+      path: ZIKU_CONFIG_FILE,
+    });
+    expect(isZikuConfigPath(ZIKU_CONFIG_FILE)).toBe(true);
+  });
+
+  it("同じ `.ziku/` 配下でも lock.json は通常の同期ファイル扱い", () => {
+    // lock.json はテンプレート取得元 source を持つローカル専用ファイルで、同期対象ではない。
+    // 種別判定がディレクトリではなくパス単位であることを固定する。
+    expect(classifySyncPath(repoRelPath(".ziku/lock.json"))).toEqual({
+      kind: "syncedFile",
+      path: ".ziku/lock.json",
+    });
+    expect(isZikuConfigPath(repoRelPath(".ziku/lock.json"))).toBe(false);
+  });
+
+  it("通常のファイルは syncedFile 種別", () => {
+    expect(classifySyncPath(repoRelPath(".claude/rules/foo.md")).kind).toBe("syncedFile");
+    expect(isZikuConfigPath(repoRelPath(".claude/rules/foo.md"))).toBe(false);
+  });
+
+  it("特別扱いの表に登録された種別をすべて返す", () => {
+    // 判定は表の逆引きだけで組み立てる。表に載っているのに分類が返さない種別があると、
+    // その種別を前提にした消費側の分岐が到達不能なまま通り、通常の同期ファイルとして
+    // コピー・削除・3-way マージに乗ってしまう。
+    for (const [kind, special] of Object.entries(SPECIAL_SYNC_PATHS)) {
+      expect(classifySyncPath(special.path)).toEqual({ kind, path: special.path });
+    }
+  });
+
+  it("型: 種別を足したら特別扱いの表への登録が必須になる", () => {
+    // 登録の強制が型の役目なので、@ts-expect-error が外れたら（= 空の表が書けるように
+    // なったら）typecheck が失敗して気付ける。
+    // @ts-expect-error 種別ごとのパスを欠いた表は SPECIAL_SYNC_PATHS の型を満たさない
+    const missing: typeof SPECIAL_SYNC_PATHS = {};
+    expect(Object.keys(missing)).toEqual([]);
+  });
+
+  it("型: 表の鍵と分類結果の種別は食い違えない", () => {
+    const mismatched: typeof SPECIAL_SYNC_PATHS = {
+      // @ts-expect-error zikuConfig の欄に別種別の分類結果は置けない
+      zikuConfig: { kind: "syncedFile", path: ZIKU_CONFIG_FILE },
+    };
+    expect(mismatched.zikuConfig.path).toBe(ZIKU_CONFIG_FILE);
+  });
+});
+
+describe("alwaysTrackedPathsIn", () => {
+  beforeEach(() => {
+    vol.reset();
+  });
+
+  it("実在する常時追跡パスを返す", () => {
+    vol.fromJSON({ [`/project/${ZIKU_CONFIG_FILE}`]: "{}" });
+    expect(alwaysTrackedPathsIn(absPath("/project"))).toEqual([ZIKU_CONFIG_FILE]);
+  });
+
+  it("実在しなければ返さない（走査に存在しないファイルを混ぜない）", () => {
+    vol.fromJSON({ "/project/.claude/rules/foo.md": "x" });
+    expect(alwaysTrackedPathsIn(absPath("/project"))).toEqual([]);
   });
 });
 
@@ -243,48 +378,55 @@ describe("loadLock", () => {
     vol.reset();
   });
 
-  it("正常な .ziku/lock.json を読み込める", async () => {
+  const runLoad = (dir: string): Promise<LockState> => Effect.runPromise(loadLock(absPath(dir)));
+  const loadFailure = async (dir: string): Promise<unknown> => {
+    const exit = await Effect.runPromiseExit(loadLock(absPath(dir)));
+    return Exit.isFailure(exit) ? Cause.failureOption(exit.cause) : undefined;
+  };
+
+  it("ベース未確定 (sync: pending) のロックを読み込める", async () => {
     const lock = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
-      source: { owner: "tktcorporation", repo: ".github" },
+      source: { kind: "github", owner: "tktcorporation", repo: ".github" },
+      sync: "pending",
     };
 
     vol.fromJSON({
       "/project/.ziku/lock.json": JSON.stringify(lock),
     });
 
-    const result = await loadLock("/project");
-    expect(result).toEqual(lock);
+    expect(await runLoad("/project")).toEqual(lock);
   });
 
-  it("baseRef と baseHashes を含むロックを読み込める", async () => {
+  it("ベース確定済み (sync: synced) のロックを読み込める", async () => {
     const lock = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
-      source: { owner: "tktcorporation", repo: ".github" },
-      baseRef: "abc123def",
-      baseHashes: { "file.txt": "sha256hash" },
+      source: { kind: "github", owner: "tktcorporation", repo: ".github" },
+      sync: "synced",
+      base: { hashes: { "file.txt": "sha256hash" }, ref: "abc123def" },
     };
 
     vol.fromJSON({
       "/project/.ziku/lock.json": JSON.stringify(lock),
     });
 
-    const result = await loadLock("/project");
-    expect(result.baseRef).toBe("abc123def");
-    expect(result.baseHashes).toEqual({ "file.txt": "sha256hash" });
+    const result = await runLoad("/project");
+    expect(baseCommitSha(result)).toBe("abc123def");
+    expect(baseHashesOf(result)).toEqual({ "file.txt": "sha256hash" });
   });
 
-  it("pendingMerge を含むロックを読み込める", async () => {
+  it("コンフリクト解決待ち (sync: merging) のロックを読み込める", async () => {
     const lock = {
       version: "1.0.0",
       installedAt: "2024-01-01T00:00:00+09:00",
-      source: { owner: "tktcorporation", repo: ".github" },
-      pendingMerge: {
-        conflicts: ["file1.txt"],
-        templateHashes: { "file1.txt": "hash1" },
-        latestRef: "def456",
+      source: { kind: "github", owner: "tktcorporation", repo: ".github" },
+      sync: "merging",
+      base: { hashes: {}, ref: "abc123" },
+      merge: {
+        conflicts: [{ path: "file1.txt", reason: "markers" }],
+        nextBase: { hashes: { "file1.txt": "hash1" }, ref: "def456" },
       },
     };
 
@@ -292,40 +434,112 @@ describe("loadLock", () => {
       "/project/.ziku/lock.json": JSON.stringify(lock),
     });
 
-    const result = await loadLock("/project");
-    expect(result.pendingMerge?.conflicts).toEqual(["file1.txt"]);
-    expect(result.pendingMerge?.latestRef).toBe("def456");
+    const result = await runLoad("/project");
+    expect(result.sync).toBe("merging");
+    if (result.sync !== "merging") throw new Error("expected merging lock");
+    expect(result.merge.conflicts).toEqual([{ path: "file1.txt", reason: "markers" }]);
+    expect(result.merge.nextBase.hashes).toEqual({ "file1.txt": "hash1" });
   });
 
-  it("ファイルが存在しない場合はエラー", async () => {
+  it("ローカルソースのロックにコミット SHA があれば ValidationError", async () => {
+    vol.fromJSON({
+      "/project/.ziku/lock.json": JSON.stringify({
+        version: "1.0.0",
+        installedAt: "2024-01-01T00:00:00+09:00",
+        source: { kind: "local", path: "/tpl" },
+        sync: "synced",
+        base: { hashes: {}, ref: "abc123" },
+      }),
+    });
+
+    expect(await loadFailure("/project")).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "ValidationError" })),
+    );
+  });
+
+  it("解決待ちのコンフリクトが空配列のロックは受け付けない", async () => {
+    vol.fromJSON({
+      "/project/.ziku/lock.json": JSON.stringify({
+        version: "1.0.0",
+        installedAt: "2024-01-01T00:00:00+09:00",
+        source: { kind: "local", path: "/tpl" },
+        sync: "merging",
+        base: { hashes: {} },
+        merge: { conflicts: [], nextBase: { hashes: {} } },
+      }),
+    });
+
+    expect(await loadFailure("/project")).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "ValidationError" })),
+    );
+  });
+
+  it("ファイルが存在しない場合は FileNotFoundError", async () => {
     vol.fromJSON({});
-    await expect(loadLock("/project")).rejects.toThrow();
+    expect(await loadFailure("/project")).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "FileNotFoundError" })),
+    );
   });
 
-  it("不正な JSON の場合はエラー", async () => {
+  it("不正な JSON の場合は ParseError", async () => {
     vol.fromJSON({
       "/project/.ziku/lock.json": "{ invalid json }",
     });
-    await expect(loadLock("/project")).rejects.toThrow();
+    expect(await loadFailure("/project")).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "ParseError" })),
+    );
   });
 
-  it("スキーマに合わない場合はエラー (version が欠けている)", async () => {
+  it("スキーマに合わない場合は ValidationError (version が欠けている)", async () => {
     vol.fromJSON({
       "/project/.ziku/lock.json": JSON.stringify({
         installedAt: "2024-01-01T00:00:00+09:00",
+        source: { kind: "local", path: "/tpl" },
+        sync: "pending",
       }),
     });
-    await expect(loadLock("/project")).rejects.toThrow();
+    expect(await loadFailure("/project")).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "ValidationError" })),
+    );
   });
 
-  it("installedAt が不正な datetime 形式の場合はエラー", async () => {
+  it("installedAt が不正な datetime 形式の場合は ValidationError", async () => {
     vol.fromJSON({
       "/project/.ziku/lock.json": JSON.stringify({
         version: "1.0.0",
         installedAt: "invalid-date",
+        source: { kind: "local", path: "/tpl" },
+        sync: "pending",
       }),
     });
-    await expect(loadLock("/project")).rejects.toThrow();
+    expect(await loadFailure("/project")).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "ValidationError" })),
+    );
+  });
+
+  it("同期状態をトップレベルに持つロックは、不在ではなく検証失敗として作り直しを促す", async () => {
+    vol.fromJSON({
+      "/project/.ziku/lock.json": JSON.stringify({
+        version: "1.0.0",
+        installedAt: "2024-01-01T00:00:00+09:00",
+        source: { owner: "tktcorporation", repo: ".github" },
+        baseRef: "abc123",
+        baseHashes: { "file.txt": "hash" },
+      }),
+    });
+
+    const failure = await loadFailure("/project");
+    expect(failure).toMatchObject(
+      Option.some(expect.objectContaining({ _tag: "ValidationError", path: LOCK_FILE })),
+    );
+
+    // 「見つからない」ではなく検証失敗として分類され、作り直しを促すこと
+    const validationError = Option.getOrThrow(failure as Option.Option<ValidationError>);
+    const failureValue = toZikuFailure(validationError);
+    expect(failureValue.reason).toMatchObject({ kind: "ConfigInvalid", path: LOCK_FILE });
+    expect(failureValue.message).toContain(LOCK_FILE);
+    expect(failureValue.hint).toContain("cannot read");
+    expect(failureValue.hint).toContain("ziku init");
   });
 });
 
@@ -334,16 +548,17 @@ describe("saveLock", () => {
     vol.reset();
   });
 
+  const lock: LockState = {
+    version: "1.0.0",
+    installedAt: "2024-01-01T00:00:00+09:00",
+    source: { kind: "github", owner: "test", repo: ".ziku" },
+    sync: "pending",
+  };
+
   it("ロックを JSON ファイルとして保存できる", async () => {
     vol.fromJSON({ "/project/.ziku": null });
 
-    const lock = {
-      version: "1.0.0",
-      installedAt: "2024-01-01T00:00:00+09:00",
-      source: { owner: "test", repo: ".ziku" },
-    };
-
-    await saveLock("/project", lock);
+    await saveLock(absPath("/project"), lock);
 
     const saved = vol.readFileSync("/project/.ziku/lock.json", "utf8");
     expect(JSON.parse(saved as string)).toEqual(lock);
@@ -352,13 +567,7 @@ describe("saveLock", () => {
   it("保存される JSON は整形されている（2スペースインデント + 末尾改行）", async () => {
     vol.fromJSON({ "/project/.ziku": null });
 
-    const lock = {
-      version: "1.0.0",
-      installedAt: "2024-01-01T00:00:00+09:00",
-      source: { owner: "test", repo: ".ziku" },
-    };
-
-    await saveLock("/project", lock);
+    await saveLock(absPath("/project"), lock);
 
     const saved = vol.readFileSync("/project/.ziku/lock.json", "utf8") as string;
     expect(saved).toContain("\n");
@@ -374,14 +583,12 @@ describe("saveLock", () => {
       }),
     });
 
-    const newLock = {
-      version: "2.0.0",
-      installedAt: "2024-06-01T00:00:00+09:00",
-      source: { owner: "test", repo: ".ziku" },
-      baseRef: "newref",
-    };
+    const newLock = markSynced(lock, {
+      hashes: hashMap({ "a.txt": "h" }),
+      commitSha: commitSha("newref"),
+    });
 
-    await saveLock("/project", newLock);
+    await saveLock(absPath("/project"), newLock);
 
     const saved = vol.readFileSync("/project/.ziku/lock.json", "utf8");
     expect(JSON.parse(saved as string)).toEqual(newLock);
@@ -390,13 +597,7 @@ describe("saveLock", () => {
   it(".ziku ディレクトリが存在しなくても保存できる", async () => {
     vol.fromJSON({ "/project": null });
 
-    const lock = {
-      version: "1.0.0",
-      installedAt: "2024-01-01T00:00:00+09:00",
-      source: { owner: "test", repo: ".ziku" },
-    };
-
-    await saveLock("/project", lock);
+    await saveLock(absPath("/project"), lock);
 
     const saved = vol.readFileSync("/project/.ziku/lock.json", "utf8");
     expect(JSON.parse(saved as string)).toEqual(lock);

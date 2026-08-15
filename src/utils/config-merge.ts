@@ -11,79 +11,128 @@
  * - 真の共通祖先で 3-way 差分を取れば削除も双方向に伝播できるが、`ziku.jsonc` の base は
  *   信頼できない。特に `init` で「テンプレートのパターンの部分集合」を選んで導入した
  *   プロジェクトでは、lock に記録される base は合成された部分集合である一方、履歴テンプレ
- *   （baseRef のダウンロード）は full なので両者が矛盾する。この矛盾下で削除を伝播させると、
+ *   （ベースのコミットからのダウンロード）は full なので両者が矛盾する。この矛盾下で削除を伝播させると、
  *   ユーザーが未選択にしただけのテンプレ側パターンを「削除」とみなして push で消してしまう
- *   （全下流に波及する事故 / codex review P1）。
+ *   （全下流に波及する事故）。
  * - 和集合なら、ローカルの追加もテンプレの追加も保持し、いかなるパターンも削除しないため、
  *   テンプレートを壊さず・ローカルの追加も失わない。
  *
  * トレードオフ: パターンの「削除」は自動伝播しない（明示的に各 ziku.jsonc を編集する必要が
  * ある）。これは安全性とのトレードオフとして受け入れる。
  */
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { parse } from "jsonc-parser";
-import { join } from "pathe";
-import type { ZikuConfig } from "../modules/schemas";
-import { ZIKU_CONFIG_FILE, generateZikuJsonc } from "./ziku-config";
+import { match } from "ts-pattern";
+import { zikuFailure } from "../errors";
+import type { AbsPath, GlobPattern, RepoRelPath } from "../modules/schemas";
+import { joinAbs, selectPatternsMatchingPaths } from "./paths";
+import { unionPatterns } from "./patterns";
+import { ZIKU_CONFIG_FILE, generateZikuJsonc, readZikuConfig, withPatterns } from "./ziku-config";
 
 export interface ConfigPatterns {
-  readonly include: string[];
-  readonly exclude: string[];
+  readonly include: readonly GlobPattern[];
+  readonly exclude: readonly GlobPattern[];
 }
 
 const EMPTY_PATTERNS: ConfigPatterns = { include: [], exclude: [] };
 
 /**
- * 配列を出現順を保ったまま重複除去して結合する（local → template の順）。
- */
-function unionOrdered(...lists: string[][]): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const list of lists) {
-    for (const item of list) {
-      if (!seen.has(item)) {
-        seen.add(item);
-        result.push(item);
-      }
-    }
-  }
-  return result;
-}
-
-/**
  * include / exclude を要素レベルで加法マージ（和集合）する純粋関数。
  *
- * ローカル優先の出現順で、ローカルにもテンプレにもあるパターンを保持する。
- * いずれの側のパターンも削除しない（削除は伝播しない）。
+ * `document` は、この結果を書き戻す先の `ziku.jsonc` が今持っているパターン。その並びを
+ * 保ったまま `incoming` の追加分を末尾へ積む（{@link unionPatterns}）。いずれの側の
+ * パターンも削除しない（削除は伝播しない）。
  */
 export function mergeConfigPatterns(opts: {
-  local: ConfigPatterns;
-  template: ConfigPatterns;
+  document: ConfigPatterns;
+  incoming: ConfigPatterns;
 }): ConfigPatterns {
   return {
-    include: unionOrdered(opts.local.include, opts.template.include),
-    exclude: unionOrdered(opts.local.exclude, opts.template.exclude),
+    include: unionPatterns(opts.document.include, opts.incoming.include).merged,
+    exclude: unionPatterns(opts.document.exclude, opts.incoming.exclude).merged,
   };
 }
 
 /**
- * 指定ディレクトリの `.ziku/ziku.jsonc` を読み、パターンを抽出する。
- * ファイルが無ければ undefined（base が無いケースの判定に使う）。
+ * ディスク上の `ziku.jsonc` 1 つ分。
+ *
+ * 生の内容も持ち回るのは、union の結果を「新しく生成した内容」ではなく「元の内容の
+ * include / exclude だけを差し替えたもの」として書き出すため（{@link withPatterns}）。
+ * パターンだけを取り出して作り直すと、注釈と ziku が読まないキーが同期のたびに消える。
  */
-async function readPatternsAt(dir: string): Promise<ConfigPatterns | undefined> {
-  const path = join(dir, ZIKU_CONFIG_FILE);
-  if (!existsSync(path)) return undefined;
-  const content = await readFile(path, "utf-8");
-  const parsed = parse(content) as ZikuConfig | undefined;
-  return {
-    include: parsed?.include ?? [],
-    exclude: parsed?.exclude ?? [],
-  };
+interface ConfigDocument {
+  readonly raw: string;
+  readonly patterns: ConfigPatterns;
+}
+
+/**
+ * 指定ディレクトリの `.ziku/ziku.jsonc` を読む。
+ * ファイルが無ければ undefined（base が無いケースの判定に使う）。
+ *
+ * 読み取りと失敗の分類は {@link readZikuConfig} が持ち、ここはその結果を `ZikuFailure` へ
+ * 写すだけにする。構文だけを見て値をキャストで通すと、`"include": "a"` や `"include": [1]`
+ * のようにスキーマだけを破った設定が、パターン列を組み立てる時点の型エラー
+ * （`map is not a function`）や、数値を glob として扱う同期として現れる。どちらも分類済みの
+ * 失敗にならず、利用者はどのファイルのどこが悪いか分からないまま止まる。
+ *
+ * 構文が壊れていれば、ユーザーが手で直せる失敗として報告して中断する。パターン無しとして
+ * 扱わないのは、ここで読んだ内容が union の入力であると同時に、{@link renderUnionInto} が
+ * 書き戻す先の土台でもあるため。壊れた側を空集合とみなすと、その側のパターンを 1 つ残らず
+ * 落とした内容を「マージ結果」として書き出す。テンプレート側でそれが起きると、パターンを
+ * 失った `ziku.jsonc` が PR に載り、マージされた時点で全プロジェクトの init / pull が
+ * 同期対象を見失う。エラー回復が返す部分的な値を採るのも同じ理由で採れない（回復できな
+ * かった分だけが静かに消える）。
+ *
+ * 中断が安全側なのは、`ziku.jsonc` が人の手で直せるテキストであり、直すまで待っても
+ * 何も失われないため。ローカル側は `loadZikuConfig` が同じ理由で先に弾いており、
+ * テンプレート側もここで同じ扱いに揃う。
+ *
+ * 失敗は `ZikuFailure` を throw して返す。この関数の呼び出し元は Effect ではない async
+ * 関数の連なりで、その先はコマンド層が defect ごと拾ってトップレベルへ運ぶ。`ZikuFailure`
+ * は `Error` を継承するのでその経路をそのまま通り、文言と hint が保たれる。
+ */
+async function readConfigAt(dir: AbsPath): Promise<ConfigDocument | undefined> {
+  const path = joinAbs(dir, ZIKU_CONFIG_FILE);
+
+  return match(await readZikuConfig(dir))
+    .with({ _tag: "NotFound" }, () => undefined)
+    .with({ _tag: "Unparsable" }, ({ detail }): never => {
+      throw zikuFailure({ kind: "ConfigUnparsable", path, detail });
+    })
+    .with({ _tag: "Invalid" }, ({ issues }): never => {
+      throw zikuFailure({ kind: "ConfigInvalid", path, issues });
+    })
+    .with({ _tag: "Ok" }, ({ raw, config }) => ({
+      raw,
+      patterns: { include: config.include, exclude: config.exclude ?? [] },
+    }))
+    .exhaustive();
+}
+
+/**
+ * 書き換える対象の文書に `incoming` を和集合で足した `ziku.jsonc` の内容を返す。
+ *
+ * 元の文書の include / exclude だけを差し替え、注釈と他のキーを残す。
+ *
+ * union の並びの基準（{@link unionPatterns} の `base`）と書き戻し先の文書を、同じ 1 つの
+ * 引数から導く。マージ済みのパターン列を受け取る形にすると「テンプレートの文書を、ローカルを
+ * 先にした並びで書き換える」組み合わせが作れてしまい、既存要素が並べ替わって配列全体の
+ * 差し替えになる（追記のはずの差分が全行の入れ替えとして PR に出る）。
+ *
+ * 文書が無い場合（まだ `ziku.jsonc` が存在しないテンプレート / プロジェクト）はこの関数を
+ * 通せない。その状況で作れるのは「土台に足した内容」ではなく「渡した分だけの新しい文書」で、
+ * 両者を 1 つの関数で扱うと、土台があることを前提にした呼び出しが黙って全体生成へ落ちる。
+ * 新規生成が正しい経路は {@link renderFullConfig} を明示的に選ぶ。
+ */
+function renderUnionInto(document: ConfigDocument, incoming: ConfigPatterns): string {
+  return withPatterns(document.raw, mergeConfigPatterns({ document: document.patterns, incoming }));
+}
+
+/** 土台になる文書が無いときに、渡したパターンだけで `ziku.jsonc` を新規生成する。 */
+function renderFullConfig(incoming: ConfigPatterns): string {
+  return generateZikuJsonc(mergeConfigPatterns({ document: EMPTY_PATTERNS, incoming }));
 }
 
 /** 2 つのパターン配列が集合として等しいか（順序・重複を無視）。 */
-function sameSet(a: string[], b: string[]): boolean {
+function sameSet(a: readonly GlobPattern[], b: readonly GlobPattern[]): boolean {
   const sa = new Set(a);
   const sb = new Set(b);
   if (sa.size !== sb.size) return false;
@@ -92,26 +141,33 @@ function sameSet(a: string[], b: string[]): boolean {
 }
 
 /**
+ * `ziku.jsonc` の内容が、どちら向きに同期アクションを必要としているか。
+ *
+ * 加法 union モデルでは「片側だけのパターン削除」は同期アクションにならない（union==その側）
+ * ため、ハッシュ差分ではなくパターン集合の包含関係で判断する。
+ */
+export interface ConfigDrift {
+  /** テンプレにあってローカルに無いパターンがある（pull で取り込む価値あり）。 */
+  readonly pullRelevant: boolean;
+  /** ローカルにあってテンプレに無いパターンがある（push で伝播する価値あり）。 */
+  readonly pushRelevant: boolean;
+}
+
+/**
  * `ziku.jsonc` の「実際に同期アクションが必要か」を union 観点で判定する。
  *
- * - `pullRelevant`: テンプレにあってローカルに無いパターンがある（pull で取り込む価値あり）。
- * - `pushRelevant`: ローカルにあってテンプレに無いパターンがある（push で伝播する価値あり）。
- *
- * 加法 union モデルでは「片側だけのパターン削除」は同期アクションにならない（union==その側）。
- * これを status の推奨判定に使うことで、テンプレ側のパターン削除だけのケースで pull を
- * 無限に推奨してしまう no-op ループを防ぐ（codex P2）。
+ * status の推奨判定に使うことで、テンプレ側のパターン削除だけのケースで pull を
+ * 無限に推奨してしまう no-op ループを防ぐ。
  */
 export async function analyzeConfigDrift(
-  targetDir: string,
-  templateDir: string,
-): Promise<{ pullRelevant: boolean; pushRelevant: boolean }> {
-  const [local, template] = await Promise.all([
-    readPatternsAt(targetDir),
-    readPatternsAt(templateDir),
-  ]);
-  const l = local ?? EMPTY_PATTERNS;
-  const t = template ?? EMPTY_PATTERNS;
-  const union = mergeConfigPatterns({ local: l, template: t });
+  targetDir: AbsPath,
+  templateDir: AbsPath,
+): Promise<ConfigDrift> {
+  const [local, template] = await Promise.all([readConfigAt(targetDir), readConfigAt(templateDir)]);
+  const l = local?.patterns ?? EMPTY_PATTERNS;
+  const t = template?.patterns ?? EMPTY_PATTERNS;
+  // どちら向きの判定も集合の包含だけを見るので、並びの基準はどちらでも結果が変わらない。
+  const union = mergeConfigPatterns({ document: l, incoming: t });
   const eq = (a: ConfigPatterns, b: ConfigPatterns): boolean =>
     sameSet(a.include, b.include) && sameSet(a.exclude, b.exclude);
   return {
@@ -132,84 +188,112 @@ export async function analyzeConfigDrift(
  * 追跡選択の永続化（`persistNewlyTracked`）は push 成功後に走るため、ディスク内容だけを
  * 読むと新規パターンが union から漏れ、テンプレにファイル本体だけ届いて include が届かない
  * （他プロジェクトの init/pull が拾えるのが 2 回目の push 後になる）。これを防ぐため、
- * 確定した新規追跡パターンをローカル側へ加えてから union を取る（codex P2）。
+ * 確定した新規追跡パターンを取り込む側へ加えてから union を取る。
+ *
+ * 結果はローカルの `ziku.jsonc` を土台に組み立てる（{@link renderUnionInto}）。この内容は
+ * pull ならローカルへ書き戻され、push ならローカルの `ziku.jsonc` を送ると決めた場面で使われる
+ * ので、どちらもローカルの注釈が残る側が正しい土台になる。並びもローカルの文書が基準になり、
+ * 取り込む分（新規追跡パターン → テンプレートの追加分）が末尾へ積まれる。
  */
 export async function computeMergedZikuConfig(opts: {
-  targetDir: string;
-  templateDir: string;
-  extraIncludes?: string[];
+  targetDir: AbsPath;
+  templateDir: AbsPath;
+  extraIncludes?: readonly GlobPattern[];
 }): Promise<string> {
   const [local, template] = await Promise.all([
-    readPatternsAt(opts.targetDir),
-    readPatternsAt(opts.templateDir),
+    readConfigAt(opts.targetDir),
+    readConfigAt(opts.templateDir),
   ]);
 
-  const localBase = local ?? EMPTY_PATTERNS;
-  const localWithExtra: ConfigPatterns = {
-    include: [...localBase.include, ...(opts.extraIncludes ?? [])],
-    exclude: localBase.exclude,
+  const templatePatterns = template?.patterns ?? EMPTY_PATTERNS;
+  const incoming: ConfigPatterns = {
+    include: [...(opts.extraIncludes ?? []), ...templatePatterns.include],
+    exclude: templatePatterns.exclude,
   };
 
-  const merged = mergeConfigPatterns({
-    local: localWithExtra,
-    template: template ?? EMPTY_PATTERNS,
-  });
-
-  return generateZikuJsonc(merged);
+  // ローカルに `ziku.jsonc` が無いのは init 前の状態で、そこへ書く内容はローカルの全パターン
+  // （= 取り込む分だけ）になる。新規生成しても失われるものが無いので全体生成でよい。
+  return local === undefined ? renderFullConfig(incoming) : renderUnionInto(local, incoming);
 }
 
 /**
- * ローカルの `ziku.jsonc` にのみ存在する include パターンのうち、指定パス集合に
+ * ローカルの `ziku.jsonc` にのみ存在する include パターンのうち、指定パスのいずれかに
  * 一致するものだけを返す。
  *
- * 背景（#90）: `ziku track <path>` は即座にディスクの `ziku.jsonc` にパターンを
+ * 背景: `ziku track <pattern>` は即座にディスクの `ziku.jsonc` にパターンを
  * 書き込む。その後 `ziku push --files=<path>` のようにファイル本体だけを指定すると、
  * `ziku.jsonc` 自体は `--files` に含まれず push 候補から漏れ、パターンがテンプレへ
  * 伝播しない（本体だけテンプレに存在し、他プロジェクトの `pull` が検出できない）。
  *
- * パターン = ファイルパス（個別追跡）の前提で、push されるパスと厳密一致するものだけを
- * 「関連パターン」として返す。無関係なローカル限定パターン（今回の push が触れていない
- * ファイルのもの）まで巻き込まないためのスコープ計算に使う。glob パターンの一致判定は
- * 将来拡張。
+ * 一致判定は glob として行う（`src/utils/paths.ts` の `selectPatternsMatchingPaths`）。
+ * パターンとパスを同じ文字列として突き合わせると、`.claude/rules/*.md` のような glob は
+ * どのパスとも一致せず、glob で追跡した利用者だけがこの補完から永久に漏れる。
+ *
+ * 無関係なローカル限定パターン（今回の push が触れていないファイルのもの）まで巻き込まない
+ * ためのスコープ計算に使う。
  */
 export async function findLocalOnlyPatternsForPaths(opts: {
-  targetDir: string;
-  templateDir: string;
-  paths: string[];
-}): Promise<string[]> {
+  targetDir: AbsPath;
+  templateDir: AbsPath;
+  paths: readonly RepoRelPath[];
+}): Promise<GlobPattern[]> {
   if (opts.paths.length === 0) return [];
 
   const [local, template] = await Promise.all([
-    readPatternsAt(opts.targetDir),
-    readPatternsAt(opts.templateDir),
+    readConfigAt(opts.targetDir),
+    readConfigAt(opts.templateDir),
   ]);
 
-  const templateInclude = new Set((template ?? EMPTY_PATTERNS).include);
-  const pathSet = new Set(opts.paths);
-
-  return (local ?? EMPTY_PATTERNS).include.filter(
-    (pattern) => !templateInclude.has(pattern) && pathSet.has(pattern),
+  const templateInclude = new Set<string>((template?.patterns ?? EMPTY_PATTERNS).include);
+  const localOnly = (local?.patterns ?? EMPTY_PATTERNS).include.filter(
+    (pattern) => !templateInclude.has(pattern),
   );
+
+  return selectPatternsMatchingPaths({
+    baseDir: opts.targetDir,
+    patterns: localOnly,
+    paths: opts.paths,
+  });
 }
+
+/**
+ * テンプレート側の `ziku.jsonc` に追加パターンを足せたかどうか。
+ *
+ * 足す先の文書が無ければ結果は「テンプレートの内容 + 追加分」ではなく「追加分だけの新しい
+ * `ziku.jsonc`」になり、スコープ限定という前提が成り立たない。呼び出し側が両方のケースを
+ * 網羅して扱う形にすることで、テンプレートに設定ファイルが無い状況で縮小版を新規作成する
+ * 経路を型から選べなくする。
+ */
+export type ScopedZikuConfig =
+  /** テンプレートの文書に追加分を足した内容。 */
+  | { readonly _tag: "Scoped"; readonly content: string }
+  /** テンプレートに `ziku.jsonc` が無く、足す先の文書が存在しない。 */
+  | { readonly _tag: "NoTemplateConfig" };
 
 /**
  * テンプレート側の `ziku.jsonc` に、指定した追加パターンだけを和集合で加えた
  * `ziku.jsonc` 文字列を返す。ローカルの `ziku.jsonc` の他のパターンは一切参照しない。
  *
  * `computeMergedZikuConfig` はローカルの `ziku.jsonc` 全体をテンプレと和集合するため、
- * ユーザーが `--files` で明示していないのに ziku.jsonc を自動同梱する場面（#90）で使うと、
- * 今回の push と無関係なローカル限定パターンまで一緒にテンプレへ漏れてしまう
- * （issue #90 で懸念されていたリスク）。この関数はテンプレの内容 + 明示的に渡した
- * 追加分だけを union するため、無関係なパターンを一切巻き込まない。
+ * ユーザーが `--files` で明示していないのに ziku.jsonc を自動同梱する場面で使うと、
+ * 今回の push と無関係なローカル限定パターンまで一緒にテンプレへ漏れてしまう。
+ * この関数はテンプレの内容 + 明示的に渡した追加分だけを union するため、無関係な
+ * パターンを一切巻き込まない。
+ *
+ * 結果はテンプレートの `ziku.jsonc` を土台に組み立てる（{@link renderUnionInto}）。この
+ * 内容はテンプレートへ送るだけでローカルへは書き戻さない（`push-plan.ts` の
+ * `ZikuConfigWriteBack`）ので、残すべき注釈はテンプレート側のもの。並びもテンプレートの
+ * 文書が基準になるため、既存パターンは動かず追加分だけが末尾に付く。追加分が既にテンプレート
+ * にあるだけなら内容は 1 文字も変わらず、送るものが無いと判定される。
  */
 export async function computeScopedZikuConfig(opts: {
-  templateDir: string;
-  additionalIncludes: string[];
-}): Promise<string> {
-  const template = (await readPatternsAt(opts.templateDir)) ?? EMPTY_PATTERNS;
-  const merged = mergeConfigPatterns({
-    local: { include: opts.additionalIncludes, exclude: [] },
-    template,
-  });
-  return generateZikuJsonc(merged);
+  templateDir: AbsPath;
+  additionalIncludes: readonly GlobPattern[];
+}): Promise<ScopedZikuConfig> {
+  const template = await readConfigAt(opts.templateDir);
+  if (template === undefined) return { _tag: "NoTemplateConfig" };
+  return {
+    _tag: "Scoped",
+    content: renderUnionInto(template, { include: opts.additionalIncludes, exclude: [] }),
+  };
 }

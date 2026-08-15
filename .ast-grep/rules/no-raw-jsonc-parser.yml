@@ -1,0 +1,29 @@
+# jsonc-parser の直接利用を禁止するルール
+#
+# 背景: jsonc-parser の parse は不正な入力でも例外を投げず、エラー回復した部分的な結果を
+# 返す。診断は第 2 引数の errors 配列に積まれるので、渡し忘れると「壊れたファイルを
+# 読めた」と扱ってしまう。この取り違えは、壊れた設定ファイルをそのまま編集して
+# テンプレートへ送る経路を生んだ。
+#
+# src/utils/jsonc.ts は結果を判別 union で返し、診断を見ずに値を取り出せない形にしている。
+# 全ての読み取りをそこへ通すことで、方言の指定（allowTrailingComma）も 1 箇所に揃う。
+id: no-raw-jsonc-parser
+language: typescript
+rule:
+  kind: import_statement
+  has:
+    kind: string
+    regex: '^[''"]jsonc-parser[''"]$'
+severity: error
+message: >-
+  jsonc-parser を直接 import しないでください。src/utils/jsonc.ts の parseJsonc()
+  を使ってください。parse() は不正な入力でも例外を投げないため、診断を見ずに値を
+  取り出すと壊れた内容を正常として扱います。
+note: >-
+  参照: src/utils/jsonc.ts
+files:
+  - "src/**/*.ts"
+ignores:
+  - "src/utils/jsonc.ts"
+  - "src/**/__tests__/**"
+  - "src/**/*.test.ts"

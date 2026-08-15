@@ -15,7 +15,10 @@ vi.mock("tinyglobby", () => ({
   glob: vi.fn(),
 }));
 
+const { absPath, repoRelPath, syncScope } = await import("../../__tests__/brands");
 const { analyzeSync } = await import("../sync-analysis");
+const { classifyFiles } = await import("../merge");
+const { partitionSyncPlan } = await import("../merge/sync-plan");
 const { hashContent } = await import("../hash");
 const { glob } = await import("tinyglobby");
 const mockedGlob = vi.mocked(glob);
@@ -26,7 +29,7 @@ describe("sync-analysis", () => {
     vi.clearAllMocks();
   });
 
-  it("returns classification and three hash maps", async () => {
+  it("returns a sync plan and three hash maps", async () => {
     vol.fromJSON({
       "/project/foo.txt": "local content",
       "/template/foo.txt": "template content",
@@ -35,20 +38,22 @@ describe("sync-analysis", () => {
     mockedGlob.mockResolvedValue(["foo.txt"]);
 
     const result = await analyzeSync({
-      targetDir: "/project",
-      templateDir: "/template",
-      baseHashes: { "foo.txt": hashContent("base content") },
-      include: ["**"],
+      targetDir: absPath("/project"),
+      templateDir: absPath("/template"),
+      baseHashes: { [repoRelPath("foo.txt")]: hashContent("base content") },
+      scope: syncScope({ include: ["**"] }),
     });
 
-    expect(result.hashes.localHashes["foo.txt"]).toBe(hashContent("local content"));
-    expect(result.hashes.templateHashes["foo.txt"]).toBe(hashContent("template content"));
-    expect(result.hashes.baseHashes["foo.txt"]).toBe(hashContent("base content"));
+    expect(result.hashes.localHashes[repoRelPath("foo.txt")]).toBe(hashContent("local content"));
+    expect(result.hashes.templateHashes[repoRelPath("foo.txt")]).toBe(
+      hashContent("template content"),
+    );
+    expect(result.hashes.baseHashes[repoRelPath("foo.txt")]).toBe(hashContent("base content"));
     // base, local, template すべて異なる → conflict カテゴリ
-    expect(result.classification.conflicts).toContain("foo.txt");
+    expect(result.plan.files.conflicts).toContain("foo.txt");
   });
 
-  it("treats undefined baseHashes as empty (init 直後ケース): すべて newFiles", async () => {
+  it("treats empty baseHashes as no base (init 直後ケース): すべて newFiles", async () => {
     vol.fromJSON({
       "/template/a.txt": "x",
       "/template/b.txt": "y",
@@ -58,15 +63,38 @@ describe("sync-analysis", () => {
     mockedGlob.mockResolvedValueOnce(["a.txt", "b.txt"]).mockResolvedValueOnce([]);
 
     const result = await analyzeSync({
-      targetDir: "/project",
-      templateDir: "/template",
-      baseHashes: undefined,
-      include: ["**"],
+      targetDir: absPath("/project"),
+      templateDir: absPath("/template"),
+      baseHashes: {},
+      scope: syncScope({ include: ["**"] }),
     });
 
     expect(result.hashes.baseHashes).toEqual({});
     // ローカルにファイルがなく base もないので、すべて newFiles に分類される
-    expect(result.classification.newFiles.toSorted()).toEqual(["a.txt", "b.txt"]);
+    expect(result.plan.files.newFiles.toSorted()).toEqual(["a.txt", "b.txt"]);
+  });
+
+  it("分類は返す hashes だけから導かれる（同じハッシュなら呼び出し元によらず同じ分類になる）", async () => {
+    vol.fromJSON({
+      "/project/changed.txt": "local",
+      "/project/same.txt": "same",
+      "/template/changed.txt": "template",
+      "/template/same.txt": "same",
+    });
+    mockedGlob.mockResolvedValue(["changed.txt", "same.txt"]);
+
+    const result = await analyzeSync({
+      targetDir: absPath("/project"),
+      templateDir: absPath("/template"),
+      baseHashes: {
+        [repoRelPath("changed.txt")]: hashContent("base"),
+        [repoRelPath("same.txt")]: hashContent("same"),
+      },
+      scope: syncScope({ include: ["**"], exclude: ["ignored/**"] }),
+    });
+
+    // pull / push / status は同じ 3 つのハッシュマップを渡す限り同じ分類を受け取る。
+    expect(result.plan).toEqual(partitionSyncPlan(classifyFiles(result.hashes)));
   });
 
   it("classifies unchanged when local equals template equals base", async () => {
@@ -77,12 +105,33 @@ describe("sync-analysis", () => {
     mockedGlob.mockResolvedValue(["same.txt"]);
 
     const result = await analyzeSync({
-      targetDir: "/project",
-      templateDir: "/template",
-      baseHashes: { "same.txt": hashContent("stable") },
-      include: ["**"],
+      targetDir: absPath("/project"),
+      templateDir: absPath("/template"),
+      baseHashes: { [repoRelPath("same.txt")]: hashContent("stable") },
+      scope: syncScope({ include: ["**"] }),
     });
 
-    expect(result.classification.unchanged).toContain("same.txt");
+    expect(result.plan.files.unchanged).toContain("same.txt");
+  });
+
+  it("gitignore されたファイルはどの分類カテゴリにも現れない", async () => {
+    vol.fromJSON({
+      "/project/.env": "TOKEN=local",
+      "/template/.env": "TOKEN=template",
+    });
+    mockedGlob.mockResolvedValue([".env"]);
+
+    const result = await analyzeSync({
+      targetDir: absPath("/project"),
+      templateDir: absPath("/template"),
+      baseHashes: {},
+      scope: syncScope({ include: ["**"], gitignore: [".env"] }),
+    });
+
+    // 分類に乗ると pull の書き換え対象にも push の送信候補にもなる。範囲の外にある
+    // ファイルはどちらの候補にも上がらない。
+    expect(Object.values(result.plan.files).flat()).toEqual([]);
+    expect(result.hashes.localHashes).toEqual({});
+    expect(result.hashes.templateHashes).toEqual({});
   });
 });

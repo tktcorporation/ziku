@@ -19,9 +19,34 @@ vi.mock("tinyglobby", () => ({
   glob: vi.fn(),
 }));
 
-const { hashContent, hashFiles } = await import("../hash");
+const { absPath, repoRelPath, syncScope } = await import("../../__tests__/brands");
+const { hashBytes, hashContent, hashFiles } = await import("../hash");
+const { ZIKU_CONFIG_FILE } = await import("../ziku-config");
 const { glob } = await import("tinyglobby");
 const mockedGlob = vi.mocked(glob);
+
+describe("hashBytes", () => {
+  it("テキストの内容は utf-8 バイト列のハッシュと一致する（既存 lock との互換）", () => {
+    // "hello" の SHA-256。lock.json に記録済みのハッシュがそのまま通ることを固定値で示す。
+    expect(hashContent("hello")).toBe(
+      "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    );
+    expect(hashBytes(Buffer.from("hello", "utf-8"))).toBe(hashContent("hello"));
+  });
+
+  it("マルチバイト文字の内容でもハッシュが一致する", () => {
+    const content = "日本語のテキスト\n";
+    expect(hashBytes(Buffer.from(content, "utf-8"))).toBe(hashContent(content));
+  });
+
+  it("内容の違うバイナリは違うハッシュになる", () => {
+    // utf-8 デコードを挟むと、どちらの不正バイトも U+FFFD へ潰れて同じ文字列になる
+    const a = Buffer.from([0x00, 0xff, 0x41]);
+    const b = Buffer.from([0x00, 0xfe, 0x41]);
+    expect(hashBytes(a)).not.toBe(hashBytes(b));
+    expect(hashContent(a.toString("utf-8"))).toBe(hashContent(b.toString("utf-8")));
+  });
+});
 
 describe("hashContent", () => {
   it("should return consistent SHA-256 hash for same input", () => {
@@ -55,18 +80,21 @@ describe("hashFiles", () => {
 
     mockedGlob.mockResolvedValue([".github/ci.yml", ".github/label.yml"]);
 
-    const hashes = await hashFiles("/project", [".github/**"]);
+    const hashes = await hashFiles(absPath("/project"), syncScope({ include: [".github/**"] }));
     expect(Object.keys(hashes)).toHaveLength(2);
-    expect(hashes[".github/ci.yml"]).toBeDefined();
-    expect(hashes[".github/label.yml"]).toBeDefined();
-    expect(hashes["README.md"]).toBeUndefined();
+    expect(hashes[repoRelPath(".github/ci.yml")]).toBeDefined();
+    expect(hashes[repoRelPath(".github/label.yml")]).toBeDefined();
+    expect(hashes[repoRelPath("README.md")]).toBeUndefined();
   });
 
   it("should return empty map for no matches", async () => {
     vol.fromJSON({ "/project/README.md": "# Hello" });
     mockedGlob.mockResolvedValue([]);
 
-    const hashes = await hashFiles("/project", [".nonexistent/**"]);
+    const hashes = await hashFiles(
+      absPath("/project"),
+      syncScope({ include: [".nonexistent/**"] }),
+    );
     expect(hashes).toEqual({});
   });
 
@@ -74,7 +102,59 @@ describe("hashFiles", () => {
     vol.fromJSON({ "/project/file.txt": "content" });
     mockedGlob.mockResolvedValue(["file.txt"]);
 
-    const hashes = await hashFiles("/project", ["**"]);
-    expect(hashes["file.txt"]).toBe(hashContent("content"));
+    const hashes = await hashFiles(absPath("/project"), syncScope({ include: ["**"] }));
+    expect(hashes[repoRelPath("file.txt")]).toBe(hashContent("content"));
+  });
+
+  it("バイナリファイルは内容が違えば違うハッシュになる", async () => {
+    vol.reset();
+    vol.mkdirSync("/project", { recursive: true });
+    vol.writeFileSync("/project/a.bin", Buffer.from([0x00, 0xff, 0x41]));
+    vol.writeFileSync("/project/b.bin", Buffer.from([0x00, 0xfe, 0x41]));
+    mockedGlob.mockResolvedValue(["a.bin", "b.bin"]);
+
+    const hashes = await hashFiles(absPath("/project"), syncScope({ include: ["**"] }));
+    expect(hashes[repoRelPath("a.bin")]).not.toBe(hashes[repoRelPath("b.bin")]);
+  });
+
+  it("改行コードが違うファイルは違うハッシュになる（正規化しない）", async () => {
+    vol.reset();
+    vol.fromJSON({ "/project/lf.txt": "a\nb\n", "/project/crlf.txt": "a\r\nb\r\n" });
+    mockedGlob.mockResolvedValue(["lf.txt", "crlf.txt"]);
+
+    const hashes = await hashFiles(absPath("/project"), syncScope({ include: ["**"] }));
+    expect(hashes[repoRelPath("lf.txt")]).not.toBe(hashes[repoRelPath("crlf.txt")]);
+  });
+
+  it("gitignore されたファイルはハッシュ対象から外れる", async () => {
+    vol.fromJSON({ "/project/.env": "TOKEN=local", "/project/app.ts": "code" });
+    mockedGlob.mockResolvedValue([".env", "app.ts"]);
+
+    const hashes = await hashFiles(
+      absPath("/project"),
+      syncScope({ include: ["**"], gitignore: [".env"] }),
+    );
+
+    // ハッシュは分類の入力なので、ここに残ると `.env` が autoUpdate に落ちて pull が
+    // マシン固有の内容をテンプレートの内容で上書きする。
+    expect(hashes[repoRelPath(".env")]).toBeUndefined();
+    expect(hashes[repoRelPath("app.ts")]).toBeDefined();
+  });
+
+  it("常に追跡するパスは gitignore されていてもハッシュ対象に残る", async () => {
+    vol.fromJSON({ "/project/.ziku/ziku.jsonc": "{}" });
+    mockedGlob.mockResolvedValue([".ziku/ziku.jsonc"]);
+
+    const hashes = await hashFiles(
+      absPath("/project"),
+      syncScope({
+        include: ["**"],
+        gitignore: [".ziku/"],
+        alwaysTracked: [ZIKU_CONFIG_FILE],
+      }),
+    );
+
+    // 同期対象パターンの定義そのものなので、`.ziku/` を無視するプロジェクトでも分類へ乗せる。
+    expect(hashes[ZIKU_CONFIG_FILE]).toBeDefined();
   });
 });

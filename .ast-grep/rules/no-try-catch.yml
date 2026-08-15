@@ -15,7 +15,7 @@ note: >-
   参照: .claude/rules/effect-ts.md
 files:
   - "src/**/*.ts"
-ignoreFiles:
+ignores:
   - "src/effect-helpers.ts"
   - "src/**/__tests__/**"
   - "src/**/*.test.ts"

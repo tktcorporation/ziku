@@ -4,11 +4,22 @@
 
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import { parse } from "jsonc-parser";
 import { join } from "pathe";
+import { match } from "ts-pattern";
+import type { GlobPattern } from "../modules/schemas";
+import { absPath } from "./paths";
+import type { ZikuConfigRead } from "./ziku-config";
+import { classifyZikuConfigText, readZikuConfig } from "./ziku-config";
 
-// マーカー定義
-const MARKERS = {
+/**
+ * ziku がマーカー間を組み直す README の区画。
+ *
+ * マーカー名は、テンプレートの README を書き換える ziku 本体（{@link renderTemplateReadme}）と、
+ * このリポジトリの README を生成する `scripts/generate-readme.ts` の間の取り決めでもある。
+ * 定義を 2 箇所に置くと、片方の名前を変えたときにもう片方が「マーカーが無い」として無言で
+ * 何も書かなくなるので、名前はここだけに持つ。
+ */
+export const MARKERS = {
   features: {
     start: "<!-- FEATURES:START -->",
     end: "<!-- FEATURES:END -->",
@@ -24,40 +35,41 @@ const MARKERS = {
 } as const;
 
 /**
- * modules.jsonc からパターン一覧を読み込む（フラット形式 or モジュール形式対応）
+ * ziku.jsonc の読み取り結果から include パターンを取り出す。
+ *
+ * 同期対象パターンの SSOT は ziku.jsonc なので、README の機能一覧と
+ * ファイル一覧はここから導出する。
+ *
+ * README の更新は同期処理の付随作業であり、これを理由に同期そのものを
+ * 止めたくない。読めない場合はパターン無しとして扱い、
+ * マーカー間を書き換えずに現状の README を残す。
+ *
+ * 構文の破綻を検証違反と同じ「パターン無し」に倒すのは、エラー回復が拾えた分だけの
+ * 部分的な include を採ると、実際より短いファイル一覧を載せた README を、正しい一覧として
+ * 書き出してしまうため。手を触れない README は古いだけだが、書き換えた README は嘘になる。
+ * 壊れている事実は `ziku.jsonc` を読む他の入口が報告するので、ここで重ねて止める必要はない。
+ *
+ * 読み取りと失敗の分類そのものは持たず、他の入口と同じ分類（`src/utils/ziku-config.ts` の
+ * `ZikuConfigRead`）を受け取って倒すだけにする。分類をここで組み直すと、`ziku.jsonc` の
+ * 読み方が変わったときに README 生成だけが取り残され、実際の同期対象と食い違うファイル一覧を
+ * 「正しい一覧」として書き出す。
  */
-async function loadPatternsFromFile(
-  modulesPath: string,
-): Promise<{ include: string[]; exclude: string[] }> {
-  if (!existsSync(modulesPath)) {
-    return { include: [], exclude: [] };
-  }
-  const content = await readFile(modulesPath, "utf-8");
-  const parsed = parse(content);
-
-  // フラット形式
-  if (parsed && Array.isArray(parsed.include)) {
-    return {
-      include: parsed.include,
-      exclude: parsed.exclude ?? [],
-    };
-  }
-
-  // モジュール形式（後方互換）→ フラット化
-  if (parsed && Array.isArray(parsed.modules)) {
-    return {
-      include: parsed.modules.flatMap((m: { include?: string[] }) => m.include ?? []),
-      exclude: parsed.modules.flatMap((m: { exclude?: string[] }) => m.exclude ?? []),
-    };
-  }
-
-  return { include: [], exclude: [] };
+function includePatternsOf(read: ZikuConfigRead): readonly GlobPattern[] {
+  return match(read)
+    .with({ _tag: "Ok" }, ({ config }) => config.include)
+    .with(
+      { _tag: "NotFound" },
+      { _tag: "Unparsable" },
+      { _tag: "Invalid" },
+      (): readonly GlobPattern[] => [],
+    )
+    .exhaustive();
 }
 
 /**
  * 機能セクションを生成
  */
-function generateFeaturesSection(patterns: string[]): string {
+function generateFeaturesSection(patterns: readonly GlobPattern[]): string {
   const lines: string[] = ["## 機能\n"];
 
   // パターンをディレクトリごとにグルーピング
@@ -80,7 +92,7 @@ function generateFeaturesSection(patterns: string[]): string {
 /**
  * 生成されるファイルセクションを生成
  */
-function generateFilesSection(patterns: string[]): string {
+function generateFilesSection(patterns: readonly GlobPattern[]): string {
   const lines: string[] = [
     "## 生成されるファイル\n",
     "以下のパターンに一致するファイルが同期されます：\n",
@@ -100,34 +112,45 @@ function generateFilesSection(patterns: string[]): string {
 }
 
 /**
- * README のマーカー間を更新
+ * マーカー間を差し替えた結果。
+ *
+ * マーカーが見つからなかったことを値で返すのは、不在の意味が呼び出し側で違うため。任意の
+ * テンプレートの README を組み直す経路（{@link renderTemplateReadme}）では、区画を持たない
+ * README に触れないのが正しい。自分のリポジトリの README を組み直す生成器
+ * （`scripts/generate-readme.ts`）では、不在は書き換え漏れなので止める対象になる。元の内容を
+ * そのまま返して潰すと、後者が「生成したのに何も書いていない」ことに気づけない。
  */
-function updateSection(
+export type SectionUpdate =
+  | { readonly _tag: "Replaced"; readonly content: string; readonly updated: boolean }
+  /** `startMarker` と `endMarker` の対が揃っていない。 */
+  | { readonly _tag: "MarkerNotFound"; readonly startMarker: string };
+
+/** README のマーカー間を、渡した内容で差し替える。 */
+export function updateSection(
   content: string,
   startMarker: string,
   endMarker: string,
   newSection: string,
-): { content: string; updated: boolean } {
+): SectionUpdate {
   const startIndex = content.indexOf(startMarker);
   const endIndex = content.indexOf(endMarker);
 
   if (startIndex === -1 || endIndex === -1) {
-    // マーカーがない場合はそのまま返す
-    return { content, updated: false };
+    return { _tag: "MarkerNotFound", startMarker };
   }
 
   const before = content.slice(0, startIndex + startMarker.length);
   const after = content.slice(endIndex);
   const newContent = `${before}\n\n${newSection}\n${after}`;
 
-  return { content: newContent, updated: newContent !== content };
+  return { _tag: "Replaced", content: newContent, updated: newContent !== content };
 }
 
 export interface GenerateReadmeOptions {
   /** README.md のパス */
   readmePath: string;
-  /** modules.jsonc のパス */
-  modulesPath: string;
+  /** 同期パターンを定義する ziku.jsonc があるディレクトリ */
+  configDir: string;
   /** コマンドセクションを生成する関数（オプション） */
   generateCommandsSection?: () => Promise<string>;
 }
@@ -141,59 +164,75 @@ export interface GenerateReadmeResult {
   readmePath: string;
 }
 
+/** マーカー間を組み直した README。ディスク上の場所は持たない。 */
+export interface RenderedReadme {
+  readonly content: string;
+  readonly updated: boolean;
+}
+
+/**
+ * README のマーカー間を、渡した include パターンから組み直す。ディスクには触れない。
+ *
+ * @param commands コマンドセクションの内容。生成元を持たない呼び出しでは undefined。
+ */
+function applyGeneratedSections(params: {
+  readme: string;
+  include: readonly GlobPattern[];
+  commands: string | undefined;
+}): RenderedReadme {
+  const sections: { start: string; end: string; body: string }[] = [];
+
+  if (params.include.length > 0) {
+    sections.push({
+      ...MARKERS.features,
+      body: generateFeaturesSection(params.include),
+    });
+  }
+  if (params.commands !== undefined) {
+    sections.push({ ...MARKERS.commands, body: params.commands });
+  }
+  if (params.include.length > 0) {
+    sections.push({ ...MARKERS.files, body: generateFilesSection(params.include) });
+  }
+
+  return sections.reduce<RenderedReadme>(
+    (rendered, section) =>
+      match(updateSection(rendered.content, section.start, section.end, section.body))
+        .with(
+          { _tag: "Replaced" },
+          (replaced): RenderedReadme => ({
+            content: replaced.content,
+            updated: rendered.updated || replaced.updated,
+          }),
+        )
+        // マーカーを持たない区画は飛ばす。どの区画を置くかはテンプレートの README が決めることで、
+        // 無い区画を作りに行くと ziku が README の構成を決めてしまう。
+        .with({ _tag: "MarkerNotFound" }, () => rendered)
+        .exhaustive(),
+    { content: params.readme, updated: false },
+  );
+}
+
 /**
  * README を生成
  */
 export async function generateReadme(
   options: GenerateReadmeOptions,
 ): Promise<GenerateReadmeResult> {
-  const { readmePath, modulesPath, generateCommandsSection } = options;
+  const { readmePath, configDir, generateCommandsSection } = options;
 
   // README が存在しない場合はスキップ
   if (!existsSync(readmePath)) {
     return { updated: false, content: "", readmePath };
   }
 
-  const { include } = await loadPatternsFromFile(modulesPath);
+  const rendered = applyGeneratedSections({
+    readme: await readFile(readmePath, "utf-8"),
+    include: includePatternsOf(await readZikuConfig(absPath(configDir))),
+    commands: generateCommandsSection === undefined ? undefined : await generateCommandsSection(),
+  });
 
-  let readme = await readFile(readmePath, "utf-8");
-  let anyUpdated = false;
-
-  // 機能セクション
-  if (include.length > 0) {
-    const featuresSection = generateFeaturesSection(include);
-    const result = updateSection(
-      readme,
-      MARKERS.features.start,
-      MARKERS.features.end,
-      featuresSection,
-    );
-    readme = result.content;
-    anyUpdated = anyUpdated || result.updated;
-  }
-
-  // コマンドセクション（オプション）
-  if (generateCommandsSection) {
-    const commandsSection = await generateCommandsSection();
-    const result = updateSection(
-      readme,
-      MARKERS.commands.start,
-      MARKERS.commands.end,
-      commandsSection,
-    );
-    readme = result.content;
-    anyUpdated = anyUpdated || result.updated;
-  }
-
-  // ファイルセクション
-  if (include.length > 0) {
-    const filesSection = generateFilesSection(include);
-    const result = updateSection(readme, MARKERS.files.start, MARKERS.files.end, filesSection);
-    readme = result.content;
-    anyUpdated = anyUpdated || result.updated;
-  }
-
-  return { updated: anyUpdated, content: readme, readmePath };
+  return { updated: rendered.updated, content: rendered.content, readmePath };
 }
 
 /**
@@ -212,32 +251,43 @@ export async function updateReadmeFile(
 }
 
 /**
- * プロジェクトディレクトリ内の README を検出して更新
- * @param targetDir プロジェクトのルートディレクトリ
- * @param templateDir テンプレートディレクトリ（modules.jsonc の場所）
+ * テンプレートの README を、これから配る内容から組み直す。ディスクへは書かない。
+ *
+ * テンプレートの README を組み直す入口はこの 1 本だけにする。ディスクから読んで組み直す入口を
+ * 別に置くと、push が送る内容と、それを予告する側が別の材料から README を作れてしまう。
+ *
+ * 生成元をディスクではなく引数で受け取れるようにしている理由: マーカー間は `ziku.jsonc` の
+ * include から導出される派生物なので、導出元と派生物が同じ変更（同じ PR）に載るときは、
+ * 生成もその変更に載る内容から行わないと配る README が導出元と食い違う。ディスク上の
+ * `ziku.jsonc` から作ると、`ziku track` で足したばかりのパターンを反映しない README を
+ * 配ることになる。
+ *
+ * @param params.templateDir README / ziku.jsonc をディスクから読む既定の出所。
+ * @param params.readme これから配る README の内容。配る内容に含まれないなら undefined。
+ * @param params.config これから配る ziku.jsonc の内容。配る内容に含まれないなら undefined。
+ * @returns README が無い / マーカーが無い場合は null。
  */
-export async function detectAndUpdateReadme(
-  targetDir: string,
-  templateDir: string,
-): Promise<GenerateReadmeResult | null> {
-  const readmePath = join(targetDir, "README.md");
-  const modulesPath = join(templateDir, ".ziku/modules.jsonc");
+export async function renderTemplateReadme(params: {
+  readonly templateDir: string;
+  readonly readme: string | undefined;
+  readonly config: string | undefined;
+}): Promise<RenderedReadme | null> {
+  const readmePath = join(params.templateDir, "README.md");
+  if (params.readme === undefined && !existsSync(readmePath)) return null;
 
-  // README にマーカーがあるか確認
-  if (!existsSync(readmePath)) {
-    return null;
-  }
+  const readme = params.readme ?? (await readFile(readmePath, "utf-8"));
+  if (!hasGeneratedSections(readme)) return null;
 
-  const readmeContent = await readFile(readmePath, "utf-8");
-  const hasMarkers =
-    readmeContent.includes(MARKERS.features.start) || readmeContent.includes(MARKERS.files.start);
+  const include = includePatternsOf(
+    params.config === undefined
+      ? await readZikuConfig(absPath(params.templateDir))
+      : classifyZikuConfigText(params.config),
+  );
 
-  if (!hasMarkers) {
-    return null;
-  }
+  return applyGeneratedSections({ readme, include, commands: undefined });
+}
 
-  return updateReadmeFile({
-    readmePath,
-    modulesPath,
-  });
+/** マーカー間を ziku が組み直す README か。マーカーが無い README には触れない。 */
+function hasGeneratedSections(readme: string): boolean {
+  return readme.includes(MARKERS.features.start) || readme.includes(MARKERS.files.start);
 }

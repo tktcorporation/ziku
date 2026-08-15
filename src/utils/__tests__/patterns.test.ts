@@ -1,56 +1,38 @@
 import { describe, expect, it } from "vitest";
-import { mergePatterns, matchesPatterns } from "../patterns";
+import { globPatterns } from "../../__tests__/brands";
+import { unionPatterns } from "../patterns";
 
-describe("mergePatterns", () => {
-  it("複数の配列をマージする", () => {
-    const result = mergePatterns(["a", "b"], ["c", "d"]);
+describe("unionPatterns", () => {
+  it("ローカルの並びを保ち、ローカルに無いパターンだけを末尾へ足す", () => {
+    const result = unionPatterns(
+      globPatterns([".claude/**", ".eslintrc.json"]),
+      globPatterns([".claude/**", ".github/**"]),
+    );
 
-    expect(result).toEqual(["a", "b", "c", "d"]);
+    expect(result.merged).toEqual([".claude/**", ".eslintrc.json", ".github/**"]);
+    expect(result.added).toEqual([".github/**"]);
   });
 
-  it("重複を排除する", () => {
-    const result = mergePatterns(["a", "b"], ["b", "c"]);
+  it("両側の重複を除去する（往復適用しても増えない）", () => {
+    const once = unionPatterns(globPatterns([".a", ".a", ".b"]), globPatterns([".b", ".c", ".c"]));
+    const twice = unionPatterns(once.merged, globPatterns([".b", ".c"]));
 
-    expect(result).toEqual(["a", "b", "c"]);
+    expect(once.merged).toEqual([".a", ".b", ".c"]);
+    expect(twice.merged).toEqual(once.merged);
+    expect(twice.added).toEqual([]);
   });
 
-  it("空配列を処理できる", () => {
-    const result = mergePatterns([], ["a", "b"], []);
+  it("どちらの側のパターンも落とさない", () => {
+    const result = unionPatterns(globPatterns([".local-only"]), globPatterns([".template-only"]));
 
-    expect(result).toEqual(["a", "b"]);
+    expect(result.merged).toEqual([".local-only", ".template-only"]);
   });
 
-  it("3つ以上の配列をマージできる", () => {
-    const result = mergePatterns(["a"], ["b"], ["c"], ["d"]);
-
-    expect(result).toEqual(["a", "b", "c", "d"]);
-  });
-
-  it("引数なしの場合は空配列を返す", () => {
-    const result = mergePatterns();
-
-    expect(result).toEqual([]);
-  });
-});
-
-describe("matchesPatterns", () => {
-  it("完全一致するファイルを検出する", () => {
-    expect(matchesPatterns("file.txt", ["file.txt"])).toBe(true);
-  });
-
-  it("マッチしない場合は false を返す", () => {
-    expect(matchesPatterns("file.txt", ["other.txt"])).toBe(false);
-  });
-
-  it("複数パターンのいずれかにマッチする場合は true", () => {
-    expect(matchesPatterns("file.txt", ["other.txt", "file.txt"])).toBe(true);
-  });
-
-  it("空のパターン配列の場合は false", () => {
-    expect(matchesPatterns("file.txt", [])).toBe(false);
+  it("片側が空でももう片側をそのまま返す", () => {
+    expect(unionPatterns([], globPatterns([".a", ".b"]))).toEqual({
+      merged: [".a", ".b"],
+      added: [".a", ".b"],
+    });
+    expect(unionPatterns(globPatterns([".a"]), [])).toEqual({ merged: [".a"], added: [] });
   });
 });
-
-// resolvePatterns と compareDirectories は実際のファイルシステムに依存するため、
-// 統合テストとしてテストするか、別途モックを用意する必要があります。
-// ここでは純粋関数のみをテストしています。

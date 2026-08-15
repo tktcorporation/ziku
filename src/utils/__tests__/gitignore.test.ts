@@ -13,7 +13,8 @@ vi.mock("node:fs/promises", async () => {
 });
 
 // モック後にインポート
-const { loadMergedGitignore, filterByGitignore } = await import("../gitignore");
+const { absPath, globPatterns, repoRelPath } = await import("../../__tests__/brands");
+const { loadMergedGitignore } = await import("../gitignore");
 
 describe("gitignore", () => {
   beforeEach(() => {
@@ -24,11 +25,11 @@ describe("gitignore", () => {
     it(".gitignore が存在しない場合は空の Ignore を返す", async () => {
       vol.fromJSON({});
 
-      const ig = await loadMergedGitignore(["/project"]);
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([]));
 
       // 何もフィルタリングされない
       const files = ["file.txt", "secret.env"];
-      expect(ig.filter(files)).toEqual(files);
+      expect(files.filter((f) => !ig.ignores(repoRelPath(f)))).toEqual(files);
     });
 
     it("単一ディレクトリの .gitignore を読み込む", async () => {
@@ -36,9 +37,11 @@ describe("gitignore", () => {
         "/project/.gitignore": "*.env\nnode_modules/",
       });
 
-      const ig = await loadMergedGitignore(["/project"]);
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([]));
 
-      expect(ig.filter(["app.ts", "secret.env", "node_modules/pkg"])).toEqual(["app.ts"]);
+      expect(
+        ["app.ts", "secret.env", "node_modules/pkg"].filter((f) => !ig.ignores(repoRelPath(f))),
+      ).toEqual(["app.ts"]);
     });
 
     it("複数ディレクトリの .gitignore をマージする", async () => {
@@ -47,13 +50,17 @@ describe("gitignore", () => {
         "/template/.gitignore": "*.secret",
       });
 
-      const ig = await loadMergedGitignore(["/local", "/template"]);
+      const ig = await loadMergedGitignore(
+        [absPath("/local"), absPath("/template")],
+        globPatterns([]),
+      );
 
       // 両方の .gitignore ルールが適用される
-      expect(ig.filter(["app.ts", "config.env", "api.secret", "readme.md"])).toEqual([
-        "app.ts",
-        "readme.md",
-      ]);
+      expect(
+        ["app.ts", "config.env", "api.secret", "readme.md"].filter(
+          (f) => !ig.ignores(repoRelPath(f)),
+        ),
+      ).toEqual(["app.ts", "readme.md"]);
     });
 
     it("片方のディレクトリにのみ .gitignore がある場合", async () => {
@@ -62,9 +69,14 @@ describe("gitignore", () => {
         // /template には .gitignore がない
       });
 
-      const ig = await loadMergedGitignore(["/local", "/template"]);
+      const ig = await loadMergedGitignore(
+        [absPath("/local"), absPath("/template")],
+        globPatterns([]),
+      );
 
-      expect(ig.filter(["app.ts", "config.env"])).toEqual(["app.ts"]);
+      expect(["app.ts", "config.env"].filter((f) => !ig.ignores(repoRelPath(f)))).toEqual([
+        "app.ts",
+      ]);
     });
 
     it("空の .gitignore ファイルを正しく処理する", async () => {
@@ -72,10 +84,10 @@ describe("gitignore", () => {
         "/project/.gitignore": "",
       });
 
-      const ig = await loadMergedGitignore(["/project"]);
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([]));
 
       const files = ["file.txt", "secret.env"];
-      expect(ig.filter(files)).toEqual(files);
+      expect(files.filter((f) => !ig.ignores(repoRelPath(f)))).toEqual(files);
     });
 
     it("コメント行のみの .gitignore を正しく処理する", async () => {
@@ -83,10 +95,10 @@ describe("gitignore", () => {
         "/project/.gitignore": "# This is a comment\n# Another comment",
       });
 
-      const ig = await loadMergedGitignore(["/project"]);
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([]));
 
       const files = ["file.txt", "secret.env"];
-      expect(ig.filter(files)).toEqual(files);
+      expect(files.filter((f) => !ig.ignores(repoRelPath(f)))).toEqual(files);
     });
 
     it("複雑な gitignore パターンを処理する", async () => {
@@ -112,7 +124,7 @@ node_modules/
 `,
       });
 
-      const ig = await loadMergedGitignore(["/project"]);
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([]));
 
       const files = [
         "src/app.ts",
@@ -125,7 +137,7 @@ node_modules/
         "README.md",
       ];
 
-      expect(ig.filter(files)).toEqual([
+      expect(files.filter((f) => !ig.ignores(repoRelPath(f)))).toEqual([
         "src/app.ts",
         ".env.example", // ネゲーションで除外から復帰
         "README.md",
@@ -133,42 +145,265 @@ node_modules/
     });
   });
 
-  describe("filterByGitignore", () => {
-    it("gitignore ルールに従ってファイルをフィルタリングする", async () => {
+  describe("ネストした .gitignore", () => {
+    it("サブディレクトリの .gitignore をディレクトリ接頭辞付きで読み込む", async () => {
       vol.fromJSON({
-        "/project/.gitignore": "*.env\n*.secret",
+        "/project/.gitignore": "*.log",
+        "/project/.devcontainer/.gitignore": "*.local",
       });
 
-      const ig = await loadMergedGitignore(["/project"]);
-      const files = ["app.ts", "config.env", "api.secret", "readme.md"];
+      const ig = await loadMergedGitignore(
+        [absPath("/project")],
+        globPatterns([".devcontainer/**"]),
+      );
 
-      expect(filterByGitignore(files, ig)).toEqual(["app.ts", "readme.md"]);
+      expect(ig.ignores(repoRelPath("error.log"))).toBe(true);
+      expect(ig.ignores(repoRelPath(".devcontainer/config.local"))).toBe(true);
+      // 接頭辞が付くので、同名のファイルでもサブディレクトリ外には適用されない
+      expect(ig.ignores(repoRelPath("config.local"))).toBe(false);
     });
 
-    it("空のファイルリストを正しく処理する", async () => {
+    it("否定パターンは ! の後ろに接頭辞が付く", async () => {
       vol.fromJSON({
-        "/project/.gitignore": "*.env",
+        "/project/.claude/.gitignore": "*.local.md\n!keep.local.md",
       });
 
-      const ig = await loadMergedGitignore(["/project"]);
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([".claude/**"]));
 
-      expect(filterByGitignore([], ig)).toEqual([]);
+      expect(ig.ignores(repoRelPath(".claude/settings.local.md"))).toBe(true);
+      expect(ig.ignores(repoRelPath(".claude/keep.local.md"))).toBe(false);
     });
 
-    it("ディレクトリパターンを正しく処理する", async () => {
+    it("テンプレート側のネストした .gitignore も同じ規則で畳み込む", async () => {
       vol.fromJSON({
-        "/project/.gitignore": ".devcontainer/",
+        "/template/.claude/.gitignore": "*.local.md",
       });
 
-      const ig = await loadMergedGitignore(["/project"]);
+      const ig = await loadMergedGitignore(
+        [absPath("/local"), absPath("/template")],
+        globPatterns([".claude/**"]),
+      );
 
-      const files = [
-        ".devcontainer/devcontainer.json",
-        ".devcontainer/setup.sh",
-        ".github/workflows/ci.yml",
-      ];
+      expect(ig.ignores(repoRelPath(".claude/settings.local.md"))).toBe(true);
+    });
 
-      expect(filterByGitignore(files, ig)).toEqual([".github/workflows/ci.yml"]);
+    it("スラッシュを含まない規則はそのディレクトリ配下の全階層に当たる", async () => {
+      vol.fromJSON({
+        "/project/.claude/.gitignore": "*.pem",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([".claude/**"]));
+
+      expect(ig.ignores(repoRelPath(".claude/key.pem"))).toBe(true);
+      expect(ig.ignores(repoRelPath(".claude/sub/deep/key.pem"))).toBe(true);
+      // ディレクトリの外へは広がらない
+      expect(ig.ignores(repoRelPath("key.pem"))).toBe(false);
+    });
+
+    it("スラッシュを含む規則はそのディレクトリ起点に固定される", async () => {
+      vol.fromJSON({
+        "/project/.claude/.gitignore": "sub/*.pem\n/root-only.key",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([".claude/**"]));
+
+      expect(ig.ignores(repoRelPath(".claude/sub/key.pem"))).toBe(true);
+      expect(ig.ignores(repoRelPath(".claude/other/key.pem"))).toBe(false);
+      expect(ig.ignores(repoRelPath(".claude/root-only.key"))).toBe(true);
+      expect(ig.ignores(repoRelPath(".claude/sub/root-only.key"))).toBe(false);
+    });
+
+    it("ディレクトリ限定の規則も配下の全階層に当たる", async () => {
+      vol.fromJSON({
+        "/project/.claude/.gitignore": "cache/",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([".claude/**"]));
+
+      expect(ig.ignores(repoRelPath(".claude/cache/a.json"))).toBe(true);
+      expect(ig.ignores(repoRelPath(".claude/sub/cache/a.json"))).toBe(true);
+    });
+
+    it("バックスラッシュでエスケープした末尾の空白を規則の一部として残す", async () => {
+      // `secret\ ` は末尾に空白を持つ名前の規則。空白を落とすと、git が無視するファイルを
+      // 同期の対象として扱ってしまう。
+      vol.fromJSON({
+        "/project/.claude/.gitignore": "secret\\ ",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([".claude/**"]));
+
+      expect(ig.ignores(repoRelPath(".claude/secret "))).toBe(true);
+      expect(ig.ignores(repoRelPath(".claude/secret"))).toBe(false);
+    });
+
+    it("エスケープされていない末尾の空白は規則に含めない", async () => {
+      vol.fromJSON({
+        "/project/.claude/.gitignore": "foo   ",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([".claude/**"]));
+
+      expect(ig.ignores(repoRelPath(".claude/foo"))).toBe(true);
+    });
+
+    it("行頭の空白を規則の一部として残す", async () => {
+      // ` secret` は先頭に空白を持つ名前だけを指す。空白を落とすと、git が同期に出す
+      // `secret` まで対象から外れる。
+      vol.fromJSON({
+        "/project/.claude/.gitignore": " secret",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([".claude/**"]));
+
+      expect(ig.ignores(repoRelPath(".claude/nested/ secret"))).toBe(true);
+      expect(ig.ignores(repoRelPath(".claude/nested/secret"))).toBe(false);
+    });
+
+    it("行頭に空白がある `#` 始まりの行はコメントではなく規則", async () => {
+      // git はコメントかどうかを行の先頭 1 文字で決める。
+      vol.fromJSON({
+        "/project/.claude/.gitignore": " #notacomment",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([".claude/**"]));
+
+      expect(ig.ignores(repoRelPath(".claude/ #notacomment"))).toBe(true);
+      expect(ig.ignores(repoRelPath(".claude/notacomment"))).toBe(false);
+    });
+
+    it("否定パターンも元の適用範囲を保つ", async () => {
+      vol.fromJSON({
+        "/project/.claude/.gitignore": "*.pem\n!keep.pem",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([".claude/**"]));
+
+      expect(ig.ignores(repoRelPath(".claude/sub/key.pem"))).toBe(true);
+      expect(ig.ignores(repoRelPath(".claude/sub/keep.pem"))).toBe(false);
+    });
+
+    it("先頭が `**` のパターンでは、ルートから下の `.gitignore` を読む", async () => {
+      // `**` をディレクトリ名として扱うと、その名前のディレクトリが実在せず走査が始まらない。
+      vol.fromJSON({
+        "/project/services/app/.gitignore": ".env",
+        "/project/services/app/main.ts": "",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns(["**/*.env"]));
+
+      expect(ig.ignores(repoRelPath("services/app/.env"))).toBe(true);
+    });
+
+    it("先頭が波括弧展開のパターンでも、ルートから下の `.gitignore` を読む", async () => {
+      vol.fromJSON({
+        "/project/services/app/.gitignore": ".env",
+        "/project/services/app/main.ts": "",
+      });
+
+      const ig = await loadMergedGitignore(
+        [absPath("/project")],
+        globPatterns(["{services,apps}/**"]),
+      );
+
+      expect(ig.ignores(repoRelPath("services/app/.env"))).toBe(true);
+    });
+
+    it("片方のリポジトリの否定規則が、もう片方の無視を打ち消さない", async () => {
+      // 規則を 1 つの matcher へ連結すると gitignore の「後の規則が勝つ」順序が働き、
+      // ローカルが無視すると決めた資格情報がテンプレート側の否定で同期対象へ戻る。
+      vol.fromJSON({
+        "/local/.gitignore": ".claude/secret.env",
+        "/template/.claude/.gitignore": "!secret.env",
+      });
+
+      const ig = await loadMergedGitignore(
+        [absPath("/local"), absPath("/template")],
+        globPatterns([".claude/**"]),
+      );
+
+      expect(ig.ignores(repoRelPath(".claude/secret.env"))).toBe(true);
+    });
+
+    it("同じリポジトリ内の否定規則は効く", async () => {
+      vol.fromJSON({
+        "/local/.gitignore": "*.env\n!keep.env",
+      });
+
+      const ig = await loadMergedGitignore(
+        [absPath("/local"), absPath("/template")],
+        globPatterns([]),
+      );
+
+      expect(ig.ignores(repoRelPath("secret.env"))).toBe(true);
+      expect(ig.ignores(repoRelPath("keep.env"))).toBe(false);
+    });
+
+    it("ネストした .gitignore が無いディレクトリを渡しても動作する", async () => {
+      vol.fromJSON({
+        "/project/.gitignore": "*.log",
+      });
+
+      const ig = await loadMergedGitignore(
+        [absPath("/project")],
+        globPatterns([".claude/**", ".github/**"]),
+      );
+
+      expect(ig.ignores(repoRelPath("error.log"))).toBe(true);
+      expect(ig.ignores(repoRelPath(".claude/rules.md"))).toBe(false);
+    });
+
+    it("include の先頭セグメントより深い .gitignore も効く", async () => {
+      // 読む先をパターンの先頭セグメントで列挙すると、この規則が判定から漏れ、
+      // 無視されている資格情報が同期の対象に残る。
+      vol.fromJSON({
+        "/project/.claude/sub/.gitignore": "secret.env",
+        "/project/.claude/a/b/c/.gitignore": "deep.key",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([".claude/**"]));
+
+      expect(ig.ignores(repoRelPath(".claude/sub/secret.env"))).toBe(true);
+      expect(ig.ignores(repoRelPath(".claude/a/b/c/deep.key"))).toBe(true);
+      // 規則が書かれたディレクトリの外へは広がらない
+      expect(ig.ignores(repoRelPath(".claude/secret.env"))).toBe(false);
+    });
+
+    it("同一リポジトリ内では深い側の .gitignore が浅い側を上書きする", async () => {
+      vol.fromJSON({
+        "/project/.claude/.gitignore": "*.local",
+        "/project/.claude/sub/.gitignore": "!keep.local",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([".claude/**"]));
+
+      expect(ig.ignores(repoRelPath(".claude/sub/keep.local"))).toBe(false);
+      expect(ig.ignores(repoRelPath(".claude/sub/other.local"))).toBe(true);
+      expect(ig.ignores(repoRelPath(".claude/other/keep.local"))).toBe(true);
+    });
+
+    it("include が到達しないディレクトリの .gitignore は読まない", async () => {
+      vol.fromJSON({
+        "/project/.claude/.gitignore": "*.local",
+        "/project/.github/.gitignore": "*.yml",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([".claude/**"]));
+
+      expect(ig.ignores(repoRelPath(".claude/settings.local"))).toBe(true);
+      expect(ig.ignores(repoRelPath(".github/ci.yml"))).toBe(false);
+    });
+
+    it("依存パッケージと git のディレクトリは走査しない", async () => {
+      vol.fromJSON({
+        "/project/.claude/node_modules/pkg/.gitignore": "vendored.txt",
+        "/project/.claude/.git/.gitignore": "objects.txt",
+      });
+
+      const ig = await loadMergedGitignore([absPath("/project")], globPatterns([".claude/**"]));
+
+      expect(ig.ignores(repoRelPath(".claude/node_modules/pkg/vendored.txt"))).toBe(false);
+      expect(ig.ignores(repoRelPath(".claude/.git/objects.txt"))).toBe(false);
     });
   });
 });

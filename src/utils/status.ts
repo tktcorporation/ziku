@@ -1,11 +1,12 @@
 import { match } from "ts-pattern";
-import type { LockState } from "../modules/schemas";
+import type { LockState, RepoRelPath } from "../modules/schemas";
+import type { ZikuConfigStatus } from "./merge/sync-plan";
 import type { FileClassification } from "./merge/types";
 
 /**
  * ステータス表示で使う「方向」のラベル。
  *
- * 7カテゴリ（FileClassification）を UX 上の3方向に集約するためのキー。
+ * FileClassification の各カテゴリを UX 上の3方向に集約するためのキー。
  * - "pull"  : テンプレート側で起きた変更を取り込む方向
  * - "push"  : ローカル側で起きた変更をテンプレートに送る方向
  * - "conflict" : 双方が変更しており、3-way merge が必要
@@ -29,15 +30,14 @@ export type EntryCategory = Exclude<keyof FileClassification, "unchanged">;
  * 警告表示する。
  */
 export interface StatusEntry {
-  readonly path: string;
+  readonly path: RepoRelPath;
   readonly direction: StatusDirection;
   readonly category: EntryCategory;
   /**
    * 破壊的（ファイル削除を伴う）変更か。
    *
    * UI は `git status` の "deleted" のように赤系で目立たせ、必要なら確認プロンプトの
-   * トリガにする。`deletedFiles` (テンプレ側削除→pull) と `deletedLocally`
-   * (ローカル側削除→push --includeDeletions で反映) が true。
+   * トリガにする。判定は isDestructiveCategory が持つ。
    */
   readonly isDestructive: boolean;
 }
@@ -69,12 +69,16 @@ export interface StatusBuckets {
  * - pushOnly         : push だけで十分
  * - pullThenPush     : 先に pull、その後 push（順序が重要なので分岐させている）
  * - resolveConflict  : conflict があるので pull で 3-way merge を始める
- * - continueMerge    : pendingMerge 中。`ziku pull --continue` で再開
- *                     conflictCount === 0 のケースは「stale lock のクリア」を促す
- *                     縮退状態（pull --continue 実行直前にプロセスが死んだ等）。
+ * - continueMerge    : コンフリクト解決待ち。`ziku pull --continue` で再開。
+ *                     解決待ちのファイルは必ず 1 件以上ある（lock の型が空を許さない）。
+ * - localOnlyConfigPatterns : ファイルはすべて一致しているが、ローカルの `ziku.jsonc` にだけ
+ *                     あるパターンがテンプレートへ届いていない（`ZikuConfigStatus` の
+ *                     `LocalOnlyPatterns`）。pull も push もこのファイルを書き換えないので
+ *                     どちらのコマンドも勧められないが、同期済みでもない。
  */
 export type Recommendation =
   | { readonly kind: "inSync" }
+  | { readonly kind: "localOnlyConfigPatterns" }
   | { readonly kind: "pullOnly"; readonly pullCount: number }
   | { readonly kind: "pushOnly"; readonly pushCount: number }
   | {
@@ -111,6 +115,8 @@ export function isEntryCategory(category: keyof FileClassification): category is
  *     （deletedLocally は push --includeDeletions で実反映。
  *      status の役割は「方向を見せる」ことなので、フラグの有無は別問題として扱う）
  *   - conflicts は両方変更されているので merge 必要
+ *   - deletedWithLocalEdits は「テンプレの削除を受け入れるか、ローカルの編集を残すか」を
+ *     ユーザーが決めるまで進めない。pull にも push にも倒せないので conflict へ入れる
  *
  * `unchanged` は型から除外しているため `match.exhaustive()` の対象にならない。
  */
@@ -118,7 +124,7 @@ export function directionOfCategory(category: EntryCategory): StatusDirection {
   return match(category)
     .with("autoUpdate", "newFiles", "deletedFiles", () => "pull" as const)
     .with("localOnly", "deletedLocally", () => "push" as const)
-    .with("conflicts", () => "conflict" as const)
+    .with("conflicts", "deletedWithLocalEdits", () => "conflict" as const)
     .exhaustive();
 }
 
@@ -126,21 +132,29 @@ export function directionOfCategory(category: EntryCategory): StatusDirection {
  * 削除を伴うカテゴリかどうかを判定する。
  *
  * UI が破壊的操作を警告表示するために StatusEntry.isDestructive にコピーする。
- * `deletedFiles` (テンプレ側削除) と `deletedLocally` (ローカル側削除) が破壊的。
+ * テンプレ側削除 (`deletedFiles` / `deletedWithLocalEdits`) とローカル側削除
+ * (`deletedLocally`) が破壊的。
+ *
+ * カテゴリ追加時に判定漏れをコンパイルエラーにするため、条件式ではなく網羅的な
+ * match で書く。
  */
 export function isDestructiveCategory(category: EntryCategory): boolean {
-  return category === "deletedFiles" || category === "deletedLocally";
+  return match(category)
+    .with("deletedFiles", "deletedWithLocalEdits", "deletedLocally", () => true)
+    .with("autoUpdate", "newFiles", "localOnly", "conflicts", () => false)
+    .exhaustive();
 }
 
 /** path 昇順比較。決定論的出力のためバケツ内ソートに使う。 */
 const byPath = (a: StatusEntry, b: StatusEntry): number => a.path.localeCompare(b.path);
 
 /**
- * FileClassification の 7 カテゴリを、UX の3方向（pull / push / conflict）に集約する。
+ * FileClassification の各カテゴリを、UX の3方向（pull / push / conflict）に集約する。
  *
- * push.ts は内部で `localOnly + conflicts + deletedLocally` を pushable として扱うが、
- * status は conflict を別バケツとして表示する点が異なる（「次に何をすべきか」を
- * 強調するため、両方変更されたファイルは "modify both sides" として目立たせる）。
+ * push.ts は内部で `localOnly + conflicts + deletedLocally + deletedWithLocalEdits` を
+ * pushable として扱うが、status は conflict を別バケツとして表示する点が異なる
+ * （「次に何をすべきか」を強調するため、両方変更されたファイルは "modify both sides"
+ * として目立たせる）。
  *
  * 並び: 各バケツ内は path 昇順。
  */
@@ -176,34 +190,36 @@ export function categorizeForStatus(classification: FileClassification): StatusB
  * バケツと lock の状態から「次にすべきアクション」を1つ決める。
  *
  * 優先度（上から評価）:
- *   1. pendingMerge があれば continueMerge（最優先；他の差分より先に解決すべき）
- *      - conflicts.length === 0 のレアケース（--continue 直前にプロセスが死んだ等で
- *        lock が stale）でも continueMerge を返し、UI が「stale lock のクリア」を案内する。
- *        inSync にフォールスルーすると、その後 push が pendingMerge ガードでブロック
- *        される際に理由が分からなくなるため。
+ *   1. コンフリクト解決待ち（sync: "merging"）なら continueMerge
+ *      （最優先；他の差分より先に解決すべきで、その間 push はブロックされる）
  *   2. conflict があれば resolveConflict（pull --continue ではなく新規 pull で merge を開始）
  *   3. pull も push もある → pullThenPush（pull 先行で取りこぼし防止）
  *   4. pull だけ → pullOnly
  *   5. push だけ → pushOnly
- *   6. 何もない → inSync
+ *   6. 何も無いが、ローカルにしか無い同期パターンが残っている → localOnlyConfigPatterns
+ *   7. 何もない → inSync
  *
- * `patternsUpdated`: テンプレ側で include/exclude が追加された状態。
- * バケツが「ファイル差分」の集計なのに対し、これは「パターン定義の差分」という別軸の
- * pull-pending 信号。push は raw `config.include` を読むため、パターン追加を反映するには
- * 必ず先に `pull` で `ziku.jsonc` を更新する必要がある。これを忘れて pushOnly や inSync を
- * 推奨すると「次の操作が no-op」という UX 事故になる (codex review #71)。
+ * コマンドを勧める判断材料はバケツと lock だけにする。テンプレート側のパターン追加は、
+ * `ziku.jsonc` 自体が pull のバケツへ入ることで現れる（`src/utils/merge/sync-plan.ts` の
+ * `zikuConfigStatus`）。パターンの差分をバケツと別軸の信号として足すと、`pull` が何も書き換え
+ * ない状態でも pull を勧めてしまう。
  *
- * 参考: schemas.ts の pendingMerge コメント — pendingMerge 中は push がブロックされる仕様。
+ * `config` を受け取るのは、どのコマンドも勧められない状態を「同期済み」と言い切らないため。
+ * `LocalOnlyPatterns` はどのバケツにも入らない（`withZikuConfigStatus`）ので、バケツだけを見ると
+ * inSync に落ちる。ここで見るのはバケツが全部空のときだけなので、勧める操作が別の信号で
+ * すり替わることはない。
+ *
+ * 参考: schemas.ts の lockSchema — `merging` の間は push がブロックされる仕様。
  */
 export function decideRecommendation(
   buckets: StatusBuckets,
-  lock: Pick<LockState, "pendingMerge">,
-  patternsUpdated = false,
+  lock: LockState,
+  config: ZikuConfigStatus,
 ): Recommendation {
-  if (lock.pendingMerge !== undefined) {
+  if (lock.sync === "merging") {
     return {
       kind: "continueMerge",
-      conflictCount: lock.pendingMerge.conflicts.length,
+      conflictCount: lock.merge.conflicts.length,
     };
   }
 
@@ -215,18 +231,23 @@ export function decideRecommendation(
     return { kind: "resolveConflict", conflictCount, pullCount, pushCount };
   }
 
-  // patternsUpdated は「ファイル差分は無いがパターンの取り込みが必要」を意味する
-  // 別軸の pull-pending 信号。pullCount > 0 と同列に扱う。
-  const needsPull = pullCount > 0 || patternsUpdated;
-
-  if (needsPull && pushCount > 0) {
+  if (pullCount > 0 && pushCount > 0) {
     return { kind: "pullThenPush", pullCount, pushCount };
   }
-  if (needsPull) {
+  if (pullCount > 0) {
     return { kind: "pullOnly", pullCount };
   }
   if (pushCount > 0) {
     return { kind: "pushOnly", pushCount };
   }
-  return { kind: "inSync" };
+
+  return match(config)
+    .with(
+      { _tag: "LocalOnlyPatterns" },
+      (): Recommendation => ({
+        kind: "localOnlyConfigPatterns",
+      }),
+    )
+    .with({ _tag: "Categorized" }, (): Recommendation => ({ kind: "inSync" }))
+    .exhaustive();
 }

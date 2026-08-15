@@ -19,7 +19,7 @@ import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
 export type { FileOp, CommandLifecycle, Location, Op } from "./lifecycle-types";
 export { SYNCED_FILES } from "./lifecycle-types";
 import { SYNCED_FILES } from "./lifecycle-types";
-import type { CommandLifecycle, Op } from "./lifecycle-types";
+import type { CommandLifecycle, FileOp, Location, Op } from "./lifecycle-types";
 
 // ──────────────────────────────────────────────
 // 各コマンドからライフサイクルを集約
@@ -32,137 +32,243 @@ import { setupLifecycle } from "../commands/setup";
 import { diffLifecycle } from "../commands/diff";
 import { statusLifecycle } from "../commands/status";
 import { trackLifecycle } from "../commands/track";
+import type { SubCommandName } from "../commands/names";
 
-export const lifecycle: readonly CommandLifecycle[] = [
-  setupLifecycle,
-  initUserLifecycle,
-  pullLifecycle,
-  pushLifecycle,
-  diffLifecycle,
-  statusLifecycle,
-  trackLifecycle,
-];
+/**
+ * サブコマンドごとのライフサイクル定義。
+ *
+ * `Record<SubCommandName, ...>` にしているのは、コマンドを足したときにここへの登録が
+ * コンパイルエラーになるようにするため。素の配列だと登録漏れが検知できず、生成される
+ * ドキュメントからそのコマンドが黙って消える。
+ *
+ * 宣言順がそのままドキュメントの節の並びになる（{@link lifecycle} が値の順を引き継ぐ）。
+ */
+export const LIFECYCLE_BY_COMMAND: Record<SubCommandName, CommandLifecycle> = {
+  setup: setupLifecycle,
+  init: initUserLifecycle,
+  pull: pullLifecycle,
+  push: pushLifecycle,
+  diff: diffLifecycle,
+  status: statusLifecycle,
+  track: trackLifecycle,
+};
+
+export const lifecycle: readonly CommandLifecycle[] = Object.values(LIFECYCLE_BY_COMMAND);
 
 // ──────────────────────────────────────────────
 // ドキュメント生成
 // ──────────────────────────────────────────────
 
-/** 操作の種類をラベルに変換 */
-function opLabel(op: Op): string {
-  switch (op) {
-    case "read":
-      return "読み取り";
-    case "create":
-      return "作成";
-    case "update":
-      return "更新";
-    default:
-      return op;
-  }
+/**
+ * 操作の種類の表示ラベル。
+ *
+ * `Record<Op, string>` にしているのは、`Op` に値を足したときにラベルの登録が
+ * コンパイルエラーになるようにするため。既定値へ落とす分岐にすると、ラベルの無い操作が
+ * 生の識別子のままドキュメントへ出る。
+ */
+export const OP_LABELS: Record<Op, string> = {
+  read: "読み取り",
+  create: "作成",
+  update: "更新",
+};
+
+/**
+ * ファイル別表で行を並べる順。
+ *
+ * `Record<Op, number>` にしているのは、`Op` に値を足したときに順序の登録が
+ * コンパイルエラーになるようにするため。順序が決まっていないと、ops と無関係に行が
+ * 入れ替わった生成物で `docs:check` が落ちる。
+ */
+const OP_ROW_ORDER: Record<Op, number> = {
+  read: 0,
+  create: 1,
+  update: 2,
+};
+
+/**
+ * 図の矢印の種類。読み取りだけ点線にして、状態を変える操作と見分けられるようにする。
+ *
+ * `Record<Op, string>` にしているのは、`Op` に値を足したときに矢印の登録が
+ * コンパイルエラーになるようにするため。
+ */
+const OP_ARROWS: Record<Op, string> = {
+  read: "-.->",
+  create: "-->",
+  update: "-->",
+};
+
+/** 図の subgraph と、表・図での場所の並び順。 */
+interface LocationView {
+  /** mermaid の subgraph ID */
+  readonly subgraphId: string;
+  /** subgraph の表示名 */
+  readonly title: string;
+  /**
+   * ノード ID の接頭辞。
+   *
+   * 同じファイルがテンプレートとユーザープロジェクトの両方に存在し、図では別ノードに
+   * なるため、場所で ID を分ける。
+   */
+  readonly nodePrefix: string;
+  /** 図の subgraph と表の行の並び順 */
+  readonly order: number;
+}
+
+/**
+ * 場所ごとの表示定義。
+ *
+ * `Record<Location, LocationView>` にしているのは、場所を足したときに登録が
+ * コンパイルエラーになるようにするため。
+ */
+const LOCATION_VIEWS: Record<Location, LocationView> = {
+  template: { subgraphId: "Template", title: "Template Repository", nodePrefix: "T", order: 0 },
+  local: { subgraphId: "User", title: "User Project", nodePrefix: "U", order: 1 },
+};
+
+/**
+ * ファイルの役割。ops から導けない唯一の散文なので、ここに持つ。
+ *
+ * `Record` ではなく `Map` なのは、パス定数が brand 付きの `string` でリテラル型ではなく、
+ * `Record` のキーとして網羅を強制できないため。役割を持たないファイルは見出しと表だけを出す。
+ */
+const FILE_ROLES: ReadonlyMap<string, string> = new Map<string, string>([
+  [
+    ZIKU_CONFIG_FILE,
+    "同期対象パターン定義（include/exclude）。テンプレートとユーザーで同一フォーマット",
+  ],
+  [LOCK_FILE, "同期状態 + ソース情報（source, sync, base, merge）"],
+  [SYNCED_FILES, "パターンに一致する実際のファイル群（.claude/rules/*.md など）"],
+]);
+
+/** 表示用のファイル名。実パスはコード表記にし、概念的なラベルはそのまま出す。 */
+function formatFile(file: string): string {
+  return file === SYNCED_FILES ? SYNCED_FILES : `\`${file}\``;
+}
+
+/**
+ * mermaid のノード ID を作る。
+ *
+ * パスには mermaid の ID に使えない文字（`.` `/` 空白）が含まれるので英数字以外を潰し、
+ * 場所の接頭辞を付けて一意にする。
+ */
+function nodeId(op: FileOp): string {
+  const slug = op.file
+    .replaceAll(/[^A-Za-z0-9]+/g, "_")
+    .replaceAll(/^_+|_+$/g, "")
+    .toUpperCase();
+  return `${LOCATION_VIEWS[op.location].nodePrefix}_${slug}`;
 }
 
 /**
  * コンポーネント（ファイル）一覧と、各コマンドとの関係を示す mermaid 図を生成。
  * file-lifecycle.md と README の両方で使用される（SSOT）。
+ *
+ * ノードもエッジも ops から導く。図を手書きすると、コマンドが宣言した操作が図に現れない
+ * （テンプレートの README を書き換えるエッジが落ちる等）ずれが起きる。
  */
 export function generateComponentDiagram(): string {
-  const lines: string[] = [
-    "```mermaid",
-    "graph TB",
-    "",
-    `  subgraph Template["Template Repository"]`,
-    `    ZIKU_TPL["${ZIKU_CONFIG_FILE}"]`,
-    `    T_FILES["synced files"]`,
-    "  end",
-    "",
-    `  subgraph User["User Project"]`,
-    `    ZIKU["${ZIKU_CONFIG_FILE}"]`,
-    `    LOCK["${LOCK_FILE}"]`,
-    `    U_FILES["synced files"]`,
-    "  end",
-    "",
-    "  setup([setup]) -->|create| ZIKU_TPL",
-    "  init([init]) -->|read| ZIKU_TPL",
-    "  init -->|create| ZIKU & LOCK & U_FILES",
-    "  push([push]) -->|read| ZIKU & LOCK",
-    "  push -->|update| T_FILES",
-    "  pull([pull]) -->|read| ZIKU & LOCK",
-    "  pull -->|update| U_FILES & ZIKU & LOCK",
-    "  diff([diff]) -.->|read| ZIKU & LOCK & U_FILES",
-    "  status([status]) -.->|read| ZIKU & LOCK & U_FILES",
-    "  track([track]) -.->|update| ZIKU",
-    "",
-    "```",
-  ];
+  /** 場所 → ノード ID → ラベル。ノードの並びは ops への初出順。 */
+  const nodesByLocation = new Map<Location, Map<string, string>>();
+  const edges: string[] = [];
+
+  for (const [command, cmd] of Object.entries(LIFECYCLE_BY_COMMAND)) {
+    /** 操作 → 宛先ノード ID。同じ操作の宛先は mermaid の `A & B` 記法で 1 本にまとめる。 */
+    const targetsByOp = new Map<Op, string[]>();
+
+    for (const op of cmd.ops) {
+      const id = nodeId(op);
+
+      const nodes = nodesByLocation.get(op.location) ?? new Map<string, string>();
+      nodesByLocation.set(op.location, nodes);
+      nodes.set(id, op.file);
+
+      const targets = targetsByOp.get(op.op) ?? [];
+      targetsByOp.set(op.op, targets);
+      if (!targets.includes(id)) targets.push(id);
+    }
+
+    let shapeDeclared = false;
+    for (const [op, targets] of targetsByOp) {
+      // コマンドのノード形状は初出のエッジでだけ宣言する（2 回目以降は ID だけで参照する）。
+      const from = shapeDeclared ? command : `${command}([${command}])`;
+      shapeDeclared = true;
+      edges.push(`  ${from} ${OP_ARROWS[op]}|${op}| ${targets.join(" & ")}`);
+    }
+  }
+
+  const subgraphs = [...nodesByLocation].toSorted(
+    ([a], [b]) => LOCATION_VIEWS[a].order - LOCATION_VIEWS[b].order,
+  );
+
+  const lines: string[] = ["```mermaid", "graph TB", ""];
+  for (const [location, nodes] of subgraphs) {
+    const view = LOCATION_VIEWS[location];
+    lines.push(`  subgraph ${view.subgraphId}["${view.title}"]`);
+    for (const [id, label] of nodes) {
+      lines.push(`    ${id}["${label}"]`);
+    }
+    lines.push("  end", "");
+  }
+  lines.push(...edges, "", "```");
 
   return lines.join("\n");
 }
 
-/** ファイルごとのライフサイクル表を生成 */
+/** ファイル別表の 1 行: ある場所のそのファイルへ、その操作をするコマンドの一覧。 */
+interface FileUsageRow {
+  readonly op: Op;
+  readonly location: Location;
+  readonly commands: string[];
+}
+
+/**
+ * ファイルごとのライフサイクル表を生成。
+ *
+ * ops をファイルで束ね、操作 × 場所ごとに「どのコマンドがそれをするか」を集計する。
+ * 各操作の詳細（note）はコマンド別表が持つので、ここでは繰り返さない。
+ */
 function generateFileLifecycleTable(): string {
-  const files = [
-    {
-      file: ZIKU_CONFIG_FILE,
-      location: "両方（テンプレート + ユーザー）",
-      description:
-        "同期対象パターン定義（include/exclude）。テンプレートとユーザーで同一フォーマット",
-      lifecycle: [
-        {
-          phase: "生成",
-          detail: "`ziku setup` でデフォルトパターンを含む初期ファイルをテンプレートに作成",
-        },
-        {
-          phase: "読み取り",
-          detail:
-            "`ziku init` でテンプレートのパターンを読み、ディレクトリ選択 UI のデータとして使用",
-        },
-        { phase: "生成", detail: "`ziku init` で選択結果をユーザープロジェクトに保存" },
-        {
-          phase: "読み取り",
-          detail: "`pull` / `push` / `diff` でパターンを取得",
-        },
-        { phase: "更新", detail: "`ziku track` で新しいパターンを追加" },
-      ],
-    },
-    {
-      file: LOCK_FILE,
-      location: "ユーザープロジェクト",
-      description: "同期状態 + ソース情報（source, baseRef, baseHashes, pendingMerge）",
-      lifecycle: [
-        {
-          phase: "生成",
-          detail: "`ziku init` でソース情報 + テンプレートのコミット SHA とハッシュを記録",
-        },
-        {
-          phase: "読み取り",
-          detail: "`pull` / `push` / `diff` でソースと前回同期状態との差分検出に使用",
-        },
-        { phase: "更新", detail: "`ziku pull` で最新のベースに更新" },
-      ],
-    },
-    {
-      file: "synced files",
-      location: "両方",
-      description: "パターンに一致する実際のファイル群（.claude/rules/*.md など）",
-      lifecycle: [
-        { phase: "生成", detail: "`ziku init` でテンプレートからコピー" },
-        { phase: "更新", detail: "`ziku pull` で 3-way マージにより同期" },
-        { phase: "更新", detail: "`ziku push` でローカル変更を PR としてテンプレートに送信" },
-      ],
-    },
-  ];
+  /** ファイル → 操作 → 場所 → コマンド名。ファイルの並びは ops への初出順。 */
+  const usageByFile = new Map<string, Map<Op, Map<Location, string[]>>>();
+
+  for (const [command, cmd] of Object.entries(LIFECYCLE_BY_COMMAND)) {
+    for (const op of cmd.ops) {
+      const byOp = usageByFile.get(op.file) ?? new Map<Op, Map<Location, string[]>>();
+      usageByFile.set(op.file, byOp);
+
+      const byLocation = byOp.get(op.op) ?? new Map<Location, string[]>();
+      byOp.set(op.op, byLocation);
+
+      const commands = byLocation.get(op.location) ?? [];
+      byLocation.set(op.location, commands);
+      // 同じコマンドが同じファイルへ同じ操作を複数回宣言していても、表には 1 度だけ出す。
+      if (!commands.includes(command)) commands.push(command);
+    }
+  }
 
   const sections: string[] = [];
 
-  for (const f of files) {
-    const fileDisplay = f.file === "synced files" ? "synced files" : `\`${f.file}\``;
-    sections.push(`### ${fileDisplay}\n`);
-    sections.push(`**場所:** ${f.location}  `);
-    sections.push(`**役割:** ${f.description}\n`);
-    sections.push("| フェーズ | 詳細 |");
-    sections.push("|---|---|");
-    for (const lc of f.lifecycle) {
-      sections.push(`| ${lc.phase} | ${lc.detail} |`);
+  for (const [file, byOp] of usageByFile) {
+    sections.push(`### ${formatFile(file)}\n`);
+
+    const role = FILE_ROLES.get(file);
+    if (role !== undefined) sections.push(`**役割:** ${role}\n`);
+
+    sections.push("| 操作 | 場所 | コマンド |");
+    sections.push("|---|---|---|");
+
+    const rows: FileUsageRow[] = [...byOp].flatMap(([op, byLocation]) =>
+      [...byLocation].map(([location, commands]) => ({ op, location, commands })),
+    );
+    const sorted = rows.toSorted((a, b) => {
+      const byOpOrder = OP_ROW_ORDER[a.op] - OP_ROW_ORDER[b.op];
+      if (byOpOrder !== 0) return byOpOrder;
+      return LOCATION_VIEWS[a.location].order - LOCATION_VIEWS[b.location].order;
+    });
+
+    for (const row of sorted) {
+      const commands = row.commands.map((command) => `\`${command}\``).join(", ");
+      sections.push(`| ${OP_LABELS[row.op]} | ${row.location} | ${commands} |`);
     }
     sections.push("");
   }
@@ -180,9 +286,9 @@ function generateCommandTables(): string {
     sections.push("| 操作 | ファイル | 場所 | 詳細 |");
     sections.push("|---|---|---|---|");
     for (const op of cmd.ops) {
-      const loc = op.location === "template" ? "template" : "local";
-      const fileDisplay = op.file === SYNCED_FILES ? "synced files" : `\`${op.file}\``;
-      sections.push(`| ${opLabel(op.op)} | ${fileDisplay} | ${loc} | ${op.note} |`);
+      sections.push(
+        `| ${OP_LABELS[op.op]} | ${formatFile(op.file)} | ${op.location} | ${op.note} |`,
+      );
     }
     sections.push("");
   }
@@ -197,11 +303,13 @@ function generateCommandTables(): string {
 /**
  * 各コマンドの notes フィールドから「補足」セクションを自動生成する。
  *
- * 背景: 以前はハードコードされた散文だったが、コマンド実装と乖離するリスクがあった。
- * notes をコマンドファイルにコロケーションすることで、動作変更時に更新漏れを防ぐ。
+ * notes をコマンドの実装ファイルへ置くことで、挙動を変えたときに説明も同じ差分に
+ * 現れる。ドキュメント側に散文で持つと、実装だけが変わって説明が嘘になる。
  */
 function generateNotesSection(): string {
-  const commandsWithNotes = lifecycle.filter((cmd) => cmd.notes && cmd.notes.length > 0);
+  const commandsWithNotes = lifecycle.filter(
+    (cmd) => cmd.notes !== undefined && cmd.notes.length > 0,
+  );
   if (commandsWithNotes.length === 0) return "";
 
   const lines: string[] = ["## 補足\n"];
