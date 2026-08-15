@@ -1561,9 +1561,11 @@ export function getRepoIdentity(owner: string, repo: string): Promise<RepoIdenti
       const segments = data.full_name.split("/");
       const [canonicalOwner, canonicalRepo] = segments;
       if (segments.length !== 2 || !canonicalOwner || !canonicalRepo) {
-        throw new Error(
-          `Unexpected "full_name" in GitHub API response for ${owner}/${repo}: ${data.full_name}`,
-        );
+        throw zikuFailure({
+          kind: "GitHubUnusableResponse",
+          operation: `resolve the canonical name of ${owner}/${repo}`,
+          detail: `"full_name" was not in owner/repo form: ${data.full_name}`,
+        });
       }
       return { owner: canonicalOwner, repo: canonicalRepo, defaultBranch: data.default_branch };
     },
@@ -1637,9 +1639,13 @@ export function fetchRepoTextFile(
         return Option.none<string>();
       }
       if (data.content === undefined || data.encoding !== "base64") {
-        throw new Error(
-          `File content unavailable (size=${data.size} bytes; likely exceeds the Contents API's 1MB limit): ${owner}/${repo}/${path}`,
-        );
+        // 分類済みの失敗にしておく。生の Error のままだと呼び出し側で defect になり、
+        // 1 ファイルが上限を超えただけで owner 横断の走査全体が落ちる。
+        throw zikuFailure({
+          kind: "GitHubUnusableResponse",
+          operation: `read ${owner}/${repo}/${path}`,
+          detail: `the response carried no usable content (size=${data.size} bytes; the Contents API omits bodies over 1MB)`,
+        });
       }
       // Option.some(...) は unicorn/no-array-callback-reference が Array.prototype.some との
       // 名前衝突で誤検知するため、fromNullable で同じ意味を表現する（decoded は常に

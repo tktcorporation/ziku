@@ -36,6 +36,12 @@ export const aggregateLifecycle: CommandLifecycle = {
       note: "owner 配下の候補リポジトリの lock.json を取得し、対象テンプレートの利用リポジトリか判定",
     },
     {
+      file: ZIKU_CONFIG_FILE,
+      location: "remote",
+      op: "read",
+      note: "利用リポジトリ側の追跡パターンを取得し、テンプレート側との和集合を比較範囲にする",
+    },
+    {
       file: SYNCED_FILES,
       location: "template",
       op: "read",
@@ -282,19 +288,24 @@ export const aggregateCommand = defineCommand({
           runCommandEffect(aggregateEffect),
         );
 
-    if (jsonMode) {
-      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-    } else {
-      log.message(renderAggregateSummary(report));
-      outro(aggregateOutroLine(report));
+    const serialized = `${JSON.stringify(report, null, 2)}\n`;
+
+    // ファイルへの書き出しは outro より前に済ませる。outro は clack のブロックを閉じるので、
+    // 後に log を出すと終了バーの下へはみ出す。書き込みが失敗したときに成功を告げないためでもある。
+    const outArg = args.out as string | undefined;
+    const outPath = outArg === undefined ? undefined : absPath(outArg);
+    if (outPath !== undefined) {
+      await mkdir(dirname(outPath), { recursive: true });
+      await writeFile(outPath, serialized, "utf-8");
     }
 
-    const outArg = args.out as string | undefined;
-    if (outArg !== undefined) {
-      const outPath = absPath(outArg);
-      await mkdir(dirname(outPath), { recursive: true });
-      await writeFile(outPath, `${JSON.stringify(report, null, 2)}\n`, "utf-8");
-      if (!jsonMode) log.success(`Report written to ${pc.cyan(outPath)}`);
+    if (jsonMode) {
+      process.stdout.write(serialized);
+      return;
     }
+
+    if (outPath !== undefined) log.success(`Report written to ${pc.cyan(outPath)}`);
+    log.message(renderAggregateSummary(report));
+    outro(aggregateOutroLine(report));
   },
 });

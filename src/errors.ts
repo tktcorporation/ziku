@@ -72,6 +72,23 @@ export type FailureReason =
    */
   | { readonly kind: "GitHubUnreachable"; readonly operation: string; readonly detail: string }
   /**
+   * GitHub は応答したが、その内容をこちらが使えない。
+   *
+   * API の上限で本文が省かれた（Contents API の 1MB 制限など）、あるいは想定した形で
+   * 返ってこなかった場合。再実行しても同じ結果になるので、`GitHubUnreachable` の
+   * 「接続を確かめて実行し直す」とは取る行動が違う。対象を小さくするか、対象そのものを
+   * 変えることになる。
+   *
+   * 値の欠けを黙って既定値に読み替えないための分類でもある。1MB を超えたファイルの
+   * 空の本文を「中身が空のファイル」として扱うと、内容が消えたのか元から空なのかを
+   * 呼び出し側が区別できない。
+   */
+  | {
+      readonly kind: "GitHubUnusableResponse";
+      readonly operation: string;
+      readonly detail: string;
+    }
+  /**
    * GitHub が宛先を「無い」と答えた (404)。
    *
    * 取る行動は宛先を今あるものへ直すこと。ref を明示していないテンプレートでは、lock に
@@ -288,6 +305,10 @@ export function describeFailure(reason: FailureReason): FailureDisplay {
     .with({ kind: "GitHubUnreachable" }, (r) => ({
       message: `Cannot reach GitHub to ${r.operation}: ${r.detail}`,
       hint: "Check your network connection and any proxy settings, then run the same command again.",
+    }))
+    .with({ kind: "GitHubUnusableResponse" }, (r) => ({
+      message: `GitHub returned a response ziku cannot use while trying to ${r.operation}: ${r.detail}`,
+      hint: "Re-running will not change the result. Reduce the size of the file involved, or point the command at a different target.",
     }))
     .with({ kind: "GitHubTargetNotFound" }, (r) => ({
       message: `GitHub has no such repository or branch to ${r.operation}: ${r.detail}`,

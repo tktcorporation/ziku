@@ -152,7 +152,10 @@ export function aggregateTemplateUsage(
 
       const evaluations = yield* Effect.forEach(
         candidates,
-        (candidate) => evaluateCandidate(template, templateRefSha, candidate, resolveIdentity),
+        (candidate) =>
+          containDefect(candidate, () =>
+            evaluateCandidate(template, templateRefSha, candidate, resolveIdentity),
+          ),
         { concurrency },
       );
 
@@ -184,14 +187,16 @@ export function aggregateTemplateUsage(
                 candidateIndex,
               })),
               ({ candidate, candidateIndex }) =>
-                processCandidate({
-                  templateDir,
-                  candidate,
-                  candidateIndex,
-                  tmpBaseDir,
-                  since,
-                  concurrency,
-                }),
+                containDefect(candidate.repoInfo, () =>
+                  processCandidate({
+                    templateDir,
+                    candidate,
+                    candidateIndex,
+                    tmpBaseDir,
+                    since,
+                    concurrency,
+                  }),
+                ),
               { concurrency },
             );
 
@@ -253,6 +258,28 @@ function tryGitHub<A>(run: () => Promise<A>): Effect.Effect<A, ZikuFailure> {
   return Effect.tryPromise({ try: run, catch: (cause) => cause }).pipe(
     Effect.catchAll((cause) =>
       cause instanceof ZikuFailure ? Effect.fail(cause) : Effect.die(cause),
+    ),
+  );
+}
+
+/**
+ * 1 リポジトリ分の処理で起きた defect を、そのリポジトリの `skipped` に閉じ込める。
+ *
+ * `tryGitHub` は分類できない失敗を defect のまま運ぶ（`ZikuFailure` に潰すと、行動を
+ * 書けない失敗に嘘の hint が付くため）。ただしこの走査は owner 配下の全リポジトリを
+ * 相手にするので、1 件の 5xx や想定外のレスポンスで全体を落とすと、他の全リポジトリの
+ * 結果まで失う。ここで受け止めて `skipped` に降ろし、走査は続ける。
+ *
+ * 握りつぶしではない。理由文に元の内容を残し、分類済みの失敗とは別の文言にして、
+ * レポートを読む側が「ziku が想定していない事態」だと分かるようにする。
+ */
+function containDefect<A>(
+  repoInfo: OwnerRepoInfo,
+  run: () => Effect.Effect<A>,
+): Effect.Effect<A | { readonly _tag: "skipped"; readonly skip: SkippedRepository }> {
+  return Effect.catchAllDefect(run(), (defect) =>
+    Effect.succeed(
+      skippedEvaluation(repoInfo, `Unexpected failure while processing: ${toMessage(defect)}`),
     ),
   );
 }

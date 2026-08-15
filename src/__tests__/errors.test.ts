@@ -132,6 +132,18 @@ const cases: FailureCases = {
       hint: /network connection/,
     },
   ],
+  GitHubUnusableResponse: [
+    {
+      reason: {
+        kind: "GitHubUnusableResponse",
+        operation: "read acme/proj/.ziku/lock.json",
+        detail: "the response carried no usable content (size=2000000 bytes)",
+      },
+      message:
+        "GitHub returned a response ziku cannot use while trying to read acme/proj/.ziku/lock.json: the response carried no usable content (size=2000000 bytes)",
+      hint: /Re-running will not change the result/,
+    },
+  ],
   GitHubTargetNotFound: [
     {
       reason: {

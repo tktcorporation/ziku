@@ -538,6 +538,43 @@ describe("aggregateTemplateUsage", () => {
     });
   });
 
+  // 分類できない失敗（5xx や想定外のレスポンス）は defect のまま運ばれる。owner 配下
+  // 全件を相手にする走査では、1 件の defect で他の全リポジトリの結果まで失う。
+  it("1 リポジトリで想定外の失敗が起きても、他のリポジトリの結果は返る", async () => {
+    mockListOwnerRepos.mockResolvedValue([
+      repoInfo({ owner: "acme", repo: "boom" }),
+      repoInfo({ owner: "acme", repo: "good" }),
+    ]);
+    setLockFixture(lockFixtures, "acme", "boom", () => {
+      // classified() が分類できずそのまま投げ直す失敗を模す。
+      throw new Error("Internal Server Error");
+    });
+    setLockFixture(lockFixtures, "acme", "good", () => Promise.resolve(Option.some(lockJson())));
+    shaFixtures.set("acme/good", sha("good-sha"));
+    dirsBySource.set("gh:acme/good#good-sha", "/good-dir");
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-defect");
+    vol.fromJSON({
+      "/good-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["**"] }),
+      "/tmpl-dir-defect/.ziku/ziku.jsonc": JSON.stringify({ include: ["**"] }),
+    });
+    queueGlobResults([], []);
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: absPath("/tmp-base"),
+        concurrency: 1,
+      }),
+    );
+
+    // 走査は落ちず、good の結果が返る
+    expect(report.repositories.map((r) => r.repo)).toEqual(["good"]);
+    // 想定外の失敗は握りつぶさず、分類済みの失敗と区別できる文言で残す
+    const boom = report.skipped.find((s) => s.repo === "boom");
+    expect(boom?.reason).toContain("Unexpected failure");
+    expect(boom?.reason).toContain("Internal Server Error");
+  });
+
   it("lock.json が壊れているリポジトリは skipped に理由付きで入り、他のリポジトリの結果は返る", async () => {
     mockListOwnerRepos.mockResolvedValue([
       repoInfo({ owner: "acme", repo: "broken" }),

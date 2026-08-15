@@ -25,6 +25,7 @@ graph TB
 
   subgraph Consumers["Consumer Repositories"]
     R_ZIKU_LOCK_JSON[".ziku/lock.json"]
+    R_ZIKU_ZIKU_JSONC[".ziku/ziku.jsonc"]
     R_SYNCED_FILES["synced files"]
   end
 
@@ -39,7 +40,7 @@ graph TB
   status([status]) -.->|read| U_ZIKU_ZIKU_JSONC & U_ZIKU_LOCK_JSON & U_SYNCED_FILES & T_SYNCED_FILES
   track([track]) -.->|read| U_ZIKU_ZIKU_JSONC
   track -->|update| U_ZIKU_ZIKU_JSONC
-  aggregate([aggregate]) -.->|read| T_ZIKU_ZIKU_JSONC & R_ZIKU_LOCK_JSON & T_SYNCED_FILES & R_SYNCED_FILES
+  aggregate([aggregate]) -.->|read| T_ZIKU_ZIKU_JSONC & R_ZIKU_LOCK_JSON & R_ZIKU_ZIKU_JSONC & T_SYNCED_FILES & R_SYNCED_FILES
 
 ```
 
@@ -53,6 +54,7 @@ graph TB
 | -------- | -------- | ----------------------------------------- |
 | 読み取り | template | `init`, `aggregate`                       |
 | 読み取り | local    | `pull`, `push`, `diff`, `status`, `track` |
+| 読み取り | remote   | `aggregate`                               |
 | 作成     | template | `setup`                                   |
 | 作成     | local    | `init`                                    |
 | 更新     | template | `push`                                    |
@@ -177,6 +179,7 @@ Inventory unsynced diffs across repositories using this template (read-only)
 | -------- | ------------------ | -------- | --------------------------------------------------------------------------------------- |
 | 読み取り | `.ziku/ziku.jsonc` | template | 比較基準となる include/exclude パターンを取得                                           |
 | 読み取り | `.ziku/lock.json`  | remote   | owner 配下の候補リポジトリの lock.json を取得し、対象テンプレートの利用リポジトリか判定 |
+| 読み取り | `.ziku/ziku.jsonc` | remote   | 利用リポジトリ側の追跡パターンを取得し、テンプレート側との和集合を比較範囲にする        |
 | 読み取り | synced files       | template | 比較基準としてテンプレートを指定 commit でダウンロードしハッシュ計算                    |
 | 読み取り | synced files       | remote   | 利用リポジトリをダウンロードし、テンプレートとハッシュ比較して未同期差分を分類          |
 
