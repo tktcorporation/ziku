@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import { Option } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { commitSha, repoRelPath } from "../../__tests__/brands";
 import type { DeletablePath } from "../../modules/schemas";
@@ -7,11 +9,29 @@ import { ZikuFailure } from "../../errors";
 import {
   checkRepoExists,
   checkRepoSetup,
+  fetchRepoTextFile,
   getGhCliToken,
   getGitHubToken,
+  getLastCommitDate,
+  getRepoIdentity,
+  listOwnerRepos,
   rateLimitedError,
+  resetGhCliTokenCache,
   unauthorizedError,
 } from "../github";
+
+// `getGhCliToken` の gh CLI サブプロセス起動をテストから制御するためのモック。
+// テストファイル全体に適用し、実環境の `gh` インストール有無に依存させない。
+vi.mock("node:child_process", () => ({
+  execFileSync: vi.fn(),
+}));
+
+// `getGhCliToken` はプロセス内キャッシュを持つ（{@link resetGhCliTokenCache}）。
+// テストの独立性を保つため、モックの呼び出し履歴・戻り値設定とキャッシュを毎テスト後に消す。
+afterEach(() => {
+  vi.mocked(execFileSync).mockReset();
+  resetGhCliTokenCache();
+});
 
 /**
  * 削除として送れるパスを組み立てる。設定ファイルを渡すのはフィクスチャの誤りなので落とす。
@@ -818,6 +838,12 @@ const mockResponse = (init: {
   headers: new Map(Object.entries(init.headers ?? {})) as unknown as Headers,
 });
 
+/** JSON ボディ付きの成功レスポンス。owner 横断探索系の関数はすべてこの形を読む。 */
+const mockJsonResponse = (status: number, body: unknown, headers: Record<string, string> = {}) => ({
+  ...mockResponse({ status, headers }),
+  json: () => Promise.resolve(body),
+});
+
 describe("checkRepoExists", () => {
   const originalFetch = globalThis.fetch;
   const originalEnv = process.env;
@@ -1178,6 +1204,298 @@ describe("checkRepoSetup", () => {
   });
 });
 
+/** owner 横断探索系の関数が読む `/orgs/{owner}/repos` 等の 1 要素を組み立てる。 */
+function repoListItem(
+  name: string,
+  overrides: { archived?: boolean; owner?: string; private?: boolean } = {},
+) {
+  return {
+    name,
+    owner: { login: overrides.owner ?? "acme" },
+    default_branch: "main",
+    archived: overrides.archived ?? false,
+    pushed_at: "2026-01-01T00:00:00Z",
+    private: overrides.private ?? false,
+  };
+}
+
+describe("listOwnerRepos", () => {
+  const originalFetch = globalThis.fetch;
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    process.env = originalEnv;
+  });
+
+  it("2 ページ以上のページネーションを辿る", async () => {
+    const page1 = Array.from({ length: 100 }, (_, i) => repoListItem(`repo-${i}`));
+    const page2 = [repoListItem("repo-last")];
+
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(mockResponse({ status: 200 }));
+      }
+      const page = new URL(url).searchParams.get("page");
+      return Promise.resolve(mockJsonResponse(200, page === "2" ? page2 : page1));
+    });
+
+    const result = await listOwnerRepos("acme");
+    expect(result).toHaveLength(101);
+    expect(result.map((r) => r.repo)).toContain("repo-last");
+  });
+
+  it("includeArchived: false（既定）でアーカイブ済みを除外する", async () => {
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(mockResponse({ status: 200 }));
+      }
+      return Promise.resolve(
+        mockJsonResponse(200, [repoListItem("active"), repoListItem("old", { archived: true })]),
+      );
+    });
+
+    const result = await listOwnerRepos("acme");
+    expect(result.map((r) => r.repo)).toEqual(["active"]);
+  });
+
+  it("includeArchived: true ではアーカイブ済みも含める", async () => {
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(mockResponse({ status: 200 }));
+      }
+      return Promise.resolve(
+        mockJsonResponse(200, [repoListItem("active"), repoListItem("old", { archived: true })]),
+      );
+    });
+
+    const result = await listOwnerRepos("acme", { includeArchived: true });
+    expect(result.map((r) => r.repo).toSorted()).toEqual(["active", "old"]);
+  });
+
+  it("/orgs/{owner} が 404 以外で失敗したら、user へフォールバックせず失敗する", async () => {
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(mockResponse({ status: 403, statusText: "Must have admin rights" }));
+      }
+      return Promise.reject(new Error("must not fall back to /users endpoint"));
+    });
+
+    await expect(listOwnerRepos("acme")).rejects.toBeInstanceOf(ZikuFailure);
+  });
+
+  it("探索対象が認証ユーザー自身なら /user/repos?affiliation=owner を使う", async () => {
+    process.env.GITHUB_TOKEN = "ghp_test";
+    const calledUrls: string[] = [];
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      calledUrls.push(url);
+      if (url === "https://api.github.com/orgs/testuser") {
+        return Promise.resolve(mockResponse({ status: 404 }));
+      }
+      if (url === "https://api.github.com/user") {
+        return Promise.resolve(mockJsonResponse(200, { login: "testuser" }));
+      }
+      return Promise.resolve(mockJsonResponse(200, [repoListItem("mine", { owner: "testuser" })]));
+    });
+
+    const result = await listOwnerRepos("testuser");
+
+    expect(result.map((r) => r.repo)).toEqual(["mine"]);
+    expect(calledUrls.some((u) => u.startsWith("https://api.github.com/user/repos"))).toBe(true);
+    expect(
+      calledUrls.some((u) => u.startsWith("https://api.github.com/users/testuser/repos")),
+    ).toBe(false);
+  });
+
+  it("トークンが無ければ public 限定の /users/{owner}/repos を使う", async () => {
+    const calledUrls: string[] = [];
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      calledUrls.push(url);
+      if (url === "https://api.github.com/orgs/someone") {
+        return Promise.resolve(mockResponse({ status: 404 }));
+      }
+      return Promise.resolve(
+        mockJsonResponse(200, [repoListItem("public-repo", { owner: "someone" })]),
+      );
+    });
+
+    const result = await listOwnerRepos("someone");
+
+    expect(result.map((r) => r.repo)).toEqual(["public-repo"]);
+    // トークンが無いので、認証ユーザー自身かどうかの判定（/user）自体を呼ばない。
+    expect(calledUrls).not.toContain("https://api.github.com/user");
+  });
+
+  it("認証ユーザーの判定に失敗したら、public 限定へ落とさず失敗する", async () => {
+    process.env.GITHUB_TOKEN = "ghp_expired";
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/someone") {
+        return Promise.resolve(mockResponse({ status: 404 }));
+      }
+      if (url === "https://api.github.com/user") {
+        return Promise.resolve(mockResponse({ status: 401, statusText: "Bad credentials" }));
+      }
+      return Promise.reject(new Error("must not fall back to public listing"));
+    });
+
+    await expect(listOwnerRepos("someone")).rejects.toBeInstanceOf(ZikuFailure);
+  });
+});
+
+describe("getRepoIdentity", () => {
+  const originalFetch = globalThis.fetch;
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    process.env = originalEnv;
+  });
+
+  it("リダイレクト後の full_name を正規名として返す", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        mockJsonResponse(200, { default_branch: "main", full_name: "new-owner/new-repo" }),
+      );
+
+    const identity = await getRepoIdentity("old-owner", "old-repo");
+
+    expect(identity).toEqual({ owner: "new-owner", repo: "new-repo", defaultBranch: "main" });
+  });
+
+  it("2 セグメントでない full_name は失敗する", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        mockJsonResponse(200, { default_branch: "main", full_name: "not-a-full-name" }),
+      );
+
+    await expect(getRepoIdentity("owner", "repo")).rejects.toThrow();
+  });
+});
+
+describe("fetchRepoTextFile", () => {
+  const originalFetch = globalThis.fetch;
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    process.env = originalEnv;
+  });
+
+  it("404 はファイルが無かったとして Option.none を返す", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ status: 404, statusText: "Not Found" }));
+
+    const result = await fetchRepoTextFile("owner", "repo", repoRelPath(".ziku/lock.json"));
+
+    expect(Option.isNone(result)).toBe(true);
+  });
+
+  it("ファイルの内容を base64 から復号して返す", async () => {
+    const content = Buffer.from("hello, ziku").toString("base64");
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        mockJsonResponse(200, { type: "file", content, encoding: "base64", size: 11 }),
+      );
+
+    const result = await fetchRepoTextFile("owner", "repo", repoRelPath(".ziku/lock.json"));
+
+    expect(Option.getOrUndefined(result)).toBe("hello, ziku");
+  });
+
+  it("403 はエラーとして失敗する（404 と混同しない）", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ status: 403, statusText: "Forbidden" }));
+
+    await expect(
+      fetchRepoTextFile("owner", "repo", repoRelPath(".ziku/lock.json")),
+    ).rejects.toBeInstanceOf(ZikuFailure);
+  });
+});
+
+describe("getLastCommitDate", () => {
+  const originalFetch = globalThis.fetch;
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    process.env = originalEnv;
+  });
+
+  it("コミット履歴が無い（空配列）場合は Option.none を返す", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(mockJsonResponse(200, []));
+
+    const result = await getLastCommitDate("owner", "repo", repoRelPath(".ziku/lock.json"));
+
+    expect(Option.isNone(result)).toBe(true);
+  });
+
+  it("最新コミットの日時を返す", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        mockJsonResponse(200, [
+          { commit: { committer: { date: "2026-01-01T00:00:00Z" }, author: null } },
+        ]),
+      );
+
+    const result = await getLastCommitDate("owner", "repo", repoRelPath(".ziku/lock.json"));
+
+    expect(Option.getOrUndefined(result)).toBe("2026-01-01T00:00:00Z");
+  });
+});
+
+describe("getGhCliToken のキャッシュ", () => {
+  it("複数回呼んでもサブプロセス起動は 1 回だけ", () => {
+    vi.mocked(execFileSync).mockReturnValue("ghp_cached_token\n");
+
+    expect(getGhCliToken()).toBe("ghp_cached_token");
+    expect(getGhCliToken()).toBe("ghp_cached_token");
+    expect(getGhCliToken()).toBe("ghp_cached_token");
+
+    expect(execFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("resetGhCliTokenCache() の後は再実行する", () => {
+    vi.mocked(execFileSync).mockReturnValue("ghp_first\n");
+    expect(getGhCliToken()).toBe("ghp_first");
+
+    resetGhCliTokenCache();
+    vi.mocked(execFileSync).mockReturnValue("ghp_second\n");
+    expect(getGhCliToken()).toBe("ghp_second");
+
+    expect(execFileSync).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("scaffoldTemplateRepo", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1336,6 +1654,23 @@ describe("resolveLatestCommitSha", () => {
     );
     // ref が判明しているので既定ブランチの問い合わせは不要
     expect(mockReposGet).not.toHaveBeenCalled();
+  });
+
+  it("スラッシュを含むブランチ名でも、スラッシュをパス区切りとして残した URL を組む", async () => {
+    // release/2026 のような ref は、GitHub の Commits API がスラッシュ込みでそのまま
+    // パスセグメントとして受け付ける。過剰にエスケープすると別のパスとして解釈される。
+    globalThis.fetch = vi.fn().mockResolvedValue(shaResponse("sha-release"));
+
+    const resolution = await resolveLatestCommitSha("owner", "repo", {
+      kind: "branch",
+      name: "release/2026",
+    });
+
+    expect(resolution).toEqual({ _tag: "Resolved", sha: "sha-release" });
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "https://api.github.com/repos/owner/repo/commits/release/2026",
+      expect.anything(),
+    );
   });
 
   it("ref 未指定の場合はリポジトリの既定ブランチの SHA を解決する", async () => {

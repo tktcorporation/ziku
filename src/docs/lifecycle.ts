@@ -123,6 +123,9 @@ interface LocationView {
 const LOCATION_VIEWS: Record<Location, LocationView> = {
   template: { subgraphId: "Template", title: "Template Repository", nodePrefix: "T", order: 0 },
   local: { subgraphId: "User", title: "User Project", nodePrefix: "U", order: 1 },
+  // ローカルに取得せず GitHub API 経由でのみ読む、テンプレートを使う複数のリポジトリ。
+  // 1 つのディレクトリに対応しないので、図でも template / local と別の枠に置く。
+  remote: { subgraphId: "Consumers", title: "Consumer Repositories", nodePrefix: "R", order: 2 },
 };
 
 /**

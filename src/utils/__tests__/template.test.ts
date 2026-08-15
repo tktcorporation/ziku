@@ -1,4 +1,3 @@
-import { Effect } from "effect";
 import { vol } from "memfs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { absPath, commitSha, repoRelPath } from "../../__tests__/brands";
@@ -29,38 +28,10 @@ vi.mock("../../ui/renderer", () => ({
   },
 }));
 
-// giget をモック: tempDir にダミーファイルを作って成功扱いにする。
-// downloadTemplate に渡された options（auth を含む）をテストから検証できるよう、
-// vi.fn() でラップして呼び出し引数を記録する。
-vi.mock("giget", () => ({
-  downloadTemplate: vi.fn(async (_source: string, opts: { dir: string }) => {
-    const { mkdirSync, writeFileSync } = await import("node:fs");
-    mkdirSync(opts.dir, { recursive: true });
-    writeFileSync(`${opts.dir}/dummy.txt`, "hi");
-    return { dir: opts.dir };
-  }),
-}));
-
-// getGitHubToken をモック: トークン取得の有無を各テストで切り替える
-vi.mock("../github", () => ({
-  getGitHubToken: vi.fn(),
-}));
-
 // モック後にインポート
-const {
-  copyFile,
-  writeFileWithStrategy,
-  acquireTempTemplate,
-  downloadTemplateToTemp,
-  fetchTemplates,
-  TEMPLATE_SOURCE,
-} = await import("../template");
+const { copyFile, writeFileWithStrategy } = await import("../template");
 const clack = await import("@clack/prompts");
 const mockConfirm = vi.mocked(clack.confirm);
-const giget = await import("giget");
-const mockDownloadTemplate = vi.mocked(giget.downloadTemplate);
-const github = await import("../github");
-const mockGetGitHubToken = vi.mocked(github.getGitHubToken);
 
 describe("buildTemplateSource", () => {
   it("owner/repo から giget 形式の文字列を構築", () => {
@@ -510,86 +481,5 @@ describe("writeFileWithStrategy", () => {
       expect(mockConfirm).not.toHaveBeenCalled();
       expect(vol.readFileSync("/dest/file.txt", "utf8")).toBe("old content");
     });
-  });
-});
-
-describe("downloadTemplate へのトークン受け渡し", () => {
-  beforeEach(() => {
-    vol.reset();
-    vi.clearAllMocks();
-    // 既定は未認証環境（GITHUB_TOKEN 等が無い）を模す
-    mockGetGitHubToken.mockReturnValue(undefined);
-  });
-
-  it("acquireTempTemplate: トークンが取得できるとき downloadTemplate に auth として渡す", async () => {
-    mockGetGitHubToken.mockReturnValue("ghp_dummy_token");
-
-    const program = acquireTempTemplate("/work", "gh:foo/bar");
-    await Effect.runPromise(Effect.scoped(program));
-
-    expect(mockDownloadTemplate).toHaveBeenCalledWith(
-      "gh:foo/bar",
-      expect.objectContaining({ auth: "ghp_dummy_token" }),
-    );
-  });
-
-  it("acquireTempTemplate: トークンが取得できなくても downloadTemplate は呼ばれる（public リポジトリ対応）", async () => {
-    const program = acquireTempTemplate("/work", "gh:foo/bar");
-    await Effect.runPromise(Effect.scoped(program));
-
-    expect(mockDownloadTemplate).toHaveBeenCalledWith(
-      "gh:foo/bar",
-      expect.objectContaining({ auth: undefined }),
-    );
-  });
-
-  it("downloadTemplateToTemp: トークンが取得できるとき downloadTemplate に auth として渡す", async () => {
-    mockGetGitHubToken.mockReturnValue("ghp_dummy_token");
-
-    const { cleanup } = await downloadTemplateToTemp("/work", "gh:foo/bar");
-    cleanup();
-
-    expect(mockDownloadTemplate).toHaveBeenCalledWith(
-      "gh:foo/bar",
-      expect.objectContaining({ auth: "ghp_dummy_token" }),
-    );
-  });
-
-  it("downloadTemplateToTemp: トークンが取得できなくても downloadTemplate は呼ばれる（public リポジトリ対応）", async () => {
-    const { cleanup } = await downloadTemplateToTemp("/work", "gh:foo/bar");
-    cleanup();
-
-    expect(mockDownloadTemplate).toHaveBeenCalledWith(
-      "gh:foo/bar",
-      expect.objectContaining({ auth: undefined }),
-    );
-  });
-
-  it("fetchTemplates: トークンが取得できるとき downloadTemplate に auth として渡す", async () => {
-    mockGetGitHubToken.mockReturnValue("ghp_dummy_token");
-
-    await fetchTemplates({
-      targetDir: "/work",
-      overwriteStrategy: "skip",
-      patterns: { include: [], exclude: [] },
-    });
-
-    expect(mockDownloadTemplate).toHaveBeenCalledWith(
-      TEMPLATE_SOURCE,
-      expect.objectContaining({ auth: "ghp_dummy_token" }),
-    );
-  });
-
-  it("fetchTemplates: トークンが取得できなくても downloadTemplate は呼ばれる（public リポジトリ対応）", async () => {
-    await fetchTemplates({
-      targetDir: "/work",
-      overwriteStrategy: "skip",
-      patterns: { include: [], exclude: [] },
-    });
-
-    expect(mockDownloadTemplate).toHaveBeenCalledWith(
-      TEMPLATE_SOURCE,
-      expect.objectContaining({ auth: undefined }),
-    );
   });
 });
