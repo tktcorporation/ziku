@@ -47,6 +47,14 @@ export const log = {
   error: (message: string) => p.log.error(message),
   step: (message: string) => p.log.step(message),
   message: (message: string) => p.log.message(message),
+  /**
+   * コマンドの出力ではない警告を stderr へ出す。
+   *
+   * `aggregate --json` のように stdout そのものが機械可読な出力であるコマンドがあるため、
+   * 実行環境の問題を伝えるだけの警告は stdout へ混ぜない。どのコマンドから呼ばれるか
+   * 分からない層（`utils/` 配下など）が警告を出すときはこちらを使う。
+   */
+  warnToStderr: (message: string) => p.log.warn(message, { output: process.stderr }),
 };
 
 /**

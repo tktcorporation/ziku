@@ -14,11 +14,13 @@ import {
   getGitHubToken,
   getLastCommitDate,
   getRepoIdentity,
+  isGitHubTokenFormat,
   listOwnerRepos,
   rateLimitedError,
-  resetGhCliTokenCache,
+  resetGitHubTokenCaches,
   unauthorizedError,
 } from "../github";
+import { log } from "../../ui/renderer";
 
 // `getGhCliToken` の gh CLI サブプロセス起動をテストから制御するためのモック。
 // テストファイル全体に適用し、実環境の `gh` インストール有無に依存させない。
@@ -26,11 +28,11 @@ vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(),
 }));
 
-// `getGhCliToken` はプロセス内キャッシュを持つ（{@link resetGhCliTokenCache}）。
+// `getGhCliToken` はプロセス内キャッシュを持つ（{@link resetGitHubTokenCaches}）。
 // テストの独立性を保つため、モックの呼び出し履歴・戻り値設定とキャッシュを毎テスト後に消す。
 afterEach(() => {
   vi.mocked(execFileSync).mockReset();
-  resetGhCliTokenCache();
+  resetGitHubTokenCaches();
 });
 
 /**
@@ -135,6 +137,66 @@ describe("getGitHubToken", () => {
 
     expect(getGitHubToken()).toBe("ghp_github");
   });
+
+  // 実行環境が `GITHUB_TOKEN` にトークン以外の定型値を置くことがある。そのまま
+  // Authorization ヘッダへ載せると GitHub が 401 を返し、未認証なら取得できる public
+  // テンプレートまで取れなくなる。
+  it("GitHub トークンの形をしていない環境変数は無視する", () => {
+    process.env.GITHUB_TOKEN = "proxy-injected";
+    process.env.GH_TOKEN = "proxy-injected";
+
+    expect(getGitHubToken()).toBeUndefined();
+  });
+
+  it("GITHUB_TOKEN の形が不正でも GH_TOKEN が有効ならそちらを使う", () => {
+    process.env.GITHUB_TOKEN = "proxy-injected";
+    process.env.GH_TOKEN = "ghp_valid_token";
+
+    expect(getGitHubToken()).toBe("ghp_valid_token");
+  });
+
+  // 警告は stdout ではなく stderr へ出す。`aggregate --json` の stdout は
+  // 機械可読な出力そのものなので、実行環境の問題を伝える警告を混ぜない。
+  it("無視したことを警告する（同じ変数につき 1 回だけ）", () => {
+    const warn = vi.spyOn(log, "warnToStderr").mockImplementation(() => {});
+    process.env.GITHUB_TOKEN = "proxy-injected";
+    delete process.env.GH_TOKEN;
+
+    getGitHubToken();
+    getGitHubToken();
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain("GITHUB_TOKEN");
+    warn.mockRestore();
+  });
+});
+
+describe("isGitHubTokenFormat", () => {
+  it.each([
+    "ghp_classicPersonalAccessToken",
+    "gho_oauthToken",
+    "ghu_userToServerToken",
+    // GitHub Actions が GITHUB_TOKEN に入れる installation token
+    "ghs_serverToServerToken",
+    "ghr_refreshToken",
+    "github_pat_fineGrainedToken",
+    // 接頭辞の導入前に発行された classic PAT
+    "0123456789abcdef0123456789abcdef01234567",
+  ])("トークンの形をしている値を受け入れる: %s", (token) => {
+    expect(isGitHubTokenFormat(token)).toBe(true);
+  });
+
+  it.each([
+    "proxy-injected",
+    "your-token-here",
+    "$GITHUB_TOKEN",
+    "ghp_",
+    "ghx_unknownPrefix",
+    // 40 桁に足りない 16 進数
+    "0123456789abcdef",
+  ])("トークンの形をしていない値を拒否する: %s", (value) => {
+    expect(isGitHubTokenFormat(value)).toBe(false);
+  });
 });
 
 describe("getGhCliToken", () => {
@@ -143,6 +205,12 @@ describe("getGhCliToken", () => {
     const token = getGhCliToken();
     // token が string なら gh CLI 経由で取得済み、undefined なら未インストール/未ログイン
     expect(token === undefined || typeof token === "string").toBe(true);
+  });
+
+  it("トークンの形をしていない出力は採用しない", () => {
+    vi.mocked(execFileSync).mockReturnValue("not logged in\n");
+
+    expect(getGhCliToken()).toBeUndefined();
   });
 });
 
@@ -1503,11 +1571,11 @@ describe("getGhCliToken のキャッシュ", () => {
     expect(execFileSync).toHaveBeenCalledTimes(1);
   });
 
-  it("resetGhCliTokenCache() の後は再実行する", () => {
+  it("resetGitHubTokenCaches() の後は再実行する", () => {
     vi.mocked(execFileSync).mockReturnValue("ghp_first\n");
     expect(getGhCliToken()).toBe("ghp_first");
 
-    resetGhCliTokenCache();
+    resetGitHubTokenCaches();
     vi.mocked(execFileSync).mockReturnValue("ghp_second\n");
     expect(getGhCliToken()).toBe("ghp_second");
 
