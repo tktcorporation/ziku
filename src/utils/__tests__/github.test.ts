@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { Option } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { commitSha, repoRelPath } from "../../__tests__/brands";
@@ -25,14 +25,48 @@ import { log } from "../../ui/renderer";
 // `getGhCliToken` の gh CLI サブプロセス起動をテストから制御するためのモック。
 // テストファイル全体に適用し、実環境の `gh` インストール有無に依存させない。
 vi.mock("node:child_process", () => ({
+  execFile: vi.fn(),
   execFileSync: vi.fn(),
 }));
+
+/**
+ * `git ls-remote` の標準出力を差し替える。
+ *
+ * `promisify(execFile)` が呼ぶのはコールバック版なので、コールバックを成功で呼ぶ実装を
+ * 差し込む。空文字を返せば「一致する参照が無い」= git でも引けない状況になる。
+ */
+function mockLsRemoteFailure(): void {
+  vi.mocked(execFile).mockImplementation(((...args: unknown[]) => {
+    const callback = args.at(-1) as (error: Error) => void;
+    callback(new Error("git ls-remote failed"));
+    return undefined;
+  }) as unknown as typeof execFile);
+}
+
+function mockLsRemoteOutput(stdout: string): void {
+  vi.mocked(execFile).mockImplementation(((...args: unknown[]) => {
+    const callback = args.at(-1) as (
+      error: null,
+      result: { stdout: string; stderr: string },
+    ) => void;
+    callback(null, { stdout, stderr: "" });
+    return undefined;
+  }) as unknown as typeof execFile);
+}
 
 // `getGhCliToken` はプロセス内キャッシュを持つ（{@link resetGitHubTokenCaches}）。
 // テストの独立性を保つため、モックの呼び出し履歴・戻り値設定とキャッシュを毎テスト後に消す。
 afterEach(() => {
   vi.mocked(execFileSync).mockReset();
+  vi.mocked(execFile).mockReset();
   resetGitHubTokenCaches();
+});
+
+// 既定は「git でも引けない」。API の失敗をそのまま観察したいテストが、git フォールバックの
+// 成功で結果を変えられないようにする。git で引ける状況を見るテストは mockLsRemoteOutput で
+// 上書きする。
+beforeEach(() => {
+  mockLsRemoteFailure();
 });
 
 /**
@@ -1669,6 +1703,40 @@ describe("fetchDefaultBranch", () => {
       reason: "Not Found",
     });
   });
+
+  // 未認証の REST API は IP あたり 60 req/h で、共有 IP から実行すると枯れる。git の
+  // プロトコルはこの枠を使わないので、待てば直る失敗は git で引き直す。
+  it("API が引けなかった場合は git ls-remote で解決する", async () => {
+    mockReposGet.mockRejectedValue(new Error("API rate limit exceeded"));
+    mockLsRemoteOutput("ref: refs/heads/trunk\tHEAD\n");
+
+    expect(await fetchDefaultBranch("owner", "repo")).toEqual({
+      _tag: "Resolved",
+      name: "trunk",
+    });
+  });
+
+  it("git でも引けなければ API 側の失敗理由を保つ", async () => {
+    mockReposGet.mockRejectedValue(new Error("API rate limit exceeded"));
+    mockLsRemoteFailure();
+
+    expect(await fetchDefaultBranch("owner", "repo")).toEqual({
+      _tag: "Unresolved",
+      reason: "API rate limit exceeded",
+    });
+  });
+
+  // トークン拒否は人がトークンを直すまで解消しない。git で引けてしまうと、権限の切れた
+  // トークンのまま同期が進む。
+  it("トークンを拒否された場合は git へ倒さない", async () => {
+    mockReposGet.mockRejectedValue(apiError(401, "Bad credentials"));
+    mockLsRemoteOutput("ref: refs/heads/trunk\tHEAD\n");
+
+    expect(await fetchDefaultBranch("owner", "repo")).toEqual({
+      _tag: "AuthRejected",
+      detail: "Bad credentials",
+    });
+  });
 });
 
 /**
@@ -1816,6 +1884,40 @@ describe("resolveLatestCommitSha", () => {
     expect(
       await resolveLatestCommitSha("owner", "repo", { kind: "branch", name: "develop" }),
     ).toEqual({ _tag: "Unresolved", reason: "Network error" });
+  });
+
+  it("API が引けなかった場合は git ls-remote で SHA を解決する", async () => {
+    const sha = "1111111111111111111111111111111111111111";
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: false, status: 403, statusText: "rate limit exceeded" });
+    mockLsRemoteOutput(`${sha}\trefs/heads/develop\n`);
+
+    expect(
+      await resolveLatestCommitSha("owner", "repo", { kind: "branch", name: "develop" }),
+    ).toEqual({ _tag: "Resolved", sha });
+  });
+
+  it("git でも引けなければ API 側の失敗理由を保つ", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: false, status: 403, statusText: "rate limit exceeded" });
+    mockLsRemoteFailure();
+
+    expect(
+      await resolveLatestCommitSha("owner", "repo", { kind: "branch", name: "develop" }),
+    ).toEqual({ _tag: "Unresolved", reason: "rate limit exceeded" });
+  });
+
+  it("トークンを拒否された場合は git へ倒さない", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: false, status: 401, statusText: "Unauthorized" });
+    mockLsRemoteOutput("1111111111111111111111111111111111111111\trefs/heads/develop\n");
+
+    expect(
+      await resolveLatestCommitSha("owner", "repo", { kind: "branch", name: "develop" }),
+    ).toEqual({ _tag: "AuthRejected", detail: "Unauthorized" });
   });
 });
 

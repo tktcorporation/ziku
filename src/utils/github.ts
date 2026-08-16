@@ -16,6 +16,7 @@ import type {
 import { blobShaSchema, commitShaSchema } from "../modules/schemas";
 import { log } from "../ui/renderer";
 import { transportTextToBytes } from "./file-content";
+import { lsRemoteCommitSha, lsRemoteDefaultBranch } from "./git-remote";
 import { ZIKU_CONFIG_FILE } from "./ziku-config";
 
 export interface PushOptions {
@@ -1239,10 +1240,13 @@ function isNetworkFailure(cause: unknown): boolean {
  * 中断、待てば直る失敗なら控えのブランチ名へ倒す）ので、undefined へ畳むと「待てば直る
  * 失敗」と「人が直すまで変わらない失敗」が同じ結末になる。
  */
-export function fetchDefaultBranch(owner: string, repo: string): Promise<DefaultBranchResolution> {
+export async function fetchDefaultBranch(
+  owner: string,
+  repo: string,
+): Promise<DefaultBranchResolution> {
   const octokit = new Octokit({ auth: getGitHubToken() });
 
-  return Effect.runPromise(
+  const viaApi = await Effect.runPromise(
     Effect.tryPromise({
       try: () => octokit.repos.get({ owner, repo }),
       catch: classifyOctokitFailure,
@@ -1254,7 +1258,50 @@ export function fetchDefaultBranch(owner: string, repo: string): Promise<Default
       Effect.merge,
     ),
   );
+
+  return match(viaApi)
+    .with({ _tag: "Resolved" }, (r): DefaultBranchResolution => r)
+    .with({ _tag: "AuthRejected" }, (f): DefaultBranchResolution => f)
+    .with({ _tag: "Unresolved" }, async (f): Promise<DefaultBranchResolution> => {
+      const name = await lsRemoteDefaultBranch(owner, repo);
+      if (name === undefined) return f;
+      logGitFallback(`the default branch of ${owner}/${repo}`, f.reason);
+      return { _tag: "Resolved", name };
+    })
+    .exhaustive();
 }
+
+/**
+ * REST API で引けなかった参照を git で引き直したことを伝える。
+ *
+ * 黙って切り替えない理由: API が使えない状態（未認証の枠切れ・接続断）は、`push` の PR 作成
+ * など git では代われない操作でそのまま失敗として現れる。取得だけが通っていると原因が
+ * 見えないため、切り替えた事実と API 側の理由を残す。
+ *
+ * stdout を使わないのは、`aggregate --json` の stdout が機械可読な出力そのものであるため
+ * （`log.warnToStderr`）。
+ */
+function logGitFallback(what: string, apiReason: string): void {
+  log.warnToStderr(
+    `GitHub API could not resolve ${what} (${summarizeFailureReason(apiReason)}) — used git ls-remote instead.`,
+  );
+}
+
+/**
+ * 失敗理由を 1 行の通知に収まる長さへ切り詰める。
+ *
+ * GitHub のレート制限の本文のように、案内文とドキュメント URL まで含んだ長い理由が載る。
+ * 切り替えを伝える 1 行に丸ごと入れると、本題（git で引き直したこと）が埋もれる。
+ */
+function summarizeFailureReason(reason: string): string {
+  const firstLine = reason.split("\n")[0].trim();
+  return firstLine.length <= FAILURE_REASON_MAX_LENGTH
+    ? firstLine
+    : `${firstLine.slice(0, FAILURE_REASON_MAX_LENGTH).trimEnd()}…`;
+}
+
+/** 通知 1 行に載せる失敗理由の上限。原因が判る程度に残しつつ、折り返しを 2 行前後に抑える長さ。 */
+const FAILURE_REASON_MAX_LENGTH = 80;
 
 /**
  * 任意の git ref（ブランチ名 / タグ名 / コミット SHA）が指すコミット SHA を取得する。
@@ -1268,13 +1315,17 @@ export function fetchDefaultBranch(owner: string, repo: string): Promise<Default
  * 別のコミットを指すか 404 になる。`/` は区切りとして残す。このエンドポイントは
  * `heads/BRANCH_NAME` のように `/` を含む ref をそのまま受け取る。
  */
-function fetchCommitSha(owner: string, repo: string, ref: string): Promise<CommitShaResolution> {
+async function fetchCommitSha(
+  owner: string,
+  repo: string,
+  ref: string,
+): Promise<CommitShaResolution> {
   const headers = {
     Accept: "application/vnd.github.sha",
     ...githubAuthHeaders(getGitHubToken()),
   };
 
-  return Effect.runPromise(
+  const viaApi = await Effect.runPromise(
     Effect.tryPromise({
       try: async (): Promise<CommitShaResolution> => {
         const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeGitHubPathSegments(ref)}`;
@@ -1290,6 +1341,18 @@ function fetchCommitSha(owner: string, repo: string, ref: string): Promise<Commi
       }),
     }).pipe(Effect.merge),
   );
+
+  return match(viaApi)
+    .with({ _tag: "Resolved" }, (r): CommitShaResolution => r)
+    .with({ _tag: "AuthRejected" }, (f): CommitShaResolution => f)
+    .with({ _tag: "Unresolved" }, async (f): Promise<CommitShaResolution> => {
+      // git の出力も外の世界から入ってくる値なので、API レスポンスと同じスキーマを通す。
+      const parsed = commitShaSchema.safeParse(await lsRemoteCommitSha(owner, repo, ref));
+      if (!parsed.success) return f;
+      logGitFallback(`${ref} of ${owner}/${repo}`, f.reason);
+      return { _tag: "Resolved", sha: parsed.data };
+    })
+    .exhaustive();
 }
 
 /**
