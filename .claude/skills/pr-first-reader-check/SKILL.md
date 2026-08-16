@@ -159,3 +159,5 @@ git log --format='%h %s%n%b' "${base:?origin/HEAD 未解決。git remote set-hea
 ## 関連ルール
 
 成果物を書くときは `@.claude/rules/conclusion-only-output.md` も適用する: **結論だけを書き、そこに至る過程・対比・自己言及（どう調べたか／当初こう考えたが訂正した／別ツールはこう言ったが覆った）を本文に残さない。**
+
+本スキルは①文脈②可読性を見る。それとは別に、LLM 口調・論証の厳密さ・段落構成・冗長排除など**文章としての品質**は `@.claude/skills/technical-writing-style/SKILL.md` が見る。PR 本文を書くときは両スキルを併用する（重複領域なし）。

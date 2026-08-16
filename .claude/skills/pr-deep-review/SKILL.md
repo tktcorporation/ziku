@@ -7,7 +7,7 @@ description: PR・ブランチ差分を「仕様面・コードの正しさ・�
 
 PR / ブランチ差分を、**diff の外側まで読んで**「仕様通りか・コードとして正しいか・読みやすく作り込まれているか・既存の設計と整合しているか」を判定するスキル。
 
-**レビュー中は作業ツリーを変更しない**: Step 0〜4 を通じて `git diff` / `git show` / `git log` / `rg` など読み取り専用の操作だけを使う。`git checkout` / `git switch` / `git reset` / `git stash` で HEAD・作業ツリー・ブランチ状態を動かさない。別リビジョンの中身を見る必要があるときは `git show <SHA>:<path>` で読むか、`EnterWorktree` / `git worktree add` で隔離した別ディレクトリを使う（`.claude/rules/parallel-work.md` の「他プロセスの変更を絶対に消さない」と同じ理由。Agent 並列 dispatch で複数のレビュー担当が同じチェックアウトを触ると、他の作業や他レンズの調査結果を壊しうる）。
+**レビュー中は作業ツリーを変更しない**: Step 0〜4 を通じて `git diff` / `git show` / `git log` / `rg` など読み取り専用の操作だけを使う。`git checkout` / `git switch` / `git reset` / `git stash` で HEAD・作業ツリー・ブランチ状態を動かさない。別リビジョンの中身を見る必要があるときは `git show <SHA>:<path>` で読むか、`EnterWorktree` / `git worktree add` で隔離した別ディレクトリを使う（`.claude/rules/worktree.md` の「他プロセスの変更を絶対に消さない」と同じ理由。Agent 並列 dispatch で複数のレビュー担当が同じチェックアウトを触ると、他の作業や他レンズの調査結果を壊しうる）。
 
 ## 何のためのスキルか（位置づけ）
 

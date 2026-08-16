@@ -41,3 +41,42 @@ npx ziku pull
 # ローカルの変更をテンプレへ反映（PR が立つ）
 npx ziku push
 ```
+
+## push の落とし穴（--files の厳密絞り・偽 conflict 回避）
+
+特定ファイルだけをテンプレへ送りたいとき、`ziku push` の非自明な挙動を知らないと、共有テンプレに無関係なローカル固有ファイルが漏れたり、push 全体が中断したりする。
+
+### `--files` でのスコープは「実 push」でのみ効く
+
+特定ファイルだけ送るときは非対話で指定する。
+
+```bash
+npx ziku push --yes --files=<path[,path...]> -m "<PR title>"
+```
+
+| 操作            | `--files` の効き方                                             |
+| --------------- | -------------------------------------------------------------- |
+| 実 push         | **厳密に絞る**（指定ファイルだけが対象）                       |
+| `push --dryRun` | **`--files` を無視して全候補を表示**（スコープ確認に使えない） |
+
+スコープ確認は dry-run ではなく、**実 push 直前に出る「N file(s) selected via --files」とファイル表**で行う。`mise.toml` / `settings.json` / `devcontainer.json` のようなローカル固有ファイルを共有テンプレに漏らさないため、skill / rules だけを `--files` で明示指定する。
+
+### 偽 conflict とその回避
+
+過去に push 済みだが `lock.json` の `baseHashes` に未記録のファイルは、次回 push で `conflicts` 扱いになる。`--files` に含めると `unresolvedConflictError` で push 全体が中断する（`ziku pull` は無関係ファイルも巻き込むので、ここでは使いたくない）。
+
+回避: `lock.json` の `baseHashes[<path>]` に**テンプレ現行内容のハッシュ**を手動記録すると、そのファイルが `localOnly` 化してクリーンに push できる。push 内容は常にローカル側なので、`baseHashes` の値が誤っていても誤配は起きない。
+
+```bash
+# テンプレ現行内容のハッシュを取得して baseHashes に記録する
+gh api repos/tktcorporation/.github/contents/<path> --jq .content | base64 -d | sha256sum
+```
+
+ハッシュ算法は `sha256(file content, utf-8).hex` ＝ `sha256sum <file>` と一致する。
+
+### push 後の lock.json と新規ファイルの track
+
+- push しても `lock.json` の `baseRef` は更新されない。テンプレ側 PR がマージされた後に `ziku pull` を実行して初めて baseRef/hash が追従し、`status` の push pending が消える。
+- 新規ルール等は `npx ziku track <path>` で include に追記してから push する。未 track でも wildcard `.claude/rules/*.md` でマッチはするが、`status` では modified・`diff` では untracked と表示が割れるため、明示 track が確実。
+- `npx ziku` を `/tmp` 等のラッパーシェルスクリプト経由で実行すると auto-mode classifier に拒否される。`npx ziku <cmd>` を直接コマンドとして叩く。
+- ziku ツール自体の改善要望は `tktcorporation/ziku` リポジトリに Issue を出す（業務 Issue の集約先とは別）。

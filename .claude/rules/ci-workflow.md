@@ -31,7 +31,9 @@ push 前に CI をローカルで再現し、push 後は全チェックが pass 
 
 ## changeset
 
-**すべての PR に新規の `.changeset/*.md` が 1 つ以上必要。** CI の changeset job が base branch との差分で新規追加を検査し、無ければ fail する。ドキュメントのみ・リファクタなど版に影響しない変更も対象で、その場合は frontmatter を空にして bump 無しを表現する。bump するパッケージ名は `package.json` の `name` を参照する。
+changeset を使うプロジェクトでは、その CI が何を要求するかを確認して従う。全 PR に新規の `.changeset/*.md` を要求する CI なら、ドキュメントのみ・リファクタなど版に影響しない変更でも、frontmatter を空にしたファイルを追加して bump 無しを表明する。要求しない CI なら、版に影響する変更のときだけ追加する。bump するパッケージ名は `package.json` の `name` を参照する。
+
+確認先は「変更を出す先のリポジトリ」の CI 設定になる。サブモジュールや別リポジトリで作業しているときは、手元のワークスペース直下の `.github/workflows/` を見てもその要求は分からない。
 
 ## 禁止事項
 

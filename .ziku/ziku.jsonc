@@ -48,5 +48,12 @@
     ".claude/skills/upstream-fix",
     ".claude/skills/evergreen-writing",
     ".claude/skills/package-upgrade/SKILL.md",
+    ".claude/output-styles/*.md",
+    ".claude/skills/functional-ddd/SKILL.md",
+    ".claude/skills/pr-review-loop",
+    ".config/docs-lifecycle.json",
+    "scripts/docs-lifecycle.ts",
+    "scripts/lib/docs-lifecycle",
+    ".claude/rules/template-sync-boundary.md",
   ],
 }
