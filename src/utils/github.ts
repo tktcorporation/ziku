@@ -546,7 +546,7 @@ function readEnvGitHubToken(): string | undefined {
 
     if (!warnedInvalidEnvTokens.has(name)) {
       warnedInvalidEnvTokens.add(name);
-      log.warn(
+      log.warnToStderr(
         `${name} is not in GitHub token format — ignoring it and continuing unauthenticated.`,
       );
     }

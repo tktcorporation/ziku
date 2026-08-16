@@ -155,8 +155,10 @@ describe("getGitHubToken", () => {
     expect(getGitHubToken()).toBe("ghp_valid_token");
   });
 
+  // 警告は stdout ではなく stderr へ出す。`aggregate --json` の stdout は
+  // 機械可読な出力そのものなので、実行環境の問題を伝える警告を混ぜない。
   it("無視したことを警告する（同じ変数につき 1 回だけ）", () => {
-    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+    const warn = vi.spyOn(log, "warnToStderr").mockImplementation(() => {});
     process.env.GITHUB_TOKEN = "proxy-injected";
     delete process.env.GH_TOKEN;
 
