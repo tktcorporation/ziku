@@ -14,6 +14,7 @@ import type {
   TemplateRef,
 } from "../modules/schemas";
 import { blobShaSchema, commitShaSchema } from "../modules/schemas";
+import { log } from "../ui/renderer";
 import { transportTextToBytes } from "./file-content";
 import { ZIKU_CONFIG_FILE } from "./ziku-config";
 
@@ -487,6 +488,73 @@ function isForkOf(
 }
 
 /**
+ * GitHub が発行するトークンの形。
+ *
+ * `gh*_` は用途ごとの接頭辞（classic PAT / OAuth / user-to-server / server-to-server /
+ * refresh）で、`ghs_` には GitHub Actions が `GITHUB_TOKEN` に入れる installation token が
+ * 含まれる。`github_pat_` は fine-grained PAT。40 桁の 16 進数は接頭辞の導入前に発行された
+ * classic PAT で、いまも有効なため受け入れる。
+ *
+ * 本体の長さと文字種を絞らないのは、判定の目的が「トークンかどうか」であって「使える
+ * トークンかどうか」ではないため。長さや文字種を GitHub の現行仕様に合わせて狭めると、
+ * 仕様が変わったときに本物のトークンを弾いてしまい、その症状は private リポジトリの
+ * 404 という無関係な形で出る。使えないトークンを弾くのは GitHub の 401 の仕事なので、
+ * ここでは接頭辞だけを見て、通した先の判断は GitHub に任せる。
+ */
+const GITHUB_TOKEN_FORMATS: readonly RegExp[] = [
+  /^gh[pousr]_[A-Za-z0-9_]+$/,
+  /^github_pat_[A-Za-z0-9_]+$/,
+  /^[0-9a-f]{40}$/,
+];
+
+/**
+ * GitHub トークンとして送ってよい形かどうかを判定する。
+ *
+ * トークンではない文字列を Authorization ヘッダに載せる経路をここで塞ぐ。判定の範囲は
+ * {@link GITHUB_TOKEN_FORMATS} を参照。
+ */
+export function isGitHubTokenFormat(token: string): boolean {
+  return GITHUB_TOKEN_FORMATS.some((format) => format.test(token));
+}
+
+/**
+ * 形式が不正で無視した環境変数の名前。同じ変数について警告を一度だけ出すために持つ。
+ *
+ * `githubFetch` は API リクエストのたびに {@link getGitHubToken} を呼ぶので、記録しないと
+ * 1 コマンドの実行で同じ警告が何十回も出る。
+ */
+const warnedInvalidEnvTokens = new Set<string>();
+
+/**
+ * 環境変数からトークンを読む。GitHub トークンの形をしていない値は無視して次の候補へ進む。
+ *
+ * 形式検査を入れる理由: 実体はトークンでないプレースホルダ文字列（サンドボックス実行環境が
+ * `GITHUB_TOKEN` に置く定型値など）をそのまま Authorization ヘッダへ載せると、GitHub は
+ * 401 を返す。ziku は 401 を「人がトークンを直すまで解消しない失敗」として扱う
+ * （{@link classifyGitHubApiFailure}）ため、未認証なら public テンプレートを問題なく取得
+ * できる環境でも、テンプレート取得そのものが中断する。トークンの形をしていない値は
+ * 「トークンが無い」と同じに扱い、未認証の経路へ倒す。
+ *
+ * 黙って無視はしない。トークンを設定したつもりの利用者にとっては、private リポジトリの
+ * 404 という無関係な症状に化けるため、無視した事実と変数名を警告に出す。
+ */
+function readEnvGitHubToken(): string | undefined {
+  for (const name of ["GITHUB_TOKEN", "GH_TOKEN"] as const) {
+    const value = process.env[name];
+    if (!value) continue;
+    if (isGitHubTokenFormat(value)) return value;
+
+    if (!warnedInvalidEnvTokens.has(name)) {
+      warnedInvalidEnvTokens.add(name);
+      log.warn(
+        `${name} is not in GitHub token format — ignoring it and continuing unauthenticated.`,
+      );
+    }
+  }
+  return undefined;
+}
+
+/**
  * GitHub トークンを環境変数または gh CLI から取得
  *
  * 優先順位:
@@ -494,14 +562,14 @@ function isForkOf(
  *   2. GH_TOKEN 環境変数
  *   3. `gh auth token` コマンド出力（gh CLI がインストール済みの場合）
  *
+ * どの経路も {@link isGitHubTokenFormat} を通った値だけを返す。通らなかった値の扱いは
+ * {@link readEnvGitHubToken} を参照。
+ *
  * 背景: gh CLI でログイン済みなのにトークンを手動入力させるのは不親切。
  * 多くの開発者は `gh auth login` 済みなので、そのトークンを自動取得する。
  */
 export function getGitHubToken(): string | undefined {
-  const envToken = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
-  if (envToken) return envToken;
-
-  return getGhCliToken();
+  return readEnvGitHubToken() ?? getGhCliToken();
 }
 
 /**
@@ -520,7 +588,7 @@ let ghCliTokenCache: { readonly token: string | undefined } | undefined;
  * gh CLI の `gh auth token` からトークンを取得する。
  * gh CLI が未インストール or 未ログインの場合は undefined を返す。
  *
- * 結果はプロセス内でキャッシュされる（{@link resetGhCliTokenCache} 参照）。
+ * 結果はプロセス内でキャッシュされる（{@link resetGitHubTokenCaches} 参照）。
  */
 export function getGhCliToken(): string | undefined {
   if (ghCliTokenCache !== undefined) return ghCliTokenCache.token;
@@ -535,9 +603,7 @@ export function getGhCliToken(): string | undefined {
         }).trim(),
       ).pipe(
         Effect.flatMap((t) =>
-          t && (t.startsWith("ghp_") || t.startsWith("gho_") || t.startsWith("github_pat_"))
-            ? Effect.succeed(t)
-            : Effect.fail("invalid token format" as const),
+          isGitHubTokenFormat(t) ? Effect.succeed(t) : Effect.fail("invalid token format" as const),
         ),
         Effect.option,
       ),
@@ -548,14 +614,15 @@ export function getGhCliToken(): string | undefined {
 }
 
 /**
- * `getGhCliToken` のモジュールレベルキャッシュをリセットする。
+ * トークン取得がプロセス内に持つ状態（gh CLI の結果キャッシュと、形式不正な環境変数に
+ * ついて警告済みかの記録）をリセットする。
  *
- * テストで gh CLI の認証状態（またはそのモック）を切り替える前に呼ぶこと。
- * プロダクションコードから呼ぶ必要はない（プロセス寿命の間キャッシュが有効という
- * 前提のため）。
+ * テストで gh CLI の認証状態（またはそのモック）や環境変数を切り替える前に呼ぶこと。
+ * プロダクションコードから呼ぶ必要はない（どちらもプロセス寿命の間は変わらない前提のため）。
  */
-export function resetGhCliTokenCache(): void {
+export function resetGitHubTokenCaches(): void {
   ghCliTokenCache = undefined;
+  warnedInvalidEnvTokens.clear();
 }
 
 /**
