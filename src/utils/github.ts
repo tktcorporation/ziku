@@ -1262,8 +1262,8 @@ export async function fetchDefaultBranch(
   return match(viaApi)
     .with({ _tag: "Resolved" }, (r): DefaultBranchResolution => r)
     .with({ _tag: "AuthRejected" }, (f): DefaultBranchResolution => f)
-    .with({ _tag: "Unresolved" }, (f): DefaultBranchResolution => {
-      const name = lsRemoteDefaultBranch(owner, repo);
+    .with({ _tag: "Unresolved" }, async (f): Promise<DefaultBranchResolution> => {
+      const name = await lsRemoteDefaultBranch(owner, repo);
       if (name === undefined) return f;
       logGitFallback(`the default branch of ${owner}/${repo}`, f.reason);
       return { _tag: "Resolved", name };
@@ -1345,9 +1345,9 @@ async function fetchCommitSha(
   return match(viaApi)
     .with({ _tag: "Resolved" }, (r): CommitShaResolution => r)
     .with({ _tag: "AuthRejected" }, (f): CommitShaResolution => f)
-    .with({ _tag: "Unresolved" }, (f): CommitShaResolution => {
+    .with({ _tag: "Unresolved" }, async (f): Promise<CommitShaResolution> => {
       // git の出力も外の世界から入ってくる値なので、API レスポンスと同じスキーマを通す。
-      const parsed = commitShaSchema.safeParse(lsRemoteCommitSha(owner, repo, ref));
+      const parsed = commitShaSchema.safeParse(await lsRemoteCommitSha(owner, repo, ref));
       if (!parsed.success) return f;
       logGitFallback(`${ref} of ${owner}/${repo}`, f.reason);
       return { _tag: "Resolved", sha: parsed.data };

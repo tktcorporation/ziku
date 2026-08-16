@@ -1,4 +1,5 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { Effect, Option } from "effect";
 
 /** テンプレートリポジトリのデフォルト名（優先順） */
@@ -91,22 +92,25 @@ const LS_REMOTE_TIMEOUT_MS = 10_000;
  * 共有 IP から実行する環境ではこの枠が他の利用者と混ざって枯れる。git のプロトコルは
  * この枠を消費しないので、参照を引くだけの用途は git 側で足りる。
  *
+ * 同期版（`execFileSync`）を使わないのは、`aggregate` がリポジトリごとの問い合わせを並列に
+ * 走らせるため。同期実行はイベントループを止めるので、1 本が応答を待つ間ほかの問い合わせも
+ * 進まず、並列度の指定が効かなくなる。
+ *
  * `GIT_TERMINAL_PROMPT=0` を渡すのは、認証情報を持たない private リポジトリに対して
  * git が対話プロンプトを出し、非対話実行のまま応答待ちで止まるのを防ぐため。
  */
-function lsRemote(args: readonly string[]): string | undefined {
-  return Option.getOrUndefined(
-    Effect.runSync(
-      Effect.try(() =>
-        execFileSync("git", ["ls-remote", ...args], {
-          encoding: "utf-8",
-          timeout: LS_REMOTE_TIMEOUT_MS,
-          stdio: ["pipe", "pipe", "pipe"],
-          env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-        }),
-      ).pipe(Effect.option),
-    ),
+async function lsRemote(args: readonly string[]): Promise<string | undefined> {
+  const result = await Effect.runPromise(
+    Effect.tryPromise(() =>
+      promisify(execFile)("git", ["ls-remote", ...args], {
+        encoding: "utf-8",
+        timeout: LS_REMOTE_TIMEOUT_MS,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      }),
+    ).pipe(Effect.option),
   );
+
+  return Option.getOrUndefined(result)?.stdout;
 }
 
 /** `git ls-remote` に渡す GitHub リポジトリの URL。 */
@@ -120,8 +124,11 @@ function gitHubRepoUrl(owner: string, repo: string): string {
  * `HEAD` がどの参照を指しているかを聞く。GitHub のリモート HEAD はリポジトリ設定の
  * 既定ブランチを指すため、REST API の `default_branch` と同じ名前が返る。
  */
-export function lsRemoteDefaultBranch(owner: string, repo: string): string | undefined {
-  const output = lsRemote(["--symref", gitHubRepoUrl(owner, repo), "HEAD"]);
+export async function lsRemoteDefaultBranch(
+  owner: string,
+  repo: string,
+): Promise<string | undefined> {
+  const output = await lsRemote(["--symref", gitHubRepoUrl(owner, repo), "HEAD"]);
   if (output === undefined) return undefined;
 
   return /^ref:\s+refs\/heads\/(?<branch>\S+)\s+HEAD$/m.exec(output)?.groups?.branch;
@@ -137,12 +144,16 @@ export function lsRemoteDefaultBranch(owner: string, repo: string): string | und
  * 注釈付きタグには `^{}` を付けた参照も併せて聞く。`refs/tags/<name>` はタグオブジェクト自身の
  * SHA を返し、それはコミットの SHA ではないため、剥がした側を優先する。
  */
-export function lsRemoteCommitSha(owner: string, repo: string, ref: string): string | undefined {
+export async function lsRemoteCommitSha(
+  owner: string,
+  repo: string,
+  ref: string,
+): Promise<string | undefined> {
   const branchRef = `refs/heads/${ref}`;
   const tagRef = `refs/tags/${ref}`;
   const peeledTagRef = `${tagRef}^{}`;
 
-  const output = lsRemote([gitHubRepoUrl(owner, repo), branchRef, tagRef, peeledTagRef]);
+  const output = await lsRemote([gitHubRepoUrl(owner, repo), branchRef, tagRef, peeledTagRef]);
   if (output === undefined) return undefined;
 
   const shaByRef = new Map(
