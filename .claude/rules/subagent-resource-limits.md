@@ -25,7 +25,7 @@ lint/format/typecheck/test/ビルドコマンドを実行する場合は、同�
 
 **Why**: Workflow ツールの `agent()` は `min(16, cpu核数-2)` で同時実行数を
 自動的に制限するが、Task/Agent ツール経由のサブエージェント
-(subagent-driven-development スキル等) には同様の上限がない。vCPU数が少なく
+(実装を委譲するスキル等) には同様の上限がない。vCPU数が少なく
 メモリに余裕の無い devcontainer で検証ツールチェーンを積んだサブエージェント
 を無制限に並列化すると、メモリ枯渇からホスト全体の OOM killer 発火に直結する。
 

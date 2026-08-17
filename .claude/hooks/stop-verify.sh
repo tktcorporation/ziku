@@ -32,8 +32,17 @@ fi
 command -v mise >/dev/null 2>&1 || exit 0
 "${guard[@]+"${guard[@]}"}" mise tasks ls --no-header 2>/dev/null | awk '{print $1}' | grep -qx 'claude-verify' || exit 0
 
-if errors="$("${guard[@]+"${guard[@]}"}" mise run --quiet claude-verify 2>&1)"; then
-  exit 0
+# timeout は対象プロセスがハングした場合 124（gtimeout の -k 経由 SIGKILL なら 137）を
+# 出力なしで返す。空出力を「違反なし」と誤判定すると検証未完了のまま完了扱いになるため、
+# 終了コードを明示的に見て区別する（set -e 下で終了コードを失わないよう一時的に無効化）。
+set +e
+errors="$("${guard[@]+"${guard[@]}"}" mise run --quiet claude-verify 2>&1)"
+status=$?
+set -e
+[[ "$status" -eq 0 ]] && exit 0
+
+if [[ "$status" -eq 124 || "$status" -eq 137 ]]; then
+  errors="claude-verify がタイムアウトしました（300秒超過、exit ${status}）。検証が完了していません。"
 fi
 
 # mise が失敗時に "[task-name] ERROR task failed" を末尾に追記するので除去

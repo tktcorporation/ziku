@@ -42,8 +42,17 @@ command -v mise >/dev/null 2>&1 || exit 0
 file="$(echo "$input" | jq -r '.tool_input.file_path // .tool_input.path // empty' 2>/dev/null || true)"
 [[ -z "$file" || ! -f "$file" ]] && exit 0
 
-if diag="$("${guard[@]+"${guard[@]}"}" mise run --quiet claude-postedit -- "$file" 2>&1)"; then
-  exit 0
+# timeout は対象プロセスがハングした場合 124（gtimeout の -k 経由 SIGKILL なら 137）を
+# 出力なしで返す。空出力を「違反なし」と誤判定すると診断未完了のまま通過扱いになるため、
+# 終了コードを明示的に見て区別する（set -e 下で終了コードを失わないよう一時的に無効化）。
+set +e
+diag="$("${guard[@]+"${guard[@]}"}" mise run --quiet claude-postedit -- "$file" 2>&1)"
+status=$?
+set -e
+[[ "$status" -eq 0 ]] && exit 0
+
+if [[ "$status" -eq 124 || "$status" -eq 137 ]]; then
+  diag="claude-postedit がタイムアウトしました（120秒超過、exit ${status}）。lint/format が完了していません。"
 fi
 
 # mise が失敗時に "[task-name] ERROR task failed" を末尾に追記するので除去

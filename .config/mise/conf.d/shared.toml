@@ -29,3 +29,23 @@ pipx.uvx = true
 [tasks.ziku]
 run = "npx ziku@latest"
 description = "Run ziku CLI"
+
+# docs の鮮度とリンク切れを検査する。引数は `mise run lint-docs -- --list` の
+# ように `--` の後ろへ渡す (--list で違反していない doc も含む一覧、--json で
+# 機械可読な出力)。設定 `.config/docs-lifecycle.json` が無いリポジトリでは
+# スクリプト側が警告を出して何もしない。
+#
+# bun で動かす理由は、npm パッケージを import した TypeScript を node_modules も
+# package.json も無いまま実行できること (auto-install が依存をグローバル
+# キャッシュへ解決する)。同期先が JS のパッケージ管理を持つとは限らないので、
+# 依存の解決をランタイムへ寄せている。
+#
+# bun の用意を [tools] やタスクの tools フィールドではなく run 内の `mise exec` で
+# 行うのは、この設定が複数のリポジトリへ同期されるため。[tools] に書くと
+# auto_install がディレクトリ移動のたびに効き、docs を持たないリポジトリにも bun が
+# 入る。タスクの tools フィールドはそれを避けられるが、このフィールドを知らない
+# 古い mise はファイル全体をパースエラーにするので、同じファイルに置いた他のタスクや
+# [tools] まで巻き添えになる。run は単なる文字列なのでその失敗の仕方をしない。
+[tasks.lint-docs]
+run = "mise exec bun@latest -- bun run scripts/docs-lifecycle.ts"
+description = "docs の鮮度とリンク切れを検査する"

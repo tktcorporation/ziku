@@ -56,11 +56,18 @@ DENY_JSON
   fi
 done
 
-# ast-grep ルールファイルも保護（sgconfig.yml の ruleDirs: .ast-grep/rules 配下のみ。
-# */rules/*.yml だと無関係な "rules" ディレクトリ（例: 業務ドメインの rules/*.yml）まで
-# 誤検知してブロックしてしまうため、実際のルール置き場だけに絞る）。
-case "$file" in
-  */.ast-grep/rules/*.yml|.ast-grep/rules/*.yml)
+# ast-grep ルールファイルも保護する。file_path は絶対パスで渡されるため、
+# リポジトリルート（CLAUDE_PROJECT_DIR）からの相対パスに変換してから判定する。
+# 相対パスにせず「パスのどこかに rules/ を含む」形で判定すると、ネストした
+# 無関係なディレクトリ（業務ドメインの rules/*.yml 等）まで誤って一致してしまう。
+project_dir="${CLAUDE_PROJECT_DIR:-}"
+rel_file="$file"
+if [[ -n "$project_dir" && "$file" == "$project_dir"/* ]]; then
+  rel_file="${file#"$project_dir"/}"
+fi
+
+case "$rel_file" in
+  rules/*.yml|.ast-grep/rules/*.yml)
     cat <<DENY_JSON
 {
   "hookSpecificOutput": {
@@ -75,3 +82,4 @@ DENY_JSON
 esac
 
 exit 0
+

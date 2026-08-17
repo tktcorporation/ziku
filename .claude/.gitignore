@@ -1,2 +1,3 @@
 *.local.json
 .pr-review-count
+plans/

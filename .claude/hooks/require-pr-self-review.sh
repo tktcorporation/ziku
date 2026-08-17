@@ -8,7 +8,10 @@
 #
 # カウンターの操作:
 #   インクリメント: .claude/hooks/record-pr-review.sh
-#   リセット: このスクリプトが通過を許可した時点で自動リセット
+#   リセット: .claude/hooks/reset-pr-review-count.sh (PostToolUse) が行う。
+#     PostToolUse は gh pr create が exit 0 で完了した場合にのみ発火する
+#     （非ゼロ終了・許可拒否では発火しない）ため、実際に PR が作成できたときだけ
+#     カウンターがリセットされる。
 
 set -euo pipefail
 
@@ -39,6 +42,6 @@ DENY_JSON
   exit 0
 fi
 
-# レビュー完了済み — PR作成を許可し、カウンターをリセット
-rm -f "$REVIEW_COUNT_FILE"
+# レビュー完了済み — PR作成を許可する。カウンターのリセットは
+# reset-pr-review-count.sh (PostToolUse) が gh pr create 成功後に行う。
 exit 0
