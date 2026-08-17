@@ -91,9 +91,15 @@ function readTextField(
   const value = document[key];
   if (typeof value === "string") {
     const trimmed = value.trim();
-    if (trimmed.length > 0) return trimmed;
-    problems.push(`\`${key}\` の値が空です`);
-    return null;
+    if (trimmed.length === 0) {
+      problems.push(`\`${key}\` の値が空です`);
+      return null;
+    }
+    if (trimmed.includes("\n")) {
+      problems.push(`\`${key}\` は 1 行のテキストで書いてください（複数行スカラーは不可）`);
+      return null;
+    }
+    return trimmed;
   }
 
   if (value === null) {

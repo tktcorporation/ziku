@@ -31,10 +31,15 @@ case "$file" in
 *) exit 0 ;;
 esac
 
-# scan の glob からワイルドカード以降を落とし、対象ルート（例: `docs/`）を導出する
+# scan の glob からワイルドカード以降を落とし、対象ルート（例: `docs/`）を導出する。
+# `**/*.md` のようにリテラルな prefix を持たない glob は、絞り込みができないので
+# 全 .md ファイルにマッチする扱いにする（advisory hook なので見逃すより過検知の方が安全）。
 matched=0
 while IFS= read -r root; do
-  [[ -z "$root" ]] && continue
+  if [[ -z "$root" ]]; then
+    matched=1
+    continue
+  fi
   case "$file" in "$root"*) matched=1 ;; esac
 done < <(jq -r '.scan[]' "$config" 2>/dev/null | sed 's#\*.*##' | sort -u)
 [[ "$matched" -eq 1 ]] || exit 0
