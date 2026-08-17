@@ -1,6 +1,6 @@
 # ziku — `.claude` 設定のテンプレート同期
 
-`npx ziku`（OSS: [`tktcorporation/ziku`](https://github.com/tktcorporation/ziku)）は、リポジトリの `.claude/` 配下の設定（skills / hooks / rules / guides など）を**テンプレートリポジトリ `tktcorporation/.github` と双方向に同期する CLI**。
+`npx ziku`（OSS: [`tktcorporation/ziku`](https://github.com/tktcorporation/ziku)）は、リポジトリの `.claude/` 配下の設定（skills / hooks / rules / guides など）を**テンプレートリポジトリと双方向に同期する CLI**。テンプレートリポジトリの owner/repo は `.ziku/lock.json` の `source` に記録されている。
 
 ## なぜ使うのか
 
@@ -69,7 +69,8 @@ npx ziku push --yes --files=<path[,path...]> -m "<PR title>"
 
 ```bash
 # テンプレ現行内容のハッシュを取得して baseHashes に記録する
-gh api repos/tktcorporation/.github/contents/<path> --jq .content | base64 -d | sha256sum
+# <template-owner>/<template-repo> は .ziku/lock.json の source を参照する
+gh api repos/<template-owner>/<template-repo>/contents/<path> --jq .content | base64 -d | sha256sum
 ```
 
 ハッシュ算法は `sha256(file content, utf-8).hex` ＝ `sha256sum <file>` と一致する。

@@ -176,10 +176,12 @@ describe("parseDocMeta", () => {
   });
 
   it("複数行スカラーをサイレントに無視せず違反として報告する", () => {
-    const result = parseDocMeta("---\nreview-reason: |\n  長い理由\n---\n");
+    const result = parseDocMeta(
+      "---\nreview-by: 2026-09-01\nreview-reason: |\n  1行目の理由\n  2行目の理由\n---\n",
+    );
     expect(result.kind).toBe("invalid");
     if (result.kind === "invalid") {
-      expect(result.problems.join("\n")).toContain("review-reason");
+      expect(result.problems.join("\n")).toContain("1 行のテキストで書いてください");
     }
   });
 });
