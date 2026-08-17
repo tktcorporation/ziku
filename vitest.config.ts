@@ -4,7 +4,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "scripts/**/*.test.ts"],
     // 実ネットワークへ出る経路を塞ぐ。理由は src/__tests__/no-network.ts を参照。
     setupFiles: ["src/__tests__/no-network.ts"],
     coverage: {
