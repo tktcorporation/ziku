@@ -1,4 +1,5 @@
-import { match } from "ts-pattern";
+import { Option, pipe } from "effect";
+import { P, match } from "ts-pattern";
 import type { ContentHash } from "../../modules/schemas";
 import { repoRelPaths } from "../paths";
 import type { ClassifyOptions, FileCategory, FileClassification } from "./types";
@@ -6,8 +7,75 @@ import type { ClassifyOptions, FileCategory, FileClassification } from "./types"
 /** 分類カテゴリ名。FileClassification のキーと対応する。 */
 type Category = FileCategory;
 
-/** 有無を boolean に変換して3値の存在パターンをタプルで扱う */
-type Presence = { hasBase: boolean; hasLocal: boolean; hasTemplate: boolean };
+/**
+ * 1 ファイルの同期履歴。
+ *
+ * 3 個の optional なハッシュを判定処理へ直接渡すと、各分岐で「この値は必ずある」という
+ * 前提を繰り返すことになる。存在関係を先に直和型へ変換し、分類側では成立する状態だけを扱う。
+ * どこにも存在しない組み合わせはファイルの状態ではないため、この型には含めない。
+ */
+type FileHistory =
+  | { readonly _tag: "CreatedInTemplate" }
+  | { readonly _tag: "CreatedLocally" }
+  | {
+      readonly _tag: "CreatedOnBoth";
+      readonly local: ContentHash;
+      readonly template: ContentHash;
+    }
+  | { readonly _tag: "DeletedEverywhere" }
+  | {
+      readonly _tag: "DeletedFromTemplate";
+      readonly base: ContentHash;
+      readonly local: ContentHash;
+    }
+  | {
+      readonly _tag: "DeletedLocally";
+      readonly base: ContentHash;
+      readonly template: ContentHash;
+    }
+  | {
+      readonly _tag: "PresentEverywhere";
+      readonly base: ContentHash;
+      readonly local: ContentHash;
+      readonly template: ContentHash;
+    };
+
+/** 外部の疎なハッシュマップ表現を、分類ドメインの状態へ一度だけ変換する。 */
+function fileHistory(
+  baseInput: ContentHash | undefined,
+  localInput: ContentHash | undefined,
+  templateInput: ContentHash | undefined,
+): Option.Option<FileHistory> {
+  return match({ base: baseInput, local: localInput, template: templateInput })
+    .with({ base: undefined, local: undefined, template: undefined }, () => Option.none())
+    .with({ base: undefined, local: undefined, template: P.not(undefined) }, () =>
+      Option.some({ _tag: "CreatedInTemplate" } as const),
+    )
+    .with({ base: undefined, local: P.not(undefined), template: undefined }, () =>
+      Option.some({ _tag: "CreatedLocally" } as const),
+    )
+    .with(
+      { base: undefined, local: P.not(undefined), template: P.not(undefined) },
+      ({ local, template }) => Option.some({ _tag: "CreatedOnBoth", local, template } as const),
+    )
+    .with({ base: P.not(undefined), local: undefined, template: undefined }, () =>
+      Option.some({ _tag: "DeletedEverywhere" } as const),
+    )
+    .with(
+      { base: P.not(undefined), local: P.not(undefined), template: undefined },
+      ({ base, local }) => Option.some({ _tag: "DeletedFromTemplate", base, local } as const),
+    )
+    .with(
+      { base: P.not(undefined), local: undefined, template: P.not(undefined) },
+      ({ base, template }) => Option.some({ _tag: "DeletedLocally", base, template } as const),
+    )
+    .with(
+      { base: P.not(undefined), local: P.not(undefined), template: P.not(undefined) },
+      ({ base, local, template }) =>
+        Option.some({ _tag: "PresentEverywhere", base, local, template } as const),
+    )
+    .exhaustive();
+}
 
 /**
  * 1ファイルの base/local/template ハッシュから分類カテゴリを判定する。
@@ -20,43 +88,37 @@ type Presence = { hasBase: boolean; hasLocal: boolean; hasTemplate: boolean };
  * テンプレート側に無いファイルを入れると読み込みが失敗して回復不能になる。
  */
 function classifyOneFile(
-  base: ContentHash | undefined,
-  local: ContentHash | undefined,
-  template: ContentHash | undefined,
-): Category {
-  const presence: Presence = {
-    hasBase: base !== undefined,
-    hasLocal: local !== undefined,
-    hasTemplate: template !== undefined,
-  };
-
-  return (
-    match(presence)
-      .with({ hasBase: false, hasLocal: false, hasTemplate: true }, () => "newFiles" as const)
-      // テンプレート側の削除とローカル側の編集が衝突する delete/modify。テンプレート側に
-      // ファイルが無いのでテキストマージの材料が揃わず、conflicts には入れられない
-      // （下の不変条件を参照）。削除候補に混ぜると --force がローカルの編集ごと消すため、
-      // 「削除するか残すか」を選ばせる専用カテゴリに分ける。
-      .with({ hasBase: true, hasLocal: true, hasTemplate: false }, () =>
-        local === base ? ("deletedFiles" as const) : ("deletedWithLocalEdits" as const),
-      )
-      .with({ hasBase: true, hasLocal: false, hasTemplate: false }, () => "deletedFiles" as const)
-      // 逆向きの delete/modify（ローカル削除 × テンプレート変更）は conflicts のままでよい。
-      // テンプレート側にファイルがあるので、ローカル側を空文字列としてマージできる。
-      .with({ hasBase: true, hasLocal: false, hasTemplate: true }, () =>
-        template === base ? ("deletedLocally" as const) : ("conflicts" as const),
-      )
-      .with({ hasBase: false, hasLocal: true, hasTemplate: false }, () => "localOnly" as const)
-      .with({ hasBase: false, hasLocal: true, hasTemplate: true }, () =>
-        local === template ? ("unchanged" as const) : ("conflicts" as const),
-      )
-      .with({ hasBase: true, hasLocal: true, hasTemplate: true }, () =>
-        classifyThreeWay(base, local, template),
-      )
-      // どのハッシュマップにも無いパスは classifyFiles の走査対象に入らないため到達しない。
-      // 網羅性検査を成立させるためだけの分岐で、変更なし扱いにしても副作用はない。
-      .with({ hasBase: false, hasLocal: false, hasTemplate: false }, () => "unchanged" as const)
-      .exhaustive()
+  baseInput: ContentHash | undefined,
+  localInput: ContentHash | undefined,
+  templateInput: ContentHash | undefined,
+): Option.Option<Category> {
+  return pipe(
+    fileHistory(baseInput, localInput, templateInput),
+    Option.map((history) =>
+      match(history)
+        .with({ _tag: "CreatedInTemplate" }, () => "newFiles" as const)
+        // テンプレート側の削除とローカル側の編集が衝突する delete/modify。テンプレート側に
+        // ファイルが無いのでテキストマージの材料が揃わず、conflicts には入れられない
+        // （下の不変条件を参照）。削除候補に混ぜると --force がローカルの編集ごと消すため、
+        // 「削除するか残すか」を選ばせる専用カテゴリに分ける。
+        .with({ _tag: "DeletedFromTemplate" }, ({ base, local }) =>
+          local === base ? "deletedFiles" : "deletedWithLocalEdits",
+        )
+        .with({ _tag: "DeletedEverywhere" }, () => "deletedFiles" as const)
+        // 逆向きの delete/modify（ローカル削除 × テンプレート変更）は conflicts のままでよい。
+        // テンプレート側にファイルがあるので、ローカル側を空文字列としてマージできる。
+        .with({ _tag: "DeletedLocally" }, ({ base, template }) =>
+          template === base ? "deletedLocally" : "conflicts",
+        )
+        .with({ _tag: "CreatedLocally" }, () => "localOnly" as const)
+        .with({ _tag: "CreatedOnBoth" }, ({ local, template }) =>
+          local === template ? "unchanged" : "conflicts",
+        )
+        .with({ _tag: "PresentEverywhere" }, ({ base, local, template }) =>
+          classifyThreeWay(base, local, template),
+        )
+        .exhaustive(),
+    ),
   );
 }
 
@@ -110,8 +172,10 @@ export function classifyFiles(opts: ClassifyOptions): FileClassification {
   ]);
 
   for (const file of allFiles) {
-    const category = classifyOneFile(baseHashes[file], localHashes[file], templateHashes[file]);
-    result[category].push(file);
+    pipe(
+      classifyOneFile(baseHashes[file], localHashes[file], templateHashes[file]),
+      Option.map((category) => result[category].push(file)),
+    );
   }
 
   return result;
