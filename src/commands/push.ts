@@ -21,6 +21,7 @@ import {
   asPushContent,
   baseCommitSha,
   baseHashesOf,
+  basePatternsOf,
   markSynced,
   mergedAsPushContent,
 } from "../modules/schemas";
@@ -44,6 +45,7 @@ import {
   computeMergedZikuConfig,
   computeScopedZikuConfig,
   findLocalOnlyPatternsForPaths,
+  readDeclaredPatterns,
 } from "../utils/config-merge";
 import type { CommandContextShape } from "../services/command-context";
 import type { PinnedGitHubSource } from "../utils/template-resolve";
@@ -442,6 +444,10 @@ function pushToLocal(input: PushToLocalInput): Effect.Effect<boolean, ZikuFailur
             alreadySynced: input.alreadySynced,
             writtenBackToLocal,
           }),
+          // 宣言もハッシュと同じく push 後のテンプレートから読む。送った内容がテンプレートの
+          // 宣言を広げているので、送る前の値を記録すると、その差分が次の pull で
+          // 「テンプレートが追加した」として現れる。
+          templatePatterns: await readDeclaredPatterns(localSource.path),
         }),
       );
 
@@ -668,6 +674,7 @@ export const pushCommand = defineCommand({
       templateDir: ctx.templateDir,
       include: config.include,
       exclude: config.exclude ?? [],
+      basePatterns: basePatternsOf(ctx.lock),
     });
 
     const pushArgs: PushArgs = {
@@ -1530,7 +1537,11 @@ async function analyzePushTargets(params: {
   // 設定ファイルの案内はパターン集合の実差分まで見て決める。ハッシュ差分だけを見ると、
   // テンプレートがパターンを削除しただけの状態を「pull で取り込める更新」として案内し、
   // 実行しても何も起きない操作を勧めることになる（`planPushCandidates` の drift 引数）。
-  const drift = await analyzeConfigDrift(params.targetDir, params.templateDir);
+  const drift = await analyzeConfigDrift(
+    params.targetDir,
+    params.templateDir,
+    basePatternsOf(params.lock),
+  );
   const candidatePlan = planPushCandidates(plan, drift);
   const mergedContents = new Map<RepoRelPath, PushContent>();
 

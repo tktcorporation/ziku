@@ -300,6 +300,24 @@ const pendingConflictsSchema = z.tuple([pendingConflictSchema], pendingConflictS
 export type PendingConflicts = z.infer<typeof pendingConflictsSchema>;
 
 /**
+ * ある同期時点でテンプレートが宣言していた同期対象パターン。
+ *
+ * ローカルの `ziku.jsonc` が持つ宣言とは別物で、両方を突き合わせて初めて「テンプレートが
+ * パターンを外した」と「ローカルが独自にパターンを足した」を区別できる。どちらも
+ * 「テンプレートに無くローカルにある」という同じ形で現れるため、この記録が無い状態で削除を
+ * 伝播させるとローカル固有のパターンまで消える。
+ *
+ * 記録の無い lock（この形式より前に作られたもの）は optional で表す。判断材料が無いので、
+ * パターンの同期は削除を伝播しない加法 union へ縮退する（`utils/config-merge.ts` の
+ * `reconcilePatterns`）。
+ */
+const templatePatternsSchema = z.object({
+  include: z.array(globPatternSchema).readonly(),
+  exclude: z.array(globPatternSchema).readonly(),
+});
+export type TemplatePatterns = z.infer<typeof templatePatternsSchema>;
+
+/**
  * GitHub ソースの同期ベース。
  *
  * `ref` は「`hashes` を取ったツリーを再取得できるコミット SHA」。ブランチ名やタグではなく、
@@ -316,6 +334,7 @@ export type PendingConflicts = z.infer<typeof pendingConflictsSchema>;
 const gitHubSyncBaseSchema = z.object({
   hashes: hashMapSchema,
   ref: commitShaSchema.optional(),
+  patterns: templatePatternsSchema.optional(),
 });
 
 /**
@@ -331,6 +350,7 @@ const gitHubSyncBaseSchema = z.object({
 const localSyncBaseSchema = z.object({
   hashes: hashMapSchema,
   ref: z.undefined().optional(),
+  patterns: templatePatternsSchema.optional(),
 });
 
 export type GitHubSyncBase = z.infer<typeof gitHubSyncBaseSchema>;
@@ -440,11 +460,26 @@ export interface SyncPoint {
    * 確定できないなら省く（3-way が 2-way へ縮退する）。
    */
   readonly commitSha?: CommitSha | undefined;
+  /**
+   * この同期で取り込んだ時点のテンプレートの宣言（{@link TemplatePatterns}）。
+   *
+   * 次回の同期でパターンの 3-way を成立させる唯一の材料。テンプレートの `ziku.jsonc` を
+   * 読めなかった実行では省く（記録の無い lock と同じく、加法 union へ縮退する）。
+   */
+  readonly templatePatterns?: TemplatePatterns | undefined;
+}
+
+/** ソース種別に依らず同期ベースへ載せる項目。 */
+function commonBaseOf(at: SyncPoint): { hashes: HashMap; patterns?: TemplatePatterns } {
+  return {
+    hashes: at.hashes,
+    ...(at.templatePatterns !== undefined ? { patterns: at.templatePatterns } : {}),
+  };
 }
 
 function gitHubBaseOf(at: SyncPoint): GitHubSyncBase {
   return {
-    hashes: at.hashes,
+    ...commonBaseOf(at),
     ...(at.commitSha !== undefined ? { ref: at.commitSha } : {}),
   };
 }
@@ -457,6 +492,16 @@ function gitHubBaseOf(at: SyncPoint): GitHubSyncBase {
  */
 export function baseHashesOf(lock: LockState): HashMap {
   return lock.sync === "pending" ? {} : lock.base.hashes;
+}
+
+/**
+ * 前回の同期時点でテンプレートが宣言していたパターン。
+ *
+ * ベース未確定（`pending`）と、記録の無い lock はどちらも `undefined`。どちらも「テンプレートが
+ * 何を宣言していたか分からない」という同じ状態で、パターンの同期はそこから削除を導けない。
+ */
+export function basePatternsOf(lock: LockState): TemplatePatterns | undefined {
+  return lock.sync === "pending" ? undefined : lock.base.patterns;
 }
 
 /**
@@ -546,7 +591,7 @@ export function markSynced(lock: LockState, at: SyncPoint): ResumableLockState {
       installedAt: l.installedAt,
       source: l.source,
       sync: "synced" as const,
-      base: { hashes: at.hashes },
+      base: commonBaseOf(at),
     }))
     .exhaustive();
 }
@@ -580,7 +625,7 @@ export function markMerging(
       source: l.source,
       sync: "merging" as const,
       base: l.sync === "pending" ? { hashes: {} } : l.base,
-      merge: { conflicts, nextBase: { hashes: next.hashes } },
+      merge: { conflicts, nextBase: commonBaseOf(next) },
     }))
     .exhaustive();
 }

@@ -8,6 +8,7 @@ vi.mock("node:fs/promises", async () => (await import("memfs")).fs.promises);
 const { absPath, globPatterns, repoRelPaths } = await import("../../__tests__/brands");
 const {
   mergeConfigPatterns,
+  reconcilePatterns,
   computeMergedZikuConfig,
   computeScopedZikuConfig,
   analyzeConfigDrift,
@@ -23,6 +24,75 @@ function scopedContent(result: ScopedZikuConfig): string {
   if (result._tag !== "Scoped") throw new Error(`expected Scoped, got ${result._tag}`);
   return result.content;
 }
+
+describe("reconcilePatterns（テンプレート → ローカルの 3-way）", () => {
+  /** 前回のテンプレートの宣言・ローカルの宣言・テンプレートの現在の宣言から include を決める。 */
+  function includeAfter(params: {
+    base?: readonly string[];
+    local: readonly string[];
+    template: readonly string[];
+  }): readonly string[] {
+    return reconcilePatterns({
+      base:
+        params.base === undefined ? undefined : { include: globPatterns(params.base), exclude: [] },
+      local: { include: globPatterns(params.local), exclude: [] },
+      template: { include: globPatterns(params.template), exclude: [] },
+    }).include;
+  }
+
+  it("テンプレートが外したパターンをローカルからも落とす", () => {
+    expect(includeAfter({ base: ["a", "b"], local: ["a", "b"], template: ["a"] })).toEqual(["a"]);
+  });
+
+  it("テンプレートが足したパターンをローカルへ加える", () => {
+    expect(includeAfter({ base: ["a"], local: ["a"], template: ["a", "b"] })).toEqual(["a", "b"]);
+  });
+
+  it("ローカルだけが持つパターンは、テンプレートに無くても残す", () => {
+    // ベースに無い＝テンプレート由来ではないので、テンプレートの削除ではなくローカルの追加。
+    expect(includeAfter({ base: ["a"], local: ["a", "mine"], template: ["a"] })).toEqual([
+      "a",
+      "mine",
+    ]);
+  });
+
+  it("ローカルが外したパターンをテンプレートから戻さない", () => {
+    // 1 プロジェクトの opt-out。テンプレートはまだ宣言しているが、ローカルへは戻さない。
+    expect(includeAfter({ base: ["a", "b"], local: ["a"], template: ["a", "b"] })).toEqual(["a"]);
+  });
+
+  it("両側から消えたパターンは結果にも出てこない", () => {
+    expect(includeAfter({ base: ["a", "b"], local: ["a"], template: ["a"] })).toEqual(["a"]);
+  });
+
+  it("ベースの記録が無ければ削除は起きず、加法 union と一致する", () => {
+    // 記録の無い lock。「テンプレートが外した」と「ローカルが足した」を区別できないので、
+    // どちらも消さない側へ倒す。
+    expect(includeAfter({ local: ["a", "mine"], template: ["a", "b"] })).toEqual([
+      "a",
+      "mine",
+      "b",
+    ]);
+  });
+
+  it("並びはローカルの宣言が基準で、テンプレートの追加分が末尾に付く", () => {
+    // 書き戻し先の文書と並びの基準を揃えることで、差分が末尾への追記と削除行だけになる。
+    expect(includeAfter({ base: ["a"], local: ["mine", "a"], template: ["a", "b"] })).toEqual([
+      "mine",
+      "a",
+      "b",
+    ]);
+  });
+
+  it("exclude も include と同じ規則で決まる", () => {
+    const result = reconcilePatterns({
+      base: { include: [], exclude: globPatterns(["dropped", "kept"]) },
+      local: { include: [], exclude: globPatterns(["dropped", "kept"]) },
+      template: { include: [], exclude: globPatterns(["kept"]) },
+    });
+    expect(result.exclude).toEqual(["kept"]);
+  });
+});
 
 describe("mergeConfigPatterns（要素レベル加法マージ＝和集合）", () => {
   it("書き換える文書と取り込む側、双方の追加を保持する", () => {
@@ -310,7 +380,7 @@ describe("analyzeConfigDrift（union 観点の実差分判定）", () => {
 
   it("完全一致なら pull も push も不要", async () => {
     write([".a/**"], [".a/**"]);
-    expect(await analyzeConfigDrift(absPath("/local"), absPath("/template"))).toEqual({
+    expect(await analyzeConfigDrift(absPath("/local"), absPath("/template"), undefined)).toEqual({
       pullRelevant: false,
       pushRelevant: false,
     });
@@ -318,14 +388,14 @@ describe("analyzeConfigDrift（union 観点の実差分判定）", () => {
 
   it("テンプレに追加分がある → pullRelevant", async () => {
     write([".a/**"], [".a/**", ".b/**"]);
-    const d = await analyzeConfigDrift(absPath("/local"), absPath("/template"));
+    const d = await analyzeConfigDrift(absPath("/local"), absPath("/template"), undefined);
     expect(d.pullRelevant).toBe(true);
     expect(d.pushRelevant).toBe(false);
   });
 
   it("ローカルに追加分がある → pushRelevant", async () => {
     write([".a/**", ".b/**"], [".a/**"]);
-    const d = await analyzeConfigDrift(absPath("/local"), absPath("/template"));
+    const d = await analyzeConfigDrift(absPath("/local"), absPath("/template"), undefined);
     expect(d.pullRelevant).toBe(false);
     expect(d.pushRelevant).toBe(true);
   });
@@ -334,7 +404,7 @@ describe("analyzeConfigDrift（union 観点の実差分判定）", () => {
     // local=[a,b], template=[a]（b を削除）。union=[a,b]==local → pull 不要。
     // union≠template → push 観点では「ローカルに余分」= pushRelevant。
     write([".a/**", ".b/**"], [".a/**"]);
-    const d = await analyzeConfigDrift(absPath("/local"), absPath("/template"));
+    const d = await analyzeConfigDrift(absPath("/local"), absPath("/template"), undefined);
     expect(d.pullRelevant).toBe(false);
   });
 });

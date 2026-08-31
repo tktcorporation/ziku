@@ -20,6 +20,7 @@ import type {
   RepoRelPath,
   ResumableLockState,
   SyncPoint,
+  TemplatePatterns,
   UnmergedConflict,
 } from "../modules/schemas";
 import { markSynced, resolveMerge } from "../modules/schemas";
@@ -273,16 +274,39 @@ export function nextSyncBase(params: {
   readonly previousBase: HashMap;
   readonly localHashes: HashMap;
   readonly deletions: DeletionOutcome;
+  /**
+   * 宣言されたパターンが拾うパス（`utils/sync-analysis.ts` の `SyncAnalysis.declaredPaths`）。
+   *
+   * テンプレートが外したパターンにだけ一致するファイルは、削除を見届けるために今回の分類へは
+   * 載るが、次回からは走査されない。ベースにエントリを残すと、走査されないパスのベースだけが
+   * 残り続け、`status` が同期済みにならない。
+   */
+  readonly declaredPaths: ReadonlySet<RepoRelPath>;
+  /** この pull が取り込んだ時点のテンプレートの宣言。 */
+  readonly templatePatterns: TemplatePatterns | undefined;
 }): SyncPoint {
+  const hashes = baseAfterDeletions({
+    advancedBase: params.advance.hashes,
+    previousBase: params.previousBase,
+    localHashes: params.localHashes,
+    deletions: params.deletions,
+  });
   return {
-    hashes: baseAfterDeletions({
-      advancedBase: params.advance.hashes,
-      previousBase: params.previousBase,
-      localHashes: params.localHashes,
-      deletions: params.deletions,
-    }),
+    hashes: retainDeclaredPaths(hashes, params.declaredPaths),
     commitSha: params.advance.commitSha,
+    templatePatterns: params.templatePatterns,
   };
+}
+
+/** 宣言の外へ出たパスのエントリをベースから落とす。 */
+function retainDeclaredPaths(hashes: HashMap, declared: ReadonlySet<RepoRelPath>): HashMap {
+  const retained: HashMap = {};
+  for (const path of repoRelPaths(Object.keys(hashes))) {
+    if (!declared.has(path)) continue;
+    const hash = hashes[path];
+    if (hash !== undefined) retained[path] = hash;
+  }
+  return retained;
 }
 
 // ─── 取り込む変更の集計 ───
@@ -455,5 +479,6 @@ export function finalizeMergedBase(
   return markSynced(lock, {
     hashes: { ...lock.merge.nextBase.hashes, ...takenFromTemplate },
     commitSha: lock.merge.nextBase.ref,
+    templatePatterns: lock.merge.nextBase.patterns,
   });
 }

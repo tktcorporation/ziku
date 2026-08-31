@@ -15,9 +15,10 @@ import type {
   RepoRelPath,
   ResumableLockState,
   SyncPoint,
+  TemplatePatterns,
   UnmergedConflict,
 } from "../modules/schemas";
-import { baseHashesOf, markMerging, markSynced } from "../modules/schemas";
+import { baseHashesOf, basePatternsOf, markMerging, markSynced } from "../modules/schemas";
 import type { UnmergedResolution } from "../ui/prompts";
 import {
   selectDeletedFiles,
@@ -49,7 +50,7 @@ import type { ZikuConfigPullAction } from "../utils/merge/sync-plan";
 import { zikuConfigPullAction } from "../utils/merge/sync-plan";
 import { analyzeSync } from "../utils/sync-analysis";
 import { resolveSyncScope } from "../utils/sync-scope";
-import { computeMergedZikuConfig } from "../utils/config-merge";
+import { computeReconciledZikuConfig } from "../utils/config-merge";
 import type { BaseAdvance, PullApprovalFlags, ZikuConfigMergeResult } from "./pull-plan";
 import {
   configContentToWrite,
@@ -201,20 +202,22 @@ export const pullCommand = defineCommand({
         Effect.promise(async () => {
           // 走査範囲は全コマンドで同じ規則から決める。ziku.jsonc 自体の内容同期は、
           // 下の resolveConfigMerge が加法 union で行う。
-          const { scope, newInclude } = await resolveSyncScope({
+          const { scope, newInclude, removedInclude, templatePatterns } = await resolveSyncScope({
             targetDir,
             templateDir,
             include,
             exclude,
+            basePatterns: basePatternsOf(lock),
           });
 
-          // テンプレ側で追加された include パターンをユーザー向けに通知。
+          // テンプレ側の宣言の変化をユーザー向けに通知。
           // 範囲の解決は副作用フリーなので、ログはここで行う。
           logNewIncludeNotice(newInclude);
+          logRemovedIncludeNotice(removedInclude);
 
           log.step("Analyzing changes...");
 
-          const { plan, hashes } = await analyzeSync({
+          const { plan, hashes, declaredPaths } = await analyzeSync({
             targetDir,
             templateDir,
             baseHashes: baseHashesOf(lock),
@@ -223,13 +226,13 @@ export const pullCommand = defineCommand({
 
           // ziku.jsonc の扱いは分類カテゴリではなく sync-plan の判断に従う。テンプレートの
           // 内容をそのまま置くコピー（{@link copyTemplateFiles}）や diff3 マージに乗せると、
-          // テンプレ側で削除されたパターンがローカルへ伝播し「削除は自動伝播しない」方針に
-          // 反する。plan.files には ziku.jsonc が入らないため、以降の適用・削除処理へ
-          // 紛れ込むことはない。
+          // ローカル固有のパターンがテンプレートの内容で上書きされて消える。plan.files には
+          // ziku.jsonc が入らないため、以降の適用・削除処理へ紛れ込むことはない。
           const configSync = await resolveConfigMerge(
             targetDir,
             templateDir,
             zikuConfigPullAction(plan.config),
+            basePatternsOf(lock),
           );
           const configWrite = configContentToWrite(configSync);
           const { autoUpdate, conflicts, deletedWithLocalEdits } = plan.files;
@@ -283,6 +286,8 @@ export const pullCommand = defineCommand({
               previousBase: hashes.baseHashes,
               localHashes: hashes.localHashes,
               deletions: { candidates: changes.deletionCandidates, applied: appliedDeletions },
+              declaredPaths,
+              templatePatterns,
             });
 
           // 自動更新・新規追加・ziku.jsonc union 同期をまとめて適用
@@ -357,6 +362,22 @@ function logNewIncludeNotice(newInclude: readonly GlobPattern[]): void {
 }
 
 /**
+ * テンプレ側が外し、ローカルの宣言からも落とす include パターンをユーザーへ通知する。
+ *
+ * パターンが外れたファイルはワークツリーに残る。テンプレートが同じ変更でファイルも削除して
+ * いれば削除候補として別に提示されるので、ここでは宣言の変化だけを伝える。
+ */
+function logRemovedIncludeNotice(removedInclude: readonly GlobPattern[]): void {
+  if (removedInclude.length === 0) return;
+  log.info(
+    `Template dropped ${removedInclude.length} pattern(s) — matching files are no longer synced:`,
+  );
+  for (const p of removedInclude) {
+    log.message(`  ${pc.yellow("-")} ${p}`);
+  }
+}
+
+/**
  * pull における `ziku.jsonc` の加法 union 同期を計算する。
  *
  * ローカルとテンプレートの内容を読むところまでがここの仕事で、結末をどう lock と書き込みへ
@@ -366,6 +387,7 @@ function resolveConfigMerge(
   targetDir: AbsPath,
   templateDir: AbsPath,
   action: ZikuConfigPullAction,
+  basePatterns: TemplatePatterns | undefined,
 ): Promise<ZikuConfigMergeResult> {
   return (
     match(action)
@@ -375,8 +397,8 @@ function resolveConfigMerge(
         { _tag: P.union("FollowTemplate", "RetainBase") },
         (passthrough): Promise<ZikuConfigMergeResult> => Promise.resolve(passthrough),
       )
-      .with({ _tag: "UnionMerge" }, async (): Promise<ZikuConfigMergeResult> => {
-        const merged = await computeMergedZikuConfig({ targetDir, templateDir });
+      .with({ _tag: "ReconcilePatterns" }, async (): Promise<ZikuConfigMergeResult> => {
+        const merged = await computeReconciledZikuConfig({ targetDir, templateDir, basePatterns });
         const currentLocal = await readFile(joinAbs(targetDir, ZIKU_CONFIG_FILE), "utf-8");
         const baseHash = hashContent(merged);
         return merged === currentLocal

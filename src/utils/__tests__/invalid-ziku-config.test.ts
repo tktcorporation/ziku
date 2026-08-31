@@ -64,6 +64,7 @@ describe("スキーマ違反の ziku.jsonc（構文エラーではなく検証�
         templateDir: absPath("/template"),
         include: globPatterns([".claude/**"]),
         exclude: [],
+        basePatterns: undefined,
       }),
     );
   });
@@ -122,6 +123,7 @@ describe("スキーマ違反の ziku.jsonc（構文エラーではなく検証�
         templateDir: absPath("/template"),
         include: globPatterns([".claude/**"]),
         exclude: [],
+        basePatterns: undefined,
       }),
     ).rejects.toMatchObject({
       reason: { kind: "ConfigInvalid" },

@@ -46,6 +46,8 @@ import { hashFiles } from "../utils/hash";
 import { resolveDeclaredScope } from "../utils/sync-scope";
 import { absPath, joinAbs, repoRelPath } from "../utils/paths";
 import { LOCK_FILE, saveLock } from "../utils/lock";
+import type { ConfigPatterns } from "../utils/config-merge";
+import { readDeclaredPatterns } from "../utils/config-merge";
 import { ZIKU_CONFIG_FILE, generateZikuJsonc, zikuConfigExists } from "../utils/ziku-config";
 import {
   buildTemplateSource,
@@ -454,6 +456,7 @@ async function applyTemplate(
       source: template.source,
       baseHashes,
       baseCommit,
+      templatePatterns: await readDeclaredPatterns(template.templateDir),
       dryRun: args.dryRun,
     }),
   );
@@ -667,6 +670,7 @@ async function writeLockFile(
     source: TemplateSource;
     baseHashes: HashMap;
     baseCommit: CommitSha | undefined;
+    templatePatterns: ConfigPatterns | undefined;
     dryRun?: boolean;
   },
 ): Promise<FileOperationResult> {
@@ -676,6 +680,7 @@ async function writeLockFile(
     source: opts.source,
     baseHashes: opts.baseHashes,
     baseCommit: opts.baseCommit,
+    templatePatterns: opts.templatePatterns,
   });
 
   const isNew = !existsSync(joinAbs(targetDir, LOCK_FILE));

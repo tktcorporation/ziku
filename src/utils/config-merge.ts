@@ -7,18 +7,21 @@
  * 「集合」として扱い、要素単位でマージすることで、常に解決可能（衝突マーカーなし）で
  * 決定的な結果を得る。
  *
- * マージは「和集合（additive）」に固定する。理由:
- * - 真の共通祖先で 3-way 差分を取れば削除も双方向に伝播できるが、`ziku.jsonc` の base は
- *   信頼できない。特に `init` で「テンプレートのパターンの部分集合」を選んで導入した
- *   プロジェクトでは、lock に記録される base は合成された部分集合である一方、履歴テンプレ
- *   （ベースのコミットからのダウンロード）は full なので両者が矛盾する。この矛盾下で削除を伝播させると、
- *   ユーザーが未選択にしただけのテンプレ側パターンを「削除」とみなして push で消してしまう
- *   （全下流に波及する事故）。
- * - 和集合なら、ローカルの追加もテンプレの追加も保持し、いかなるパターンも削除しないため、
- *   テンプレートを壊さず・ローカルの追加も失わない。
+ * 突き合わせ方は方向で分かれる。
  *
- * トレードオフ: パターンの「削除」は自動伝播しない（明示的に各 ziku.jsonc を編集する必要が
- * ある）。これは安全性とのトレードオフとして受け入れる。
+ * - テンプレート → ローカル（{@link reconcilePatterns}）は 3-way。lock の `base.patterns`
+ *   （前回の同期時点でテンプレートが宣言していた集合）を共通祖先に使い、テンプレートが外した
+ *   パターンをローカルからも落とす。ローカルが外したパターンは戻さない。
+ * - ローカル → テンプレート（{@link mergeConfigPatterns}）は加法 union。1 つのプロジェクトが
+ *   外したパターンをテンプレートから消すと、そのテンプレートを使う全プロジェクトへ波及する。
+ *   削除はテンプレートの `ziku.jsonc` を直接編集する操作に閉じる。
+ *
+ * 3-way の共通祖先にローカル側の base（lock の `base.hashes` が指す内容）を使わないのは、
+ * それが「ローカルが前回宣言していた集合」だから。`init` でテンプレートのパターンの部分集合を
+ * 選んで導入したプロジェクトでは、それは合成された部分集合であってテンプレートの宣言とは
+ * 一致しない。これを共通祖先に据えると、ユーザーが未選択にしただけのパターンが「テンプレートが
+ * 削除した」に見える。記録が無い lock（この形式より前に作られたもの）は共通祖先を空集合として
+ * 扱い、加法 union へ縮退する。
  */
 import { match } from "ts-pattern";
 import { zikuFailure } from "../errors";
@@ -48,6 +51,59 @@ export function mergeConfigPatterns(opts: {
   return {
     include: unionPatterns(opts.document.include, opts.incoming.include).merged,
     exclude: unionPatterns(opts.document.exclude, opts.incoming.exclude).merged,
+  };
+}
+
+/** 並びを保ったまま重複を落とす。 */
+function dedupe(patterns: readonly GlobPattern[]): GlobPattern[] {
+  return [...new Set(patterns)];
+}
+
+/**
+ * 1 種類のパターン列について、ローカルが持つべき集合を 3-way で決める。
+ *
+ * 並びはローカルの宣言を先頭に置き、テンプレートの追加分を末尾へ積む（{@link unionPatterns}
+ * と同じ基準）。書き戻し先の文書と並びの基準を揃えることで、差分が末尾への追記と削除行だけに
+ * なる。
+ */
+function reconcileList(
+  base: readonly GlobPattern[],
+  local: readonly GlobPattern[],
+  template: readonly GlobPattern[],
+): GlobPattern[] {
+  const inBase = new Set<string>(base);
+  const inLocal = new Set<string>(local);
+  const inTemplate = new Set<string>(template);
+
+  // ローカルの宣言のうち、テンプレートが外したものだけを落とす。ベースに無いパターンは
+  // ローカル固有の追加なので、テンプレートに無くても残す。
+  const kept = dedupe(local).filter(
+    (pattern) => !(inBase.has(pattern) && !inTemplate.has(pattern)),
+  );
+  // テンプレートの宣言のうち、ローカルに無いものを足す。ベースにあってローカルに無いものは
+  // ローカルが外した（opt-out）ので戻さない。
+  const added = dedupe(template).filter((pattern) => !inLocal.has(pattern) && !inBase.has(pattern));
+
+  return [...kept, ...added];
+}
+
+/**
+ * ローカルの宣言・テンプレートの宣言・前回のテンプレートの宣言から、ローカルが持つべき
+ * パターンを決める。
+ *
+ * `base` が `undefined`（記録の無い lock）のときは共通祖先が空集合になり、どちらの削除条件も
+ * 成立しないので結果は加法 union と一致する。判断材料が無い状態では何も消さない、という
+ * 安全側の縮退がそのまま式に現れる。
+ */
+export function reconcilePatterns(opts: {
+  readonly base: ConfigPatterns | undefined;
+  readonly local: ConfigPatterns;
+  readonly template: ConfigPatterns;
+}): ConfigPatterns {
+  const base = opts.base ?? EMPTY_PATTERNS;
+  return {
+    include: reconcileList(base.include, opts.local.include, opts.template.include),
+    exclude: reconcileList(base.exclude, opts.local.exclude, opts.template.exclude),
   };
 }
 
@@ -143,13 +199,14 @@ function sameSet(a: readonly GlobPattern[], b: readonly GlobPattern[]): boolean 
 /**
  * `ziku.jsonc` の内容が、どちら向きに同期アクションを必要としているか。
  *
- * 加法 union モデルでは「片側だけのパターン削除」は同期アクションにならない（union==その側）
- * ため、ハッシュ差分ではなくパターン集合の包含関係で判断する。
+ * ハッシュ差分では判断できない。ローカルが独自に足したパターンがあるだけで内容は食い違うが、
+ * push はテンプレートの宣言を減らさないので送っても何も起きない、という組み合わせがあるため。
+ * 実際に書き込みが起きるかを、パターン集合の突き合わせから判断する。
  */
 export interface ConfigDrift {
-  /** テンプレにあってローカルに無いパターンがある（pull で取り込む価値あり）。 */
+  /** pull がローカルの宣言を書き換える（テンプレートの追加を足す／外した分を落とす）。 */
   readonly pullRelevant: boolean;
-  /** ローカルにあってテンプレに無いパターンがある（push で伝播する価値あり）。 */
+  /** push がテンプレートの宣言を増やす（ローカルにしか無いパターンがある）。 */
   readonly pushRelevant: boolean;
 }
 
@@ -162,26 +219,77 @@ export interface ConfigDrift {
 export async function analyzeConfigDrift(
   targetDir: AbsPath,
   templateDir: AbsPath,
+  /**
+   * 前回の同期時点でテンプレートが宣言していたパターン（lock の `base.patterns`）。
+   *
+   * 記録の無い lock では `undefined`。省略可能にしないのは、渡し忘れが「テンプレートの削除を
+   * 検出しない」へ静かに縮退するため。呼び出し側に毎回どちらかを表明させる。
+   */
+  basePatterns: ConfigPatterns | undefined,
 ): Promise<ConfigDrift> {
   const [local, template] = await Promise.all([readConfigAt(targetDir), readConfigAt(templateDir)]);
   const l = local?.patterns ?? EMPTY_PATTERNS;
   const t = template?.patterns ?? EMPTY_PATTERNS;
+  // pull が書き込む内容そのもの。テンプレートが外したパターンはここで落ちるので、それが
+  // 「ローカルにしか無いパターン」として push 側の判定へ流れ込まない。
+  const reconciled = reconcilePatterns({ base: basePatterns, local: l, template: t });
   // どちら向きの判定も集合の包含だけを見るので、並びの基準はどちらでも結果が変わらない。
-  const union = mergeConfigPatterns({ document: l, incoming: t });
   const eq = (a: ConfigPatterns, b: ConfigPatterns): boolean =>
     sameSet(a.include, b.include) && sameSet(a.exclude, b.exclude);
   return {
-    pullRelevant: !eq(union, l),
-    pushRelevant: !eq(union, t),
+    pullRelevant: !eq(reconciled, l),
+    pushRelevant: !eq(mergeConfigPatterns({ document: t, incoming: reconciled }), t),
   };
+}
+
+/**
+ * そのディレクトリの `ziku.jsonc` が宣言しているパターン。`ziku.jsonc` が無ければ `undefined`。
+ *
+ * lock へ「テンプレートが宣言していたパターン」を記録する経路が使う。空集合ではなく
+ * `undefined` を返すのは、設定ファイルの不在と「何も宣言していない」を混ぜないため。前者を
+ * 空集合として記録すると、次回の突き合わせで「テンプレートが全パターンを外した」と読まれる。
+ */
+export async function readDeclaredPatterns(dir: AbsPath): Promise<ConfigPatterns | undefined> {
+  return (await readConfigAt(dir))?.patterns;
+}
+
+/**
+ * pull がローカルの `ziku.jsonc` へ書き込む内容を組み立てる。
+ *
+ * テンプレートの追加を取り込み、テンプレートが外したパターンを落とした結果
+ * （{@link reconcilePatterns}）を、ローカルの文書へ差し込む。土台をローカルの文書にするのは、
+ * 書き込み先がローカルであり、注釈と ziku が読まないキーを残す必要があるため。
+ *
+ * テンプレートへ送る内容は {@link computeMergedZikuConfig} が別に組み立てる。こちらの結果を
+ * 送ると、ローカルが外したパターンがテンプレートからも消え、全下流のプロジェクトへ波及する。
+ */
+export async function computeReconciledZikuConfig(opts: {
+  targetDir: AbsPath;
+  templateDir: AbsPath;
+  basePatterns: ConfigPatterns | undefined;
+}): Promise<string> {
+  const [local, template] = await Promise.all([
+    readConfigAt(opts.targetDir),
+    readConfigAt(opts.templateDir),
+  ]);
+
+  const reconciled = reconcilePatterns({
+    base: opts.basePatterns,
+    local: local?.patterns ?? EMPTY_PATTERNS,
+    template: template?.patterns ?? EMPTY_PATTERNS,
+  });
+
+  // ローカルに `ziku.jsonc` が無いのは init 前の状態。差し込む土台が無いので新規生成する。
+  return local === undefined ? generateZikuJsonc(reconciled) : withPatterns(local.raw, reconciled);
 }
 
 /**
  * ローカルとテンプレートの `ziku.jsonc` を読み、要素レベルの和集合マージ結果を
  * `ziku.jsonc` 文字列として返す。
  *
- * pull / push の conflict 解決で `ziku.jsonc` をテキスト diff3 ではなくこれで解決する。
- * 和集合なので削除は伝播しないが、テンプレートのパターンもローカルの追加も失われない。
+ * テンプレートへ送る内容がこれになる。和集合なので、ローカルが外したパターンをテンプレートから
+ * 消すことはなく、テンプレートのパターンもローカルの追加も失われない。ローカルへ書き込む内容は
+ * {@link computeReconciledZikuConfig} が別に組み立てる。
  *
  * `extraIncludes` は、ディスク上の `ziku.jsonc` にはまだ書かれていないが今回の push で
  * 反映したい include パターン（対話 push で新規追跡選択したファイルのパス）を渡すために使う。

@@ -4,6 +4,7 @@ import {
   commitSha,
   contentHash,
   globPattern,
+  globPatterns,
   hashMap,
   pendingConflict,
   repoRelPath,
@@ -44,6 +45,7 @@ import {
   templateRefToString,
   templateSourceSchema,
   createPendingLock,
+  basePatternsOf,
   markMerging,
   markSynced,
   resolveMerge,
@@ -371,6 +373,34 @@ describe("lock の状態遷移", () => {
     });
     expect(synced).toEqual({ ...localLock, sync: "synced", base: { hashes: { "a.txt": "h" } } });
     expect(baseCommitSha(synced)).toBeUndefined();
+  });
+
+  it("markSynced: テンプレートの宣言を同期ベースへ記録する", () => {
+    const patterns = { include: globPatterns([".claude/**"]), exclude: [] };
+    const synced = markSynced(localLock, {
+      hashes: hashMap({ "a.txt": "h" }),
+      templatePatterns: patterns,
+    });
+
+    expect(basePatternsOf(synced)).toEqual(patterns);
+  });
+
+  it("markMerging → resolveMerge: テンプレートの宣言が中断を挟んでも残る", () => {
+    // 記録が落ちると、解決後の pull がテンプレートの削除を検出できないまま 1 周する。
+    const patterns = { include: globPatterns([".claude/**"]), exclude: [] };
+    const merging = markMerging(
+      localLock,
+      { hashes: hashMap({ "a.txt": "h" }), templatePatterns: patterns },
+      [pendingConflict("a.txt")],
+    );
+
+    expect(basePatternsOf(resolveMerge(merging))).toEqual(patterns);
+  });
+
+  it("basePatternsOf: 記録の無い lock では undefined", () => {
+    expect(
+      basePatternsOf(markSynced(localLock, { hashes: hashMap({ "a.txt": "h" }) })),
+    ).toBeUndefined();
   });
 
   it("baseHashesOf: ベース未確定なら空写像", () => {

@@ -360,7 +360,12 @@ describe("planLockBaseHashes", () => {
 describe("buildInitialLock", () => {
   const githubSource: TemplateSource = { kind: "github", owner: "o", repo: "r" };
   const localSource: TemplateSource = { kind: "local", path: absPath("/templates") };
-  const identity = { version: "1.0.0", installedAt: "2020-01-01T00:00:00.000Z" };
+  // 記録するテンプレートの宣言は buildInitialLock の主題ではない。記録の無い形で通す。
+  const identity = {
+    version: "1.0.0",
+    installedAt: "2020-01-01T00:00:00.000Z",
+    templatePatterns: undefined,
+  };
 
   it("ハッシュが取れていればベース確定済み（synced）にする", () => {
     const lock = buildInitialLock({

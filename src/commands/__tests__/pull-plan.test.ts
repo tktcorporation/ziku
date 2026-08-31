@@ -230,10 +230,15 @@ describe("baseAfterDeletions", () => {
 });
 
 describe("nextSyncBase", () => {
+  /** 宣言の絞り込みが主題ではないケース。走査したパスはすべて宣言の中にあるものとして渡す。 */
+  const allDeclared = pathSet(["a.txt", "old.txt"]);
+
   const common = {
     previousBase: hashMap({ "a.txt": "hash-base" }),
     localHashes: hashMap({ "a.txt": "hash-t" }),
     deletions: { candidates: [], applied: pathSet() },
+    declaredPaths: allDeclared,
+    templatePatterns: undefined,
   };
 
   it("解決できたコミット SHA をベースに載せる", () => {
@@ -242,7 +247,11 @@ describe("nextSyncBase", () => {
       advance: { hashes: hashMap({ "a.txt": "hash-t" }), commitSha: commitSha("latest123") },
     });
 
-    expect(point).toEqual({ hashes: { "a.txt": "hash-t" }, commitSha: "latest123" });
+    expect(point).toEqual({
+      hashes: { "a.txt": "hash-t" },
+      commitSha: "latest123",
+      templatePatterns: undefined,
+    });
   });
 
   it("SHA を解決できなければ、ハッシュだけ前進させて SHA を持たないベースになる", () => {
@@ -253,7 +262,11 @@ describe("nextSyncBase", () => {
 
     // ハッシュは取り込んだツリーへ進む。SHA は空のままで、前回記録した SHA を引き継がない。
     // 引き継ぐと共通祖先が前回のツリーになり、取り込み済みの変更が再びマージに載る。
-    expect(point).toEqual({ hashes: { "a.txt": "hash-t" }, commitSha: undefined });
+    expect(point).toEqual({
+      hashes: { "a.txt": "hash-t" },
+      commitSha: undefined,
+      templatePatterns: undefined,
+    });
   });
 
   it("中断（削除は 1 件も適用しない）と確定は、適用した削除の分だけ違うベースになる", () => {
@@ -261,6 +274,8 @@ describe("nextSyncBase", () => {
       advance: { hashes: hashMap({ "a.txt": "hash-t" }), commitSha: commitSha("latest123") },
       previousBase: hashMap({ "a.txt": "hash-base", "old.txt": "hash-old" }),
       localHashes: hashMap({ "a.txt": "hash-t", "old.txt": "hash-old" }),
+      declaredPaths: allDeclared,
+      templatePatterns: undefined,
     };
     const candidates = repoRelPaths(["old.txt"]);
 

@@ -57,6 +57,8 @@ export function syncScope(
     readonly gitignore?: readonly string[];
     /** gitignore や exclude を越えて走査へ戻すパス。 */
     readonly alwaysTracked?: readonly string[];
+    /** 宣言から落ちた（走査には残る）パターン。省略すると走査と宣言が一致する範囲になる。 */
+    readonly retired?: readonly string[];
   } = {},
 ): SyncScope {
   const include = globPatterns(params.include ?? []);
@@ -71,6 +73,7 @@ export function syncScope(
     },
     gitignore: ignore().add([...(params.gitignore ?? [])]),
     alwaysTracked: repoRelPaths(params.alwaysTracked ?? []),
+    retired: { include: globPatterns(params.retired ?? []), exclude: [] },
   };
 }
 

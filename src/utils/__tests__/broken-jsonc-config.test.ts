@@ -114,7 +114,9 @@ describe("readConfigAt 経由の入口（テンプレートが壊れていれば
   it("drift 判定（analyzeConfigDrift）も同じく中断する", async () => {
     writeBrokenTemplate();
 
-    await expectConfigUnparsable(() => analyzeConfigDrift(absPath("/local"), absPath("/template")));
+    await expectConfigUnparsable(() =>
+      analyzeConfigDrift(absPath("/local"), absPath("/template"), undefined),
+    );
   });
 
   it("スコープ計算（findLocalOnlyPatternsForPaths）も同じく中断する", async () => {
@@ -207,6 +209,7 @@ describe("走査範囲の解決（壊れていれば範囲を空へ潰さず中�
         templateDir: absPath("/template"),
         include: globPatterns([".claude/**"]),
         exclude: [],
+        basePatterns: undefined,
       }),
     ).rejects.toMatchObject({
       _tag: "ZikuFailure",
@@ -225,6 +228,7 @@ describe("走査範囲の解決（壊れていれば範囲を空へ潰さず中�
       templateDir: absPath("/template"),
       include: globPatterns([".claude/**"]),
       exclude: [],
+      basePatterns: undefined,
     });
 
     expect(scope.declared.include).toEqual([".claude/**"]);

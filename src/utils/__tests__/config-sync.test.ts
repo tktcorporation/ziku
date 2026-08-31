@@ -149,7 +149,7 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
     const templateAfter = await readFile(join(templateDir, ZIKU_CONFIG_FILE), "utf-8");
     expect(localAfter).toContain("// このプロジェクトは mcp だけ足している");
     expect(templateAfter).toContain("// 共通ルール");
-    expect(await analyzeConfigDrift(projectDir, templateDir)).toEqual({
+    expect(await analyzeConfigDrift(projectDir, templateDir, undefined)).toEqual({
       pullRelevant: false,
       pushRelevant: false,
     });
@@ -211,6 +211,7 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
       templateDir,
       include: globPatterns([".claude/**"]),
       exclude: [],
+      basePatterns: undefined,
     });
 
     const diff = await detectDiff({ targetDir: projectDir, templateDir, scope });
@@ -239,6 +240,7 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
       templateDir,
       include: globPatterns([".claude/**"]),
       exclude: [],
+      basePatterns: undefined,
     });
 
     // 分類はハッシュだけから導かれるので、ここで落ちるとパターンの追加が双方向に伝わらない。
@@ -280,6 +282,7 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
       templateDir: dir,
       include: globPatterns([".claude/**"]),
       exclude: [],
+      basePatterns: undefined,
     });
 
     expect(scope.scan.include).toContain(ZIKU_CONFIG_FILE);
@@ -300,6 +303,7 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
       templateDir: dir,
       include: globPatterns([".claude/**"]),
       exclude: [],
+      basePatterns: undefined,
     });
     const untracked = await detectUntrackedFiles({ targetDir: dir, scope });
 
@@ -326,6 +330,7 @@ describe("ziku.jsonc 同期メカニズム（実 hashFiles + classifyFiles）", 
       templateDir: dir,
       include: globPatterns(["**/*.md"]),
       exclude: [],
+      basePatterns: undefined,
     });
     const untracked = await detectUntrackedFiles({ targetDir: dir, scope });
 
@@ -477,7 +482,7 @@ describe("status の推奨と pull / push の実動作の一致（実ファイ�
     const baseHashes = { [ZIKU_CONFIG_FILE]: hashContent(configText(base)) };
 
     const plan = partitionSyncPlan(classifyFiles({ baseHashes, localHashes, templateHashes }));
-    const drift = await analyzeConfigDrift(projectDir, templateDir);
+    const drift = await analyzeConfigDrift(projectDir, templateDir, undefined);
     const status = zikuConfigStatus(plan.config, drift);
 
     expect(status).toEqual(expected);
@@ -489,7 +494,7 @@ describe("status の推奨と pull / push の実動作の一致（実ファイ�
     const templateContent = template === undefined ? undefined : configText(template);
     const { pull, push } = zikuConfigActions(plan.config);
     const changes = {
-      pull: pull._tag === "UnionMerge" && union !== localContent,
+      pull: pull._tag === "ReconcilePatterns" && union !== localContent,
       push: push._tag === "SendUnion" && union !== templateContent,
     };
 

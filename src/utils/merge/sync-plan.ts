@@ -27,8 +27,9 @@ import type { FileCategory, FileClassification } from "./types";
  *
  * `Untracked` は分類の走査対象に現れなかった状態（設定ファイルを追跡しないパターンで
  * 分類した場合など）。`Tracked` の `category` は「他の追跡ファイルと同じ規則ならどう扱われた
- * はずか」を表すだけで、そのまま実行してよい指示ではない。加法 union で同期し削除は伝播
- * しないため、実際の扱いは {@link zikuConfigActions} へ翻訳してから使う。
+ * はずか」を表すだけで、そのまま実行してよい指示ではない。このファイルは中身（パターン集合）を
+ * 突き合わせて同期し、ファイル自体の削除はどちらの向きにも伝播しないため、実際の扱いは
+ * {@link zikuConfigActions} へ翻訳してから使う。
  */
 export type ZikuConfigState =
   | { readonly _tag: "Untracked" }
@@ -106,13 +107,14 @@ export type ZikuConfigPullAction =
   /**
    * ローカルの内容は触らず、ベースはテンプレートの走査結果に従う。
    *
-   * テンプレートに設定ファイルがあり、union を計算してもローカルの内容が変わらない状態。
+   * テンプレートに設定ファイルがあり、パターンを突き合わせてもローカルの内容が変わらない状態。
    */
   | { readonly _tag: "FollowTemplate" }
   /**
    * ローカルの内容は触らず、ベースは前回の値を据え置く。
    *
-   * テンプレートが設定ファイルを削除した状態。削除は伝播しないのでローカルには残るが、
+   * テンプレートが設定ファイルを削除した状態。ファイル自体の削除は伝播しないのでローカルには
+   * 残るが、
    * ベースをテンプレートの走査結果（エントリ無し）まで進めると、次の分類は
    * 「ベース無・ローカル有・テンプレート無」＝ `localOnly` になる。`localOnly` は push の
    * 既定送信集合で、`restoresTemplateDeletion`（テンプレートの削除を取り消す操作だと識別
@@ -121,8 +123,12 @@ export type ZikuConfigPullAction =
    * その識別が効き続ける。
    */
   | { readonly _tag: "RetainBase" }
-  /** テンプレート側の追加を取り込むため、加法 union を計算してローカルへ反映する。 */
-  | { readonly _tag: "UnionMerge" };
+  /**
+   * テンプレート側の宣言の変化を取り込むため、パターンを 3-way で突き合わせてローカルへ
+   * 反映する（`utils/config-merge.ts` の `reconcilePatterns`）。追加だけでなく、テンプレートが
+   * 外したパターンの削除もここで反映される。
+   */
+  | { readonly _tag: "ReconcilePatterns" };
 
 /** push における設定ファイルの扱い。 */
 export type ZikuConfigPushAction =
@@ -157,21 +163,23 @@ const NO_SYNC: ZikuConfigActions = { pull: { _tag: "FollowTemplate" }, push: { _
  * 分類カテゴリごとに、pull と push が設定ファイルに対して行うことを決める。
  *
  * pull が取り込むのは、テンプレートだけが変えた（autoUpdate）か双方が変えた（conflicts）
- * 場合だけ。他のカテゴリでは union がローカルの内容と一致するので、読み書きせず何もしない。
- * テンプレート側の削除（deletedFiles / deletedWithLocalEdits）でローカルの内容を触らないのが
- * 「削除は伝播しない」の実体で、ローカルの制御ファイルを消して以降のコマンドを未初期化に
- * しない。そのうえで pull が `RetainBase` を返し、削除を伝播しないという決定が lock の
+ * 場合だけ。他のカテゴリでは突き合わせの結果がローカルの内容と一致するので、読み書きせず
+ * 何もしない。テンプレート側がファイルごと削除したカテゴリ（deletedFiles /
+ * deletedWithLocalEdits）でローカルの内容を触らないのは、ローカルの制御ファイルを消すと以降の
+ * コマンドが未初期化になるため。そのうえで pull が `RetainBase` を返し、その決定が lock の
  * ベースにも表れるようにする（{@link ZikuConfigPullAction}）。
  *
- * push が送るのはローカルの生の内容ではなく加法 union。生の内容を送ると、ローカルが
- * パターンを削除していた場合にテンプレート側のパターンまで消え、全下流のプロジェクトへ
- * 波及する。テンプレートだけが変えた状態（autoUpdate）で送らないのも同じ理由で、送れば
- * テンプレートが削除したパターンを復活させてしまう。
+ * push が送るのはローカルの生の内容ではなく加法 union。生の内容を送ると、ローカルが外した
+ * パターンがテンプレート側からも消え、全下流のプロジェクトへ波及する。1 つのプロジェクトの
+ * opt-out を全体へ配らないため、パターンの削除はローカル → テンプレートの向きには伝播させない
+ * （テンプレート → ローカルの向きは伝播する。規則の全体は `utils/config-merge.ts`）。
+ * テンプレートだけが変えた状態（autoUpdate）で送らないのも同じ理由で、送れば
+ * テンプレートが外したパターンを復活させてしまう。
  *
  * ローカルに設定ファイルが無いカテゴリ（newFiles / deletedLocally）で push が `Skip` を
- * 返すのは、送る内容である加法 union がテンプレートの内容と必ず一致するため。ローカルの
- * 削除そのものも送らない（削除は方向を問わず伝播しない）。テンプレートの設定ファイルが
- * 消えると、そのテンプレートを使う全プロジェクトが同期対象パターンを引けなくなる。
+ * 返すのは、送る内容である加法 union がテンプレートの内容と必ず一致するため。ローカルで
+ * ファイルごと消した場合もそれは送らない。テンプレートの設定ファイルが消えると、そのテンプレートを
+ * 使う全プロジェクトが同期対象パターンを引けなくなる。
  */
 export function zikuConfigActions(state: ZikuConfigState): ZikuConfigActions {
   return match(state)
@@ -183,14 +191,14 @@ export function zikuConfigActions(state: ZikuConfigState): ZikuConfigActions {
           .with(
             "autoUpdate",
             (): ZikuConfigActions => ({
-              pull: { _tag: "UnionMerge" },
+              pull: { _tag: "ReconcilePatterns" },
               push: { _tag: "TemplateOnly" },
             }),
           )
           .with(
             "conflicts",
             (): ZikuConfigActions => ({
-              pull: { _tag: "UnionMerge" },
+              pull: { _tag: "ReconcilePatterns" },
               push: { _tag: "SendUnion", restoresTemplateDeletion: false },
             }),
           )
@@ -283,8 +291,8 @@ export function zikuConfigPushOutcome(
 /**
  * status が設定ファイルを入れうるカテゴリ。
  *
- * 加法 union の同期に「ファイルの追加」も「削除」も無いため、新規追加・削除系のカテゴリは
- * 結論になりえない。取りうる値を絞ることで、表示側が起こりえないラベル（`new file:` など）を
+ * パターンの同期は既存の設定ファイルの中身だけを書き換えるので、「ファイルの追加」も「削除」も
+ * 起きない。そのため新規追加・削除系のカテゴリは結論になりえない。取りうる値を絞ることで、表示側が起こりえないラベル（`new file:` など）を
  * 設定ファイルに対して描く経路を型で塞ぐ。
  */
 export type ZikuConfigStatusCategory = Extract<
@@ -309,9 +317,11 @@ export type ZikuConfigStatus =
    * ローカルの `ziku.jsonc` にテンプレートへ無いパターンが残っているが、push は設定ファイルを
    * 送らない。
    *
-   * 加法 union の下では、`base == local` の分類（`autoUpdate`）から「テンプレートがパターンを
-   * 削除した」と「ローカルが独自のパターンを持つ」を区別できない。送ればテンプレートが消した
-   * パターンを復活させ、全下流のプロジェクトへ波及するので、送信は安全側（送らない）に倒す。
+   * テンプレートが外したパターンは、ローカルの宣言からも落ちたうえで判定に入る
+   * （`utils/config-merge.ts` の `analyzeConfigDrift`）ので、ここに残るのはローカル固有の
+   * パターンだけ。それでも送信は安全側（送らない）に倒す。テンプレートの宣言を記録していない
+   * lock では「テンプレートが外した」と「ローカルが足した」を区別できず、送れば消えたはずの
+   * パターンを全下流のプロジェクトへ復活させてしまう。
    *
    * ただし利用者から見れば同期済みではない。ローカル限定のパターンは、それに一致するファイルを
    * push したときにスコープ限定の union として同梱されて初めてテンプレートへ届く。status が
@@ -334,11 +344,8 @@ function categorized(category: ZikuConfigStatusCategory): ZikuConfigStatus {
  * `ziku push` が PR を作ることはない。
  *
  * どちらのコマンドも設定ファイルを書き換えないときは、ローカルにしか無いパターンが残っているか
- * （`pushRelevant`）で分かれる。残っていなければ `unchanged`（同期済み）で、これが加法 union の
- * 終端状態: テンプレートがパターンを削除しローカルが変更していない場合がここに入り、pull は
- * 削除を伝播せず、push はテンプレートが消したパターンを復活させない。テンプレートに合わせて
- * ローカルからもパターンを消したい利用者は、ローカルの `ziku.jsonc` を自分で編集する
- * （それが「削除は伝播しない」方針の帰結）。残っていれば {@link ZikuConfigStatus} の
+ * （`pushRelevant`）で分かれる。残っていなければ `unchanged`（同期済み）。残っていれば
+ * {@link ZikuConfigStatus} の
  * `LocalOnlyPatterns` で、送信の可否は変えずに、届いていない事実だけを見せる。
  */
 export function zikuConfigStatus(state: ZikuConfigState, drift: ConfigDrift): ZikuConfigStatus {
@@ -366,7 +373,7 @@ export function zikuConfigStatus(state: ZikuConfigState, drift: ConfigDrift): Zi
 function pullWritesLocal(action: ZikuConfigPullAction, drift: ConfigDrift): boolean {
   return match(action)
     .with({ _tag: P.union("FollowTemplate", "RetainBase") }, () => false)
-    .with({ _tag: "UnionMerge" }, () => drift.pullRelevant)
+    .with({ _tag: "ReconcilePatterns" }, () => drift.pullRelevant)
     .exhaustive();
 }
 

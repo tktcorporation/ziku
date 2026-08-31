@@ -1110,7 +1110,7 @@ describe("initCommand", () => {
       // 保持した本文はテンプレートと足並みが揃っていないので、未解決として扱われる。
       expect(plan.config).toEqual({ _tag: "Tracked", category: "conflicts" });
       // 設定ファイルの解決は加法 union なので、保持したローカルのパターンは失われない。
-      expect(zikuConfigPullAction(plan.config)).toEqual({ _tag: "UnionMerge" });
+      expect(zikuConfigPullAction(plan.config)).toEqual({ _tag: "ReconcilePatterns" });
       // ローカルにしか無いパターンが無いので、push はテンプレートへ何も送らず、取り込みだけを勧める。
       expect(
         zikuConfigPushOutcome(plan.config, { pullRelevant: true, pushRelevant: false }),

@@ -29,9 +29,16 @@ import type {
   PendingPushEntry,
   RepoRelPath,
   SkippedRepository,
+  TemplatePatterns,
   TemplateRef,
 } from "../modules/schemas";
-import { baseCommitSha, baseHashesOf, lockSchema, templateRefToString } from "../modules/schemas";
+import {
+  baseCommitSha,
+  baseHashesOf,
+  basePatternsOf,
+  lockSchema,
+  templateRefToString,
+} from "../modules/schemas";
 import { analyzeConfigDrift } from "./config-merge";
 import {
   fetchRepoTextFile,
@@ -782,6 +789,7 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
           candidateIndex,
           tmpBaseDir,
           baseHashes: baseHashesOf(lock),
+          basePatterns: basePatternsOf(lock),
         }),
       ),
     );
@@ -858,6 +866,8 @@ interface ClassifyAgainstTemplateOptions {
   readonly candidateIndex: number;
   readonly tmpBaseDir: AbsPath;
   readonly baseHashes: HashMap;
+  /** 前回の同期時点でテンプレートが宣言していたパターン（lock の `base.patterns`）。 */
+  readonly basePatterns: TemplatePatterns | undefined;
 }
 
 /**
@@ -868,7 +878,7 @@ interface ClassifyAgainstTemplateOptions {
 function classifyAgainstTemplate(
   opts: ClassifyAgainstTemplateOptions,
 ): Effect.Effect<FileClassification, string, Scope.Scope> {
-  const { templateDir, repoInfo, ref, candidateIndex, tmpBaseDir, baseHashes } = opts;
+  const { templateDir, repoInfo, ref, candidateIndex, tmpBaseDir, baseHashes, basePatterns } = opts;
   // sanitizeLabel は記号を "_" に潰すだけなので、owner/repo が違っても衝突しうる
   // （例: "foo.bar" と "foo_bar"）。candidateIndex を付与して一意性を保証する。
   const label = `${sanitizeLabel(`${repoInfo.owner}-${repoInfo.repo}`)}-${candidateIndex}`;
@@ -894,6 +904,7 @@ function classifyAgainstTemplate(
           templateDir,
           include: repoConfig.config.include,
           exclude: repoConfig.config.exclude ?? [],
+          basePatterns,
         }),
       catch: toMessage,
     });
@@ -903,13 +914,13 @@ function classifyAgainstTemplate(
       catch: toMessage,
     });
 
-    // `.ziku/ziku.jsonc` は加法 union で同期されるため、生の 3-way 分類のままだと
+    // `.ziku/ziku.jsonc` はパターン集合として突き合わせるため、生の 3-way 分類のままだと
     // 「利用側がパターンを 1 つ削っただけ」が push 相当の差分に見える。レポートを読んだ
     // エージェントがテンプレートからそのパターンを消すと、全利用リポジトリへ波及する。
     // status と同じ状態機械（zikuConfigStatus）を通してから、通常の追跡ファイルと同じ
     // FileClassification へ合流させる。
     const drift = yield* Effect.tryPromise({
-      try: () => analyzeConfigDrift(repoDir, templateDir),
+      try: () => analyzeConfigDrift(repoDir, templateDir, basePatterns),
       catch: toMessage,
     });
     const configStatus = zikuConfigStatus(plan.config, drift);

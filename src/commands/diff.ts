@@ -1,6 +1,7 @@
 import { defineCommand } from "citty";
 import { Effect } from "effect";
 import { withCleanup } from "../effect-helpers";
+import { basePatternsOf } from "../modules/schemas";
 import { renderFileDiff } from "../ui/diff-view";
 import { logUntrackedFilesNotice } from "../ui/prompts";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
@@ -69,7 +70,7 @@ export const diffCommand = defineCommand({
       loadCommandContext(targetDir, "readOnly").pipe(Effect.mapError(toZikuFailure)),
     );
 
-    const { config, source, templateDir, cleanup } = ctx;
+    const { config, lock, source, templateDir, cleanup } = ctx;
 
     log.info(`Template: ${pc.cyan(templateDir)}${source.kind === "local" ? " (local)" : ""}`);
 
@@ -92,6 +93,7 @@ export const diffCommand = defineCommand({
             templateDir,
             include: config.include,
             exclude: config.exclude ?? [],
+            basePatterns: basePatternsOf(lock),
           });
 
           log.step("Detecting changes...");

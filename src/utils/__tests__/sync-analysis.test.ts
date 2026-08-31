@@ -16,7 +16,7 @@ vi.mock("tinyglobby", () => ({
 }));
 
 const { absPath, repoRelPath, syncScope } = await import("../../__tests__/brands");
-const { analyzeSync } = await import("../sync-analysis");
+const { analyzeSync, restrictToDeclaredScope } = await import("../sync-analysis");
 const { classifyFiles } = await import("../merge");
 const { partitionSyncPlan } = await import("../merge/sync-plan");
 const { hashContent } = await import("../hash");
@@ -133,5 +133,45 @@ describe("sync-analysis", () => {
     expect(Object.values(result.plan.files).flat()).toEqual([]);
     expect(result.hashes.localHashes).toEqual({});
     expect(result.hashes.templateHashes).toEqual({});
+  });
+});
+
+describe("restrictToDeclaredScope", () => {
+  /** 全カテゴリに同じ 1 パスを入れた分類。どのカテゴリが宣言の外を許すかだけを見る。 */
+  function everyCategoryWith(path: string) {
+    const paths = [repoRelPath(path)];
+    return {
+      autoUpdate: [...paths],
+      localOnly: [...paths],
+      conflicts: [...paths],
+      newFiles: [...paths],
+      deletedFiles: [...paths],
+      deletedWithLocalEdits: [...paths],
+      deletedLocally: [...paths],
+      unchanged: [...paths],
+    };
+  }
+
+  it("宣言の中のパスはどのカテゴリでもそのまま残る", () => {
+    const result = restrictToDeclaredScope(everyCategoryWith("a.md"), () => true);
+
+    expect(result).toEqual(everyCategoryWith("a.md"));
+  });
+
+  it("宣言の外のパスは、テンプレート側の削除を表す 2 カテゴリにだけ残る", () => {
+    // 削除を最後まで見届けるための例外。残りは同期対象ではないので、テンプレートの内容を
+    // 配置したりローカルの変更を送ったりする経路へ載せない。
+    const result = restrictToDeclaredScope(everyCategoryWith("retired.sh"), () => false);
+
+    expect(result).toEqual({
+      autoUpdate: [],
+      localOnly: [],
+      conflicts: [],
+      newFiles: [],
+      deletedFiles: [repoRelPath("retired.sh")],
+      deletedWithLocalEdits: [repoRelPath("retired.sh")],
+      deletedLocally: [],
+      unchanged: [],
+    });
   });
 });

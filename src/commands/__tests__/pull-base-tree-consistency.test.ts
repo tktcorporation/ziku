@@ -104,6 +104,9 @@ function lockAfterPullingV2(resolvedSha: typeof SHA_V2 | undefined): LockState {
       previousBase: hashMap({ [CONFIG_FILE]: "hash-v1" }),
       localHashes: hashMap({ [CONFIG_FILE]: "hash-v2" }),
       deletions: { candidates: [], applied: new Set<RepoRelPath>() },
+      // 宣言の絞り込みは本テストの主題ではない。走査したパスがそのまま宣言の中にある形。
+      declaredPaths: new Set(repoRelPaths([CONFIG_FILE])),
+      templatePatterns: undefined,
     }),
   );
 }

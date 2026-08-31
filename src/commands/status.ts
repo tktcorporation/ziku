@@ -3,7 +3,7 @@ import { Effect, Option } from "effect";
 import { withCleanup } from "../effect-helpers";
 import { loadCommandContext, runCommandEffect, toZikuFailure } from "../services/command-context";
 import type { LockState } from "../modules/schemas";
-import { baseHashesOf } from "../modules/schemas";
+import { baseHashesOf, basePatternsOf } from "../modules/schemas";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
 import { SYNCED_FILES } from "../docs/lifecycle-types";
 import { intro, log, outro, pc, withSpinner } from "../ui/renderer";
@@ -138,12 +138,22 @@ export const statusCommand = defineCommand({
 
           // 走査範囲は全コマンドで同じ規則から決める。テンプレ側の追加パターンを取り込まないと
           // 「in sync」と誤判定し、その後の `pull` で大量の新ファイルが降ってくる。
-          const { scope, newInclude } = await resolveSyncScope({
+          const { scope, newInclude, removedInclude } = await resolveSyncScope({
             targetDir,
             templateDir,
             include,
             exclude,
+            basePatterns: basePatternsOf(lock),
           });
+
+          if (removedInclude.length > 0) {
+            log.info(
+              `Template dropped ${removedInclude.length} pattern(s) — matching files are no longer synced:`,
+            );
+            for (const p of removedInclude) {
+              log.message(`  ${pc.yellow("-")} ${p}`);
+            }
+          }
 
           if (newInclude.length > 0) {
             log.info(
@@ -167,7 +177,7 @@ export const statusCommand = defineCommand({
           // ならない。pull / push が実際にこのファイルを書き換えるかで入れるバケツを決め直して
           // から表示に載せる（判断は zikuConfigStatus）。どのバケツにも載らない状態は
           // 表示側へそのまま渡し、専用の案内として見せる。
-          const drift = await analyzeConfigDrift(targetDir, templateDir);
+          const drift = await analyzeConfigDrift(targetDir, templateDir, basePatternsOf(lock));
           const configStatus = zikuConfigStatus(plan.config, drift);
           const buckets = categorizeForStatus(withZikuConfigStatus(plan.files, configStatus));
           const untracked = await detectUntrackedFiles({ targetDir, scope });

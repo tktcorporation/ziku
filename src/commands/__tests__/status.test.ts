@@ -216,6 +216,8 @@ describe("statusCommand", () => {
     mockResolveSyncScope.mockResolvedValue({
       scope: syncScope({ include: [".claude/**", ".ziku/ziku.jsonc"] }),
       newInclude: [],
+      removedInclude: [],
+      templatePatterns: undefined,
     });
     // デフォルト: lock 未作成相当 (fast-path をスキップし、通常の loadCommandContext 経路に進む)
     mockLoadLock.mockReturnValue(Effect.fail(new FileNotFoundError({ path: ".ziku/lock.json" })));
@@ -350,6 +352,7 @@ describe("statusCommand", () => {
       mockAnalyzeSync.mockResolvedValueOnce({
         plan: syncPlanOf(emptyClassification()),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
+        declaredPaths: new Set(),
       });
 
       // biome-ignore lint/suspicious/noExplicitAny: citty run signature
@@ -368,6 +371,7 @@ describe("statusCommand", () => {
       mockAnalyzeSync.mockResolvedValueOnce({
         plan: syncPlanOf(emptyClassification()),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
+        declaredPaths: new Set(),
       });
 
       // biome-ignore lint/suspicious/noExplicitAny: citty run signature
@@ -391,6 +395,7 @@ describe("statusCommand", () => {
       mockAnalyzeSync.mockResolvedValueOnce({
         plan: syncPlanOf({ ...emptyClassification(), autoUpdate: repoRelPaths(["a.txt"]) }),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
+        declaredPaths: new Set(),
       });
 
       // biome-ignore lint/suspicious/noExplicitAny: citty run signature
@@ -410,6 +415,7 @@ describe("statusCommand", () => {
       mockAnalyzeSync.mockResolvedValueOnce({
         plan: syncPlanOf({ ...emptyClassification(), localOnly: repoRelPaths(["b.txt"]) }),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
+        declaredPaths: new Set(),
       });
 
       // biome-ignore lint/suspicious/noExplicitAny: citty run signature
@@ -433,6 +439,7 @@ describe("statusCommand", () => {
       mockAnalyzeSync.mockResolvedValueOnce({
         plan: syncPlanOf(emptyClassification()),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
+        declaredPaths: new Set(),
       });
 
       // biome-ignore lint/suspicious/noExplicitAny: citty run signature
@@ -456,6 +463,7 @@ describe("statusCommand", () => {
           localOnly: repoRelPaths(["b.txt"]),
         }),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
+        declaredPaths: new Set(),
       });
 
       // biome-ignore lint/suspicious/noExplicitAny: citty run signature
@@ -476,6 +484,7 @@ describe("statusCommand", () => {
       mockAnalyzeSync.mockResolvedValueOnce({
         plan: syncPlanOf({ ...emptyClassification(), conflicts: repoRelPaths(["c.txt"]) }),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
+        declaredPaths: new Set(),
       });
 
       // biome-ignore lint/suspicious/noExplicitAny: citty run signature
@@ -497,11 +506,14 @@ describe("statusCommand", () => {
       mockResolveSyncScope.mockResolvedValueOnce({
         scope: syncScope({ include: [".claude/**", ".new-pattern/**", ".ziku/ziku.jsonc"] }),
         newInclude: globPatterns([".new-pattern/**"]),
+        removedInclude: [],
+        templatePatterns: undefined,
       });
       writeConfigs({ local: [".claude/**"], template: [".claude/**", ".new-pattern/**"] });
       mockAnalyzeSync.mockResolvedValueOnce({
         plan: trackedConfigPlan("autoUpdate"),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
+        declaredPaths: new Set(),
       });
 
       // biome-ignore lint/suspicious/noExplicitAny: citty run signature
@@ -528,6 +540,7 @@ describe("statusCommand", () => {
       mockAnalyzeSync.mockResolvedValueOnce({
         plan: trackedConfigPlan("autoUpdate"),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
+        declaredPaths: new Set(),
       });
 
       // biome-ignore lint/suspicious/noExplicitAny: citty run signature
@@ -553,6 +566,7 @@ describe("statusCommand", () => {
       mockAnalyzeSync.mockResolvedValueOnce({
         plan: trackedConfigPlan("localOnly"),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
+        declaredPaths: new Set(),
       });
 
       // biome-ignore lint/suspicious/noExplicitAny: citty run signature
@@ -575,10 +589,13 @@ describe("statusCommand", () => {
       mockResolveSyncScope.mockResolvedValueOnce({
         scope,
         newInclude: globPatterns([".new-feature/**"]),
+        removedInclude: [],
+        templatePatterns: undefined,
       });
       mockAnalyzeSync.mockResolvedValueOnce({
         plan: syncPlanOf(emptyClassification()),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
+        declaredPaths: new Set(),
       });
 
       // biome-ignore lint/suspicious/noExplicitAny: citty run signature
@@ -603,6 +620,7 @@ describe("statusCommand", () => {
       mockAnalyzeSync.mockResolvedValueOnce({
         plan: syncPlanOf(emptyClassification()),
         hashes: { baseHashes: {}, localHashes: {}, templateHashes: {} },
+        declaredPaths: new Set(),
       });
       mockDetectUntrackedFiles.mockResolvedValueOnce([
         {

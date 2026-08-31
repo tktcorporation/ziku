@@ -107,10 +107,10 @@ describe("partitionSyncPlan", () => {
 describe("zikuConfigPullAction", () => {
   it("テンプレ側に取り込む余地があるときだけ union マージする", () => {
     expect(zikuConfigPullAction({ _tag: "Tracked", category: "autoUpdate" })).toEqual({
-      _tag: "UnionMerge",
+      _tag: "ReconcilePatterns",
     });
     expect(zikuConfigPullAction({ _tag: "Tracked", category: "conflicts" })).toEqual({
-      _tag: "UnionMerge",
+      _tag: "ReconcilePatterns",
     });
   });
 
@@ -333,7 +333,7 @@ describe("status が見せる方向と、pull / push が実際に行う操作", 
     // 加法 union は片側にしか無いパターンを足すだけなので、足すものがある（drift）ときだけ
     // 内容が変わる。アクションが Skip / TemplateOnly ならそもそも読み書きしない。
     const changes = {
-      pull: pull._tag === "UnionMerge" && drift.pullRelevant,
+      pull: pull._tag === "ReconcilePatterns" && drift.pullRelevant,
       push: push._tag === "SendUnion" && drift.pushRelevant,
     };
 

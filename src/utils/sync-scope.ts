@@ -1,5 +1,7 @@
 import type { AbsPath, GlobPattern, RepoRelPath } from "../modules/schemas";
+import type { ConfigPatterns } from "./config-merge";
 import { loadMergedGitignore } from "./gitignore";
+import { resolvePatterns } from "./patterns";
 import type { IgnoreDecision } from "./gitignore";
 import { mergeTemplatePatterns } from "./template-patterns";
 import { alwaysTrackedPathsIn, withConfigTracked } from "./ziku-config";
@@ -23,8 +25,13 @@ interface PurposedPatterns<P extends PatternPurpose> {
 /**
  * ローカルとテンプレートを突き合わせるために走査するパターン。
  *
- * 宣言されたパターンに加えて、ziku 自身が同期の前提として必要とする制御ファイル
- * （`alwaysTrackedPathsIn` の対象）を含む。ハッシュ計算・分類・差分検出はこれで走る。
+ * 宣言されたパターンに加えて、テンプレートが外したパターン（前回の宣言）と、ziku 自身が
+ * 同期の前提として必要とする制御ファイル（`alwaysTrackedPathsIn` の対象）を含む。
+ * ハッシュ計算・分類・差分検出はこれで走る。
+ *
+ * 宣言より広く取るのは、パターンを外すことがファイルを消すことと別だから。外したパターンを
+ * 走査からも同時に落とすと、そのパターンにだけ一致していたローカルのファイルはどちらの走査にも
+ * 現れず、テンプレートが同じ変更で削除したファイルが削除候補から静かに落ちる。
  */
 export type ScanPatterns = PurposedPatterns<"scan">;
 
@@ -37,10 +44,14 @@ export type ScanPatterns = PurposedPatterns<"scan">;
  * ファイル）が追跡候補として提示される。案内に従って追跡すると、そのマシン固有の内容が
  * テンプレートへ送られる。
  *
- * テンプレート側にしかなかったパターンはこちらにも含む。パターン同期は加法 union なので、
- * それらは次の `pull` / `push` でローカルの `ziku.jsonc` へ書き込まれる宣言そのものになる。
- * 除くと、実際に同期されているディレクトリが探索の基点から外れ、そこに置いた新規ファイルを
- * 追跡候補として提示できなくなる。
+ * テンプレート側にしかなかったパターンはこちらにも含む。それらは次の `pull` / `push` で
+ * ローカルの `ziku.jsonc` へ書き込まれる宣言そのものになる。除くと、実際に同期されている
+ * ディレクトリが探索の基点から外れ、そこに置いた新規ファイルを追跡候補として提示できなくなる。
+ *
+ * 逆に、テンプレートが外したパターンはこちらから落ちる。走査
+ * （{@link ScanPatterns}）には残るので、そのパターンにだけ一致していたファイルは今回の実行では
+ * 分類の対象のままで、削除候補として提示できる。宣言から落ちた時点でそのファイルは同期対象で
+ * なくなり、以降は未追跡として扱われる。
  */
 export type DeclaredPatterns = PurposedPatterns<"declared">;
 
@@ -84,12 +95,27 @@ export interface SyncScope {
    * どのプロジェクトにも届かない。
    */
   readonly alwaysTracked: readonly RepoRelPath[];
+  /**
+   * 宣言から落ちたパターン。走査には残っているが、同期対象ではない。
+   *
+   * 空でないことが「走査が宣言より広い」ことの根拠になる。広い分に含まれるファイルは、
+   * テンプレート側の削除を最後まで見届けるためだけに分類へ載せ、それ以外の扱い
+   * （テンプレート内容の配置・更新・マージ）からは外す（`utils/sync-analysis.ts`）。
+   */
+  readonly retired: ConfigPatterns;
 }
 
 export interface ResolvedSyncScope {
   readonly scope: SyncScope;
   /** テンプレート側にしかなかった include パターン。取り込みの通知に使う。 */
   readonly newInclude: readonly GlobPattern[];
+  /** テンプレート側が外し、ローカルの宣言からも落とす include パターン。通知に使う。 */
+  readonly removedInclude: readonly GlobPattern[];
+  /**
+   * テンプレートが現在宣言しているパターン。lock へ記録して次回の共通祖先にする
+   * （`utils/template-patterns.ts` の `ReconciledTemplatePatterns`）。
+   */
+  readonly templatePatterns: ConfigPatterns | undefined;
 }
 
 /**
@@ -102,15 +128,16 @@ export interface ResolvedSyncScope {
 async function composeScope(params: {
   targetDir: AbsPath;
   templateDir: AbsPath;
-  include: readonly GlobPattern[];
-  exclude: readonly GlobPattern[];
+  scan: ConfigPatterns;
+  declared: ConfigPatterns;
+  retired: ConfigPatterns;
 }): Promise<SyncScope> {
-  // `.gitignore` を探す範囲は、宣言されたパターンが触れる位置に限る。走査用パターン
-  // （`.ziku/ziku.jsonc` を足したもの）を渡すと、ziku 自身の設定ディレクトリを探索の基点として
-  // 扱う経路が範囲の決定側にも生まれる。
+  // `.gitignore` を探す範囲は、同期対象のパターンが触れる位置に限る。走査用パターンへ足す
+  // `.ziku/ziku.jsonc` を含めると、ziku 自身の設定ディレクトリを探索の基点として扱う経路が
+  // 範囲の決定側にも生まれる。
   const gitignore = await loadMergedGitignore(
     [params.targetDir, params.templateDir],
-    params.include,
+    params.scan.include,
   );
   const alwaysTracked = [
     ...new Set([
@@ -123,12 +150,17 @@ async function composeScope(params: {
       purpose: "scan",
       // ziku 自身の設定ファイルを走査対象へ含める。他の追跡ファイルと同じ差分検出に
       // 乗せることで、パターンの追加が双方向に伝わる。
-      include: withConfigTracked(params.include),
-      exclude: params.exclude,
+      include: withConfigTracked(params.scan.include),
+      exclude: params.scan.exclude,
     },
-    declared: { purpose: "declared", include: params.include, exclude: params.exclude },
+    declared: {
+      purpose: "declared",
+      include: params.declared.include,
+      exclude: params.declared.exclude,
+    },
     gitignore,
     alwaysTracked,
+    retired: params.retired,
   };
 }
 
@@ -152,19 +184,34 @@ export async function resolveSyncScope(params: {
   templateDir: AbsPath;
   include: readonly GlobPattern[];
   exclude: readonly GlobPattern[];
+  /**
+   * 前回の同期時点でテンプレートが宣言していたパターン（lock の `base.patterns`）。
+   *
+   * 記録の無い lock では `undefined`。そのときはテンプレートが外したパターンを「ローカル固有の
+   * 追加」と区別できないので、削除は伝播しない（加法 union へ縮退する）。省略可能にしないのは、
+   * 渡し忘れが同じ縮退へ静かに落ちるため。
+   */
+  basePatterns: ConfigPatterns | undefined;
 }): Promise<ResolvedSyncScope> {
-  const { mergedInclude, mergedExclude, newInclude } = await mergeTemplatePatterns(
+  const reconciled = await mergeTemplatePatterns(
     params.templateDir,
     params.include,
     params.exclude,
+    params.basePatterns,
   );
   const scope = await composeScope({
     targetDir: params.targetDir,
     templateDir: params.templateDir,
-    include: mergedInclude,
-    exclude: mergedExclude,
+    scan: reconciled.scan,
+    declared: reconciled.declared,
+    retired: reconciled.retired,
   });
-  return { scope, newInclude };
+  return {
+    scope,
+    newInclude: reconciled.added.include,
+    removedInclude: reconciled.removed.include,
+    templatePatterns: reconciled.templatePatterns,
+  };
 }
 
 /**
@@ -183,7 +230,14 @@ export function resolveDeclaredScope(params: {
   include: readonly GlobPattern[];
   exclude: readonly GlobPattern[];
 }): Promise<SyncScope> {
-  return composeScope(params);
+  const patterns: ConfigPatterns = { include: params.include, exclude: params.exclude };
+  return composeScope({
+    targetDir: params.targetDir,
+    templateDir: params.templateDir,
+    scan: patterns,
+    declared: patterns,
+    retired: { include: [], exclude: [] },
+  });
 }
 
 /**
@@ -223,4 +277,36 @@ export function isExcludedFromScope(file: RepoRelPath, scope: SyncScope): boolea
 /** 走査結果から、範囲外のパスを落とす。 */
 export function withinScope(files: readonly RepoRelPath[], scope: SyncScope): RepoRelPath[] {
   return files.filter((file) => !isExcludedFromScope(file, scope));
+}
+
+/**
+ * 走査が宣言より広いか。
+ *
+ * テンプレートが外したパターンがあるときだけ真になる。広くない実行では、宣言の中かどうかを
+ * 確かめるための追加の走査（{@link declaredPaths}）が不要になる。
+ */
+export function scanExceedsDeclared(scope: SyncScope): boolean {
+  return scope.retired.include.length > 0 || scope.retired.exclude.length > 0;
+}
+
+/**
+ * 宣言されたパターンが実際に拾うパス。
+ *
+ * 走査の範囲（{@link ScanPatterns}）には、テンプレートが外したパターンにだけ一致する
+ * ファイルも入る。それらは同期対象ではないので、テンプレートの内容を配置したり更新したり
+ * する扱いへ載せてはならない。その判定に使う集合を、両ディレクトリの実体から作る。
+ */
+export function declaredPaths(params: {
+  targetDir: AbsPath;
+  templateDir: AbsPath;
+  scope: SyncScope;
+}): ReadonlySet<RepoRelPath> {
+  const { scope } = params;
+  const resolve = (dir: AbsPath): RepoRelPath[] =>
+    withinScope(resolvePatterns(dir, scope.declared.include, scope.declared.exclude), scope);
+  return new Set([
+    ...resolve(params.targetDir),
+    ...resolve(params.templateDir),
+    ...scope.alwaysTracked,
+  ]);
 }

@@ -1,9 +1,12 @@
-import type { AbsPath, HashMap } from "../modules/schemas";
+import type { AbsPath, HashMap, RepoRelPath } from "../modules/schemas";
+import type { FileClassification } from "./merge/types";
 import type { SyncPlan } from "./merge/sync-plan";
 import { partitionSyncPlan } from "./merge/sync-plan";
 import { classifyFiles } from "./merge";
 import { hashFiles } from "./hash";
+import { repoRelPaths } from "./paths";
 import type { SyncScope } from "./sync-scope";
+import { declaredPaths, scanExceedsDeclared } from "./sync-scope";
 
 /**
  * 3-way ハッシュ比較に必要な3つのハッシュマップ。
@@ -42,6 +45,45 @@ export interface SyncAnalysis {
    */
   readonly plan: SyncPlan;
   readonly hashes: SyncHashes;
+  /**
+   * 同期対象として宣言されているパス。次の同期ベースに載せてよいパスの判定に使う
+   * （`commands/pull-plan.ts` の `nextSyncBase`）。宣言の外のエントリをベースへ載せると、
+   * 以降は走査されないパスのベースだけが残り続ける。
+   *
+   * 走査が宣言と一致する実行では、走査で拾ったパスがそのまま宣言の中身になる。テンプレートが
+   * パターンを外した実行だけ、宣言のパターンを別に解決して狭い集合になる。
+   */
+  readonly declaredPaths: ReadonlySet<RepoRelPath>;
+}
+
+/**
+ * 宣言の外に出たパスを、扱いごとに仕分ける。
+ *
+ * 走査が宣言より広いのは、テンプレートが外したパターンにだけ一致するファイルを、削除候補と
+ * して最後まで見届けるため。その一点を超えて広い範囲を使うと、同期対象ではないファイルへ
+ * テンプレートの内容が配置され、ローカルの変更がテンプレートへ送られる。削除の 2 カテゴリ
+ * だけを宣言の外にも許し、残りは落とす。
+ *
+ * 落ちたパスはどのカテゴリにも入らないので、コマンドから見えなくなる。ファイルはワークツリー
+ * に残り、以降は未追跡として扱われる（パターンを外すこととファイルを消すことは別）。
+ */
+export function restrictToDeclaredScope(
+  classification: FileClassification,
+  isDeclared: (path: RepoRelPath) => boolean,
+): FileClassification {
+  const declared = (paths: readonly RepoRelPath[]): RepoRelPath[] =>
+    paths.filter((path) => isDeclared(path));
+  return {
+    autoUpdate: declared(classification.autoUpdate),
+    localOnly: declared(classification.localOnly),
+    conflicts: declared(classification.conflicts),
+    newFiles: declared(classification.newFiles),
+    // テンプレートが外したパターンのファイルは、ここでだけ宣言の外に残る。
+    deletedFiles: classification.deletedFiles,
+    deletedWithLocalEdits: classification.deletedWithLocalEdits,
+    deletedLocally: declared(classification.deletedLocally),
+    unchanged: declared(classification.unchanged),
+  };
 }
 
 /**
@@ -71,8 +113,24 @@ export async function analyzeSync(options: AnalyzeSyncOptions): Promise<SyncAnal
     localHashes,
     templateHashes,
   });
+
+  // 走査が宣言と一致する実行（テンプレートがパターンを外していない）では、宣言の中かどうかを
+  // 確かめるまでもなく全パスが宣言の中にある。追加の走査を省く。
+  if (!scanExceedsDeclared(scope)) {
+    return {
+      plan: partitionSyncPlan(classification),
+      hashes: { baseHashes, localHashes, templateHashes },
+      declaredPaths: new Set([
+        ...repoRelPaths([...Object.keys(templateHashes), ...Object.keys(localHashes)]),
+        ...scope.alwaysTracked,
+      ]),
+    };
+  }
+
+  const declared = declaredPaths({ targetDir, templateDir, scope });
   return {
-    plan: partitionSyncPlan(classification),
+    plan: partitionSyncPlan(restrictToDeclaredScope(classification, (path) => declared.has(path))),
     hashes: { baseHashes, localHashes, templateHashes },
+    declaredPaths: declared,
   };
 }

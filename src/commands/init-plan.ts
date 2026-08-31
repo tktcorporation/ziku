@@ -21,6 +21,7 @@ import type {
   RepoRelPath,
   TemplateSource,
 } from "../modules/schemas";
+import type { ConfigPatterns } from "../utils/config-merge";
 import { createPendingLock, markSynced } from "../modules/schemas";
 import type { TemplateCandidate } from "../ui/prompts";
 import type { RepoExistence } from "../utils/github";
@@ -345,6 +346,14 @@ export function buildInitialLock(params: {
   readonly source: TemplateSource;
   readonly baseHashes: HashMap;
   readonly baseCommit: CommitSha | undefined;
+  /**
+   * 導入時点でテンプレートが宣言していたパターン。次回の同期でパターンの 3-way を成立させる。
+   *
+   * ローカルの `ziku.jsonc` に書いた宣言ではなくテンプレートの宣言を記録する。導入時に一部の
+   * ディレクトリだけを選んだプロジェクトでは両者が食い違い、ローカル側を記録すると、選ばな
+   * かったパターンが次の pull で「テンプレートが追加した」として毎回提示される。
+   */
+  readonly templatePatterns: ConfigPatterns | undefined;
 }): LockState {
   const pending = createPendingLock({
     version: params.version,
@@ -352,7 +361,11 @@ export function buildInitialLock(params: {
     source: params.source,
   });
   return Object.keys(params.baseHashes).length > 0
-    ? markSynced(pending, { hashes: params.baseHashes, commitSha: params.baseCommit })
+    ? markSynced(pending, {
+        hashes: params.baseHashes,
+        commitSha: params.baseCommit,
+        templatePatterns: params.templatePatterns,
+      })
     : pending;
 }
 

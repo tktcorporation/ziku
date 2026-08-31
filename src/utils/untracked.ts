@@ -101,6 +101,11 @@ export async function getRootDotFiles(baseDir: AbsPath): Promise<RepoRelPath[]> 
  * （{@link candidateRoots}）。走査用パターンを使うと、ziku が走査のために足す
  * `.ziku/ziku.jsonc` が基点 `.ziku` を生み、同期対象ではない `.ziku/lock.json` が追跡候補
  * として提示される。追跡すると、そのマシン固有の取得元とベースがテンプレートへ送られる。
+ *
+ * テンプレートが今回の実行で外したパターン（{@link SyncScope.retired}）に一致するファイルは、
+ * 宣言の外に出ているが追跡候補にしない。同じ実行でテンプレート側の削除を適用するか問われて
+ * いる最中で、「削除しますか」と「追跡しますか」を同時に見せることになるため。残す判断をすれば
+ * 次の実行では外したパターンが走査からも消え、通常の未追跡ファイルとして現れる。
  */
 export async function detectUntrackedFiles(options: {
   targetDir: AbsPath;
@@ -112,6 +117,11 @@ export async function detectUntrackedFiles(options: {
   // フラットパターンで tracked files を算出
   const trackedFiles = resolvePatterns(targetDir, declared.include, declared.exclude);
   const allTrackedFiles = new Set<string>(trackedFiles);
+  const underRetiredPatterns = new Set<string>(
+    scope.retired.include.length === 0
+      ? []
+      : resolvePatterns(targetDir, scope.retired.include, declared.exclude),
+  );
 
   const { dirs: allBaseDirs, hasRootPatterns } = candidateRoots(declared, trackedFiles);
 
@@ -126,6 +136,7 @@ export async function detectUntrackedFiles(options: {
 
   for (const filePath of allFiles) {
     if (allTrackedFiles.has(filePath)) continue;
+    if (underRetiredPatterns.has(filePath)) continue;
     if (isExcludedFromScope(filePath, scope)) continue;
 
     const displayFolder = getDisplayFolderFromPath(filePath);
