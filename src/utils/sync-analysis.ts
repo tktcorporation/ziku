@@ -71,18 +71,18 @@ export function restrictToDeclaredScope(
   classification: FileClassification,
   isDeclared: (path: RepoRelPath) => boolean,
 ): FileClassification {
-  const declared = (paths: readonly RepoRelPath[]): RepoRelPath[] =>
+  const onlyDeclared = (paths: readonly RepoRelPath[]): RepoRelPath[] =>
     paths.filter((path) => isDeclared(path));
   return {
-    autoUpdate: declared(classification.autoUpdate),
-    localOnly: declared(classification.localOnly),
-    conflicts: declared(classification.conflicts),
-    newFiles: declared(classification.newFiles),
+    autoUpdate: onlyDeclared(classification.autoUpdate),
+    localOnly: onlyDeclared(classification.localOnly),
+    conflicts: onlyDeclared(classification.conflicts),
+    newFiles: onlyDeclared(classification.newFiles),
     // テンプレートが外したパターンのファイルは、ここでだけ宣言の外に残る。
     deletedFiles: classification.deletedFiles,
     deletedWithLocalEdits: classification.deletedWithLocalEdits,
-    deletedLocally: declared(classification.deletedLocally),
-    unchanged: declared(classification.unchanged),
+    deletedLocally: onlyDeclared(classification.deletedLocally),
+    unchanged: onlyDeclared(classification.unchanged),
   };
 }
 

@@ -284,7 +284,7 @@ describe("テンプレートが include から外したパターンは、利用�
     expect(await includeOf(PROJECT_DIR)).toEqual(["docs/*.md", "local/*.txt", "hooks/*.ts"]);
   });
 
-  it("記録の無い既存 lock では、従来どおり削除を伝播させない", async () => {
+  it("記録の無い lock では、パターンの削除を伝播させない", async () => {
     // 判断材料が無い状態で削除に倒すと、ローカル固有のパターンを消しうる。安全側に据え置く。
     setupPatternRemoval({});
 

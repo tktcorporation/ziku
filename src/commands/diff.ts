@@ -1,7 +1,9 @@
 import { defineCommand } from "citty";
 import { Effect } from "effect";
 import { withCleanup } from "../effect-helpers";
+import type { DiffResult } from "../modules/schemas";
 import { basePatternsOf } from "../modules/schemas";
+import { analyzeConfigDrift } from "../utils/config-merge";
 import { renderFileDiff } from "../ui/diff-view";
 import { logUntrackedFilesNotice } from "../ui/prompts";
 import { intro, log, logDiffSummary, outro, pc, withSpinner } from "../ui/renderer";
@@ -9,7 +11,7 @@ import { detectDiff, hasDiff } from "../utils/diff";
 import { absPath } from "../utils/paths";
 import { resolveSyncScope } from "../utils/sync-scope";
 import { detectUntrackedFiles, getTotalUntrackedCount } from "../utils/untracked";
-import { ZIKU_CONFIG_FILE } from "../utils/ziku-config";
+import { ZIKU_CONFIG_FILE, isZikuConfigPath } from "../utils/ziku-config";
 import { LOCK_FILE } from "../utils/lock";
 import { loadCommandContext, runCommandEffect, toZikuFailure } from "../services/command-context";
 import type { CommandLifecycle } from "../docs/lifecycle-types";
@@ -98,9 +100,26 @@ export const diffCommand = defineCommand({
 
           log.step("Detecting changes...");
 
-          const diff = await withSpinner("Analyzing differences...", () =>
+          const detected = await withSpinner("Analyzing differences...", () =>
             detectDiff({ targetDir, templateDir, scope }),
           );
+
+          // `.ziku/ziku.jsonc` はテキストの一致ではなくパターン集合の突き合わせで同期する
+          // （`utils/config-merge.ts`）。テキストが食い違っていても、ローカルが外したパターンが
+          // 残っているだけなら pull も push もこのファイルを書き換えない。そのまま差分として
+          // 見せると、実行しても何も起きない `ziku push` を勧めることになる。
+          const configDrift = await analyzeConfigDrift(
+            targetDir,
+            templateDir,
+            basePatternsOf(lock),
+          );
+          const diff: DiffResult =
+            configDrift.pullRelevant || configDrift.pushRelevant
+              ? detected
+              : {
+                  ...detected,
+                  files: detected.files.filter((file) => !isZikuConfigPath(file.path)),
+                };
 
           const untrackedByFolder = await detectUntrackedFiles({ targetDir, scope });
           const untrackedCount = getTotalUntrackedCount(untrackedByFolder);

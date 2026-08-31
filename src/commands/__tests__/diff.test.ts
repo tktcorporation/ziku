@@ -3,7 +3,7 @@ import { Effect, Option } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FileNotFoundError } from "../../errors";
 import type { AbsPath, CommitSha, GlobPattern, TemplateSource } from "../../modules/schemas";
-import { createPendingLock } from "../../modules/schemas";
+import { createPendingLock, markSynced } from "../../modules/schemas";
 import { absPath, globPatterns, repoRelPath, resolvedTemplate } from "../../__tests__/brands";
 
 // fs モジュールをモック
@@ -91,6 +91,8 @@ function mockContext(
     include: GlobPattern[];
     source: TemplateSource;
     templateDir: AbsPath;
+    /** 前回の同期時点でテンプレートが宣言していたパターン。省略するとベース未確定の lock になる。 */
+    basePatterns: readonly string[];
   }>,
 ) {
   const cleanup = vi.fn();
@@ -99,11 +101,18 @@ function mockContext(
     owner: "tktcorporation",
     repo: ".github",
   };
-  const lock = createPendingLock({
+  const pending = createPendingLock({
     version: "0.1.0",
     installedAt: "2024-01-01T00:00:00.000Z",
     source,
   });
+  const lock =
+    overrides?.basePatterns === undefined
+      ? pending
+      : markSynced(pending, {
+          hashes: {},
+          templatePatterns: { include: globPatterns(overrides.basePatterns), exclude: [] },
+        });
   const templateDir = overrides?.templateDir ?? absPath("/tmp/template");
   return {
     effect: Effect.succeed({
@@ -249,6 +258,38 @@ describe("diffCommand", () => {
           }),
         }),
       );
+    });
+
+    it("ローカルが外したパターンだけが理由の ziku.jsonc は、差分として見せない", async () => {
+      // テキストは食い違うが、pull も push もこのファイルを書き換えない。見せると、実行しても
+      // 何も起きない `ziku push` を勧めることになる。
+      vol.fromJSON({
+        "/test/.ziku/ziku.jsonc": JSON.stringify({ include: ["docs/*.md"] }),
+        "/tmp/template/.ziku/ziku.jsonc": JSON.stringify({
+          include: ["docs/*.md", "hooks/*.sh"],
+        }),
+      });
+      const { effect } = mockContext({ basePatterns: ["docs/*.md", "hooks/*.sh"] });
+      mockLoadCommandContext.mockReturnValue(effect);
+      mockDetectDiff.mockResolvedValueOnce({
+        files: [
+          {
+            path: repoRelPath(ZIKU_CONFIG_FILE),
+            type: "modified",
+            localContent: "local",
+            templateContent: "template",
+          },
+        ],
+      });
+      mockHasDiff.mockImplementation((diff: { files: unknown[] }) => diff.files.length > 0);
+
+      await (diffCommand.run as any)({
+        args: { dir: "/test", verbose: false },
+        rawArgs: [],
+        cmd: diffCommand,
+      });
+
+      expect(mockOutro).toHaveBeenCalledWith("No changes — in sync with template.");
     });
 
     it("差分がある場合は logDiffSummary を呼ぶ", async () => {

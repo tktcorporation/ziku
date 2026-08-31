@@ -6,7 +6,7 @@ import { isBinaryFileDiff, readFileContent, toTransportText } from "./file-conte
 import { joinAbs } from "./paths";
 import { resolvePatterns } from "./patterns";
 import type { SyncScope } from "./sync-scope";
-import { withinScope } from "./sync-scope";
+import { declaredPaths, scanExceedsDeclared, withinScope } from "./sync-scope";
 
 export interface DiffOptions {
   targetDir: AbsPath;
@@ -38,6 +38,14 @@ export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
 
   const allFiles = new Set<RepoRelPath>([...templateFiles, ...localFiles]);
 
+  // 走査は宣言より広いことがある（テンプレートが外したパターンの分。`utils/sync-scope.ts` の
+  // `ScanPatterns`）。広い分のうちテンプレートに残っているファイルは、pull も push も触らない
+  // ので差分として見せない。見せると、実行しても何も起きない操作を勧めることになる。
+  // 分類側の同じ規則は `utils/sync-analysis.ts` の `restrictToDeclaredScope`。
+  const declared = scanExceedsDeclared(scope)
+    ? declaredPaths({ targetDir, templateDir, scope })
+    : undefined;
+
   // 常に追跡するファイルは ziku 自身の制御ファイル（追跡対象の SSOT）。プロジェクトや
   // テンプレートが `.ziku/` を gitignore していても、パターン同期のために必ず差分対象に
   // 含める。これをしないと `ziku track` の変更がテンプレへ届かない。
@@ -51,6 +59,8 @@ export async function detectDiff(options: DiffOptions): Promise<DiffResult> {
 
     const localExists = existsSync(localPath);
     const templateExists = existsSync(templatePath);
+
+    if (declared !== undefined && templateExists && !declared.has(filePath)) continue;
 
     // 内容の読み取りは種別が決まってから行う。「存在する側だけを読む」ことを
     // 分岐と一体にしておかないと、読めなかった側を後から埋める処理が必要になる。

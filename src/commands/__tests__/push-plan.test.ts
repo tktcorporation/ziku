@@ -586,33 +586,58 @@ describe("planPushDelivery", () => {
 
 describe("alreadySyncedPaths", () => {
   it("ローカルとテンプレートが一致するパスを集める", () => {
-    const synced = alreadySyncedPaths({
-      baseHashes: hashMap({ "same.txt": "old", "mine.txt": "old" }),
-      localHashes: hashMap({ "same.txt": "h1", "mine.txt": "local" }),
-      templateHashes: hashMap({ "same.txt": "h1", "mine.txt": "template" }),
-    });
+    const synced = alreadySyncedPaths(
+      {
+        baseHashes: hashMap({ "same.txt": "old", "mine.txt": "old" }),
+        localHashes: hashMap({ "same.txt": "h1", "mine.txt": "local" }),
+        templateHashes: hashMap({ "same.txt": "h1", "mine.txt": "template" }),
+      },
+      pathSet(["same.txt", "mine.txt"]),
+    );
 
     expect([...synced]).toEqual(["same.txt"]);
   });
 
   it("ベースにだけ残ったエントリも一致扱いにする（消すものも送るものも無い）", () => {
-    const synced = alreadySyncedPaths({
-      baseHashes: hashMap({ "gone-everywhere.txt": "old" }),
-      localHashes: hashMap({}),
-      templateHashes: hashMap({}),
-    });
+    const synced = alreadySyncedPaths(
+      {
+        baseHashes: hashMap({ "gone-everywhere.txt": "old" }),
+        localHashes: hashMap({}),
+        templateHashes: hashMap({}),
+      },
+      // どちらにも存在しないパスは宣言の解決結果にも現れない。それでもベースからは落とす。
+      pathSet([]),
+    );
 
     expect([...synced]).toEqual(["gone-everywhere.txt"]);
   });
 
   it("片側にだけあるパスは一致扱いにしない", () => {
-    const synced = alreadySyncedPaths({
-      baseHashes: hashMap({}),
-      localHashes: hashMap({ "local-only.txt": "h1" }),
-      templateHashes: hashMap({ "template-only.txt": "h2" }),
-    });
+    const synced = alreadySyncedPaths(
+      {
+        baseHashes: hashMap({}),
+        localHashes: hashMap({ "local-only.txt": "h1" }),
+        templateHashes: hashMap({ "template-only.txt": "h2" }),
+      },
+      pathSet(["local-only.txt", "template-only.txt"]),
+    );
 
     expect([...synced]).toEqual([]);
+  });
+
+  it("宣言の外に実在するファイルは、一致していてもベースを前進させない", () => {
+    // テンプレートが外したパターンに一致するファイル。以降は走査されないので、ベースを
+    // 前進させるとそのエントリだけが残る。
+    const synced = alreadySyncedPaths(
+      {
+        baseHashes: hashMap({ "retired.sh": "old", "kept.md": "old" }),
+        localHashes: hashMap({ "retired.sh": "h1", "kept.md": "h2" }),
+        templateHashes: hashMap({ "retired.sh": "h1", "kept.md": "h2" }),
+      },
+      pathSet(["kept.md"]),
+    );
+
+    expect([...synced]).toEqual(["kept.md"]);
   });
 });
 

@@ -572,8 +572,19 @@ function pushFileOf(
  * どちらにも存在しないパス（ベースにだけエントリが残っている状態）もここに入る。ベースから
  * 落とさないと、消すものも送るものも無いまま毎回削除候補として報告され続け、`status` が
  * 同期済みにならない。
+ *
+ * 走査は宣言より広いことがある（テンプレートが外したパターンの分。`utils/sync-scope.ts` の
+ * `ScanPatterns`）。宣言の外に実在するファイルをここへ入れるとベースがそこまで前進し、以降は
+ * 走査されないパスのエントリだけがベースに残る。どちらにも存在しないパスは宣言の外でも入れる。
+ * 前進先が「エントリが無いこと」なので、ベースから落とすのが目的そのものになる。pull 側の
+ * 同じ規則は `commands/pull-plan.ts` の `nextSyncBase`。
+ *
+ * @param declaredPaths 同期対象として宣言されているパス（`SyncAnalysis.declaredPaths`）。
  */
-export function alreadySyncedPaths(hashes: SyncHashes): ReadonlySet<RepoRelPath> {
+export function alreadySyncedPaths(
+  hashes: SyncHashes,
+  declaredPaths: ReadonlySet<RepoRelPath>,
+): ReadonlySet<RepoRelPath> {
   const scanned = repoRelPaths([
     ...new Set([
       ...Object.keys(hashes.baseHashes),
@@ -581,8 +592,14 @@ export function alreadySyncedPaths(hashes: SyncHashes): ReadonlySet<RepoRelPath>
       ...Object.keys(hashes.templateHashes),
     ]),
   ]);
+  const exists = (path: RepoRelPath): boolean =>
+    hashes.localHashes[path] !== undefined || hashes.templateHashes[path] !== undefined;
   return new Set(
-    scanned.filter((path) => hashes.localHashes[path] === hashes.templateHashes[path]),
+    scanned.filter(
+      (path) =>
+        hashes.localHashes[path] === hashes.templateHashes[path] &&
+        (declaredPaths.has(path) || !exists(path)),
+    ),
   );
 }
 

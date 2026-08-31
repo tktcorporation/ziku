@@ -1527,7 +1527,7 @@ async function analyzePushTargets(params: {
   /** push 前からローカルとテンプレートが一致していたパス。ベースの前進範囲を決めるのに使う。 */
   alreadySynced: ReadonlySet<RepoRelPath>;
 }> {
-  const { plan, hashes } = await analyzeSync({
+  const { plan, hashes, declaredPaths } = await analyzeSync({
     targetDir: params.targetDir,
     templateDir: params.templateDir,
     baseHashes: baseHashesOf(params.lock),
@@ -1579,7 +1579,7 @@ async function analyzePushTargets(params: {
     candidatePlan,
     mergedContents,
     unresolvedConflicts,
-    alreadySynced: alreadySyncedPaths(hashes),
+    alreadySynced: alreadySyncedPaths(hashes, declaredPaths),
   };
 }
 

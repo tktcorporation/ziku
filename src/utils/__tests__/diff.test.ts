@@ -186,6 +186,55 @@ describe("diff", () => {
       expect(generateUnifiedDiff(fileDiff)).toBe("");
     });
   });
+  describe("detectDiff - 宣言から落ちたパターン", () => {
+    const tempDirs: AbsPath[] = [];
+
+    afterEach(async () => {
+      for (const dir of tempDirs) await rm(dir, { recursive: true, force: true });
+      tempDirs.length = 0;
+    });
+
+    /** テンプレートが `hooks/*.sh` を外し、`hooks/*.ts` へ移った状態のディレクトリを作る。 */
+    async function retiredPatternDirs(): Promise<{ targetDir: AbsPath; templateDir: AbsPath }> {
+      const root = absPath(await mkdtemp(join(tmpdir(), "ziku-test-diff-retired-")));
+      tempDirs.push(root);
+      const targetDir = absPath(join(root, "local"));
+      const templateDir = absPath(join(root, "template"));
+      await mkdir(join(targetDir, "hooks"), { recursive: true });
+      await mkdir(join(templateDir, "hooks"), { recursive: true });
+      return { targetDir, templateDir };
+    }
+
+    /** 走査は `hooks/*.sh` まで見るが、同期対象の宣言は `hooks/*.ts` だけ。 */
+    const scope = syncScope({
+      include: ["hooks/*.sh", "hooks/*.ts"],
+      declaredInclude: ["hooks/*.ts"],
+      retired: ["hooks/*.sh"],
+    });
+
+    it("宣言の外でテンプレートに残っているファイルは差分に出さない", async () => {
+      // pull も push もこのファイルを触らない。差分として見せると、実行しても何も起きない
+      // 操作を勧めることになる。
+      const { targetDir, templateDir } = await retiredPatternDirs();
+      await writeFile(join(templateDir, "hooks", "build.sh"), "#!/bin/bash\n");
+
+      const result = await detectDiff({ targetDir, templateDir, scope });
+
+      expect(result.files).toEqual([]);
+    });
+
+    it("宣言の外でもローカルにだけ残っているファイルは差分に出す", async () => {
+      // テンプレート側が同じ変更で削除したファイル。pull が削除候補として扱うので、差分からも
+      // 落とさない。
+      const { targetDir, templateDir } = await retiredPatternDirs();
+      await writeFile(join(targetDir, "hooks", "build.sh"), "#!/bin/bash\n");
+
+      const result = await detectDiff({ targetDir, templateDir, scope });
+
+      expect(result.files.map((f) => [f.path, f.type])).toEqual([["hooks/build.sh", "added"]]);
+    });
+  });
+
   describe("detectDiff - バイナリ", () => {
     const tempDirs: AbsPath[] = [];
 
