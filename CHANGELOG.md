@@ -1,5 +1,13 @@
 # @tktco/ziku
 
+## 2.1.0
+
+### Minor Changes
+
+- [#107](https://github.com/tktcorporation/ziku/pull/107) [`9622e69`](https://github.com/tktcorporation/ziku/commit/9622e69c89ebdd7a63deb685a827b7ea9257e814) Thanks [@tktcorporation](https://github.com/tktcorporation)! - 依存パッケージを更新し、既知の脆弱性 15 件を解消する。あわせて動作要件を Node.js 22 以上に引き上げる
+
+  `@octokit/rest` が引く `content-type` 3.x が Node 22 以上を、`@clack/prompts` 1.3.0 以降が Node 20.12 以上を要求するため、これまでの `>=20.0.0` を満たせなくなった。Node 20 は 2026 年 4 月に EOL を迎えているため、依存を古い版に据え置くのではなく要件側を引き上げる。Node 20 / 21 では動作しなくなる。
+
 ## 2.0.2
 
 ### Patch Changes
