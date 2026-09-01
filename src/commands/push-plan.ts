@@ -261,13 +261,10 @@ export function applyPushSelection(
       const { filtered, notFound } = filterByFilesArg(candidates, filesArg);
       return { selected: filtered, notFound };
     })
-    .with(
-      { _tag: "Default" },
-      (opts): PushFileSelectionResult => ({
-        selected: defaultPushSelection(candidates, opts),
-        notFound: [],
-      }),
-    )
+    .with({ _tag: "Default" }, (opts): PushFileSelectionResult => ({
+      selected: defaultPushSelection(candidates, opts),
+      notFound: [],
+    }))
     .with({ _tag: "Chosen" }, ({ paths }): PushFileSelectionResult => {
       const chosen = new Set<RepoRelPath>(paths);
       return { selected: candidates.filter((f) => chosen.has(f.path)), notFound: [] };
@@ -780,10 +777,9 @@ export type ZikuConfigWriteBack =
 /** 伝播の計画から、ローカルの `ziku.jsonc` へ書き戻すかを決める。 */
 export function zikuConfigWriteBack(plan: ConfigPropagationPlan): ZikuConfigWriteBack {
   return match(plan)
-    .with(
-      { _tag: P.union("NoConfigChange", "MergeLocalConfig") },
-      (): ZikuConfigWriteBack => ({ _tag: "WriteBack" }),
-    )
+    .with({ _tag: P.union("NoConfigChange", "MergeLocalConfig") }, (): ZikuConfigWriteBack => ({
+      _tag: "WriteBack",
+    }))
     .with({ _tag: "MergeScopedConfig" }, (): ZikuConfigWriteBack => ({ _tag: "Withhold" }))
     .exhaustive();
 }
@@ -879,10 +875,10 @@ export type PrBaseBranch =
 export function resolvePrBaseBranch(pinned: PinnedGitHubSource): PrBaseBranch {
   return match(pinned.ref)
     .with({ kind: "branch" }, (branch): PrBaseBranch => ({ _tag: "Branch", name: branch.name }))
-    .with(
-      { kind: P.union("tag", "commit") },
-      (ref): PrBaseBranch => ({ _tag: "UnsupportedRef", kind: ref.kind }),
-    )
+    .with({ kind: P.union("tag", "commit") }, (ref): PrBaseBranch => ({
+      _tag: "UnsupportedRef",
+      kind: ref.kind,
+    }))
     .exhaustive();
 }
 

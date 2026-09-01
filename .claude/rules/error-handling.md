@@ -21,8 +21,7 @@ function getData(): Result<Data, Error>;
 
 // ✅ 理由ごとに分岐でき、増えたときは型が教える
 type GetDataError =
-  | { type: "NOT_FOUND"; id: string }
-  | { type: "VALIDATION_ERROR"; message: string };
+  { type: "NOT_FOUND"; id: string } | { type: "VALIDATION_ERROR"; message: string };
 function getData(): Result<Data, GetDataError>;
 ```
 

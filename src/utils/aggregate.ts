@@ -461,24 +461,18 @@ function resolveCandidateRef(candidate: OwnerRepoInfo): Effect.Effect<CandidateR
   ).pipe(
     Effect.map((resolution) =>
       match(resolution)
-        .with(
-          { _tag: "Resolved" },
-          (r): CandidateRefResolution => ({ _tag: "resolved" as const, ref: r.sha }),
-        )
-        .with(
-          { _tag: "AuthRejected" },
-          (f): CandidateRefResolution => ({
-            _tag: "failed" as const,
-            reason: `Could not resolve the latest commit SHA: GitHub rejected the authentication token (${f.detail})`,
-          }),
-        )
-        .with(
-          { _tag: "Unresolved" },
-          (f): CandidateRefResolution => ({
-            _tag: "failed" as const,
-            reason: `Could not resolve the latest commit SHA: ${f.reason}`,
-          }),
-        )
+        .with({ _tag: "Resolved" }, (r): CandidateRefResolution => ({
+          _tag: "resolved" as const,
+          ref: r.sha,
+        }))
+        .with({ _tag: "AuthRejected" }, (f): CandidateRefResolution => ({
+          _tag: "failed" as const,
+          reason: `Could not resolve the latest commit SHA: GitHub rejected the authentication token (${f.detail})`,
+        }))
+        .with({ _tag: "Unresolved" }, (f): CandidateRefResolution => ({
+          _tag: "failed" as const,
+          reason: `Could not resolve the latest commit SHA: ${f.reason}`,
+        }))
         .exhaustive(),
     ),
   );
@@ -981,9 +975,10 @@ function toPendingPullEntries(c: FileClassification): PendingPullEntry[] {
 function toConflictEntries(c: FileClassification): ConflictEntry[] {
   return [
     ...c.conflicts.map((path): ConflictEntry => ({ path, reason: "textConflict" })),
-    ...c.deletedWithLocalEdits.map(
-      (path): ConflictEntry => ({ path, reason: "deletedWithLocalEdits" }),
-    ),
+    ...c.deletedWithLocalEdits.map((path): ConflictEntry => ({
+      path,
+      reason: "deletedWithLocalEdits",
+    })),
   ];
 }
 

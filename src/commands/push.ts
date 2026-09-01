@@ -1247,10 +1247,10 @@ function renderPropagatedConfig(
         additionalIncludes,
       });
       return match(scoped)
-        .with(
-          { _tag: "Scoped" },
-          ({ content }): PropagatedConfig => ({ _tag: "Rendered", content }),
-        )
+        .with({ _tag: "Scoped" }, ({ content }): PropagatedConfig => ({
+          _tag: "Rendered",
+          content,
+        }))
         .with({ _tag: "NoTemplateConfig" }, (): PropagatedConfig => ({ _tag: "NoTemplateConfig" }))
         .exhaustive();
     })
