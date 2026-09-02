@@ -56,13 +56,14 @@
     "max-lines-per-function": "off",
     "max-lines": "off",
     "max-classes-per-file": "off",
-    // `_` prefix は意図を表す慣習として使う: Effect TaggedError の `_tag`、
-    // ビルド時に置換される `__VERSION__`、テスト専用 export の `_*ForTest`。
+    // `_` prefix は「通常の参照経路から外れる」ことを示すマーカーとして使う。
+    // Effect TaggedError の `_tag`、ビルド時に置換される `__VERSION__`、
+    // テスト専用 export の `_*ForTest`、意図的に使わない変数の `_exhaustive` など。
     "no-underscore-dangle": "off",
     // Zod brand は同じ名前を値と型の両方に宣言する。これを再宣言と誤検知する。
     "no-redeclare": "off",
-    // 正規表現の対象は ASCII のパス・マーカー・行頭記号に限られ、`u` フラグの
-    // 厳密化に見合う利得がない。
+    // 正規表現の対象は ASCII のパスと BMP 内の文字クラスに収まり、`u` フラグが
+    // 防ぐサロゲートペアの分割が起こらない。
     "require-unicode-regexp": "off",
 
     /** ── Import ── */
