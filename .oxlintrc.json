@@ -52,9 +52,18 @@
     /** ── Pedantic: コードベースに合わない制約ルールを無効化 ── */
     "no-inline-comments": "off",
     "no-negated-condition": "off",
+    "unicorn/no-negated-condition": "off",
     "max-lines-per-function": "off",
     "max-lines": "off",
     "max-classes-per-file": "off",
+    // `_` prefix は意図を表す慣習として使う: Effect TaggedError の `_tag`、
+    // ビルド時に置換される `__VERSION__`、テスト専用 export の `_*ForTest`。
+    "no-underscore-dangle": "off",
+    // Zod brand は同じ名前を値と型の両方に宣言する。これを再宣言と誤検知する。
+    "no-redeclare": "off",
+    // 正規表現の対象は ASCII のパス・マーカー・行頭記号に限られ、`u` フラグの
+    // 厳密化に見合う利得がない。
+    "require-unicode-regexp": "off",
 
     /** ── Import ── */
     "import/max-dependencies": "off",
@@ -74,7 +83,9 @@
         "max-lines": "off",
         "require-await": "off",
         "unicorn/no-array-callback-reference": "off",
-        "unicorn/no-useless-undefined": "off"
+        "unicorn/no-useless-undefined": "off",
+        // テストの局所ヘルパーは、対象の describe 内に置く方が対応関係を追いやすい。
+        "unicorn/consistent-function-scoping": "off"
       }
     }
   ],
