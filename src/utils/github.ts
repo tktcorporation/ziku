@@ -455,13 +455,11 @@ function ensurePushHead(
   target: { owner: string; repo: string; forkOwner: string },
 ): Promise<HeadRepo> {
   return match(head)
-    .with(
-      { _tag: "SameRepo" },
-      (): Promise<HeadRepo> => Promise.resolve({ owner: target.owner, repo: target.repo }),
+    .with({ _tag: "SameRepo" }, (): Promise<HeadRepo> =>
+      Promise.resolve({ owner: target.owner, repo: target.repo }),
     )
-    .with(
-      { _tag: "Fork" },
-      ({ name }): Promise<HeadRepo> => Promise.resolve({ owner: target.forkOwner, repo: name }),
+    .with({ _tag: "Fork" }, ({ name }): Promise<HeadRepo> =>
+      Promise.resolve({ owner: target.forkOwner, repo: name }),
     )
     .with({ _tag: "Absent" }, async (): Promise<HeadRepo> => {
       const { data } = await octokit.repos.createFork({ owner: target.owner, repo: target.repo });
@@ -988,16 +986,14 @@ export function decideDefaultBranch(
 ): DefaultBranchDecision {
   return match(resolution)
     .with({ _tag: "Resolved" }, (r): DefaultBranchDecision => ({ _tag: "Fetched", name: r.name }))
-    .with(
-      { _tag: "AuthRejected" },
-      (f): DefaultBranchDecision => ({ _tag: "AuthRejected", detail: f.detail }),
-    )
-    .with(
-      { _tag: "Unresolved" },
-      (f): DefaultBranchDecision =>
-        recorded === undefined
-          ? { _tag: "Unresolved", reason: f.reason }
-          : { _tag: "Recorded", name: recorded, reason: f.reason },
+    .with({ _tag: "AuthRejected" }, (f): DefaultBranchDecision => ({
+      _tag: "AuthRejected",
+      detail: f.detail,
+    }))
+    .with({ _tag: "Unresolved" }, (f): DefaultBranchDecision =>
+      recorded === undefined
+        ? { _tag: "Unresolved", reason: f.reason }
+        : { _tag: "Recorded", name: recorded, reason: f.reason },
     )
     .exhaustive();
 }
@@ -1083,16 +1079,13 @@ function classifyGitHubApiFailure(cause: unknown): GitHubApiFailure {
     .with(401, (): GitHubApiFailure => ({ _tag: "AuthRejected", detail }))
     .with(404, (): GitHubApiFailure => ({ _tag: "NotFound", detail }))
     .with(429, (): GitHubApiFailure => ({ _tag: "RateLimited", resetAt: rateLimitResetOf(cause) }))
-    .with(
-      403,
-      (): GitHubApiFailure =>
-        isRateLimitResponse(cause)
-          ? { _tag: "RateLimited", resetAt: rateLimitResetOf(cause) }
-          : { _tag: "PermissionDenied", detail },
+    .with(403, (): GitHubApiFailure =>
+      isRateLimitResponse(cause)
+        ? { _tag: "RateLimited", resetAt: rateLimitResetOf(cause) }
+        : { _tag: "PermissionDenied", detail },
     )
-    .otherwise(
-      (): GitHubApiFailure =>
-        isNetworkFailure(cause) ? { _tag: "Unreachable", detail } : { _tag: "Unclassified" },
+    .otherwise((): GitHubApiFailure =>
+      isNetworkFailure(cause) ? { _tag: "Unreachable", detail } : { _tag: "Unclassified" },
     );
 }
 
@@ -1251,9 +1244,10 @@ export async function fetchDefaultBranch(
       try: () => octokit.repos.get({ owner, repo }),
       catch: classifyOctokitFailure,
     }).pipe(
-      Effect.map(
-        ({ data }): DefaultBranchResolution => ({ _tag: "Resolved", name: data.default_branch }),
-      ),
+      Effect.map(({ data }): DefaultBranchResolution => ({
+        _tag: "Resolved",
+        name: data.default_branch,
+      })),
       // 成功も失敗も同じ union なので、エラーチャネルを戻り値へ畳む。
       Effect.merge,
     ),
@@ -1375,13 +1369,10 @@ export async function resolveLatestCommitSha(
   return match(await fetchDefaultBranch(owner, repo))
     .with({ _tag: "Resolved" }, (r) => fetchCommitSha(owner, repo, r.name))
     .with({ _tag: "AuthRejected" }, (f): CommitShaResolution => f)
-    .with(
-      { _tag: "Unresolved" },
-      (f): CommitShaResolution => ({
-        _tag: "Unresolved",
-        reason: `could not resolve the default branch: ${f.reason}`,
-      }),
-    )
+    .with({ _tag: "Unresolved" }, (f): CommitShaResolution => ({
+      _tag: "Unresolved",
+      reason: `could not resolve the default branch: ${f.reason}`,
+    }))
     .exhaustive();
 }
 
@@ -1637,16 +1628,14 @@ export function listOwnerRepos(
         : await fetchPersonalOwnerRepoPages(owner);
       return items
         .filter((item) => includeArchived || !item.archived)
-        .map(
-          (item): OwnerRepoInfo => ({
-            owner: item.owner.login,
-            repo: item.name,
-            defaultBranch: item.default_branch,
-            archived: item.archived,
-            pushedAt: item.pushed_at,
-            isPrivate: item.private,
-          }),
-        );
+        .map((item): OwnerRepoInfo => ({
+          owner: item.owner.login,
+          repo: item.name,
+          defaultBranch: item.default_branch,
+          archived: item.archived,
+          pushedAt: item.pushed_at,
+          isPrivate: item.private,
+        }));
     },
   );
 }

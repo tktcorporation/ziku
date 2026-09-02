@@ -668,10 +668,8 @@ function handleDeletedFiles(
         );
         return Effect.succeed([]);
       })
-      .with(
-        "askUser",
-        (): Effect.Effect<readonly RepoRelPath[]> =>
-          Effect.promise(() => selectDeletedFiles(deletedFiles)),
+      .with("askUser", (): Effect.Effect<readonly RepoRelPath[]> =>
+        Effect.promise(() => selectDeletedFiles(deletedFiles)),
       )
       .exhaustive();
 

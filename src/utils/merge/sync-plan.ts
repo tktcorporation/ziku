@@ -176,44 +176,30 @@ const NO_SYNC: ZikuConfigActions = { pull: { _tag: "FollowTemplate" }, push: { _
 export function zikuConfigActions(state: ZikuConfigState): ZikuConfigActions {
   return match(state)
     .with({ _tag: "Untracked" }, (): ZikuConfigActions => NO_SYNC)
-    .with(
-      { _tag: "Tracked" },
-      ({ category }): ZikuConfigActions =>
-        match(category)
-          .with(
-            "autoUpdate",
-            (): ZikuConfigActions => ({
-              pull: { _tag: "UnionMerge" },
-              push: { _tag: "TemplateOnly" },
-            }),
-          )
-          .with(
-            "conflicts",
-            (): ZikuConfigActions => ({
-              pull: { _tag: "UnionMerge" },
-              push: { _tag: "SendUnion", restoresTemplateDeletion: false },
-            }),
-          )
-          .with(
-            "localOnly",
-            (): ZikuConfigActions => ({
-              pull: { _tag: "FollowTemplate" },
-              push: { _tag: "SendUnion", restoresTemplateDeletion: false },
-            }),
-          )
-          .with(
-            "deletedWithLocalEdits",
-            (): ZikuConfigActions => ({
-              pull: { _tag: "RetainBase" },
-              push: { _tag: "SendUnion", restoresTemplateDeletion: true },
-            }),
-          )
-          .with(
-            "deletedFiles",
-            (): ZikuConfigActions => ({ pull: { _tag: "RetainBase" }, push: { _tag: "Skip" } }),
-          )
-          .with("newFiles", "deletedLocally", "unchanged", (): ZikuConfigActions => NO_SYNC)
-          .exhaustive(),
+    .with({ _tag: "Tracked" }, ({ category }): ZikuConfigActions =>
+      match(category)
+        .with("autoUpdate", (): ZikuConfigActions => ({
+          pull: { _tag: "UnionMerge" },
+          push: { _tag: "TemplateOnly" },
+        }))
+        .with("conflicts", (): ZikuConfigActions => ({
+          pull: { _tag: "UnionMerge" },
+          push: { _tag: "SendUnion", restoresTemplateDeletion: false },
+        }))
+        .with("localOnly", (): ZikuConfigActions => ({
+          pull: { _tag: "FollowTemplate" },
+          push: { _tag: "SendUnion", restoresTemplateDeletion: false },
+        }))
+        .with("deletedWithLocalEdits", (): ZikuConfigActions => ({
+          pull: { _tag: "RetainBase" },
+          push: { _tag: "SendUnion", restoresTemplateDeletion: true },
+        }))
+        .with("deletedFiles", (): ZikuConfigActions => ({
+          pull: { _tag: "RetainBase" },
+          push: { _tag: "Skip" },
+        }))
+        .with("newFiles", "deletedLocally", "unchanged", (): ZikuConfigActions => NO_SYNC)
+        .exhaustive(),
     )
     .exhaustive();
 }
@@ -262,21 +248,16 @@ export function zikuConfigPushOutcome(
     push: pushWritesTemplate(actions.push, drift),
     pull: pullWritesLocal(actions.pull, drift),
   })
-    .with(
-      { push: { _tag: "SendUnion" } },
-      ({ push }): ZikuConfigPushOutcome => ({
-        _tag: "SendUnion",
-        restoresTemplateDeletion: push.restoresTemplateDeletion,
-      }),
-    )
-    .with(
-      { push: { _tag: "NoWrite" }, pull: true },
-      (): ZikuConfigPushOutcome => ({ _tag: "PullToSync" }),
-    )
-    .with(
-      { push: { _tag: "NoWrite" }, pull: false },
-      (): ZikuConfigPushOutcome => ({ _tag: "Skip" }),
-    )
+    .with({ push: { _tag: "SendUnion" } }, ({ push }): ZikuConfigPushOutcome => ({
+      _tag: "SendUnion",
+      restoresTemplateDeletion: push.restoresTemplateDeletion,
+    }))
+    .with({ push: { _tag: "NoWrite" }, pull: true }, (): ZikuConfigPushOutcome => ({
+      _tag: "PullToSync",
+    }))
+    .with({ push: { _tag: "NoWrite" }, pull: false }, (): ZikuConfigPushOutcome => ({
+      _tag: "Skip",
+    }))
     .exhaustive();
 }
 
@@ -349,10 +330,8 @@ export function zikuConfigStatus(state: ZikuConfigState, drift: ConfigDrift): Zi
     .with({ push: { _tag: "SendUnion" }, pull: true }, () => categorized("conflicts"))
     .with({ push: { _tag: "SendUnion" }, pull: false }, () => categorized("localOnly"))
     .with({ push: { _tag: "PullToSync" } }, () => categorized("autoUpdate"))
-    .with(
-      { push: { _tag: "Skip" } },
-      (): ZikuConfigStatus =>
-        drift.pushRelevant ? { _tag: "LocalOnlyPatterns" } : categorized("unchanged"),
+    .with({ push: { _tag: "Skip" } }, (): ZikuConfigStatus =>
+      drift.pushRelevant ? { _tag: "LocalOnlyPatterns" } : categorized("unchanged"),
     )
     .exhaustive();
 }
@@ -394,15 +373,11 @@ function pushWritesTemplate(
   drift: ConfigDrift,
 ): ZikuConfigPushEffect {
   return match(action)
-    .with(
-      { _tag: "Skip" },
-      { _tag: "TemplateOnly" },
-      (): ZikuConfigPushEffect => ({ _tag: "NoWrite" }),
-    )
-    .with(
-      { _tag: "SendUnion" },
-      ({ restoresTemplateDeletion }): ZikuConfigPushEffect =>
-        drift.pushRelevant ? { _tag: "SendUnion", restoresTemplateDeletion } : { _tag: "NoWrite" },
+    .with({ _tag: "Skip" }, { _tag: "TemplateOnly" }, (): ZikuConfigPushEffect => ({
+      _tag: "NoWrite",
+    }))
+    .with({ _tag: "SendUnion" }, ({ restoresTemplateDeletion }): ZikuConfigPushEffect =>
+      drift.pushRelevant ? { _tag: "SendUnion", restoresTemplateDeletion } : { _tag: "NoWrite" },
     )
     .exhaustive();
 }

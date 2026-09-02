@@ -214,10 +214,10 @@ export function planOverwriteStrategy(opts: {
   const strategyArg = opts.strategyArg;
   if (strategyArg !== undefined && strategyArg.length > 0) {
     return match(strategyArg)
-      .with(
-        P.union("overwrite", "skip", "prompt"),
-        (strategy): OverwriteStrategyPlan => ({ _tag: "Decided", strategy }),
-      )
+      .with(P.union("overwrite", "skip", "prompt"), (strategy): OverwriteStrategyPlan => ({
+        _tag: "Decided",
+        strategy,
+      }))
       .otherwise((value): OverwriteStrategyPlan => ({ _tag: "InvalidStrategy", value }));
   }
 
@@ -411,10 +411,10 @@ export function decideRepoProbe(existence: RepoExistence): RepoProbeDecision {
     .with({ _tag: "Exists" }, (): RepoProbeDecision => ({ _tag: "Verified" }))
     .with({ _tag: "Unknown" }, (u): RepoProbeDecision => ({ _tag: "Unverified", existence: u }))
     .with({ _tag: "NotFound" }, (): RepoProbeDecision => ({ _tag: "Absent" }))
-    .with(
-      { _tag: P.union("RateLimited", "Unauthorized") },
-      (b): RepoProbeDecision => ({ _tag: "Blocked", existence: b }),
-    )
+    .with({ _tag: P.union("RateLimited", "Unauthorized") }, (b): RepoProbeDecision => ({
+      _tag: "Blocked",
+      existence: b,
+    }))
     .exhaustive();
 }
 
@@ -649,15 +649,13 @@ export function planMissingTemplateAction(
   context: { readonly owner: string; readonly repo: string; readonly dryRun: boolean },
 ): MissingTemplatePlan {
   return match(action)
-    .with(
-      "create-repo",
-      (): MissingTemplatePlan =>
-        context.dryRun
-          ? {
-              _tag: "CreationBlocked",
-              operation: `Would create template repository ${context.owner}/${context.repo}`,
-            }
-          : { _tag: "CreateRepo" },
+    .with("create-repo", (): MissingTemplatePlan =>
+      context.dryRun
+        ? {
+            _tag: "CreationBlocked",
+            operation: `Would create template repository ${context.owner}/${context.repo}`,
+          }
+        : { _tag: "CreateRepo" },
     )
     .with("specify-source", (): MissingTemplatePlan => ({ _tag: "AskInput" }))
     .exhaustive();

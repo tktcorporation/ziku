@@ -198,13 +198,10 @@ function applyGeneratedSections(params: {
   return sections.reduce<RenderedReadme>(
     (rendered, section) =>
       match(updateSection(rendered.content, section.start, section.end, section.body))
-        .with(
-          { _tag: "Replaced" },
-          (replaced): RenderedReadme => ({
-            content: replaced.content,
-            updated: rendered.updated || replaced.updated,
-          }),
-        )
+        .with({ _tag: "Replaced" }, (replaced): RenderedReadme => ({
+          content: replaced.content,
+          updated: rendered.updated || replaced.updated,
+        }))
         // マーカーを持たない区画は飛ばす。どの区画を置くかはテンプレートの README が決めることで、
         // 無い区画を作りに行くと ziku が README の構成を決めてしまう。
         .with({ _tag: "MarkerNotFound" }, () => rendered)

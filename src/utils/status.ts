@@ -242,12 +242,9 @@ export function decideRecommendation(
   }
 
   return match(config)
-    .with(
-      { _tag: "LocalOnlyPatterns" },
-      (): Recommendation => ({
-        kind: "localOnlyConfigPatterns",
-      }),
-    )
+    .with({ _tag: "LocalOnlyPatterns" }, (): Recommendation => ({
+      kind: "localOnlyConfigPatterns",
+    }))
     .with({ _tag: "Categorized" }, (): Recommendation => ({ kind: "inSync" }))
     .exhaustive();
 }
