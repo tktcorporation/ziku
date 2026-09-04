@@ -56,12 +56,11 @@
     "max-lines-per-function": "off",
     "max-lines": "off",
     "max-classes-per-file": "off",
-    // `_` prefix は「通常の参照経路から外れる」ことを示すマーカーとして使う。
+    // `_` prefix は「通常の参照経路の外にある」ことを示すマーカーとして使う。
     // Effect TaggedError の `_tag`、ビルド時に置換される `__VERSION__`、
-    // テスト専用 export の `_*ForTest`、意図的に使わない変数の `_exhaustive` など。
+    // テスト専用 export の `_*ForTest`、網羅性チェックの `_exhaustive`、
+    // テストで宣言だけ残しているモックとヘルパー。
     "no-underscore-dangle": "off",
-    // Zod brand は同じ名前を値と型の両方に宣言する。これを再宣言と誤検知する。
-    "no-redeclare": "off",
     // 正規表現の対象は ASCII のパスと BMP 内の文字クラスに収まり、`u` フラグが
     // 防ぐサロゲートペアの分割が起こらない。
     "require-unicode-regexp": "off",
@@ -87,6 +86,14 @@
         "unicorn/no-useless-undefined": "off",
         // テストの局所ヘルパーは、対象の describe 内に置く方が対応関係を追いやすい。
         "unicorn/consistent-function-scoping": "off"
+      }
+    },
+    {
+      "files": ["src/utils/merge/types.ts"],
+      "rules": {
+        // Zod brand は同じ名前を値と型の両方に宣言する。これを再宣言と誤検知する。
+        // 他のファイルでは本物の再宣言を検出したいので、対象をここへ限定する。
+        "no-redeclare": "off"
       }
     }
   ],
