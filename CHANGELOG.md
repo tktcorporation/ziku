@@ -1,5 +1,13 @@
 # @tktco/ziku
 
+## 2.1.1
+
+### Patch Changes
+
+- [#109](https://github.com/tktcorporation/ziku/pull/109) [`45e2e1d`](https://github.com/tktcorporation/ziku/commit/45e2e1d2f6f4141f7101a6465bdc8d269b98d12a) Thanks [@tktcorporation](https://github.com/tktcorporation)! - 依存を更新する。ランタイム依存では `diff` を 9.0.0 へ上げた。unified diff の生成 (`createPatch`) と語単位ハイライト (`diffWords`) の出力は変わらない。
+
+- [#111](https://github.com/tktcorporation/ziku/pull/111) [`b0fde35`](https://github.com/tktcorporation/ziku/commit/b0fde353490c6c547f1dba086498f341b665e1da) Thanks [@tktcorporation](https://github.com/tktcorporation)! - ランタイム依存の zod を 4.5.4 へ更新する。zod は成果物にバンドルされず外部依存として解決されるため、ziku を install した利用者が引く zod のバージョンが変わる。
+
 ## 2.1.0
 
 ### Minor Changes
