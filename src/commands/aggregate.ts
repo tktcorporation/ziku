@@ -8,7 +8,7 @@ import type { AggregateReport } from "../modules/schemas";
 import { runCommandEffect } from "../services/command-context";
 import { aggregateOutroLine, renderAggregateSummary } from "../ui/aggregate-view";
 import { intro, log, outro, pc, withSpinner } from "../ui/renderer";
-import { aggregateTemplateUsage } from "../utils/aggregate";
+import { aggregateTemplateUsage, isRepresentableRecentPushDays } from "../utils/aggregate";
 import { detectGitHubRepo } from "../utils/git-remote";
 import { LOCK_FILE } from "../utils/lock";
 import { absPath } from "../utils/paths";
@@ -158,24 +158,62 @@ function isRealTimeOfDay(hour = 0, minute = 0, second = 0): boolean {
   return hour <= 23 && minute <= 59 && second <= 60;
 }
 
-type ConcurrencyParseResult =
+type PositiveIntegerParseResult =
   | { readonly ok: true; readonly value: number | undefined }
   | { readonly ok: false };
 
-/** `--concurrency` の期待フォーマット。CLI ガード節が `InvalidArgument` の `expected` に使う。 */
-export const CONCURRENCY_FORMAT_HINT = "a positive integer, e.g. --concurrency=4";
-
 /**
- * `--concurrency` を正の整数として検証する。
- * 未指定（undefined）は `aggregateTemplateUsage` 側の既定値に委ねる。
+ * 「未指定なら ok、指定されていれば正の整数でなければ ok:false」という、この 3 つの CLI
+ * オプション（`--concurrency` / `--max-candidates` / `--recent-days`）に共通のパース規則。
+ * 未指定（undefined）を許すのは、いずれも `aggregateTemplateUsage` 側に既定値があり、
+ * それに委ねてよいため。3 つとも検証規則自体は同じで、呼び出し側ごとに違うのは
+ * エラーメッセージのフォーマットヒント（`CONCURRENCY_FORMAT_HINT` 等）だけなので、
+ * オプションごとに薄いラッパー関数は作らずこの関数を直接使う。
  */
-export function parseConcurrency(raw: string | undefined): ConcurrencyParseResult {
+export function parsePositiveInteger(raw: string | undefined): PositiveIntegerParseResult {
   if (raw === undefined) return { ok: true, value: undefined };
   const value = Number(raw);
   if (!Number.isInteger(value) || value <= 0) {
     return { ok: false };
   }
   return { ok: true, value };
+}
+
+/** `--concurrency` の期待フォーマット。CLI ガード節が `InvalidArgument` の `expected` に使う。 */
+export const CONCURRENCY_FORMAT_HINT = "a positive integer, e.g. --concurrency=4";
+
+/** `--max-candidates` の期待フォーマット。CLI ガード節が `InvalidArgument` の `expected` に使う。
+ *
+ * 未指定（undefined）は `aggregateTemplateUsage` 側の既定値（固定の既定値とレート制限の
+ * 残量から算出した上限の小さい方）に委ねる。指定した場合は、その値を「既定値より緩めてよい
+ * 明示的な意思表示」として扱う（レート制限由来の上限との小さい方が使われる）。
+ */
+export const MAX_CANDIDATES_FORMAT_HINT = "a positive integer, e.g. --max-candidates=200";
+
+/** `--recent-days` の期待フォーマット。CLI ガード節が `InvalidArgument` の `expected` に使う。
+ *
+ * `--since`（pendingPush/conflicts の最終コミット日時での絞り込み）とは別物で、こちらは
+ * owner 配下の候補そのものを push 日時で絞り込む。
+ */
+export const RECENT_DAYS_FORMAT_HINT = "a positive integer, e.g. --recent-days=30";
+
+/**
+ * `parsePositiveInteger` のような「未指定なら ok、そうでなければ検証する」パーサーの結果を、
+ * 成功なら値へ、失敗なら `InvalidArgument` の `ZikuFailure` へ変換する。
+ *
+ * `run` 本体に同じ形の `if (!result.ok) throw ...` を並べると分岐が積み重なるため、
+ * 検証系のオプションが増えるたびに複雑度が上がる問題をここへ切り出して抑える。
+ */
+function requireParsedOption<T>(
+  result: { readonly ok: true; readonly value: T } | { readonly ok: false },
+  argument: string,
+  rawValue: string | undefined,
+  expected: string,
+): T {
+  if (!result.ok) {
+    throw zikuFailure({ kind: "InvalidArgument", argument, value: rawValue ?? "", expected });
+  }
+  return result.value;
 }
 
 export const aggregateCommand = defineCommand({
@@ -217,6 +255,16 @@ export const aggregateCommand = defineCommand({
       type: "string",
       description: "Number of repositories to process concurrently (default: 4)",
     },
+    "max-candidates": {
+      type: "string",
+      description:
+        "Maximum number of candidate repositories to check (default: 30, further reduced when the current GitHub API rate limit is low)",
+    },
+    "recent-days": {
+      type: "string",
+      description:
+        "Only consider repositories pushed within this many days (default: 90; distinct from --since, which filters by the last commit date of pending-push/conflict files)",
+    },
   },
   async run({ args }) {
     const jsonMode = args.json as boolean;
@@ -257,13 +305,36 @@ export const aggregateCommand = defineCommand({
     }
 
     const concurrencyRaw = args.concurrency as string | undefined;
-    const parsedConcurrency = parseConcurrency(concurrencyRaw);
-    if (!parsedConcurrency.ok) {
+    const concurrency = requireParsedOption(
+      parsePositiveInteger(concurrencyRaw),
+      "--concurrency",
+      concurrencyRaw,
+      CONCURRENCY_FORMAT_HINT,
+    );
+
+    const maxCandidatesRaw = args["max-candidates"] as string | undefined;
+    const maxCandidates = requireParsedOption(
+      parsePositiveInteger(maxCandidatesRaw),
+      "--max-candidates",
+      maxCandidatesRaw,
+      MAX_CANDIDATES_FORMAT_HINT,
+    );
+
+    const recentDaysRaw = args["recent-days"] as string | undefined;
+    const recentPushDays = requireParsedOption(
+      parsePositiveInteger(recentDaysRaw),
+      "--recent-days",
+      recentDaysRaw,
+      RECENT_DAYS_FORMAT_HINT,
+    );
+    // `parsePositiveInteger` は正の整数であることしか見ないため、Date が表現できる範囲を
+    // 超える値（例: 2 億日）も通過する。GitHub への問い合わせに入る前にここで弾く。
+    if (recentPushDays !== undefined && !isRepresentableRecentPushDays(recentPushDays)) {
       throw zikuFailure({
         kind: "InvalidArgument",
-        argument: "--concurrency",
-        value: concurrencyRaw ?? "",
-        expected: CONCURRENCY_FORMAT_HINT,
+        argument: "--recent-days",
+        value: recentDaysRaw ?? "",
+        expected: RECENT_DAYS_FORMAT_HINT,
       });
     }
 
@@ -278,8 +349,10 @@ export const aggregateCommand = defineCommand({
       template: { owner: templateRepo.owner, repo: templateRepo.repo },
       searchOwner: owner,
       includeArchived,
-      concurrency: parsedConcurrency.value,
+      concurrency,
       since,
+      maxCandidates,
+      recentPushDays,
     });
 
     const report: AggregateReport = jsonMode

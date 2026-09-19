@@ -135,6 +135,16 @@ describe("resolveBaseRef", () => {
     expect(exit).toStrictEqual(Exit.succeed(Option.none()));
   });
 
+  // レート制限も Unresolved と同じ「待てば解消しうる失敗」として None に倒す。認証拒否と
+  // 違い、人が直すまで待つ必要は無いので、記録済みのベースへのフォールバックを妨げない。
+  it("レート制限も None にして呼び出し側のフォールバックへ倒す", async () => {
+    mockResolveSourceCommit.mockResolvedValue({ _tag: "RateLimited", resetAt: undefined });
+
+    const exit = await runResolveBaseRef(githubSource);
+
+    expect(exit).toStrictEqual(Exit.succeed(Option.none()));
+  });
+
   it("ローカルソースは API を呼ばずに None を返す", async () => {
     const exit = await runResolveBaseRef(localSource);
 

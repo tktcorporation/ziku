@@ -5,6 +5,7 @@
  * 提供し、I/O は呼び出し側（aggregate コマンド）で行う。テストしやすさを優先する。
  */
 import pc from "picocolors";
+import { match } from "ts-pattern";
 import type { AggregateReport, AggregateRepositoryReport } from "../modules/schemas";
 
 /**
@@ -56,18 +57,75 @@ function renderSkippedLines(report: AggregateReport): string[] {
 }
 
 /**
- * ヘッダー行の括弧内に添える補足（skipped 件数・`--since` による除外件数）を作る。
- * どちらも 0 件なら空配列を返し、呼び出し側は括弧そのものを省略する。
+ * レポートが「網羅的ではないかもしれない」理由。ヘッダーの補足（{@link headerNotes}）と
+ * 0 件時の案内（{@link zeroRepositoriesReason}）の双方が同じ判定条件を参照する
+ * SSOT。どちらか一方だけを更新すると、0 件のときにヘッダーの注記と outro の文言が
+ * 食い違う（ヘッダーは絞り込みを示すのに outro は「テンプレート利用リポジトリが
+ * 無い」と読める）。
+ *
+ * 候補数上限による打ち切りは、`renderSkippedLines` / `aggregateOutroLine` と同じ設計意図
+ * （0 件は「使っているリポジトリが無い」ことの証明ではない）を、候補の絞り込みそのものに
+ * まで広げたもの。owner 配下に候補数上限を超えるリポジトリがあると、その分はそもそも
+ * テンプレート利用の判定すら受けていない。`candidatesScanned >= candidateScanLimit` は
+ * 近似であり、常に正確に打ち切りの有無を表すとは限らない（近似の理由は `modules/schemas.ts`
+ * の `candidateScanLimit` を参照）。
+ *
+ * 直近 push フィルタは、候補数上限とは異なり「実際に除外が起きたか」を検知できない
+ * （`listOwnerRepos` が早期終了した件数はレポートに残らない）ため、フィルタが適用されている
+ * こと自体を常に示す。owner 配下の全リポジトリがこの下限より前にしか push されていない場合、
+ * `totalRepositories: 0` だけでは「利用リポジトリが無い」のか「直近 push フィルタで最初から
+ * 対象に入らなかった」のか読み手が区別できない。
  */
-function headerNotes(report: AggregateReport): string[] {
-  const notes: string[] = [];
+type IncompleteScanCause =
+  | { readonly _tag: "skipped"; readonly count: number }
+  | { readonly _tag: "excludedBySince"; readonly count: number }
+  | { readonly _tag: "candidateScanLimitReached"; readonly limit: number }
+  | { readonly _tag: "recentPushFiltered"; readonly since: string };
+
+function detectIncompleteScanCauses(report: AggregateReport): readonly IncompleteScanCause[] {
+  const causes: IncompleteScanCause[] = [];
   if (report.skipped.length > 0) {
-    notes.push(`${pc.bold(String(report.skipped.length))} skipped — see below`);
+    causes.push({ _tag: "skipped", count: report.skipped.length });
   }
   if (report.summary.excludedBySince > 0) {
-    notes.push(`${pc.bold(String(report.summary.excludedBySince))} excluded by --since`);
+    causes.push({ _tag: "excludedBySince", count: report.summary.excludedBySince });
   }
-  return notes;
+  const { candidateScanLimit, candidatesScanned, recentPushSince } = report.summary;
+  if (candidateScanLimit !== undefined && candidatesScanned >= candidateScanLimit) {
+    causes.push({ _tag: "candidateScanLimitReached", limit: candidateScanLimit });
+  }
+  if (recentPushSince !== undefined) {
+    causes.push({ _tag: "recentPushFiltered", since: recentPushSince });
+  }
+  return causes;
+}
+
+/**
+ * ヘッダー行の括弧内に添える、{@link IncompleteScanCause} 1 件分の短い注記（bold 強調あり）。
+ */
+function headerNoteFor(cause: IncompleteScanCause): string {
+  return match(cause)
+    .with({ _tag: "skipped" }, (c) => `${pc.bold(String(c.count))} skipped — see below`)
+    .with({ _tag: "excludedBySince" }, (c) => `${pc.bold(String(c.count))} excluded by --since`)
+    .with(
+      { _tag: "candidateScanLimitReached" },
+      (c) =>
+        `candidate scan stopped at ${pc.bold(String(c.limit))} — the owner may have more repositories that were not checked`,
+    )
+    .with(
+      { _tag: "recentPushFiltered" },
+      (c) => `only repositories pushed on/after ${pc.bold(c.since)} were scanned`,
+    )
+    .exhaustive();
+}
+
+/**
+ * ヘッダー行の括弧内に添える補足（skipped 件数・`--since` による除外件数・候補数上限による
+ * 打ち切り・直近 push フィルタの下限）を作る。いずれも該当が無ければ空配列を返し、
+ * 呼び出し側は括弧そのものを省略する。
+ */
+function headerNotes(report: AggregateReport): string[] {
+  return detectIncompleteScanCauses(report).map((cause) => headerNoteFor(cause));
 }
 
 /**
@@ -113,23 +171,37 @@ export function renderAggregateSummary(report: AggregateReport): string {
   return lines.join("\n");
 }
 
+/** {@link zeroRepositoriesReason} が並べる、{@link IncompleteScanCause} 1 件分の説明文。 */
+function zeroRepositoriesReasonFor(cause: IncompleteScanCause): string {
+  return match(cause)
+    .with(
+      { _tag: "skipped" },
+      (c) => `${c.count} repositories could not be processed (see Skipped above)`,
+    )
+    .with(
+      { _tag: "excludedBySince" },
+      (c) => `${c.count} repositories use this template but had no changes on or after --since`,
+    )
+    .with(
+      { _tag: "candidateScanLimitReached" },
+      (c) =>
+        `the candidate scan stopped at ${c.limit} repositories — the owner may have more that were not checked`,
+    )
+    .with(
+      { _tag: "recentPushFiltered" },
+      (c) => `only repositories pushed on/after ${c.since} were scanned`,
+    )
+    .exhaustive();
+}
+
 /**
  * `totalRepositories === 0` のとき、その理由を読み手に伝える 1 文を組み立てる。
- * skipped と `--since` による除外は互いに独立した理由なので両方あれば両方書く。
+ * 該当する理由は互いに独立しているので、複数あれば全て書く。
  */
 function zeroRepositoriesReason(report: AggregateReport): string | undefined {
-  const reasons: string[] = [];
-  if (report.skipped.length > 0) {
-    reasons.push(
-      `${report.skipped.length} repositories could not be processed (see Skipped above)`,
-    );
-  }
-  if (report.summary.excludedBySince > 0) {
-    reasons.push(
-      `${report.summary.excludedBySince} repositories use this template but had no changes on or after --since`,
-    );
-  }
-  if (reasons.length === 0) return undefined;
+  const causes = detectIncompleteScanCauses(report);
+  if (causes.length === 0) return undefined;
+  const reasons = causes.map((cause) => zeroRepositoriesReasonFor(cause));
   return `No repositories included in the report — ${reasons.join("; ")}. This does not mean no repositories use this template.`;
 }
 

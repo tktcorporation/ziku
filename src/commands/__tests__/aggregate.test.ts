@@ -16,10 +16,16 @@ vi.mock("node:fs/promises", async () => {
   return memfs.fs.promises;
 });
 
-// utils/aggregate をモック（集約ロジック本体はテスト対象外。src/utils/__tests__/aggregate.test.ts が別途カバー）
-vi.mock("../../utils/aggregate", () => ({
-  aggregateTemplateUsage: vi.fn(),
-}));
+// utils/aggregate をモック（集約ロジック本体はテスト対象外。src/utils/__tests__/aggregate.test.ts が別途カバー）。
+// isRepresentableRecentPushDays は CLI 層の入力検証（--recent-days の範囲チェック）が使う
+// 純粋関数なので、モックに差し替えず実装をそのまま使う。
+vi.mock("../../utils/aggregate", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../utils/aggregate")>();
+  return {
+    ...actual,
+    aggregateTemplateUsage: vi.fn(),
+  };
+});
 
 // utils/git-remote をモック
 vi.mock("../../utils/git-remote", () => ({
@@ -49,7 +55,7 @@ vi.mock("../../ui/renderer", () => ({
   },
 }));
 
-const { aggregateCommand, normalizeSince, parseConcurrency } = await import("../aggregate");
+const { aggregateCommand, normalizeSince, parsePositiveInteger } = await import("../aggregate");
 const { aggregateTemplateUsage } = await import("../../utils/aggregate");
 const { detectGitHubRepo } = await import("../../utils/git-remote");
 const { log, outro } = await import("../../ui/renderer");
@@ -82,6 +88,7 @@ function makeReport(overrides: Partial<AggregateReport> = {}): AggregateReport {
       pendingPushFiles: 0,
       conflictFiles: 0,
       excludedBySince: 0,
+      candidatesScanned: 0,
     },
     ...overrides,
   };
@@ -155,33 +162,32 @@ describe("normalizeSince", () => {
   });
 });
 
-describe("parseConcurrency", () => {
+// `--concurrency` / `--max-candidates` / `--recent-days` はすべてこの関数 1 つで検証される
+// （`aggregate.ts` 参照）。オプションごとの違いはエラーメッセージのフォーマットヒント
+// （`CONCURRENCY_FORMAT_HINT` 等）だけなので、検証規則そのもののテストは 1 箇所にまとめる。
+describe("parsePositiveInteger", () => {
   it("未指定は undefined として成功扱い", () => {
-    expect(parseConcurrency(undefined)).toEqual({ ok: true, value: undefined });
+    expect(parsePositiveInteger(undefined)).toEqual({ ok: true, value: undefined });
   });
 
   it("正の整数はそのまま受理する", () => {
-    expect(parseConcurrency("4")).toEqual({ ok: true, value: 4 });
+    expect(parsePositiveInteger("4")).toEqual({ ok: true, value: 4 });
   });
 
   it("0 はエラーになる", () => {
-    const result = parseConcurrency("0");
-    expect(result.ok).toBe(false);
+    expect(parsePositiveInteger("0").ok).toBe(false);
   });
 
   it("負値はエラーになる", () => {
-    const result = parseConcurrency("-1");
-    expect(result.ok).toBe(false);
+    expect(parsePositiveInteger("-1").ok).toBe(false);
   });
 
   it("数値でない入力はエラーになる", () => {
-    const result = parseConcurrency("abc");
-    expect(result.ok).toBe(false);
+    expect(parsePositiveInteger("abc").ok).toBe(false);
   });
 
   it("小数はエラーになる", () => {
-    const result = parseConcurrency("2.5");
-    expect(result.ok).toBe(false);
+    expect(parsePositiveInteger("2.5").ok).toBe(false);
   });
 });
 
@@ -242,6 +248,72 @@ describe("aggregateCommand", () => {
       );
     });
 
+    it("--max-candidates=0 は ZikuFailure（aggregateTemplateUsage は呼ばれない）", async () => {
+      const thrown = await runAggregate({ "max-candidates": "0" }).catch((e: unknown) => e);
+      expect(thrown).toBeInstanceOf(ZikuFailure);
+      expect((thrown as ZikuFailure).reason).toMatchObject({
+        kind: "InvalidArgument",
+        argument: "--max-candidates",
+      });
+      expect(mockAggregateTemplateUsage).not.toHaveBeenCalled();
+    });
+
+    it("--max-candidates=200 は数値として aggregateTemplateUsage に渡る", async () => {
+      await runAggregate({ "max-candidates": "200" });
+
+      expect(mockAggregateTemplateUsage).toHaveBeenCalledWith(
+        expect.objectContaining({ maxCandidates: 200 }),
+      );
+    });
+
+    it("--max-candidates 未指定なら maxCandidates は undefined のまま渡る", async () => {
+      await runAggregate({});
+
+      expect(mockAggregateTemplateUsage).toHaveBeenCalledWith(
+        expect.objectContaining({ maxCandidates: undefined }),
+      );
+    });
+
+    it("--recent-days=0 は ZikuFailure（aggregateTemplateUsage は呼ばれない）", async () => {
+      const thrown = await runAggregate({ "recent-days": "0" }).catch((e: unknown) => e);
+      expect(thrown).toBeInstanceOf(ZikuFailure);
+      expect((thrown as ZikuFailure).reason).toMatchObject({
+        kind: "InvalidArgument",
+        argument: "--recent-days",
+      });
+      expect(mockAggregateTemplateUsage).not.toHaveBeenCalled();
+    });
+
+    // parsePositiveInteger は正の整数であることしか見ないため、Date が表現できる範囲
+    // （エポックから前後約 2 億7千万年）を超える値も素通りする。GitHub への問い合わせに
+    // 入る前に弾かれ、`toISOString()` の RangeError が未分類の defect として漏れないことを
+    // 固定する。
+    it("--recent-days=200000000（Date の範囲外）は ZikuFailure（aggregateTemplateUsage は呼ばれない）", async () => {
+      const thrown = await runAggregate({ "recent-days": "200000000" }).catch((e: unknown) => e);
+      expect(thrown).toBeInstanceOf(ZikuFailure);
+      expect((thrown as ZikuFailure).reason).toMatchObject({
+        kind: "InvalidArgument",
+        argument: "--recent-days",
+      });
+      expect(mockAggregateTemplateUsage).not.toHaveBeenCalled();
+    });
+
+    it("--recent-days=30 は数値として aggregateTemplateUsage に渡る", async () => {
+      await runAggregate({ "recent-days": "30" });
+
+      expect(mockAggregateTemplateUsage).toHaveBeenCalledWith(
+        expect.objectContaining({ recentPushDays: 30 }),
+      );
+    });
+
+    it("--recent-days 未指定なら recentPushDays は undefined のまま渡る", async () => {
+      await runAggregate({});
+
+      expect(mockAggregateTemplateUsage).toHaveBeenCalledWith(
+        expect.objectContaining({ recentPushDays: undefined }),
+      );
+    });
+
     it("--owner 未指定時は検出した template owner を searchOwner に使う", async () => {
       await runAggregate({});
 
@@ -281,6 +353,7 @@ describe("aggregateCommand", () => {
           pendingPushFiles: 0,
           conflictFiles: 0,
           excludedBySince: 0,
+          candidatesScanned: 1,
         },
       });
       mockAggregateTemplateUsage.mockReturnValue(Effect.succeed(report));
@@ -334,6 +407,7 @@ describe("aggregateCommand", () => {
           pendingPushFiles: 1,
           conflictFiles: 0,
           excludedBySince: 0,
+          candidatesScanned: 1,
         },
       });
       mockAggregateTemplateUsage.mockReturnValue(Effect.succeed(report));

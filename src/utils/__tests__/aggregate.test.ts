@@ -1,7 +1,7 @@
-import { Effect, Option } from "effect";
+import { Effect, Either, Option } from "effect";
 import { vol } from "memfs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { TemplateError, zikuFailure } from "../../errors";
+import { TemplateError, ZikuFailure, zikuFailure } from "../../errors";
 import type { CommitSha } from "../../modules/schemas";
 import { commitShaSchema } from "../../modules/schemas";
 
@@ -29,15 +29,28 @@ const mockGetLastCommitDate = vi.fn();
 const mockResolveLatestCommitSha = vi.fn();
 const mockResolveSourceCommit = vi.fn();
 const mockGetRepoIdentity = vi.fn();
+const mockFetchRateLimitStatus = vi.fn();
+const mockGetObservedRateLimitRemaining = vi.fn();
 
-vi.mock("../github", () => ({
-  listOwnerRepos: (...args: unknown[]) => mockListOwnerRepos(...args),
-  fetchRepoTextFile: (...args: unknown[]) => mockFetchRepoTextFile(...args),
-  getLastCommitDate: (...args: unknown[]) => mockGetLastCommitDate(...args),
-  resolveLatestCommitSha: (...args: unknown[]) => mockResolveLatestCommitSha(...args),
-  resolveSourceCommit: (...args: unknown[]) => mockResolveSourceCommit(...args),
-  getRepoIdentity: (...args: unknown[]) => mockGetRepoIdentity(...args),
-}));
+vi.mock("../github", async (importOriginal) => {
+  // 純粋な判定関数（getGitHubToken の形式検査・detectGitHubRateLimit の HTTP ステータス/
+  // ヘッダー判定）や、この分割ではモックしない他の export は実装のまま使う。
+  // aggregate.ts からの named import はモックオブジェクトに存在しないと
+  // vitest がエラーにするため、個別にモックする関数だけを上書きする形にする。
+  const actual = await importOriginal<typeof import("../github")>();
+  return {
+    ...actual,
+    listOwnerRepos: (...args: unknown[]) => mockListOwnerRepos(...args),
+    fetchRepoTextFile: (...args: unknown[]) => mockFetchRepoTextFile(...args),
+    getLastCommitDate: (...args: unknown[]) => mockGetLastCommitDate(...args),
+    resolveLatestCommitSha: (...args: unknown[]) => mockResolveLatestCommitSha(...args),
+    resolveSourceCommit: (...args: unknown[]) => mockResolveSourceCommit(...args),
+    getRepoIdentity: (...args: unknown[]) => mockGetRepoIdentity(...args),
+    fetchRateLimitStatus: (...args: unknown[]) => mockFetchRateLimitStatus(...args),
+    getObservedRateLimitRemaining: (...args: unknown[]) =>
+      mockGetObservedRateLimitRemaining(...args),
+  };
+});
 
 const mockAcquireTempTemplate = vi.fn();
 
@@ -219,6 +232,16 @@ describe("aggregateTemplateUsage", () => {
     mockGetRepoIdentity.mockImplementation((owner: string, repo: string) =>
       Promise.resolve({ owner, repo, defaultBranch: "main" }),
     );
+    // 既定では「レート制限の残量を取得できなかった」状態にする。レート制限由来の絞り込みは
+    // 適用できないため、候補数の上限は呼び出し側が指定した maxCandidates（未指定なら固定の
+    // 既定値 DEFAULT_MAX_CANDIDATES=30）に従う（`resolveCandidateLimit` の `Unresolved` 分岐）。
+    // 個別に事前絞り込みの挙動を見るテストは、ここを上書きする。
+    mockFetchRateLimitStatus.mockResolvedValue({
+      _tag: "Unresolved",
+      reason: "not configured in this fixture",
+    });
+    // 動的ブレーキは既定では発動しない（観測値なし）。
+    mockGetObservedRateLimitRemaining.mockReturnValue(undefined);
   });
 
   it("`.ziku/lock.json` が無いリポジトリは skipped に入らず黙って除外される", async () => {
@@ -532,9 +555,11 @@ describe("aggregateTemplateUsage", () => {
       );
 
       expect(report.repositories.map((r) => r.repo)).toEqual(["exact-match"]);
-      // template.ref を明示指定しているため resolveTemplateRef 経由でも呼ばれず、
-      // lock.source が文字列一致するため canonical 解決経由でも呼ばれない。
-      expect(mockGetRepoIdentity).not.toHaveBeenCalled();
+      // template.ref を明示指定しているため resolveTemplateRef 経由では呼ばれず、
+      // lock.source が文字列一致するため canonical 解決経由でも呼ばれない。1 回だけ呼ばれるのは
+      // listOwnerRepos の excludeRepo に渡すテンプレート自身の正規名解決分。
+      expect(mockGetRepoIdentity).toHaveBeenCalledTimes(1);
+      expect(mockGetRepoIdentity).toHaveBeenCalledWith("acme", "template");
     });
   });
 
@@ -1136,6 +1161,50 @@ describe("aggregateTemplateUsage", () => {
     expect(report.template.ref).toBe("resolved-sha");
   });
 
+  it("listOwnerRepos にテンプレート自身を excludeRepo として渡す", async () => {
+    mockListOwnerRepos.mockResolvedValue([]);
+
+    await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+      }),
+    );
+
+    expect(mockListOwnerRepos).toHaveBeenCalledWith(
+      "acme",
+      expect.objectContaining({ excludeRepo: { owner: "acme", repo: "template" } }),
+    );
+  });
+
+  // テンプレートがリネーム・移管された後、呼び出し側が渡す template.owner/repo が旧名の
+  // ままでも、listOwnerRepos へは正規名（GitHub のリダイレクト後の表記）を excludeRepo として
+  // 渡す。旧名のまま渡すと、リネーム後の一覧に含まれる正規名のテンプレート自身を
+  // 除外できない。
+  it("テンプレートがリネームされていても、listOwnerRepos へ正規名の excludeRepo を渡す", async () => {
+    mockListOwnerRepos.mockResolvedValue([]);
+    mockGetRepoIdentity.mockImplementation((owner: string, repo: string) =>
+      Promise.resolve(
+        owner === "old-owner" && repo === "old-template"
+          ? { owner: "new-owner", repo: "new-template", defaultBranch: "main" }
+          : { owner, repo, defaultBranch: "main" },
+      ),
+    );
+
+    await Effect.runPromise(
+      aggregateTemplateUsage({
+        // ローカルの git remote 等から検出した、リネーム前の旧名。
+        template: { owner: "old-owner", repo: "old-template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+      }),
+    );
+
+    expect(mockListOwnerRepos).toHaveBeenCalledWith(
+      "old-owner",
+      expect.objectContaining({ excludeRepo: { owner: "new-owner", repo: "new-template" } }),
+    );
+  });
+
   it("tmpBaseDir 省略時は Scope クローズ時に tmpBaseDir を削除する", async () => {
     mockListOwnerRepos.mockResolvedValue([]);
 
@@ -1289,6 +1358,654 @@ describe("aggregateTemplateUsage", () => {
     // 2 リポジトリ × 4 ファイル = 8 件を投げるが、同時に走るのは 2 件まで。
     expect(mockGetLastCommitDate).toHaveBeenCalledTimes(8);
     expect(maxInFlight).toBeLessThanOrEqual(2);
+  });
+
+  // tryGitHubGated の事後ゲートは実際に 403/429 を受け取って初めて発動するため、変更
+  // ファイルが多いリポジトリでは、枯渇するまでファイルごとに新規リクエストを送り続けて
+  // しまう。ファイル単位の動的ブレーキ（cannotAffordRemainingRequests）が、実際に
+  // レート制限へ達する前に以降のファイルへの getLastCommitDate 呼び出しを止めることを
+  // 固定する回帰ケース。
+  it("--since 指定時、コミット日時取得中に観測残量が枯渇に近づいたら、以降のファイルへは getLastCommitDate を呼ばない", async () => {
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "many-files-rl" })]);
+    const paths = ["f1.txt", "f2.txt", "f3.txt", "f4.txt"];
+    const baseHashes = Object.fromEntries(paths.map((p) => [p, hashContent("v1")]));
+    setLockFixture(lockFixtures, "acme", "many-files-rl", () =>
+      Promise.resolve(Option.some(lockJson({ baseHashes }))),
+    );
+    shaFixtures.set("acme/many-files-rl", sha("mfrl-sha"));
+    dirsBySource.set("gh:acme/many-files-rl#mfrl-sha", "/mfrl-dir");
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-mfrl");
+
+    vol.fromJSON({
+      "/mfrl-dir/.ziku/ziku.jsonc": JSON.stringify({ include: paths }),
+      "/mfrl-dir/f1.txt": "v2",
+      "/mfrl-dir/f2.txt": "v2",
+      "/mfrl-dir/f3.txt": "v2",
+      "/mfrl-dir/f4.txt": "v2",
+      "/tmpl-dir-mfrl/.ziku/ziku.jsonc": JSON.stringify({ include: paths }),
+      "/tmpl-dir-mfrl/f1.txt": "v1",
+      "/tmpl-dir-mfrl/f2.txt": "v1",
+      "/tmpl-dir-mfrl/f3.txt": "v1",
+      "/tmpl-dir-mfrl/f4.txt": "v1",
+    });
+    queueGlobResults(paths, paths);
+
+    mockGetLastCommitDate.mockImplementation(() =>
+      Promise.resolve(Option.some("2026-08-10T00:00:00Z")),
+    );
+
+    // 1 回目（評価フェーズ）と f1・f2 の直前（2・3 回目）は未観測のままとし、f3 の直前
+    // （4 回目）で観測残量 1 を返す。f3 の必要見積もりは (remainingAfter(1)+1) * 1 = 2 なので
+    // 1 < 2 でブレーキが発動し、f3・f4 は getLastCommitDate を呼ばれない。
+    let observedCallCount = 0;
+    mockGetObservedRateLimitRemaining.mockImplementation(() => {
+      observedCallCount += 1;
+      return observedCallCount <= 3 ? undefined : { remaining: 1, resetAt: undefined };
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+        since: "2026-08-01T00:00:00.000Z",
+      }),
+    );
+
+    expect(mockGetLastCommitDate).toHaveBeenCalledTimes(2);
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(1);
+    expect(report.skipped[0]).toMatchObject({ owner: "acme", repo: "many-files-rl" });
+  });
+
+  // attachLastCommittedAt の動的ブレーキ（cannotAffordRemainingRequests）が、境界値
+  // （観測残量がちょうど残りエントリ数分足りる）で誤発動しないことを固定する。
+  it("--since 指定時、観測残量がちょうど残りエントリ数分足りる場合、動的ブレーキは誤発動しない", async () => {
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "exact-fit" })]);
+    const baseHashes = { "f.txt": hashContent("v1") };
+    setLockFixture(lockFixtures, "acme", "exact-fit", () =>
+      Promise.resolve(Option.some(lockJson({ baseHashes }))),
+    );
+    shaFixtures.set("acme/exact-fit", sha("exact-fit-sha"));
+    dirsBySource.set("gh:acme/exact-fit#exact-fit-sha", "/exact-fit-dir");
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-exact-fit");
+
+    vol.fromJSON({
+      "/exact-fit-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/exact-fit-dir/f.txt": "v2",
+      "/tmpl-dir-exact-fit/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/tmpl-dir-exact-fit/f.txt": "v1",
+    });
+    queueGlobResults(["f.txt"], ["f.txt"]);
+
+    mockGetLastCommitDate.mockImplementation(() =>
+      Promise.resolve(Option.some("2026-08-10T00:00:00Z")),
+    );
+
+    // 評価フェーズ（1 回目の呼び出し）は未観測のままとし、唯一のファイル（f.txt、
+    // remainingAfter=0）の直前で観測残量 1 を返す。`cannotAffordRemainingRequests(1, 0, 1)` は
+    // `1 < (0+1)*1 = 1` が false なので、ちょうどまかなえてブレーキは発動しない。
+    let observedCallCount = 0;
+    mockGetObservedRateLimitRemaining.mockImplementation(() => {
+      observedCallCount += 1;
+      return observedCallCount === 1 ? undefined : { remaining: 1, resetAt: undefined };
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        since: "2026-08-01T00:00:00.000Z",
+      }),
+    );
+
+    expect(mockGetLastCommitDate).toHaveBeenCalledTimes(1);
+    expect(report.skipped).toEqual([]);
+    expect(report.repositories).toHaveLength(1);
+  });
+
+  it("--since 指定時、観測残量が残りエントリ数分より1つ足りない場合、動的ブレーキは発動する", async () => {
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "one-short" })]);
+    const baseHashes = { "f.txt": hashContent("v1") };
+    setLockFixture(lockFixtures, "acme", "one-short", () =>
+      Promise.resolve(Option.some(lockJson({ baseHashes }))),
+    );
+    shaFixtures.set("acme/one-short", sha("one-short-sha"));
+    dirsBySource.set("gh:acme/one-short#one-short-sha", "/one-short-dir");
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-one-short");
+
+    vol.fromJSON({
+      "/one-short-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/one-short-dir/f.txt": "v2",
+      "/tmpl-dir-one-short/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/tmpl-dir-one-short/f.txt": "v1",
+    });
+    queueGlobResults(["f.txt"], ["f.txt"]);
+
+    mockGetLastCommitDate.mockImplementation(() =>
+      Promise.resolve(Option.some("2026-08-10T00:00:00Z")),
+    );
+
+    // 観測残量 0 は、唯一のファイル（remainingAfter=0）の必要見積もり
+    // `(0+1)*1 = 1` を 1 つ下回る。境界のもう一方として、この場合は発動することを固定する。
+    let observedCallCount = 0;
+    mockGetObservedRateLimitRemaining.mockImplementation(() => {
+      observedCallCount += 1;
+      return observedCallCount === 1 ? undefined : { remaining: 0, resetAt: undefined };
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        since: "2026-08-01T00:00:00.000Z",
+      }),
+    );
+
+    expect(mockGetLastCommitDate).not.toHaveBeenCalled();
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(1);
+    expect(report.skipped[0]).toMatchObject({ owner: "acme", repo: "one-short" });
+  });
+
+  // classifyAgainstTemplate は giget 経由でテンプレート/候補内容をダウンロードするが、giget は
+  // githubFetch を経由しないためダウンロードの成功がレート制限残量の観測に反映されない。
+  // ダウンロード直後・attachLastCommittedAt の動的ブレーキ判定に入る前に fetchRateLimitStatus
+  // を呼び、observedRateLimit を明示的にリフレッシュすることを固定する。
+  it("--since 指定時、候補のダウンロード後・動的ブレーキ判定前に fetchRateLimitStatus を呼ぶ", async () => {
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "refresh-rl" })]);
+    const baseHashes = { "f.txt": hashContent("v1") };
+    setLockFixture(lockFixtures, "acme", "refresh-rl", () =>
+      Promise.resolve(Option.some(lockJson({ baseHashes }))),
+    );
+    shaFixtures.set("acme/refresh-rl", sha("refresh-rl-sha"));
+    dirsBySource.set("gh:acme/refresh-rl#refresh-rl-sha", "/refresh-rl-dir");
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-refresh");
+
+    vol.fromJSON({
+      "/refresh-rl-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/refresh-rl-dir/f.txt": "v2",
+      "/tmpl-dir-refresh/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/tmpl-dir-refresh/f.txt": "v1",
+    });
+    queueGlobResults(["f.txt"], ["f.txt"]);
+
+    const callOrder: string[] = [];
+    mockAcquireTempTemplate.mockImplementation((_targetDir: string, source: string) => {
+      if (source.startsWith("gh:acme/refresh-rl#")) {
+        callOrder.push("download-repo");
+      }
+      const dir = dirsBySource.get(source);
+      if (dir === undefined) {
+        return Effect.fail(
+          new TemplateError({
+            message: `no fixture dir registered for source: ${source}`,
+          }),
+        );
+      }
+      return Effect.succeed(absPath(dir));
+    });
+    mockFetchRateLimitStatus.mockImplementation(() => {
+      callOrder.push("fetch-rate-limit-status");
+      return Promise.resolve({
+        _tag: "Resolved",
+        status: { limit: 5000, remaining: 4000, resetAt: undefined, authenticated: false },
+      });
+    });
+    mockGetLastCommitDate.mockImplementation(() => {
+      callOrder.push("get-last-commit-date");
+      return Promise.resolve(Option.some("2026-08-10T00:00:00Z"));
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        since: "2026-08-01T00:00:00.000Z",
+      }),
+    );
+
+    // resolveCandidateLimit（スキャン開始前の候補数見積もり）でも fetchRateLimitStatus は
+    // 1 回呼ばれるため、ここでは「候補のダウンロード後に呼ばれた分」を最後の呼び出しとして
+    // 特定し、それが download-repo より後・get-last-commit-date より前であることを見る。
+    const downloadIndex = callOrder.indexOf("download-repo");
+    const lastRateLimitIndex = callOrder.lastIndexOf("fetch-rate-limit-status");
+    const commitDateIndex = callOrder.indexOf("get-last-commit-date");
+    expect(downloadIndex).toBeGreaterThanOrEqual(0);
+    expect(lastRateLimitIndex).toBeGreaterThan(downloadIndex);
+    expect(commitDateIndex).toBeGreaterThan(lastRateLimitIndex);
+    expect(mockFetchRateLimitStatus).toHaveBeenCalledTimes(2);
+    expect(report.repositories).toHaveLength(1);
+  });
+
+  // 候補ダウンロード後の fetchRateLimitStatus リフレッシュ自体がレート制限（ヘッダー無しの
+  // secondary rate limit を含む）を検知した場合、attachLastCommittedAt の判定を待たず
+  // ここで直接ゲートを立てることを固定する。待つと、並行実行中の他候補が同じ throttling を
+  // 個別に踏んでからでないとゲートが立たない。
+  it("--since 指定時、fetchRateLimitStatus のリフレッシュ自体がレート制限を検知したら直ちにゲートを立てる", async () => {
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "refresh-rl-limited" })]);
+    const baseHashes = { "f.txt": hashContent("v1") };
+    setLockFixture(lockFixtures, "acme", "refresh-rl-limited", () =>
+      Promise.resolve(Option.some(lockJson({ baseHashes }))),
+    );
+    shaFixtures.set("acme/refresh-rl-limited", sha("refresh-rl-limited-sha"));
+    dirsBySource.set(
+      "gh:acme/refresh-rl-limited#refresh-rl-limited-sha",
+      "/refresh-rl-limited-dir",
+    );
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-refresh-limited");
+
+    vol.fromJSON({
+      "/refresh-rl-limited-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/refresh-rl-limited-dir/f.txt": "v2",
+      "/tmpl-dir-refresh-limited/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/tmpl-dir-refresh-limited/f.txt": "v1",
+    });
+    queueGlobResults(["f.txt"], ["f.txt"]);
+
+    // 1 回目（resolveCandidateLimit の事前見積もり）は健全な残量を返し、候補ダウンロード後の
+    // 2 回目でレート制限を返す。
+    let callCount = 0;
+    mockFetchRateLimitStatus.mockImplementation(() => {
+      callCount += 1;
+      if (callCount === 1) {
+        return Promise.resolve({
+          _tag: "Resolved",
+          status: { limit: 5000, remaining: 4000, resetAt: undefined, authenticated: false },
+        });
+      }
+      return Promise.resolve({ _tag: "RateLimited", resetAt: undefined });
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        since: "2026-08-01T00:00:00.000Z",
+      }),
+    );
+
+    // ゲートを立てても、この候補自身の attachLastCommittedAt 呼び出しは
+    // 「コミット日時が取得できなかった」経路（anyFetchFailed）で skip される
+    // （processCandidate はこの時点でゲートを再確認しない）。ここで固定したいのは
+    // getLastCommitDate（実際の GitHub API 呼び出し）が発行されないことそのもの。
+    expect(mockGetLastCommitDate).not.toHaveBeenCalled();
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(1);
+    expect(report.skipped[0]?.reason).toBe(
+      "Could not determine the --since filter because fetching the commit date failed for some files",
+    );
+  });
+
+  // 上のテストは候補 1 件で「ゲートが立つこと」を固定する。ここでは、その先の候補が
+  // テンプレート内容のダウンロードすら行わずスキップされることまで固定する
+  // （このリフレッシュを待たない設計だと、後続候補が同じ throttling を個別に踏んでから
+  // でないとゲートが立たない）。
+  it("--since 指定時、fetchRateLimitStatus のリフレッシュがレート制限を検知すると、以降の候補はダウンロードすら行わずスキップされる", async () => {
+    const repos = ["rl-refresh-1", "rl-refresh-2"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+    const baseHashes = { "f.txt": hashContent("v1") };
+    for (const repo of repos) {
+      setLockFixture(lockFixtures, "acme", repo, () =>
+        Promise.resolve(Option.some(lockJson({ baseHashes }))),
+      );
+      shaFixtures.set(`acme/${repo}`, sha(`${repo}-sha`));
+    }
+
+    const downloadedRepos: string[] = [];
+    const files: Record<string, string> = {
+      "/tmpl-dir-refresh-2/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/tmpl-dir-refresh-2/f.txt": "v1",
+    };
+    for (const repo of repos) {
+      files[`/${repo}-dir/.ziku/ziku.jsonc`] = JSON.stringify({ include: ["f.txt"] });
+      files[`/${repo}-dir/f.txt`] = "v2";
+    }
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-refresh-2");
+    for (const repo of repos) {
+      dirsBySource.set(`gh:acme/${repo}#${repo}-sha`, `/${repo}-dir`);
+    }
+    vol.fromJSON(files);
+    for (const _ of repos) queueGlobResults(["f.txt"], ["f.txt"]);
+
+    mockAcquireTempTemplate.mockImplementation((_targetDir: string, source: string) => {
+      if (source === "gh:acme/template#tmpl-sha") {
+        return Effect.succeed(absPath("/tmpl-dir-refresh-2"));
+      }
+      downloadedRepos.push(source);
+      const dir = dirsBySource.get(source);
+      if (dir === undefined) {
+        return Effect.fail(
+          new TemplateError({ message: `no fixture dir registered for source: ${source}` }),
+        );
+      }
+      return Effect.succeed(absPath(dir));
+    });
+
+    // 1 回目（resolveCandidateLimit の事前見積もり）は健全な残量を返し、以降は
+    // 常にレート制限を返す（候補ダウンロード後のリフレッシュ呼び出しで検知させる）。
+    let callCount = 0;
+    mockFetchRateLimitStatus.mockImplementation(() => {
+      callCount += 1;
+      if (callCount === 1) {
+        return Promise.resolve({
+          _tag: "Resolved",
+          status: { limit: 5000, remaining: 4000, resetAt: undefined, authenticated: false },
+        });
+      }
+      return Promise.resolve({ _tag: "RateLimited", resetAt: undefined });
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        since: "2026-08-01T00:00:00.000Z",
+        concurrency: 1,
+      }),
+    );
+
+    // 2 件目の利用リポジトリ内容のダウンロードは行われない
+    // （processCandidate 冒頭の早期チェックで止まる）。
+    expect(downloadedRepos).toEqual(["gh:acme/rl-refresh-1#rl-refresh-1-sha"]);
+    expect(mockGetLastCommitDate).not.toHaveBeenCalled();
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(2);
+    expect(report.skipped[1]).toMatchObject({ owner: "acme", repo: "rl-refresh-2" });
+    expect(report.skipped[1]?.reason).toBe(
+      "GitHub API rate limit reached; not checking further repositories in this scan.",
+    );
+  });
+
+  // --since のクォータリフレッシュも他の呼び出し元と同じ陳腐化判定（gateObservedRateLimit）
+  // を通す。concurrency > 1 ではこのリフレッシュ自体が複数候補にまたがって並行に発行され
+  // うるため、await して即座に使っても、クォータリセットをまたいだ古いウィンドウの応答が
+  // 後から届くことがある。
+  it("--since 指定時、fetchRateLimitStatus のリフレッシュがレート制限を検知しても、既に観測済みのより新しいウィンドウより古ければゲートを立てない", async () => {
+    const repos = ["rl-refresh-stale-1", "rl-refresh-stale-2"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+    const baseHashes = { "f.txt": hashContent("v1") };
+    for (const repo of repos) {
+      setLockFixture(lockFixtures, "acme", repo, () =>
+        Promise.resolve(Option.some(lockJson({ baseHashes }))),
+      );
+      shaFixtures.set(`acme/${repo}`, sha(`${repo}-sha`));
+    }
+
+    const downloadedRepos: string[] = [];
+    const files: Record<string, string> = {
+      "/tmpl-dir-refresh-stale/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/tmpl-dir-refresh-stale/f.txt": "v1",
+    };
+    for (const repo of repos) {
+      files[`/${repo}-dir/.ziku/ziku.jsonc`] = JSON.stringify({ include: ["f.txt"] });
+      files[`/${repo}-dir/f.txt`] = "v2";
+    }
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-refresh-stale");
+    for (const repo of repos) {
+      dirsBySource.set(`gh:acme/${repo}#${repo}-sha`, `/${repo}-dir`);
+    }
+    vol.fromJSON(files);
+    for (const _ of repos) queueGlobResults(["f.txt"], ["f.txt"]);
+
+    mockAcquireTempTemplate.mockImplementation((_targetDir: string, source: string) => {
+      if (source === "gh:acme/template#tmpl-sha") {
+        return Effect.succeed(absPath("/tmpl-dir-refresh-stale"));
+      }
+      downloadedRepos.push(source);
+      const dir = dirsBySource.get(source);
+      if (dir === undefined) {
+        return Effect.fail(
+          new TemplateError({ message: `no fixture dir registered for source: ${source}` }),
+        );
+      }
+      return Effect.succeed(absPath(dir));
+    });
+
+    const oldResetAt = new Date(Date.now() - 60 * 60_000);
+    const newResetAt = new Date(Date.now() + 60 * 60_000);
+    // 既に新しいウィンドウ（補充済み）が観測済みという状況を再現する。
+    mockGetObservedRateLimitRemaining.mockReturnValue({ remaining: 5000, resetAt: newResetAt });
+
+    // 1 回目（resolveCandidateLimit の事前見積もり）は健全な残量を返し、以降は候補ダウンロード
+    // 後のリフレッシュとして、既に過去に終わった旧ウィンドウの RateLimited を返す。
+    let callCount = 0;
+    mockFetchRateLimitStatus.mockImplementation(() => {
+      callCount += 1;
+      if (callCount === 1) {
+        return Promise.resolve({
+          _tag: "Resolved",
+          status: { limit: 5000, remaining: 4000, resetAt: undefined, authenticated: false },
+        });
+      }
+      return Promise.resolve({ _tag: "RateLimited", resetAt: oldResetAt });
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        since: "2026-08-01T00:00:00.000Z",
+        concurrency: 1,
+      }),
+    );
+
+    // ゲートが立っていないため、2 件目もダウンロードされる（ゲートで止められていない）。
+    expect(downloadedRepos).toEqual([
+      "gh:acme/rl-refresh-stale-1#rl-refresh-stale-1-sha",
+      "gh:acme/rl-refresh-stale-2#rl-refresh-stale-2-sha",
+    ]);
+    expect(report.skipped.some((s) => s.reason.includes("GitHub API rate limit"))).toBe(false);
+  });
+
+  // fetchRateLimitStatus のリフレッシュは 403/429 を受け取らなくても、GitHub 自身が
+  // remaining: 0（成功レスポンス）と申告することがある。この候補が pendingPush/conflicts を
+  // 持たなければ attachLastCommittedAt のループが一度も回らず動的ブレーキを通らないため、
+  // ここで直接ゲートを立てないと以降の候補が同じ枯渇状態へ無駄にリクエストを送ってしまう。
+  it("--since 指定時、fetchRateLimitStatus のリフレッシュが成功かつ remaining:0 なら直ちにゲートを立てる", async () => {
+    const repos = ["rl-zero-1", "rl-zero-2"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+    const baseHashes = { "f.txt": hashContent("v1") };
+    for (const repo of repos) {
+      setLockFixture(lockFixtures, "acme", repo, () =>
+        Promise.resolve(Option.some(lockJson({ baseHashes }))),
+      );
+      shaFixtures.set(`acme/${repo}`, sha(`${repo}-sha`));
+    }
+
+    const downloadedRepos: string[] = [];
+    const files: Record<string, string> = {
+      "/tmpl-dir-rl-zero/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/tmpl-dir-rl-zero/f.txt": "v1",
+      // rl-zero-1 はテンプレートと完全同期（ドリフト無し）にする。pendingPush/conflicts が
+      // 空になり attachLastCommittedAt のループが一度も回らないため、このリフレッシュでの
+      // 検知が唯一の伝播経路になるシナリオを実際に再現する。
+      "/rl-zero-1-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/rl-zero-1-dir/f.txt": "v1",
+      "/rl-zero-2-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/rl-zero-2-dir/f.txt": "v2",
+    };
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-rl-zero");
+    for (const repo of repos) {
+      dirsBySource.set(`gh:acme/${repo}#${repo}-sha`, `/${repo}-dir`);
+    }
+    vol.fromJSON(files);
+    for (const _ of repos) queueGlobResults(["f.txt"], ["f.txt"]);
+
+    mockAcquireTempTemplate.mockImplementation((_targetDir: string, source: string) => {
+      if (source === "gh:acme/template#tmpl-sha") {
+        return Effect.succeed(absPath("/tmpl-dir-rl-zero"));
+      }
+      downloadedRepos.push(source);
+      const dir = dirsBySource.get(source);
+      if (dir === undefined) {
+        return Effect.fail(
+          new TemplateError({ message: `no fixture dir registered for source: ${source}` }),
+        );
+      }
+      return Effect.succeed(absPath(dir));
+    });
+
+    // 1 回目（resolveCandidateLimit の事前見積もり）は健全な残量を返し、以降は
+    // 候補ダウンロード後のリフレッシュとして常に remaining: 0 の成功レスポンスを返す。
+    let callCount = 0;
+    mockFetchRateLimitStatus.mockImplementation(() => {
+      callCount += 1;
+      if (callCount === 1) {
+        return Promise.resolve({
+          _tag: "Resolved",
+          status: { limit: 5000, remaining: 4000, resetAt: undefined, authenticated: false },
+        });
+      }
+      return Promise.resolve({
+        _tag: "Resolved",
+        status: { limit: 5000, remaining: 0, resetAt: undefined, authenticated: false },
+      });
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        since: "2026-08-01T00:00:00.000Z",
+        concurrency: 1,
+      }),
+    );
+
+    // 2 件目の利用リポジトリ内容のダウンロードは行われない
+    // （processCandidate 冒頭の早期チェックで止まる）。
+    expect(downloadedRepos).toEqual(["gh:acme/rl-zero-1#rl-zero-1-sha"]);
+    expect(mockGetLastCommitDate).not.toHaveBeenCalled();
+    expect(report.repositories).toEqual([]);
+    // rl-zero-1 はドリフト無し（pendingPush/conflicts が空）のため filteredBySince となり
+    // skipped には含まれない。ここで固定したいのは、その pendingPush/conflicts が空という
+    // まさにその状況でも、リフレッシュ自体の remaining:0 検知でゲートが立ち、後続の
+    // rl-zero-2 がダウンロードすら行わずスキップされること。
+    expect(report.skipped).toHaveLength(1);
+    expect(report.skipped[0]).toMatchObject({ owner: "acme", repo: "rl-zero-2" });
+    // 403/429 をまだ受け取っていない（成功レスポンスの申告のみ）ため preemptive の文言になる。
+    expect(report.skipped[0]?.reason).toBe(
+      "Stopped short of the GitHub API rate limit based on the observed remaining quota; not checking further repositories in this scan.",
+    );
+  });
+
+  // remaining:0 の preemptive 検知も、RateLimited と同じ陳腐化判定を通す。
+  it("--since 指定時、fetchRateLimitStatus のリフレッシュが成功かつremaining:0でも、既に観測済みのより新しいウィンドウより古ければゲートを立てない", async () => {
+    const repos = ["rl-zero-stale-1", "rl-zero-stale-2"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+    const baseHashes = { "f.txt": hashContent("v1") };
+    for (const repo of repos) {
+      setLockFixture(lockFixtures, "acme", repo, () =>
+        Promise.resolve(Option.some(lockJson({ baseHashes }))),
+      );
+      shaFixtures.set(`acme/${repo}`, sha(`${repo}-sha`));
+    }
+
+    const downloadedRepos: string[] = [];
+    const files: Record<string, string> = {
+      "/tmpl-dir-rl-zero-stale/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/tmpl-dir-rl-zero-stale/f.txt": "v1",
+      // rl-zero-stale-1 はテンプレートと完全同期（ドリフト無し）にする。pendingPush/conflicts
+      // が空になり attachLastCommittedAt のループが一度も回らないため、このリフレッシュでの
+      // 検知が唯一の伝播経路になるシナリオを再現する。
+      "/rl-zero-stale-1-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/rl-zero-stale-1-dir/f.txt": "v1",
+      "/rl-zero-stale-2-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/rl-zero-stale-2-dir/f.txt": "v2",
+    };
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-rl-zero-stale");
+    for (const repo of repos) {
+      dirsBySource.set(`gh:acme/${repo}#${repo}-sha`, `/${repo}-dir`);
+    }
+    vol.fromJSON(files);
+    for (const _ of repos) queueGlobResults(["f.txt"], ["f.txt"]);
+
+    mockAcquireTempTemplate.mockImplementation((_targetDir: string, source: string) => {
+      if (source === "gh:acme/template#tmpl-sha") {
+        return Effect.succeed(absPath("/tmpl-dir-rl-zero-stale"));
+      }
+      downloadedRepos.push(source);
+      const dir = dirsBySource.get(source);
+      if (dir === undefined) {
+        return Effect.fail(
+          new TemplateError({ message: `no fixture dir registered for source: ${source}` }),
+        );
+      }
+      return Effect.succeed(absPath(dir));
+    });
+
+    const oldResetAt = new Date(Date.now() - 60 * 60_000);
+    const newResetAt = new Date(Date.now() + 60 * 60_000);
+    // 既に新しいウィンドウ（補充済み）が観測済みという状況を再現する。
+    mockGetObservedRateLimitRemaining.mockReturnValue({ remaining: 5000, resetAt: newResetAt });
+
+    let callCount = 0;
+    mockFetchRateLimitStatus.mockImplementation(() => {
+      callCount += 1;
+      if (callCount === 1) {
+        return Promise.resolve({
+          _tag: "Resolved",
+          status: { limit: 5000, remaining: 4000, resetAt: undefined, authenticated: false },
+        });
+      }
+      // 過去に終わった旧ウィンドウの remaining:0 申告（遅延到着した想定）。
+      return Promise.resolve({
+        _tag: "Resolved",
+        status: { limit: 5000, remaining: 0, resetAt: oldResetAt, authenticated: false },
+      });
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        since: "2026-08-01T00:00:00.000Z",
+        concurrency: 1,
+      }),
+    );
+
+    // ゲートが立っていないため、2 件目もダウンロードされる（ゲートで止められていない）。
+    expect(downloadedRepos).toEqual([
+      "gh:acme/rl-zero-stale-1#rl-zero-stale-1-sha",
+      "gh:acme/rl-zero-stale-2#rl-zero-stale-2-sha",
+    ]);
+    expect(report.skipped.some((s) => s.reason.includes("GitHub API rate limit"))).toBe(false);
+  });
+
+  it("since 未指定時は attachLastCommittedAt を呼ばず、fetchRateLimitStatus を候補処理中に追加で呼ばない", async () => {
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "no-since" })]);
+    const baseHashes = { "f.txt": hashContent("v1") };
+    setLockFixture(lockFixtures, "acme", "no-since", () =>
+      Promise.resolve(Option.some(lockJson({ baseHashes }))),
+    );
+    shaFixtures.set("acme/no-since", sha("no-since-sha"));
+    dirsBySource.set("gh:acme/no-since#no-since-sha", "/no-since-dir");
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-no-since");
+
+    vol.fromJSON({
+      "/no-since-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      // テンプレート側と内容を変え、pendingPush に 1 件入る状態を作る。この関数が
+      // `since` の有無を見ずに attachLastCommittedAt を呼んでしまう回帰を検知するには、
+      // attachLastCommittedAt に渡るエントリ配列が空でない（呼ばれれば必ず
+      // getLastCommitDate が実行される）必要がある。
+      "/no-since-dir/f.txt": "v2",
+      "/tmpl-dir-no-since/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/tmpl-dir-no-since/f.txt": "v1",
+    });
+    queueGlobResults(["f.txt"], ["f.txt"]);
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+      }),
+    );
+
+    expect(report.repositories).toHaveLength(1);
+    expect(mockGetLastCommitDate).not.toHaveBeenCalled();
+    // resolveCandidateLimit の事前見積もりで 1 回呼ばれるだけで、--since 用のリフレッシュは
+    // 発生しない。
+    expect(mockFetchRateLimitStatus).toHaveBeenCalledTimes(1);
   });
 
   it("skipped の reason は英語である（後段のエージェント/他の CLI 出力との一貫性）", async () => {
@@ -1474,5 +2191,906 @@ describe("aggregateTemplateUsage", () => {
     expect(report.skipped).toEqual([]);
     expect(report.summary.totalRepositories).toBe(0);
     expect(report.summary.excludedBySince).toBe(2);
+  });
+
+  // レート制限を検知した後も候補ごとに新規リクエストを送り続けると、枠切れ後の残り候補
+  // 全件が同じレート制限応答を受け取るだけの無駄になる。検知した時点で以降の候補への
+  // GitHub API 呼び出し自体を止めることを固定する。
+  it("レート制限を検知した後は、残りの候補へ GitHub API 呼び出しを行わない", async () => {
+    const repos = ["rl-1", "rl-2", "rl-3"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+
+    mockFetchRepoTextFile.mockImplementation((_owner: string, repo: string) => {
+      if (repo === "rl-1") {
+        return Promise.reject(
+          zikuFailure({ kind: "GitHubRateLimited", authenticated: false, resetAt: undefined }),
+        );
+      }
+      // rl-2 / rl-3 でここに到達したら、ゲートが後続候補への呼び出しを止められていない。
+      return Promise.resolve(Option.some(lockJson()));
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+      }),
+    );
+
+    // fetchRepoTextFile が呼ばれるのは最初にレート制限を検知する rl-1 だけ。
+    expect(mockFetchRepoTextFile).toHaveBeenCalledTimes(1);
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(3);
+
+    const [first, second, third] = report.skipped;
+    expect(first).toMatchObject({ owner: "acme", repo: "rl-1" });
+    expect(first?.reason).toContain("Failed to fetch lock.json");
+    expect(second).toMatchObject({ owner: "acme", repo: "rl-2" });
+    // 実際に 403 を受け取って検知したケース（"observed"）なので、予防的な打ち切り
+    // （"preemptive"、動的ブレーキ）とは文言を分ける。
+    expect(second?.reason).toBe(
+      "GitHub API rate limit reached; not checking further repositories in this scan.",
+    );
+    expect(third).toMatchObject({ owner: "acme", repo: "rl-3" });
+    expect(third?.reason).toBe(second?.reason);
+  });
+
+  // tryGitHubGated が実際に 403/429 を受け取っても、既に観測済みのより新しいウィンドウ
+  // （リセット後に補充済み）より古い resetAt を持つ場合、遅延到着した陳腐化済みの失敗と
+  // みなしてゲートを立てない。その候補自身の呼び出しは失敗するが、後続の候補は影響を
+  // 受けずに GitHub API 呼び出しを続ける。
+  it("tryGitHubGated の403/429がゲート未検知のまま既に観測済みのより新しいウィンドウより古ければ、ゲートを立てずその候補だけ失敗させる", async () => {
+    const repos = ["rl-stale-1", "rl-stale-2"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+
+    const oldResetAt = new Date("2026-01-01T00:00:00Z");
+    const newResetAt = new Date("2026-01-01T01:00:00Z");
+    // リセット直後、既に新しいウィンドウ（補充済み）の成功レスポンスが観測済みという状況。
+    mockGetObservedRateLimitRemaining.mockReturnValue({ remaining: 5000, resetAt: newResetAt });
+
+    mockFetchRepoTextFile.mockImplementation((_owner: string, repo: string) => {
+      if (repo === "rl-stale-1") {
+        return Promise.reject(
+          zikuFailure({ kind: "GitHubRateLimited", authenticated: false, resetAt: oldResetAt }),
+        );
+      }
+      return Promise.resolve(Option.none());
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+      }),
+    );
+
+    // rl-stale-2 でも fetchRepoTextFile が呼ばれている（ゲートで止められていない）。
+    expect(mockFetchRepoTextFile).toHaveBeenCalledTimes(2);
+    expect(report.repositories).toEqual([]);
+    // rl-stale-1 だけが失敗理由付きで skipped に入る。rl-stale-2 は lock.json が無い
+    // （Option.none）ため、黙って除外される（skipped には入らない）。
+    expect(report.skipped).toHaveLength(1);
+    expect(report.skipped[0]).toMatchObject({ owner: "acme", repo: "rl-stale-1" });
+    expect(report.skipped[0]?.reason).toContain("Failed to fetch lock.json");
+  });
+
+  // resolveCandidateRef（比較用 commit SHA の解決）自体がレート制限で失敗した場合も、
+  // fetchRepoTextFile の失敗経由（上のテスト）と同じくゲートを立て、以降の候補は
+  // lock.json の取得（評価の入口）にすら進まないことを固定する。
+  it("resolveCandidateRef がレート制限で失敗すると、以降の候補は評価に進まずスキップされる", async () => {
+    const repos = ["rl-1", "rl-2"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+    for (const repo of repos) {
+      setLockFixture(lockFixtures, "acme", repo, () => Promise.resolve(Option.some(lockJson())));
+    }
+
+    mockResolveLatestCommitSha.mockImplementation((_owner: string, repo: string) => {
+      if (repo === "rl-1") {
+        return Promise.resolve({ _tag: "RateLimited", resetAt: undefined });
+      }
+      // rl-2 でここに到達したら、ゲートが後続候補への呼び出しを止められていない。
+      return Promise.resolve({ _tag: "Resolved", sha: sha(`${repo}-sha`) });
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+      }),
+    );
+
+    // resolveLatestCommitSha が呼ばれるのは最初にレート制限を検知する rl-1 だけ。
+    expect(mockResolveLatestCommitSha).toHaveBeenCalledTimes(1);
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(2);
+
+    const [first, second] = report.skipped;
+    expect(first).toMatchObject({ owner: "acme", repo: "rl-1" });
+    expect(first?.reason).toBe(
+      "GitHub API rate limit reached; not checking further repositories in this scan.",
+    );
+    expect(second).toMatchObject({ owner: "acme", repo: "rl-2" });
+    expect(second?.reason).toBe(first?.reason);
+    // rl-2 は lock.json の取得（評価の入口）にすら進まない。
+    expect(
+      mockFetchRepoTextFile.mock.calls.some(([owner, repo]) => owner === "acme" && repo === "rl-2"),
+    ).toBe(false);
+  });
+
+  // resolveCandidateRef 経由の 403/429 も、tryGitHubGated と同じく既に観測済みのより
+  // 新しいウィンドウより古ければゲートを立てない。resolveCandidateRef はふるいを通った
+  // 全候補に対して必ず呼ばれる経路なので、tryGitHubGated とは別に固定する。
+  it("resolveCandidateRef の403/429がゲート未検知のまま既に観測済みのより新しいウィンドウより古ければ、ゲートを立てずその候補だけ失敗させる", async () => {
+    const repos = ["rl-stale-1", "rl-stale-2"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+    for (const repo of repos) {
+      setLockFixture(lockFixtures, "acme", repo, () => Promise.resolve(Option.some(lockJson())));
+    }
+
+    const oldResetAt = new Date("2026-01-01T00:00:00Z");
+    const newResetAt = new Date("2026-01-01T01:00:00Z");
+    // リセット直後、既に新しいウィンドウ（補充済み）の成功レスポンスが観測済みという状況。
+    mockGetObservedRateLimitRemaining.mockReturnValue({ remaining: 5000, resetAt: newResetAt });
+
+    mockResolveLatestCommitSha.mockImplementation((_owner: string, repo: string) => {
+      if (repo === "rl-stale-1") {
+        return Promise.resolve({ _tag: "RateLimited", resetAt: oldResetAt });
+      }
+      return Promise.resolve({ _tag: "Unresolved", reason: "no fixture registered" });
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+      }),
+    );
+
+    // rl-stale-2 でも resolveLatestCommitSha が呼ばれている（ゲートで止められていない）。
+    expect(mockResolveLatestCommitSha).toHaveBeenCalledTimes(2);
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(2);
+
+    const [first, second] = report.skipped;
+    expect(first).toMatchObject({ owner: "acme", repo: "rl-stale-1" });
+    expect(first?.reason).toBe(
+      "Could not resolve the latest commit SHA: GitHub API rate limit (the quota has already been replenished for other candidates in this scan)",
+    );
+    expect(second).toMatchObject({ owner: "acme", repo: "rl-stale-2" });
+    expect(second?.reason).toBe("Could not resolve the latest commit SHA: no fixture registered");
+  });
+
+  // checkPinnedRef（lock.source.ref が指すテンプレートのリビジョン解決）自体がレート制限で
+  // 失敗した場合も、resolveCandidateRef 経由の失敗（上のテスト）と同じくゲートを立て、
+  // 以降の候補は評価に進まずスキップされることを固定する。
+  it("checkPinnedRef がレート制限で失敗すると、以降の候補は評価に進まずスキップされる", async () => {
+    const repos = ["rl-1", "rl-2"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+    for (const repo of repos) {
+      shaFixtures.set(`acme/${repo}`, sha(`${repo}-sha`));
+      setLockFixture(lockFixtures, "acme", repo, () =>
+        Promise.resolve(
+          Option.some(
+            lockJson({
+              source: { owner: "acme", repo: "template", ref: { kind: "branch", name: "main" } },
+            }),
+          ),
+        ),
+      );
+    }
+
+    mockResolveSourceCommit.mockImplementation(
+      async (owner: string, repo: string, ref?: LockJsonRef) => {
+        if (ref?.kind === "commit") return { _tag: "Resolved", sha: ref.sha };
+        if (owner === "acme" && repo === "template" && ref?.kind === "branch") {
+          return { _tag: "RateLimited", resetAt: undefined };
+        }
+        // rl-2 の候補評価でここに到達したら、ゲートが後続候補への呼び出しを止められていない。
+        return { _tag: "Unresolved", reason: "no fixture registered" };
+      },
+    );
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+      }),
+    );
+
+    // resolveSourceCommit（checkPinnedRef 経由）が呼ばれるのは最初にレート制限を検知する
+    // rl-1 だけ。
+    expect(mockResolveSourceCommit).toHaveBeenCalledTimes(1);
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(2);
+
+    const [first, second] = report.skipped;
+    expect(first).toMatchObject({ owner: "acme", repo: "rl-1" });
+    // ゲートが実際に立った場合の文言（陳腐化で立たなかった場合の文言と区別する）。
+    expect(first?.reason).toBe(
+      'Pinned to template ref "main", which could not be resolved to a commit in acme/template: GitHub API rate limit',
+    );
+    expect(second).toMatchObject({ owner: "acme", repo: "rl-2" });
+    // rl-1 が立てたゲートにより、rl-2 は候補の評価開始時点で弾かれ、checkPinnedRef 自体に
+    // 到達しない。
+    expect(second?.reason).toBe(
+      "GitHub API rate limit reached; not checking further repositories in this scan.",
+    );
+  });
+
+  // checkPinnedRef 経由の 403/429 も、resolveCandidateRef と同じく既に観測済みのより
+  // 新しいウィンドウより古ければゲートを立てない。
+  it("checkPinnedRef の403/429がゲート未検知のまま既に観測済みのより新しいウィンドウより古ければ、ゲートを立てずその候補だけ失敗させる", async () => {
+    const repos = ["rl-stale-1", "rl-stale-2"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+    for (const repo of repos) {
+      shaFixtures.set(`acme/${repo}`, sha(`${repo}-sha`));
+      setLockFixture(lockFixtures, "acme", repo, () =>
+        Promise.resolve(
+          Option.some(
+            lockJson({
+              source: { owner: "acme", repo: "template", ref: { kind: "branch", name: "main" } },
+            }),
+          ),
+        ),
+      );
+    }
+
+    // 陳腐化判定は「resetAt が既に過去」であることも要求するため、ここでは過去時刻を使う。
+    const oldResetAt = new Date(Date.now() - 60 * 60_000);
+    const newResetAt = new Date(Date.now() + 60 * 60_000);
+    mockGetObservedRateLimitRemaining.mockReturnValue({ remaining: 5000, resetAt: newResetAt });
+
+    // checkPinnedRef は常に template.owner/template.repo に対して resolveSourceCommit を
+    // 呼ぶため、owner/repo だけでは候補を区別できない。呼び出し順で1回目だけ RateLimited
+    // を返す。
+    let callCount = 0;
+    mockResolveSourceCommit.mockImplementation(
+      async (_owner: string, _repo: string, ref?: LockJsonRef) => {
+        if (ref?.kind === "commit") return { _tag: "Resolved", sha: ref.sha };
+        callCount += 1;
+        if (callCount === 1) {
+          return { _tag: "RateLimited", resetAt: oldResetAt };
+        }
+        return { _tag: "Unresolved", reason: "no fixture registered" };
+      },
+    );
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+      }),
+    );
+
+    // rl-stale-2 でも resolveSourceCommit（checkPinnedRef 経由）が呼ばれている
+    // （ゲートで止められていない）。
+    expect(mockResolveSourceCommit).toHaveBeenCalledTimes(2);
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(2);
+
+    const [first, second] = report.skipped;
+    expect(first).toMatchObject({ owner: "acme", repo: "rl-stale-1" });
+    expect(first?.reason).toBe(
+      'Pinned to template ref "main", which could not be resolved to a commit in acme/template: GitHub API rate limit (the quota has already been replenished for other candidates in this scan)',
+    );
+    expect(second).toMatchObject({ owner: "acme", repo: "rl-stale-2" });
+    expect(second?.reason).toBe(
+      'Pinned to template ref "main", which could not be resolved to a commit in acme/template: no fixture registered',
+    );
+  });
+
+  // secondary rate limit（retry-after 付き）の resetAt は「今 +
+  // retry-after 秒」という短い未来時刻で、コアクォータの resetAt（最大 1 時間先）とは無関係。
+  // これを「陳腐化した旧ウィンドウ」の判定にそのまま使うと、resetAt が観測済みのコアクォータ
+  // resetAt より数値上小さいだけで誤ってゲートを立てない扱いになってしまう。まだ有効な
+  // secondary rate limit（resetAt が未来）では、コアクォータの観測値がどうであれ必ず
+  // ゲートを立てることを固定する。
+  it("secondary rate limitのresetAtが未来（=まだ有効）なら、コアクォータの観測値によらずゲートを立てる", async () => {
+    const repos = ["sec-1", "sec-2"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+
+    // コアクォータは健全（secondary rate limit とは無関係な別種のウィンドウ）。
+    const coreResetAt = new Date(Date.now() + 30 * 60_000);
+    mockGetObservedRateLimitRemaining.mockReturnValue({ remaining: 4000, resetAt: coreResetAt });
+
+    // secondary rate limit の resetAt は「今 + 60秒」程度で、コアクォータの resetAt より
+    // 数値上ずっと小さい（≒ isOlderRateLimitWindow が誤って true を返しうる形）が、
+    // まだ未来（＝有効）である。
+    const secondaryResetAt = new Date(Date.now() + 60_000);
+    mockFetchRepoTextFile.mockImplementation((_owner: string, repo: string) => {
+      if (repo === "sec-1") {
+        return Promise.reject(
+          zikuFailure({
+            kind: "GitHubRateLimited",
+            authenticated: false,
+            resetAt: secondaryResetAt,
+          }),
+        );
+      }
+      // sec-2 でここに到達したら、ゲートが後続候補への呼び出しを止められていない。
+      return Promise.resolve(Option.some(lockJson()));
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+      }),
+    );
+
+    expect(mockFetchRepoTextFile).toHaveBeenCalledTimes(1);
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(2);
+    const [first, second] = report.skipped;
+    expect(first).toMatchObject({ owner: "acme", repo: "sec-1" });
+    expect(second).toMatchObject({ owner: "acme", repo: "sec-2" });
+    // ゲートが立った（陳腐化扱いされなかった）ことの確認。resetAt を持つ observed 文言
+    // なので、分単位の残り時間表示が付く（正確な分数はテスト実行時刻に依存するため matcher
+    // で緩く見る）。
+    expect(second?.reason).toMatch(
+      /^GitHub API rate limit reached; not checking further repositories in this scan \(resets in ~\d+ min\)\.$/,
+    );
+  });
+
+  // 評価フェーズを通過した後、差分処理フェーズ（利用リポジトリ内容のダウンロード）で
+  // 実際にレート制限を受けた場合も、evaluateCandidate と同じゲートへ反映され、以降の候補は
+  // テンプレート内容のダウンロードすら行わない。
+  it("差分処理フェーズでレート制限を受けると、以降の候補もゲートに反映されてスキップされる", async () => {
+    const repos = ["rl-1", "rl-2"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+    for (const repo of repos) {
+      shaFixtures.set(`acme/${repo}`, sha(`${repo}-sha`));
+      setLockFixture(lockFixtures, "acme", repo, () => Promise.resolve(Option.some(lockJson())));
+    }
+
+    const downloadedRepos: string[] = [];
+    mockAcquireTempTemplate.mockImplementation((_targetDir: string, source: string) => {
+      if (source === "gh:acme/template#tmpl-sha") {
+        return Effect.succeed(absPath("/template-dir"));
+      }
+      downloadedRepos.push(source);
+      // giget（tarball ダウンロードの実装）は失敗時にプレーンな Error しか投げず、
+      // `status` プロパティも `response` プロパティも持たない
+      // （`node_modules/giget/dist/_chunks/giget.mjs` の `download()`）。この形を
+      // 手動構築すると production では起きない経路をテストするだけの偽陽性になるため、
+      // giget が実際に投げるメッセージ形（`Failed to download <url>: <status> <statusText>`）
+      // に揃える。429 を使うのは、`detectGigetRateLimit` が 403（権限不足と区別できない）を
+      // 意図的に検出せず、レート制限専用のステータスである 429 だけを検出する設計のため。
+      return Effect.fail(
+        new TemplateError({
+          message: "Failed to download template",
+          cause: new Error(`Failed to download ${source}: 429 Too Many Requests`),
+        }),
+      );
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+      }),
+    );
+
+    // 利用リポジトリ内容のダウンロードは最初の候補だけ。ゲートが立った以降は
+    // テンプレート内容のダウンロードそのものを行わない。
+    expect(downloadedRepos).toHaveLength(1);
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(2);
+    const [first, second] = report.skipped;
+    expect(first).toMatchObject({ owner: "acme", repo: "rl-1" });
+    expect(first?.reason).toBe(
+      "GitHub API rate limit reached; not checking further repositories in this scan.",
+    );
+    expect(second).toMatchObject({ owner: "acme", repo: "rl-2" });
+    expect(second?.reason).toBe(first?.reason);
+  });
+
+  // giget の 403 は権限不足（private リポジトリへのアクセス権が無い等）とレート制限を区別
+  // できない。誤ってスキャン全体を打ち切るゲートを立てると、owner 配下にアクセス権の無い
+  // リポジトリが 1 つあるだけで残り全候補の結果を失う。この関数は誤って候補 1 件を通常の
+  // TemplateUnavailable として skip するだけに留め、ゲートは立てないことを固定する。
+  it("差分処理フェーズの giget 403 は権限不足と区別できないため、その候補だけ skip しゲートは立てない", async () => {
+    const repos = ["forbidden-1", "forbidden-2"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+    for (const repo of repos) {
+      shaFixtures.set(`acme/${repo}`, sha(`${repo}-sha`));
+      setLockFixture(lockFixtures, "acme", repo, () => Promise.resolve(Option.some(lockJson())));
+    }
+
+    const downloadedRepos: string[] = [];
+    mockAcquireTempTemplate.mockImplementation((_targetDir: string, source: string) => {
+      if (source === "gh:acme/template#tmpl-sha") {
+        return Effect.succeed(absPath("/template-dir"));
+      }
+      downloadedRepos.push(source);
+      return Effect.fail(
+        new TemplateError({
+          message: "Failed to download template",
+          cause: new Error(`Failed to download ${source}: 403 Forbidden`),
+        }),
+      );
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+      }),
+    );
+
+    // ゲートが立っていれば 2 件目のダウンロードは行われない。両方ダウンロードを試み、
+    // 両方とも「その候補限りの失敗」として個別に skip されることを確認する。
+    expect(downloadedRepos).toHaveLength(2);
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(2);
+    for (const skip of report.skipped) {
+      expect(skip.reason).toContain("Failed to classify the diff against the template");
+      expect(skip.reason).not.toContain("rate limit");
+    }
+  });
+
+  // `--since` のコミット日時取得（attachLastCommittedAt）も同じゲートを共有するため、
+  // 評価フェーズでレート制限を検知した候補は、差分処理フェーズのコミット日時取得にも進まない。
+  it("評価フェーズでレート制限を検知した候補は、--since のコミット日時取得にも進まない", async () => {
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "rl-since" })]);
+    mockFetchRepoTextFile.mockImplementation(() =>
+      Promise.reject(
+        zikuFailure({ kind: "GitHubRateLimited", authenticated: false, resetAt: undefined }),
+      ),
+    );
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        since: "2026-08-01T00:00:00.000Z",
+      }),
+    );
+
+    expect(mockGetLastCommitDate).not.toHaveBeenCalled();
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(1);
+    expect(report.skipped[0]).toMatchObject({ owner: "acme", repo: "rl-since" });
+  });
+
+  // 401（トークン拒否）とレート制限（403/429）は取れる行動が違うため、混同してはいけない
+  // （`error-handling.md`）。401 は候補ごとの絞り込みロジックに一切入らず即座に失敗する。
+  describe("候補数の事前絞り込み", () => {
+    it("レート制限の残量から候補数上限を算出し、listOwnerRepos に渡す", async () => {
+      mockFetchRateLimitStatus.mockResolvedValue({
+        _tag: "Resolved",
+        status: { limit: 60, remaining: 50, resetAt: undefined, authenticated: false },
+      });
+      mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "only-one" })]);
+
+      const report = await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+          tmpBaseDir: "/tmp-base",
+        }),
+      );
+
+      // (remaining(50) - 安全マージン(10)) / 候補あたりの想定リクエスト数(8) = floor(40/8) = 5
+      expect(mockListOwnerRepos).toHaveBeenCalledWith(
+        "acme",
+        expect.objectContaining({ maxCandidates: 5 }),
+      );
+      expect(report.summary.candidateScanLimit).toBe(5);
+      expect(report.summary.candidatesScanned).toBe(1);
+    });
+
+    it("換算後の候補数上限が 0 以下になるほど枠が無ければ、GitHubRateLimited として失敗する", async () => {
+      mockFetchRateLimitStatus.mockResolvedValue({
+        _tag: "Resolved",
+        status: {
+          limit: 60,
+          remaining: 10,
+          resetAt: new Date("2026-01-01T00:00:00Z"),
+          authenticated: false,
+        },
+      });
+
+      const result = await Effect.runPromise(
+        Effect.either(
+          aggregateTemplateUsage({
+            template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+            tmpBaseDir: "/tmp-base",
+          }),
+        ),
+      );
+
+      expect(Either.isLeft(result)).toBe(true);
+      if (Either.isLeft(result)) {
+        expect(result.left).toBeInstanceOf(ZikuFailure);
+        expect(result.left.reason).toMatchObject({
+          kind: "GitHubRateLimited",
+          authenticated: false,
+          resetAt: new Date("2026-01-01T00:00:00Z"),
+        });
+      }
+      // 候補を 1 件もまかなえないと分かった時点で失敗するので、列挙にすら進まない。
+      expect(mockListOwnerRepos).not.toHaveBeenCalled();
+    });
+
+    it("換算後の候補数上限が 1 件以上まかなえるぎりぎりの残量なら、失敗せず続行する", async () => {
+      // (remaining(18) - 安全マージン(10)) / ESTIMATED_REQUESTS_PER_CANDIDATE(8) = 1（境界値）
+      mockFetchRateLimitStatus.mockResolvedValue({
+        _tag: "Resolved",
+        status: { limit: 60, remaining: 18, resetAt: undefined, authenticated: false },
+      });
+      mockListOwnerRepos.mockResolvedValue([]);
+
+      const report = await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+          tmpBaseDir: "/tmp-base",
+        }),
+      );
+
+      expect(mockListOwnerRepos).toHaveBeenCalledWith(
+        "acme",
+        expect.objectContaining({ maxCandidates: 1 }),
+      );
+      expect(report.summary.candidateScanLimit).toBe(1);
+    });
+
+    it("呼び出し側が指定した maxCandidates と、レート制限由来の上限の小さい方を使う", async () => {
+      mockFetchRateLimitStatus.mockResolvedValue({
+        _tag: "Resolved",
+        status: { limit: 5000, remaining: 5000, resetAt: undefined, authenticated: true },
+      });
+      mockListOwnerRepos.mockResolvedValue([]);
+
+      await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+          tmpBaseDir: "/tmp-base",
+          maxCandidates: 3,
+        }),
+      );
+
+      // レート制限由来の上限（floor((5000 - 10) / 8) = 623）よりユーザー指定（3）の方が小さい。
+      expect(mockListOwnerRepos).toHaveBeenCalledWith(
+        "acme",
+        expect.objectContaining({ maxCandidates: 3 }),
+      );
+    });
+
+    it("レート制限の事前確認に失敗しても、既定の候補数上限でスキャンを続ける", async () => {
+      mockFetchRateLimitStatus.mockResolvedValue({
+        _tag: "Unresolved",
+        reason: "network down",
+      });
+      mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "proj" })]);
+
+      const report = await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+          tmpBaseDir: "/tmp-base",
+        }),
+      );
+
+      expect(mockListOwnerRepos).toHaveBeenCalledWith(
+        "acme",
+        expect.objectContaining({ maxCandidates: 30 }),
+      );
+      expect(report.summary.candidateScanLimit).toBe(30);
+    });
+
+    it("レート制限の事前確認に失敗しても、ユーザー指定の候補数上限は尊重する", async () => {
+      mockFetchRateLimitStatus.mockResolvedValue({
+        _tag: "Unresolved",
+        reason: "network down",
+      });
+      mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "proj" })]);
+
+      const report = await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+          tmpBaseDir: "/tmp-base",
+          maxCandidates: 5,
+        }),
+      );
+
+      expect(mockListOwnerRepos).toHaveBeenCalledWith(
+        "acme",
+        expect.objectContaining({ maxCandidates: 5 }),
+      );
+      expect(report.summary.candidateScanLimit).toBe(5);
+    });
+
+    it("レート制限の事前確認が 401 なら、候補の絞り込みロジックに入らず即座に失敗する", async () => {
+      mockFetchRateLimitStatus.mockResolvedValue({
+        _tag: "AuthRejected",
+        detail: "Bad credentials",
+      });
+      mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "should-not-run" })]);
+
+      const result = await Effect.runPromise(
+        Effect.either(
+          aggregateTemplateUsage({
+            template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+            tmpBaseDir: "/tmp-base",
+          }),
+        ),
+      );
+
+      expect(Either.isLeft(result)).toBe(true);
+      if (Either.isLeft(result)) {
+        expect(result.left).toBeInstanceOf(ZikuFailure);
+        expect(result.left.reason).toMatchObject({ kind: "GitHubAuthRejected" });
+      }
+      // 401 は待っても解消しないため、候補の列挙にすら進まない。
+      expect(mockListOwnerRepos).not.toHaveBeenCalled();
+    });
+
+    it("ユーザー指定が無ければ、レート制限由来の上限が大きくても固定の既定値(30)で頭打ちにする", async () => {
+      mockFetchRateLimitStatus.mockResolvedValue({
+        _tag: "Resolved",
+        status: { limit: 5000, remaining: 5000, resetAt: undefined, authenticated: true },
+      });
+      mockListOwnerRepos.mockResolvedValue([]);
+
+      await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+          tmpBaseDir: "/tmp-base",
+        }),
+      );
+
+      // レート制限由来の上限（floor((5000 - 10) / 8) = 623）より固定の既定値（30）の方が小さい。
+      expect(mockListOwnerRepos).toHaveBeenCalledWith(
+        "acme",
+        expect.objectContaining({ maxCandidates: 30 }),
+      );
+    });
+
+    it("ユーザー指定が固定の既定値(30)より大きくても、レート制限由来の上限の範囲内ならそちらを使う", async () => {
+      mockFetchRateLimitStatus.mockResolvedValue({
+        _tag: "Resolved",
+        status: { limit: 5000, remaining: 5000, resetAt: undefined, authenticated: true },
+      });
+      mockListOwnerRepos.mockResolvedValue([]);
+
+      await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+          tmpBaseDir: "/tmp-base",
+          maxCandidates: 100,
+        }),
+      );
+
+      // ユーザー指定（100）は既定値（30）より緩めてよい意思表示として扱われ、
+      // レート制限由来の上限（floor((5000 - 10) / 8) = 623）の範囲内なのでそのまま使われる。
+      expect(mockListOwnerRepos).toHaveBeenCalledWith(
+        "acme",
+        expect.objectContaining({ maxCandidates: 100 }),
+      );
+    });
+
+    // `/rate_limit` 自体がレート制限で引けなかった場合、残量が分からない。ネットワーク断
+    // （Unresolved）とは違い GitHub 側のクォータが逼迫している確度が高いので、既定値へ
+    // 倒さず GitHubRateLimited として失敗させる。
+    it("/rate_limit 自体がレート制限で引けなければ、GitHubRateLimited として失敗する", async () => {
+      mockFetchRateLimitStatus.mockResolvedValue({
+        _tag: "RateLimited",
+        resetAt: new Date("2026-01-01T00:00:00Z"),
+      });
+
+      const result = await Effect.runPromise(
+        Effect.either(
+          aggregateTemplateUsage({
+            template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+            tmpBaseDir: "/tmp-base",
+          }),
+        ),
+      );
+
+      expect(Either.isLeft(result)).toBe(true);
+      if (Either.isLeft(result)) {
+        expect(result.left).toBeInstanceOf(ZikuFailure);
+        expect(result.left.reason).toMatchObject({
+          kind: "GitHubRateLimited",
+          resetAt: new Date("2026-01-01T00:00:00Z"),
+        });
+      }
+      expect(mockListOwnerRepos).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("直近 push フィルタ", () => {
+    it("既定では 90 日前を pushedSince として listOwnerRepos に渡す", async () => {
+      const now = new Date("2026-09-19T00:00:00.000Z");
+      vi.useFakeTimers();
+      vi.setSystemTime(now);
+      try {
+        mockListOwnerRepos.mockResolvedValue([]);
+
+        const report = await Effect.runPromise(
+          aggregateTemplateUsage({
+            template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+            tmpBaseDir: "/tmp-base",
+          }),
+        );
+
+        const expected = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString();
+        expect(mockListOwnerRepos).toHaveBeenCalledWith(
+          "acme",
+          expect.objectContaining({ pushedSince: expected }),
+        );
+        // レポートの消費者が「利用リポジトリが無い」のか「直近 push フィルタで最初から
+        // 対象に入らなかった」のかを区別できるよう、実際に使った下限をレポートへも残す。
+        expect(report.summary.recentPushSince).toBe(expected);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("recentPushDays を指定すると、その日数分前を pushedSince として渡し、レポートにも残す", async () => {
+      const now = new Date("2026-09-19T00:00:00.000Z");
+      vi.useFakeTimers();
+      vi.setSystemTime(now);
+      try {
+        mockListOwnerRepos.mockResolvedValue([]);
+
+        const report = await Effect.runPromise(
+          aggregateTemplateUsage({
+            template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+            tmpBaseDir: "/tmp-base",
+            recentPushDays: 30,
+          }),
+        );
+
+        const expected = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        expect(mockListOwnerRepos).toHaveBeenCalledWith(
+          "acme",
+          expect.objectContaining({ pushedSince: expected }),
+        );
+        expect(report.summary.recentPushSince).toBe(expected);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe("実行中の動的ブレーキ", () => {
+    it("観測した残量が少ないと、実際にレート制限に達する前に以降の候補への呼び出しを止める", async () => {
+      const repos = ["rl-1", "rl-2", "rl-3"];
+      mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+
+      let observedCallCount = 0;
+      mockGetObservedRateLimitRemaining.mockImplementation(() => {
+        observedCallCount += 1;
+        // rl-1 を評価する時点ではまだ何も観測していない。rl-1 の lock.json 取得が返って
+        // きた後、残量が少ないとレスポンスヘッダーから分かったことを模す。
+        return observedCallCount === 1 ? undefined : { remaining: 3, resetAt: undefined };
+      });
+
+      const report = await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+          tmpBaseDir: "/tmp-base",
+          concurrency: 1,
+        }),
+      );
+
+      // lock.json の取得が行われるのは観測前の rl-1 だけ。rl-2/rl-3 は動的ブレーキにより
+      // GitHub への新規リクエストなしでスキップされる。
+      expect(mockFetchRepoTextFile).toHaveBeenCalledTimes(1);
+      // rl-1 は lock.json 未導入（既定のフィクスチャ）につき黙って除外され、
+      // repositories にも skipped にも載らない。
+      expect(report.repositories).toEqual([]);
+      expect(report.skipped).toHaveLength(2);
+      expect(report.skipped.map((s) => s.repo)).toEqual(["rl-2", "rl-3"]);
+      for (const s of report.skipped) {
+        // 実際にはまだ 403 を受け取っておらず、観測残量からの予防的な打ち切り
+        // （"preemptive"）なので、実際に検知した場合（"observed"）とは文言を分ける。
+        expect(s.reason).toBe(
+          "Stopped short of the GitHub API rate limit based on the observed remaining quota; not checking further repositories in this scan.",
+        );
+      }
+    });
+
+    it("観測した残量が十分なら、動的ブレーキは発動しない", async () => {
+      const repos = ["ok-1", "ok-2"];
+      mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+      mockGetObservedRateLimitRemaining.mockReturnValue({ remaining: 5000, resetAt: undefined });
+
+      const report = await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+          tmpBaseDir: "/tmp-base",
+          concurrency: 1,
+        }),
+      );
+
+      expect(mockFetchRepoTextFile).toHaveBeenCalledTimes(2);
+      expect(report.skipped).toEqual([]);
+    });
+
+    // 候補 1 件の処理には複数回の GitHub API リクエストがかかるため、動的ブレーキは
+    // 「残り候補数」ではなく「残り候補数 × 候補あたりの想定リクエスト数」で見積もる。
+    // この係数を掛けなければブレーキが発動しない残量でも、掛けた結果発動することを確認する。
+    it("候補あたりの想定リクエスト数を考慮し、残り候補数だけの見積もりより早めに止まる", async () => {
+      const repos = ["ok", "rl"];
+      mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+
+      let observedCallCount = 0;
+      mockGetObservedRateLimitRemaining.mockImplementation(() => {
+        observedCallCount += 1;
+        // ok を評価する時点ではまだ何も観測していない。
+        // rl の直前の時点で remaining(3) が観測されたとする。
+        // 残り候補数（1 件、自分自身のみ）だけの見積もりでは 3 < 1 は false で発動しないが、
+        // 候補あたりの想定リクエスト数（8）を掛けた見積もりでは 3 < 1*8 で発動する。
+        return observedCallCount === 1 ? undefined : { remaining: 3, resetAt: undefined };
+      });
+
+      const report = await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+          tmpBaseDir: "/tmp-base",
+          concurrency: 1,
+        }),
+      );
+
+      expect(mockFetchRepoTextFile).toHaveBeenCalledTimes(1);
+      expect(report.skipped).toHaveLength(1);
+      expect(report.skipped[0]).toMatchObject({ owner: "acme", repo: "rl" });
+    });
+
+    // 事前の候補数上限算出（resolveCandidateLimit）は安全マージン（RATE_LIMIT_SAFETY_MARGIN）を
+    // 引いた残量を候補数へ換算する。動的ブレーキがこのマージンを重ねて引くと、候補数が事前算出
+    // の上限どおりで、かつ準備段階（isOrganization・resolveTemplateRef の識別解決等）の消費が
+    // ちょうどマージン分だった正常なシナリオでも、初回候補から誤って発動する
+    // （修正前: `(remaining - margin) < 見積もり` で判定していたため、`remaining` が既に
+    // マージン分減っている状態だとさらに引かれて見積もりを割り込んでしまっていた）。
+    // マージンを二重に引かないことを、そのちょうど境界になる数値で固定する。
+    it("候補数が事前算出の上限ちょうどで、準備段階の消費がマージン相当でも、初回候補でブレーキが誤発動しない", async () => {
+      // 安全マージン(10) 込みで remaining=74 から算出される上限は
+      // floor((74-10)/ESTIMATED_REQUESTS_PER_CANDIDATE(8)) = 8。
+      mockFetchRateLimitStatus.mockResolvedValue({
+        _tag: "Resolved",
+        status: { limit: 5000, remaining: 74, resetAt: undefined, authenticated: false },
+      });
+      // テンプレート自身は列挙結果に含まれず、resolveTemplateRef の識別解決で準備段階の
+      // GitHub API 呼び出しが発生する状況を模す（template.ref を明示せず解決させる）。
+      shaFixtures.set("acme/template", sha("tmpl-sha"));
+
+      // 候補数を事前算出の上限（8）ちょうどにする。
+      const repoNames = Array.from({ length: 8 }, (_, i) => `cand-${i}`);
+      mockListOwnerRepos.mockResolvedValue(
+        repoNames.map((r) => repoInfo({ owner: "acme", repo: r })),
+      );
+      // 準備段階の消費でマージン(10)分ぴったり減り、初回候補の評価時点では
+      // remaining(74) - margin(10) = 64 が観測される状況を模す。
+      //
+      // 先頭候補（残り候補 8 件中の 1 件目、remainingAfter=7）の必要見積もりは
+      // (7+1) * ESTIMATED_REQUESTS_PER_CANDIDATE(8) = 64 で、観測残量とちょうど一致する。
+      // 修正前の実装はここからさらにマージン(10)を引いて `64 - 10 = 54 < 64` が true になり
+      // 誤発動していた。
+      mockGetObservedRateLimitRemaining.mockReturnValue({ remaining: 64, resetAt: undefined });
+
+      const report = await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template" },
+          tmpBaseDir: "/tmp-base",
+          concurrency: 1,
+        }),
+      );
+
+      // 動的ブレーキが誤発動していれば、それ以降の候補は lock.json 取得すら行われず
+      // skipped になる。全候補が lock.json 取得まで進んだことを確認する。
+      expect(mockFetchRepoTextFile).toHaveBeenCalledTimes(repoNames.length);
+      expect(report.skipped).toEqual([]);
+    });
   });
 });

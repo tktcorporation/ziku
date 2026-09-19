@@ -876,6 +876,35 @@ export const aggregateSummarySchema = z.object({
    * 古かっただけと判別できる。
    */
   excludedBySince: z.number().int().nonnegative(),
+  /** owner 配下で実際に問い合わせた候補リポジトリ数（`listOwnerRepos` の結果件数） */
+  candidatesScanned: z.number().int().nonnegative(),
+  /**
+   * このスキャンに適用された候補数上限（レート制限の残量から算出した値と、呼び出し側が
+   * 指定した上限の小さい方）。`aggregateTemplateUsage` は常に具体的な値を設定する
+   * （上限が 0 以下になるほど枠が無ければ、レポートを作らず `GitHubRateLimited` で失敗する
+   * ため）。フィールド自体は他の生成元（手書き・別ツール産のレポート）との互換のため
+   * optional のまま残す。
+   *
+   * `candidatesScanned` がこの値に達している場合、owner 配下にはこの上限を超えて
+   * リポジトリが存在した可能性がある。それらは候補にすら含まれておらず、このテンプレートの
+   * 利用リポジトリかどうかの判定を受けていない。ただし取得段階の生の件数に対する近似であり、
+   * アーカイブ除外や `pushedSince` による早期終了（`utils/github.ts` の
+   * `fetchAllRepoPages`）で `candidatesScanned` がこの値へ届かないまま実際には打ち切られて
+   * いることがある。
+   */
+  candidateScanLimit: z.number().int().nonnegative().optional(),
+  /**
+   * このスキャンが候補に含めた push 日時の下限（ISO 8601、`listOwnerRepos` の `pushedSince` に
+   * 渡した値）。`aggregateTemplateUsage` は常に具体的な値を設定する（この下限は常に何らかの
+   * 既定値または明示指定から計算されるため）。フィールド自体は他の生成元（手書き・別ツール産の
+   * レポート）との互換のため `candidateScanLimit` と同じ方針で optional のまま残す。
+   *
+   * owner 配下の全リポジトリがこの下限より前にしか push されていない場合、
+   * `listOwnerRepos` は 1 件も返さず `totalRepositories: 0` になる。この値が無いと、
+   * 「利用リポジトリが無かった」のか「直近 push フィルタで最初から母集団に入らなかった」のか
+   * レポートの消費者が区別できない。
+   */
+  recentPushSince: z.string().datetime({ offset: true }).optional(),
 });
 export type AggregateSummary = z.infer<typeof aggregateSummarySchema>;
 
