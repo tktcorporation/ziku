@@ -9,9 +9,10 @@ import {
 } from "../rate-limit-budget";
 
 describe("candidateLimitFromRemaining", () => {
-  it("安全マージンを引いた残りを、候補あたりの想定リクエスト数で割った値を返す", () => {
-    // (50 - マージン(10)) / 想定リクエスト数(7) = floor(40/7) = 5
-    expect(candidateLimitFromRemaining(50)).toBe(5);
+  it("安全マージンを引いた残りを、候補あたりの想定リクエスト数で割った値を返す（端数は切り捨て）", () => {
+    // マージンを引いた残りが「5 件分 + 1」になるように残量を作り、切り捨てで 5 になることを見る。
+    const remaining = RATE_LIMIT_SAFETY_MARGIN + ESTIMATED_REQUESTS_PER_CANDIDATE * 5 + 1;
+    expect(candidateLimitFromRemaining(remaining)).toBe(5);
   });
 
   it("残量がマージン以下なら 0 を返す（負にはならない）", () => {
@@ -28,9 +29,21 @@ describe("candidateLimitFromRemaining", () => {
 
 describe("cannotAffordRemainingRequests", () => {
   it("観測残量が、自分自身を含む残り件数分の想定リクエスト数を下回るなら true を返す", () => {
-    // 残り 0 件（自分自身のみ）、1 件あたり想定リクエスト数 7 の必要見積もりは 1 * 7 = 7
-    expect(cannotAffordRemainingRequests(6, 0, ESTIMATED_REQUESTS_PER_CANDIDATE)).toBe(true);
-    expect(cannotAffordRemainingRequests(7, 0, ESTIMATED_REQUESTS_PER_CANDIDATE)).toBe(false);
+    // 残り 0 件（自分自身のみ）、1 件あたり想定リクエスト数の必要見積もりは 1 件分。
+    expect(
+      cannotAffordRemainingRequests(
+        ESTIMATED_REQUESTS_PER_CANDIDATE - 1,
+        0,
+        ESTIMATED_REQUESTS_PER_CANDIDATE,
+      ),
+    ).toBe(true);
+    expect(
+      cannotAffordRemainingRequests(
+        ESTIMATED_REQUESTS_PER_CANDIDATE,
+        0,
+        ESTIMATED_REQUESTS_PER_CANDIDATE,
+      ),
+    ).toBe(false);
   });
 
   it("安全マージンを引かない（candidateLimitFromRemaining とは別の判定基準）", () => {
@@ -42,9 +55,14 @@ describe("cannotAffordRemainingRequests", () => {
   });
 
   it("残り件数が多いほど、まかなえないと判定される残量のしきい値が上がる", () => {
-    // 残り 3 件（自分自身を含め 4 件分）、1 件あたり想定リクエスト数 7 の必要見積もりは 4 * 7 = 28
-    expect(cannotAffordRemainingRequests(27, 3, ESTIMATED_REQUESTS_PER_CANDIDATE)).toBe(true);
-    expect(cannotAffordRemainingRequests(28, 3, ESTIMATED_REQUESTS_PER_CANDIDATE)).toBe(false);
+    // 残り 3 件（自分自身を含め 4 件分）の必要見積もりは 4 件分。
+    const required = 4 * ESTIMATED_REQUESTS_PER_CANDIDATE;
+    expect(cannotAffordRemainingRequests(required - 1, 3, ESTIMATED_REQUESTS_PER_CANDIDATE)).toBe(
+      true,
+    );
+    expect(cannotAffordRemainingRequests(required, 3, ESTIMATED_REQUESTS_PER_CANDIDATE)).toBe(
+      false,
+    );
   });
 
   it("1 件あたりの想定リクエスト数を 1 にすると、ファイル単位（1 件 = 1 リクエスト）の見積もりになる", () => {

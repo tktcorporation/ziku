@@ -2220,7 +2220,7 @@ describe("aggregateTemplateUsage", () => {
         }),
       );
 
-      // (remaining(50) - 安全マージン(10)) / 候補あたりの想定リクエスト数(7) = floor(40/7) = 5
+      // (remaining(50) - 安全マージン(10)) / 候補あたりの想定リクエスト数(8) = floor(40/8) = 5
       expect(mockListOwnerRepos).toHaveBeenCalledWith(
         "acme",
         expect.objectContaining({ maxCandidates: 5 }),
@@ -2263,10 +2263,10 @@ describe("aggregateTemplateUsage", () => {
     });
 
     it("換算後の候補数上限が 1 件以上まかなえるぎりぎりの残量なら、失敗せず続行する", async () => {
-      // (remaining(17) - 安全マージン(10)) / 7 = 1（境界値）
+      // (remaining(18) - 安全マージン(10)) / ESTIMATED_REQUESTS_PER_CANDIDATE(8) = 1（境界値）
       mockFetchRateLimitStatus.mockResolvedValue({
         _tag: "Resolved",
-        status: { limit: 60, remaining: 17, resetAt: undefined, authenticated: false },
+        status: { limit: 60, remaining: 18, resetAt: undefined, authenticated: false },
       });
       mockListOwnerRepos.mockResolvedValue([]);
 
@@ -2299,7 +2299,7 @@ describe("aggregateTemplateUsage", () => {
         }),
       );
 
-      // レート制限由来の上限（floor((5000 - 10) / 7) = 712）よりユーザー指定（3）の方が小さい。
+      // レート制限由来の上限（floor((5000 - 10) / 8) = 623）よりユーザー指定（3）の方が小さい。
       expect(mockListOwnerRepos).toHaveBeenCalledWith(
         "acme",
         expect.objectContaining({ maxCandidates: 3 }),
@@ -2388,7 +2388,7 @@ describe("aggregateTemplateUsage", () => {
         }),
       );
 
-      // レート制限由来の上限（floor((5000 - 10) / 7) = 712）より固定の既定値（30）の方が小さい。
+      // レート制限由来の上限（floor((5000 - 10) / 8) = 623）より固定の既定値（30）の方が小さい。
       expect(mockListOwnerRepos).toHaveBeenCalledWith(
         "acme",
         expect.objectContaining({ maxCandidates: 30 }),
@@ -2411,7 +2411,7 @@ describe("aggregateTemplateUsage", () => {
       );
 
       // ユーザー指定（100）は既定値（30）より緩めてよい意思表示として扱われ、
-      // レート制限由来の上限（floor((5000 - 10) / 7) = 712）の範囲内なのでそのまま使われる。
+      // レート制限由来の上限（floor((5000 - 10) / 8) = 623）の範囲内なのでそのまま使われる。
       expect(mockListOwnerRepos).toHaveBeenCalledWith(
         "acme",
         expect.objectContaining({ maxCandidates: 100 }),
@@ -2571,7 +2571,7 @@ describe("aggregateTemplateUsage", () => {
         // ok を評価する時点ではまだ何も観測していない。
         // rl の直前の時点で remaining(3) が観測されたとする。
         // 残り候補数（1 件、自分自身のみ）だけの見積もりでは 3 < 1 は false で発動しないが、
-        // 候補あたりの想定リクエスト数（7）を掛けた見積もりでは 3 < 1*7 で発動する。
+        // 候補あたりの想定リクエスト数（8）を掛けた見積もりでは 3 < 1*8 で発動する。
         return observedCallCount === 1 ? undefined : { remaining: 3, resetAt: undefined };
       });
 
@@ -2596,10 +2596,11 @@ describe("aggregateTemplateUsage", () => {
     // マージン分減っている状態だとさらに引かれて見積もりを割り込んでしまっていた）。
     // マージンを二重に引かないことを、そのちょうど境界になる数値で固定する。
     it("候補数が事前算出の上限ちょうどで、準備段階の消費がマージン相当でも、初回候補でブレーキが誤発動しない", async () => {
-      // 安全マージン(10) 込みで remaining=66 から算出される上限は floor((66-10)/7) = 8。
+      // 安全マージン(10) 込みで remaining=74 から算出される上限は
+      // floor((74-10)/ESTIMATED_REQUESTS_PER_CANDIDATE(8)) = 8。
       mockFetchRateLimitStatus.mockResolvedValue({
         _tag: "Resolved",
-        status: { limit: 5000, remaining: 66, resetAt: undefined, authenticated: false },
+        status: { limit: 5000, remaining: 74, resetAt: undefined, authenticated: false },
       });
       // テンプレート自身は列挙結果に含まれず、resolveTemplateRef の識別解決で準備段階の
       // GitHub API 呼び出しが発生する状況を模す（template.ref を明示せず解決させる）。
@@ -2611,13 +2612,13 @@ describe("aggregateTemplateUsage", () => {
         repoNames.map((r) => repoInfo({ owner: "acme", repo: r })),
       );
       // 準備段階の消費でマージン(10)分ぴったり減り、初回候補の評価時点では
-      // remaining(66) - margin(10) = 56 が観測される状況を模す。
+      // remaining(74) - margin(10) = 64 が観測される状況を模す。
       //
       // 先頭候補（残り候補 8 件中の 1 件目、remainingAfter=7）の必要見積もりは
-      // (7+1) * ESTIMATED_REQUESTS_PER_CANDIDATE(7) = 56 で、観測残量とちょうど一致する。
-      // 修正前の実装はここからさらにマージン(10)を引いて `56 - 10 = 46 < 56` が true になり
+      // (7+1) * ESTIMATED_REQUESTS_PER_CANDIDATE(8) = 64 で、観測残量とちょうど一致する。
+      // 修正前の実装はここからさらにマージン(10)を引いて `64 - 10 = 54 < 64` が true になり
       // 誤発動していた。
-      mockGetObservedRateLimitRemaining.mockReturnValue({ remaining: 56, resetAt: undefined });
+      mockGetObservedRateLimitRemaining.mockReturnValue({ remaining: 64, resetAt: undefined });
 
       const report = await Effect.runPromise(
         aggregateTemplateUsage({
