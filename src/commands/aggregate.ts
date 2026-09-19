@@ -166,9 +166,11 @@ type PositiveIntegerParseResult =
  * 「未指定なら ok、指定されていれば正の整数でなければ ok:false」という、この 3 つの CLI
  * オプション（`--concurrency` / `--max-candidates` / `--recent-days`）に共通のパース規則。
  * 未指定（undefined）を許すのは、いずれも `aggregateTemplateUsage` 側に既定値があり、
- * それに委ねてよいため。
+ * それに委ねてよいため。3 つとも検証規則自体は同じで、呼び出し側ごとに違うのは
+ * エラーメッセージのフォーマットヒント（`CONCURRENCY_FORMAT_HINT` 等）だけなので、
+ * オプションごとに薄いラッパー関数は作らずこの関数を直接使う。
  */
-function parsePositiveInteger(raw: string | undefined): PositiveIntegerParseResult {
+export function parsePositiveInteger(raw: string | undefined): PositiveIntegerParseResult {
   if (raw === undefined) return { ok: true, value: undefined };
   const value = Number(raw);
   if (!Number.isInteger(value) || value <= 0) {
@@ -180,44 +182,24 @@ function parsePositiveInteger(raw: string | undefined): PositiveIntegerParseResu
 /** `--concurrency` の期待フォーマット。CLI ガード節が `InvalidArgument` の `expected` に使う。 */
 export const CONCURRENCY_FORMAT_HINT = "a positive integer, e.g. --concurrency=4";
 
-/**
- * `--concurrency` を正の整数として検証する。
- * 未指定（undefined）は `aggregateTemplateUsage` 側の既定値に委ねる。
- */
-export function parseConcurrency(raw: string | undefined): PositiveIntegerParseResult {
-  return parsePositiveInteger(raw);
-}
-
-/** `--max-candidates` の期待フォーマット。CLI ガード節が `InvalidArgument` の `expected` に使う。 */
-export const MAX_CANDIDATES_FORMAT_HINT = "a positive integer, e.g. --max-candidates=200";
-
-/**
- * `--max-candidates` を正の整数として検証する。
+/** `--max-candidates` の期待フォーマット。CLI ガード節が `InvalidArgument` の `expected` に使う。
  *
  * 未指定（undefined）は `aggregateTemplateUsage` 側の既定値（固定の既定値とレート制限の
  * 残量から算出した上限の小さい方）に委ねる。指定した場合は、その値を「既定値より緩めてよい
  * 明示的な意思表示」として扱う（レート制限由来の上限との小さい方が使われる）。
  */
-export function parseMaxCandidates(raw: string | undefined): PositiveIntegerParseResult {
-  return parsePositiveInteger(raw);
-}
+export const MAX_CANDIDATES_FORMAT_HINT = "a positive integer, e.g. --max-candidates=200";
 
-/** `--recent-days` の期待フォーマット。CLI ガード節が `InvalidArgument` の `expected` に使う。 */
+/** `--recent-days` の期待フォーマット。CLI ガード節が `InvalidArgument` の `expected` に使う。
+ *
+ * `--since`（pendingPush/conflicts の最終コミット日時での絞り込み）とは別物で、こちらは
+ * owner 配下の候補そのものを push 日時で絞り込む。
+ */
 export const RECENT_DAYS_FORMAT_HINT = "a positive integer, e.g. --recent-days=30";
 
 /**
- * `--recent-days` を正の整数として検証する。`--since`（pendingPush/conflicts の最終コミット
- * 日時での絞り込み）とは別物で、こちらは owner 配下の候補そのものを push 日時で絞り込む。
- *
- * 未指定（undefined）は `aggregateTemplateUsage` 側の既定値に委ねる。
- */
-export function parseRecentDays(raw: string | undefined): PositiveIntegerParseResult {
-  return parsePositiveInteger(raw);
-}
-
-/**
- * `parseConcurrency` / `parseMaxCandidates` のような「未指定なら ok、そうでなければ検証する」
- * パーサーの結果を、成功なら値へ、失敗なら `InvalidArgument` の `ZikuFailure` へ変換する。
+ * `parsePositiveInteger` のような「未指定なら ok、そうでなければ検証する」パーサーの結果を、
+ * 成功なら値へ、失敗なら `InvalidArgument` の `ZikuFailure` へ変換する。
  *
  * `run` 本体に同じ形の `if (!result.ok) throw ...` を並べると分岐が積み重なるため、
  * 検証系のオプションが増えるたびに複雑度が上がる問題をここへ切り出して抑える。
@@ -324,7 +306,7 @@ export const aggregateCommand = defineCommand({
 
     const concurrencyRaw = args.concurrency as string | undefined;
     const concurrency = requireParsedOption(
-      parseConcurrency(concurrencyRaw),
+      parsePositiveInteger(concurrencyRaw),
       "--concurrency",
       concurrencyRaw,
       CONCURRENCY_FORMAT_HINT,
@@ -332,7 +314,7 @@ export const aggregateCommand = defineCommand({
 
     const maxCandidatesRaw = args["max-candidates"] as string | undefined;
     const maxCandidates = requireParsedOption(
-      parseMaxCandidates(maxCandidatesRaw),
+      parsePositiveInteger(maxCandidatesRaw),
       "--max-candidates",
       maxCandidatesRaw,
       MAX_CANDIDATES_FORMAT_HINT,
@@ -340,7 +322,7 @@ export const aggregateCommand = defineCommand({
 
     const recentDaysRaw = args["recent-days"] as string | undefined;
     const recentPushDays = requireParsedOption(
-      parseRecentDays(recentDaysRaw),
+      parsePositiveInteger(recentDaysRaw),
       "--recent-days",
       recentDaysRaw,
       RECENT_DAYS_FORMAT_HINT,

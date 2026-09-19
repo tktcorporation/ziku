@@ -49,8 +49,7 @@ vi.mock("../../ui/renderer", () => ({
   },
 }));
 
-const { aggregateCommand, normalizeSince, parseConcurrency, parseMaxCandidates, parseRecentDays } =
-  await import("../aggregate");
+const { aggregateCommand, normalizeSince, parsePositiveInteger } = await import("../aggregate");
 const { aggregateTemplateUsage } = await import("../../utils/aggregate");
 const { detectGitHubRepo } = await import("../../utils/git-remote");
 const { log, outro } = await import("../../ui/renderer");
@@ -157,77 +156,32 @@ describe("normalizeSince", () => {
   });
 });
 
-describe("parseConcurrency", () => {
+// `--concurrency` / `--max-candidates` / `--recent-days` はすべてこの関数 1 つで検証される
+// （`aggregate.ts` 参照）。オプションごとの違いはエラーメッセージのフォーマットヒント
+// （`CONCURRENCY_FORMAT_HINT` 等）だけなので、検証規則そのもののテストは 1 箇所にまとめる。
+describe("parsePositiveInteger", () => {
   it("未指定は undefined として成功扱い", () => {
-    expect(parseConcurrency(undefined)).toEqual({ ok: true, value: undefined });
+    expect(parsePositiveInteger(undefined)).toEqual({ ok: true, value: undefined });
   });
 
   it("正の整数はそのまま受理する", () => {
-    expect(parseConcurrency("4")).toEqual({ ok: true, value: 4 });
+    expect(parsePositiveInteger("4")).toEqual({ ok: true, value: 4 });
   });
 
   it("0 はエラーになる", () => {
-    const result = parseConcurrency("0");
-    expect(result.ok).toBe(false);
+    expect(parsePositiveInteger("0").ok).toBe(false);
   });
 
   it("負値はエラーになる", () => {
-    const result = parseConcurrency("-1");
-    expect(result.ok).toBe(false);
+    expect(parsePositiveInteger("-1").ok).toBe(false);
   });
 
   it("数値でない入力はエラーになる", () => {
-    const result = parseConcurrency("abc");
-    expect(result.ok).toBe(false);
+    expect(parsePositiveInteger("abc").ok).toBe(false);
   });
 
   it("小数はエラーになる", () => {
-    const result = parseConcurrency("2.5");
-    expect(result.ok).toBe(false);
-  });
-});
-
-describe("parseMaxCandidates", () => {
-  it("未指定は undefined として成功扱い", () => {
-    expect(parseMaxCandidates(undefined)).toEqual({ ok: true, value: undefined });
-  });
-
-  it("正の整数はそのまま受理する", () => {
-    expect(parseMaxCandidates("200")).toEqual({ ok: true, value: 200 });
-  });
-
-  it("0 はエラーになる", () => {
-    expect(parseMaxCandidates("0").ok).toBe(false);
-  });
-
-  it("負値はエラーになる", () => {
-    expect(parseMaxCandidates("-1").ok).toBe(false);
-  });
-
-  it("数値でない入力はエラーになる", () => {
-    expect(parseMaxCandidates("abc").ok).toBe(false);
-  });
-});
-
-describe("parseRecentDays", () => {
-  it("未指定は undefined として成功扱い", () => {
-    expect(parseRecentDays(undefined)).toEqual({ ok: true, value: undefined });
-  });
-
-  it("正の整数はそのまま受理する", () => {
-    expect(parseRecentDays("30")).toEqual({ ok: true, value: 30 });
-  });
-
-  it("0 はエラーになる", () => {
-    expect(parseRecentDays("0").ok).toBe(false);
-  });
-
-  it("負値はエラーになる", () => {
-    expect(parseRecentDays("-1").ok).toBe(false);
-  });
-
-  it("数値でない入力はエラーになる", () => {
-    expect(parseRecentDays("abc").ok).toBe(false);
+    expect(parsePositiveInteger("2.5").ok).toBe(false);
   });
 });
 

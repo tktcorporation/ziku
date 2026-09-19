@@ -817,7 +817,7 @@ describe("aggregateSummarySchema", () => {
     expect(aggregateSummarySchema.parse(summary)).toEqual(summary);
   });
 
-  it("candidateScanLimit は省略できる（上限が適用されなかったことを表す）", () => {
+  it("candidateScanLimit は省略できる（他の生成元との互換のため。ziku 自身は常に値を設定する）", () => {
     const summary = {
       totalRepositories: 3,
       repositoriesWithPendingPush: 1,

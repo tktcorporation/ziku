@@ -232,9 +232,9 @@ describe("aggregateTemplateUsage", () => {
     mockGetRepoIdentity.mockImplementation((owner: string, repo: string) =>
       Promise.resolve({ owner, repo, defaultBranch: "main" }),
     );
-    // 既定では「レート制限の残量を取得できなかった」状態にする。事前絞り込みが
-    // 効かないため、候補数の上限は呼び出し側が明示指定した maxCandidates のみに従う
-    // （多くのテストでは未指定なので上限無し = 従来どおりの挙動になる）。
+    // 既定では「レート制限の残量を取得できなかった」状態にする。レート制限由来の絞り込みは
+    // 適用できないため、候補数の上限は呼び出し側が指定した maxCandidates（未指定なら固定の
+    // 既定値 DEFAULT_MAX_CANDIDATES=30）に従う（`resolveCandidateLimit` の `Unresolved` 分岐）。
     // 個別に事前絞り込みの挙動を見るテストは、ここを上書きする。
     mockFetchRateLimitStatus.mockResolvedValue({
       _tag: "Unresolved",
@@ -1559,13 +1559,16 @@ describe("aggregateTemplateUsage", () => {
         return Effect.succeed(absPath("/template-dir"));
       }
       downloadedRepos.push(source);
+      // giget（tarball ダウンロードの実装）は失敗時にプレーンな Error しか投げず、
+      // `status` プロパティも `response` プロパティも持たない
+      // （`node_modules/giget/dist/_chunks/giget.mjs` の `download()`）。この形を
+      // 手動構築すると production では起きない経路をテストするだけの偽陽性になるため、
+      // giget が実際に投げるメッセージ形（`Failed to download <url>: <status> <statusText>`）
+      // に揃える。
       return Effect.fail(
         new TemplateError({
           message: "Failed to download template",
-          cause: Object.assign(new Error("rate limited"), {
-            status: 403,
-            response: { status: 403, headers: { "x-ratelimit-remaining": "0" } },
-          }),
+          cause: new Error(`Failed to download ${source}: 403 Forbidden`),
         }),
       );
     });
@@ -1712,7 +1715,7 @@ describe("aggregateTemplateUsage", () => {
         }),
       );
 
-      // レート制限由来の上限（5000 - 10 = 4990）よりユーザー指定（3）の方が小さい。
+      // レート制限由来の上限（floor((5000 - 10) / 4) = 1247）よりユーザー指定（3）の方が小さい。
       expect(mockListOwnerRepos).toHaveBeenCalledWith(
         "acme",
         expect.objectContaining({ maxCandidates: 3 }),
@@ -1801,7 +1804,7 @@ describe("aggregateTemplateUsage", () => {
         }),
       );
 
-      // レート制限由来の上限（5000 - 10 = 4990）より固定の既定値（30）の方が小さい。
+      // レート制限由来の上限（floor((5000 - 10) / 4) = 1247）より固定の既定値（30）の方が小さい。
       expect(mockListOwnerRepos).toHaveBeenCalledWith(
         "acme",
         expect.objectContaining({ maxCandidates: 30 }),
@@ -1824,7 +1827,7 @@ describe("aggregateTemplateUsage", () => {
       );
 
       // ユーザー指定（100）は既定値（30）より緩めてよい意思表示として扱われ、
-      // レート制限由来の上限（5000 - 10 = 4990）の範囲内なのでそのまま使われる。
+      // レート制限由来の上限（floor((5000 - 10) / 4) = 1247）の範囲内なのでそのまま使われる。
       expect(mockListOwnerRepos).toHaveBeenCalledWith(
         "acme",
         expect.objectContaining({ maxCandidates: 100 }),
@@ -1949,10 +1952,10 @@ describe("aggregateTemplateUsage", () => {
       mockGetObservedRateLimitRemaining.mockImplementation(() => {
         observedCallCount += 1;
         // ok を評価する時点ではまだ何も観測していない。
-        // rl の直前の時点で remaining(13) - margin(10) = 3 が観測されたとする。
+        // rl の直前の時点で remaining(3) が観測されたとする。
         // 残り候補数（1 件、自分自身のみ）だけの見積もりでは 3 < 1 は false で発動しないが、
         // 候補あたりの想定リクエスト数（4）を掛けた見積もりでは 3 < 1*4 で発動する。
-        return observedCallCount === 1 ? undefined : { remaining: 13, resetAt: undefined };
+        return observedCallCount === 1 ? undefined : { remaining: 3, resetAt: undefined };
       });
 
       const report = await Effect.runPromise(
@@ -1966,6 +1969,51 @@ describe("aggregateTemplateUsage", () => {
       expect(mockFetchRepoTextFile).toHaveBeenCalledTimes(1);
       expect(report.skipped).toHaveLength(1);
       expect(report.skipped[0]).toMatchObject({ owner: "acme", repo: "rl" });
+    });
+
+    // 事前の候補数上限算出（resolveCandidateLimit）は安全マージン（RATE_LIMIT_SAFETY_MARGIN）を
+    // 引いた残量を候補数へ換算する。動的ブレーキがこのマージンを重ねて引くと、候補数が事前算出
+    // の上限どおりで、かつ準備段階（isOrganization・resolveTemplateRef の識別解決等）の消費が
+    // ちょうどマージン分だった正常なシナリオでも、初回候補から誤って発動する
+    // （修正前: `(remaining - margin) < 見積もり` で判定していたため、`remaining` が既に
+    // マージン分減っている状態だとさらに引かれて見積もりを割り込んでしまっていた）。
+    // マージンを二重に引かないことを、そのちょうど境界になる数値で固定する。
+    it("候補数が事前算出の上限ちょうどで、準備段階の消費がマージン相当でも、初回候補でブレーキが誤発動しない", async () => {
+      // 安全マージン(10) 込みで remaining=50 から算出される上限は floor((50-10)/4) = 10。
+      mockFetchRateLimitStatus.mockResolvedValue({
+        _tag: "Resolved",
+        status: { limit: 5000, remaining: 50, resetAt: undefined, authenticated: false },
+      });
+      // テンプレート自身は列挙結果に含まれず、resolveTemplateRef の識別解決で準備段階の
+      // GitHub API 呼び出しが発生する状況を模す（template.ref を明示せず解決させる）。
+      shaFixtures.set("acme/template", sha("tmpl-sha"));
+
+      // 候補数を事前算出の上限（10）ちょうどにする。
+      const repoNames = Array.from({ length: 10 }, (_, i) => `cand-${i}`);
+      mockListOwnerRepos.mockResolvedValue(
+        repoNames.map((r) => repoInfo({ owner: "acme", repo: r })),
+      );
+      // 準備段階の消費でマージン(10)分ぴったり減り、初回候補の評価時点では
+      // remaining(50) - margin(10) = 40 が観測される状況を模す。
+      //
+      // 先頭候補（残り候補 10 件中の 1 件目、remainingAfter=9）の必要見積もりは
+      // (9+1) * ESTIMATED_REQUESTS_PER_CANDIDATE(4) = 40 で、観測残量とちょうど一致する。
+      // 修正前の実装はここからさらにマージン(10)を引いて `40 - 10 = 30 < 40` が true になり
+      // 誤発動していた。
+      mockGetObservedRateLimitRemaining.mockReturnValue({ remaining: 40, resetAt: undefined });
+
+      const report = await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template" },
+          tmpBaseDir: "/tmp-base",
+          concurrency: 1,
+        }),
+      );
+
+      // 動的ブレーキが誤発動していれば、それ以降の候補は lock.json 取得すら行われず
+      // skipped になる。全候補が lock.json 取得まで進んだことを確認する。
+      expect(mockFetchRepoTextFile).toHaveBeenCalledTimes(repoNames.length);
+      expect(report.skipped).toEqual([]);
     });
   });
 });

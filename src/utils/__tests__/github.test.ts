@@ -9,6 +9,7 @@ import { ZikuFailure } from "../../errors";
 import {
   checkRepoExists,
   checkRepoSetup,
+  detectGigetRateLimit,
   detectGitHubRateLimit,
   fetchRateLimitStatus,
   fetchRepoTextFile,
@@ -1274,6 +1275,88 @@ describe("detectGitHubRateLimit", () => {
   });
 });
 
+/**
+ * giget（テンプレート/リポジトリ内容の tarball ダウンロード）が投げるプレーンな Error から、
+ * レート制限を検出できるかを確認する。giget はこの例外に `status`/`response` を持たせない
+ * ため、`detectGitHubRateLimit` とは別の判定経路（メッセージ末尾のステータス解析 +
+ * 観測済み残量による 403 の絞り込み）になる。
+ */
+describe("detectGigetRateLimit", () => {
+  const originalFetch = globalThis.fetch;
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+    process.env.PATH = "";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    process.env = originalEnv;
+  });
+
+  it("429 は観測残量に関係なく無条件でレート制限として検出する", () => {
+    const cause = new Error(
+      "Failed to download https://api.github.com/repos/acme/widgets/tarball/deadbeef: 429 Too Many Requests",
+    );
+    expect(detectGigetRateLimit(cause)).toEqual({ resetAt: undefined });
+  });
+
+  it("観測残量が無い状態での 403 は広くレート制限として扱う", () => {
+    expect(getObservedRateLimitRemaining()).toBeUndefined();
+    const cause = new Error(
+      "Failed to download https://api.github.com/repos/acme/widgets/tarball/deadbeef: 403 Forbidden",
+    );
+    expect(detectGigetRateLimit(cause)).toEqual({ resetAt: undefined });
+  });
+
+  it("観測残量が枯渇に近い 403 はレート制限として扱い、観測済みの resetAt を使う", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        mockJsonResponse(
+          200,
+          { full_name: "acme/widgets", default_branch: "main" },
+          { "x-ratelimit-remaining": "3", "x-ratelimit-reset": "1700000000" },
+        ),
+      );
+    await getRepoIdentity("acme", "widgets");
+
+    const cause = new Error(
+      "Failed to download https://api.github.com/repos/acme/widgets/tarball/deadbeef: 403 Forbidden",
+    );
+    expect(detectGigetRateLimit(cause)).toEqual({ resetAt: new Date(1700000000 * 1000) });
+  });
+
+  it("観測残量に十分な余裕がある 403 は権限不足と判断し、レート制限として検出しない", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        mockJsonResponse(
+          200,
+          { full_name: "acme/widgets", default_branch: "main" },
+          { "x-ratelimit-remaining": "4000" },
+        ),
+      );
+    await getRepoIdentity("acme", "widgets");
+
+    const cause = new Error(
+      "Failed to download https://api.github.com/repos/acme/widgets/tarball/deadbeef: 403 Forbidden",
+    );
+    expect(detectGigetRateLimit(cause)).toBeUndefined();
+  });
+
+  it("メッセージ末尾に <status> <statusText> が無い例外は検出しない", () => {
+    expect(detectGigetRateLimit(new Error("network error"))).toBeUndefined();
+  });
+
+  it("Error インスタンスでない値は検出しない", () => {
+    expect(detectGigetRateLimit("plain string failure")).toBeUndefined();
+  });
+});
+
 describe("checkRepoSetup", () => {
   const originalFetch = globalThis.fetch;
 
@@ -1618,6 +1701,29 @@ describe("listOwnerRepos", () => {
     const result = await listOwnerRepos("acme", { pushedSince: "2026-01-01T00:00:00Z" });
 
     expect(result.map((r) => r.repo)).toEqual(["active"]);
+  });
+
+  // `pushed_at: null` は「候補から除外する」と「以降のページ取得を打ち切ってよい」を混同すると
+  // 壊れる回帰ケース。sort=pushed&direction=desc の並びで null がどこに位置するかは GitHub API
+  // の仕様として保証されないため、先頭や中間に来ても、それより後ろにある閾値以降の正当な
+  // リポジトリを取りこぼしてはいけない。
+  it("pushed_at が null のリポジトリが先頭や中間にあっても、後続の正当なリポジトリは取得し続ける", async () => {
+    const page1 = [
+      repoListItem("empty-first", { pushedAt: null }),
+      repoListItem("active-1", { pushedAt: "2026-03-01T00:00:00Z" }),
+      repoListItem("empty-middle", { pushedAt: null }),
+      repoListItem("active-2", { pushedAt: "2026-02-01T00:00:00Z" }),
+    ];
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(mockResponse({ status: 200 }));
+      }
+      return Promise.resolve(mockJsonResponse(200, page1));
+    });
+
+    const result = await listOwnerRepos("acme", { pushedSince: "2026-01-01T00:00:00Z" });
+
+    expect(result.map((r) => r.repo)).toEqual(["active-1", "active-2"]);
   });
 
   it("pushedSince 未指定なら push 日時での絞り込みをしない", async () => {
@@ -2130,8 +2236,8 @@ describe("fetchDefaultBranch", () => {
   });
 
   // githubFetch（fetch 直叩き系）は成功・失敗どちらのレスポンスからも観測するのに対し、
-  // Octokit 経由のこの呼び出しは以前、成功時（Effect.map 内）でしか観測していなかった。
-  // RequestError が response.headers を持つ場合は、失敗時にもそこから観測できるようにする。
+  // Octokit 経由のこの呼び出しは失敗時に res を受け取らない。RequestError が
+  // response.headers を持つ場合は、そこから観測する。
   it("失敗レスポンスのヘッダーからもレート制限残量を観測する", async () => {
     mockReposGet.mockRejectedValue(
       apiError(403, "API rate limit exceeded", { "x-ratelimit-remaining": "0" }),

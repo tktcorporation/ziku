@@ -34,6 +34,7 @@ import type {
 import { baseCommitSha, baseHashesOf, lockSchema, templateRefToString } from "../modules/schemas";
 import { analyzeConfigDrift } from "./config-merge";
 import {
+  detectGigetRateLimit,
   detectGitHubRateLimit,
   fetchRateLimitStatus,
   fetchRepoTextFile,
@@ -119,13 +120,16 @@ export interface AggregateOptions {
 const DEFAULT_CONCURRENCY = 4;
 
 /**
- * レート制限の残量から候補数上限を算出するとき、および実行中の動的ブレーキ
- * （{@link evaluateCandidate}）の判定に使う安全マージン。単位は GitHub API リクエスト数
- * （{@link ESTIMATED_REQUESTS_PER_CANDIDATE} で候補数へ変換する前の値）。
+ * レート制限の残量から事前の候補数上限を算出する際（{@link resolveCandidateLimit}）に使う
+ * 安全マージン。単位は GitHub API リクエスト数（{@link ESTIMATED_REQUESTS_PER_CANDIDATE} で
+ * 候補数へ変換する前の値）。
  *
  * owner 一覧取得・テンプレートの正規名解決など、候補ごとの処理以外にもこのスキャン中に
  * GitHub API 呼び出しが発生するため、残量をそのまま候補数の上限にすると、それらの
- * 呼び出し分だけ超過しうる。
+ * 呼び出し分だけ超過しうる。実行中の動的ブレーキ（{@link evaluateCandidate}）はこのマージンを
+ * 使わない。候補処理が始まる前の準備段階の消費はここで既に見込み済みであり、動的ブレーキの
+ * 判定でも重ねて差し引くと、候補数が事前算出の上限どおりで準備段階の消費が少なかった正常な
+ * シナリオでも初回候補から誤って発動する。
  */
 const RATE_LIMIT_SAFETY_MARGIN = 10;
 
@@ -268,18 +272,24 @@ export function aggregateTemplateUsage(
 
       const { acceptedCandidates, skippedFromEvaluation } = partitionEvaluations(evaluations);
 
+      // 評価フェーズの終了後、テンプレート内容を実際にダウンロードする前にもう一度ゲートを
+      // 確認する。評価フェーズ中の動的ブレーキ（予防的な打ち切り）が発動していても、採用済み
+      // 候補が 1 件でもあれば、このチェックが無いとテンプレート tarball を 1 回無駄にダウン
+      // ロードしてしまう（その直後にどのみち全 processCandidate が skipped で返るだけなので）。
+      const gateBeforeTemplateDownload = yield* Ref.get(rateLimitGate);
+
       // テンプレートは全リポジトリ共通の比較基準なので、この Scope に 1 度だけ取得して
       // 使い回す。リポジトリごとに取得すると同じ commit を候補数だけダウンロードすることになる。
-      // 比較対象が 1 件も無ければ取得自体が不要なので、候補の確定後に取りに行く。
+      // 比較対象が 1 件も無ければ、あるいは既にゲートが立っていれば取得自体が不要なので、
+      // 候補の確定後に取りに行く。
       const templateDir =
-        acceptedCandidates.length === 0
+        acceptedCandidates.length === 0 || Option.isSome(gateBeforeTemplateDownload)
           ? undefined
           : yield* acquireTemplateSnapshot(tmpBaseDir, template, templateRefSha);
 
       const outcomes =
-        templateDir === undefined
-          ? []
-          : yield* Effect.forEach(
+        templateDir !== undefined
+          ? yield* Effect.forEach(
               // sanitizeLabel は owner/repo の記号をすべて "_" に潰すため、異なる候補が
               // 同じテンポラリラベルに衝突しうる。候補配列内の位置を label に付与し、
               // 衝突しても一意になるようにする。
@@ -300,7 +310,18 @@ export function aggregateTemplateUsage(
                   }),
                 ),
               { concurrency },
-            );
+            )
+          : // テンプレートのダウンロードそのものをゲートで止めた場合、processCandidate は
+            // 1 件も呼ばれない。採用済みの候補を理由付きで skipped として明示的に報告する
+            // （呼ばなければ黙って結果から消え、「利用リポジトリが無かった」と誤読されうる）。
+            Option.isSome(gateBeforeTemplateDownload)
+            ? acceptedCandidates.map((candidate) =>
+                processSkipped(
+                  candidate.repoInfo,
+                  rateLimitSkipReason(gateBeforeTemplateDownload.value),
+                ),
+              )
+            : [];
 
       const { repositories, skippedFromProcessing, excludedBySince } = partitionOutcomes(outcomes);
 
@@ -533,10 +554,13 @@ function githubRateLimitedFailure(resetAt: Date | undefined): ZikuFailure {
  * 同じ考え方だが、新しい依存を増やさずここに書く。
  */
 function rateLimitSkipReason(detection: RateLimitDetection): string {
-  const verb =
-    detection._tag === "observed"
-      ? "GitHub API rate limit reached"
-      : "Stopped short of the GitHub API rate limit based on the observed remaining quota";
+  const verb = match(detection)
+    .with({ _tag: "observed" }, () => "GitHub API rate limit reached")
+    .with(
+      { _tag: "preemptive" },
+      () => "Stopped short of the GitHub API rate limit based on the observed remaining quota",
+    )
+    .exhaustive();
   if (detection.resetAt === undefined) {
     return `${verb}; not checking further repositories in this scan.`;
   }
@@ -575,9 +599,14 @@ function containDefect<A>(
  * 分類ロジックの外側にある）ため、ここで明示的に検出しないとレート制限による失敗が
  * 汎用の `TemplateUnavailable` に潰れ、呼び出し側（`processCandidate`）がレート制限
  * ゲートへ反映できない。
+ *
+ * `detectGitHubRateLimit`（`cause.status`/`cause.response.headers` 前提）と
+ * `detectGigetRateLimit`（giget のプレーンな Error メッセージのパース）の両方を試す。
+ * giget は前者の形を持たない例外しか投げないため、後者が実質的な検出経路になる
+ * （両方試すのは、モック・将来の giget 実装変更などで前者の形が来た場合にも安全に働くため）。
  */
 function toTemplateFailure(e: TemplateError): ZikuFailure {
-  const rateLimit = detectGitHubRateLimit(e.cause);
+  const rateLimit = detectGitHubRateLimit(e.cause) ?? detectGigetRateLimit(e.cause);
   if (rateLimit !== undefined) {
     return zikuFailure(
       {
@@ -802,14 +831,20 @@ function evaluateCandidate(
 
     // 実際に 403 を受け取る前に、直近のレスポンスヘッダーから観測した残量で先読みする。
     // 自分自身とまだ処理していない候補の分を、候補 1 件あたりの想定リクエスト数
-    // （{@link ESTIMATED_REQUESTS_PER_CANDIDATE}）で見積もり、安全マージン込みでまかなえ
-    // なければ、この候補以降は新規リクエストを送らず、既存の事後ゲートへ「検知済み」として
-    // 合流させる。以降の候補処理は evaluateCandidate 冒頭の早期打ち切りにそのまま乗る。
+    // （{@link ESTIMATED_REQUESTS_PER_CANDIDATE}）で見積もり、まかなえなければこの候補以降は
+    // 新規リクエストを送らず、既存の事後ゲートへ「検知済み」として合流させる。以降の候補処理は
+    // evaluateCandidate 冒頭の早期打ち切りにそのまま乗る。
+    //
+    // ここでは `RATE_LIMIT_SAFETY_MARGIN` を引かない。事前の候補数上限算出
+    // （{@link resolveCandidateLimit}）が同じマージンを既に 1 回差し引いており、その分は
+    // 候補処理が始まる前の準備段階（`isOrganization`・`listOwnerRepos` の一覧取得・
+    // `resolveTemplateRef` の識別解決など）の消費を見込むバッファとして確保済みだから。
+    // ここでも同じマージンを重ねて要求すると、候補数が事前算出の上限どおりで準備段階の消費が
+    // 少なかった正常なシナリオでも、初回候補から誤ってブレーキが発動する。
     const observed = getObservedRateLimitRemaining();
     if (
       observed !== undefined &&
-      observed.remaining - RATE_LIMIT_SAFETY_MARGIN <
-        (remainingAfter + 1) * ESTIMATED_REQUESTS_PER_CANDIDATE
+      observed.remaining < (remainingAfter + 1) * ESTIMATED_REQUESTS_PER_CANDIDATE
     ) {
       const detection: RateLimitDetection = { _tag: "preemptive", resetAt: observed.resetAt };
       yield* Ref.set(rateLimitGate, Option.some(detection));

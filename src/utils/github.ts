@@ -743,12 +743,18 @@ export type RateLimitStatusResolution =
  *
  * `GET /rate_limit` はそれ自身のレスポンスがクォータを消費しない（GitHub の仕様）ため、
  * owner 横断探索の候補数を事前に絞り込む見積もりに使っても、見積もり自体が枠を圧迫しない。
+ *
+ * `githubFetch` 経由で呼ぶことで `X-GitHub-Api-Version` が付き、かつレスポンス自体が持つ
+ * `x-ratelimit-remaining` から {@link observeRateLimitHeaders} が `observedRateLimit` を
+ * クォータ消費ゼロで正確にシードできる（他の GitHub API 呼び出しが先に観測している場合
+ * より新しい値で上書きする）。
  */
 export function fetchRateLimitStatus(): Promise<RateLimitStatusResolution> {
   const token = getGitHubToken();
   const program = Effect.gen(function* () {
     const res = yield* Effect.tryPromise({
-      try: () => fetch("https://api.github.com/rate_limit", { headers: githubAuthHeaders(token) }),
+      try: () =>
+        githubFetch("https://api.github.com/rate_limit", { headers: githubAuthHeaders(token) }),
       catch: (cause): GitHubLookupFailure => ({
         _tag: "Unresolved" as const,
         reason: cause instanceof Error ? cause.message : String(cause),
@@ -1335,9 +1341,10 @@ function rateLimitResetOf(cause: unknown): Date | undefined {
  * `retry-after` 付きの 403）の形をしているかを判定する。
  *
  * {@link classifyGitHubApiFailure} と同じ判定基準を、GitHub API を直接呼ぶ経路以外の失敗にも
- * 適用できるよう公開する。テンプレート取得（giget 経由の tarball ダウンロード）はこのモジュールの
- * 外（`utils/template.ts`）で行われるが、失敗時の例外が同じ HTTP ステータス/ヘッダーの形を
- * 保っていれば、その呼び出し元でも「レート制限で落ちたのか」を区別できる。
+ * 適用できるよう公開する。判定は `cause.status` と `cause.response.headers`（Octokit の
+ * `RequestError` や `githubFetch` 系の失敗が持つ形）を前提にしており、この形を持たない例外は
+ * 検知できない。giget（テンプレート/リポジトリ内容の tarball ダウンロード、`utils/template.ts`）が
+ * 投げる例外はこの形を持たないため、{@link detectGigetRateLimit} で別途検知する。
  */
 export function detectGitHubRateLimit(
   cause: unknown,
@@ -1346,6 +1353,61 @@ export function detectGitHubRateLimit(
   if (status === 429) return { resetAt: rateLimitResetOf(cause) };
   if (status === 403 && isRateLimitResponse(cause)) return { resetAt: rateLimitResetOf(cause) };
   return undefined;
+}
+
+/**
+ * giget のエラーメッセージ末尾から HTTP ステータスを抜き出す正規表現。
+ *
+ * giget（`downloadTemplate` 内部の `download()`。`utils/template.ts` の `acquireTempTemplate` が
+ * `node_modules/giget` 経由で呼ぶ）は失敗時に
+ * `new Error(\`Failed to download ${url}: ${response.status} ${response.statusText}\`)` を
+ * 投げるだけで、`status` プロパティもレスポンスヘッダーも持たない。メッセージ末尾に必ず
+ * `<status> <statusText>` が付くという giget 側の出力規則に依存して抽出する
+ * （{@link detectGigetRateLimit}）。
+ */
+const GIGET_STATUS_SUFFIX_PATTERN = /(\d{3})\s+\S[^\n]*$/;
+
+/**
+ * {@link detectGigetRateLimit} が 403 を「権限不足であってレート制限ではない」と言い切ってよい
+ * とみなす、観測済み残量（{@link getObservedRateLimitRemaining}）のしきい値。
+ *
+ * `aggregate.ts` の `RATE_LIMIT_SAFETY_MARGIN`（候補数見積もりの安全マージン）と値は揃えて
+ * あるが、意味は別（そちらは「候補ごとの処理以外で消費されうる分の余白」、こちらは
+ * 「403 を権限不足と言い切れるほど枯渇から遠いか」）なので、値の変更が波及しないよう
+ * 独立した定数として持つ。
+ */
+const GIGET_403_HEALTHY_REMAINING_THRESHOLD = 10;
+
+/**
+ * giget が投げるプレーンな `Error` のメッセージから、GitHub のレート制限（403/429）を検知する。
+ *
+ * {@link detectGitHubRateLimit} は `cause.status` と `cause.response.headers` を前提にしており、
+ * giget の tarball ダウンロード失敗はこの形を持たないため検知できない。この関数はメッセージ
+ * 文字列のパース（{@link GIGET_STATUS_SUFFIX_PATTERN}）だけで代替する。
+ *
+ * ヘッダーが読めないため、429（GitHub 仕様上レート制限専用のステータス）と違い、403 は
+ * 「レート制限」と「権限不足（fork の可否・private リポジトリへのアクセス権等）」を区別する
+ * 材料がメッセージに無い。直近に観測したレート制限残量（同一プロセス内の他の GitHub API
+ * 呼び出しから来る先読み情報）に十分な余裕（{@link GIGET_403_HEALTHY_REMAINING_THRESHOLD}
+ * 超）があれば権限不足と判断し、それ以外（観測情報が無い、または枯渇に近い）は広くレート制限
+ * として扱う。権限不足をレート制限と誤判定して待つより、レート制限を権限不足と誤判定して
+ * 見逃す方が、owner 横断探索を無駄撃ちさせ続ける実害が大きいための判断。
+ */
+export function detectGigetRateLimit(
+  cause: unknown,
+): { readonly resetAt: Date | undefined } | undefined {
+  if (!(cause instanceof Error)) return undefined;
+  const matched = GIGET_STATUS_SUFFIX_PATTERN.exec(cause.message);
+  if (!matched) return undefined;
+  const status = Number(matched[1]);
+  if (status === 429) return { resetAt: undefined };
+  if (status !== 403) return undefined;
+
+  const observed = getObservedRateLimitRemaining();
+  if (observed !== undefined && observed.remaining > GIGET_403_HEALTHY_REMAINING_THRESHOLD) {
+    return undefined;
+  }
+  return { resetAt: observed?.resetAt };
 }
 
 /** 例外に載っているレスポンスヘッダ全体。Octokit の `RequestError` は `response.headers` に持つ。 */
@@ -1698,21 +1760,36 @@ async function isOrganization(owner: string): Promise<boolean> {
 }
 
 /**
- * `item.pushed_at` が `pushedSince`（ISO 8601 文字列）以降かどうかを判定する。
- * push 履歴の無い空リポジトリ（`pushed_at: null`）は対象に含めない
- * （`.ziku/lock.json` を持ちようがなく、期間内としても意味を持たないため）。
+ * `pushedSince` によるアイテム 1 件の絞り込み判定。
  *
- * `pushed_at` がパース不能な値の場合は false ではなく true を返す。この関数の結果は
- * {@link fetchAllRepoPages} で「これより古いページの取得を打ち切ってよいか」の判定にも
- * 使われており、false は「古い」と「ページ取得を止めてよい」の両方を意味する。パース不能な
- * 値を古いとみなすと、push 日時の新しい順という前提が崩れている箇所で以降の正当なページを
- * 巻き込んで取りこぼす。判定不能なら安全側（除外・打ち切りをしない）に倒す。
+ * 「候補に含めるか」と「以降のページ取得を打ち切ってよいか」は別の問いなので分けて表現する。
+ * 打ち切ってよいのは、push 日時の新しい順（`sort=pushed&direction=desc`）という前提のもとで
+ * 「これより後ろは全て閾値より古いと確定できる」場合だけ。`pushed_at: null`（push 履歴の無い
+ * 空リポジトリ）はこの並び基準に対してどこへ位置するか GitHub API の仕様上保証されておらず、
+ * 「古い」と断定できないため、除外はしても打ち切りはしない。
  */
-function isPushedSince(item: GitHubRepoListItem, pushedSince: string): boolean {
-  if (item.pushed_at === null) return false;
+type PushedSinceCheck =
+  /** 閾値以降。候補に含める。 */
+  | { readonly _tag: "include" }
+  /** 位置が不明（`pushed_at: null`）。除外するが、以降のページ取得は続ける。 */
+  | { readonly _tag: "excludeContinue" }
+  /** 閾値より古いと確定できる。除外し、以降のページ取得も打ち切る。 */
+  | { readonly _tag: "excludeStop" };
+
+/**
+ * `item.pushed_at` を `pushedSince`（ISO 8601 文字列）と比較し、{@link PushedSinceCheck} を返す。
+ *
+ * `pushed_at` がパース不能な値の場合は `excludeStop` ではなく `include` を返す。パース不能な
+ * 値を古いとみなして打ち切ると、push 日時の新しい順という前提が崩れている箇所で以降の正当な
+ * ページを巻き込んで取りこぼす。判定不能なら安全側（除外・打ち切りをしない）に倒す。
+ */
+function classifyPushedSince(item: GitHubRepoListItem, pushedSince: string): PushedSinceCheck {
+  if (item.pushed_at === null) return { _tag: "excludeContinue" };
   const pushedAtMs = new Date(item.pushed_at).getTime();
-  if (Number.isNaN(pushedAtMs)) return true;
-  return pushedAtMs >= new Date(pushedSince).getTime();
+  if (Number.isNaN(pushedAtMs)) return { _tag: "include" };
+  return pushedAtMs >= new Date(pushedSince).getTime()
+    ? { _tag: "include" }
+    : { _tag: "excludeStop" };
 }
 
 /**
@@ -1728,10 +1805,12 @@ function isPushedSince(item: GitHubRepoListItem, pushedSince: string): boolean {
  *   `per_page` をその値にする）ことで、1 ページ目だけで正確にこの件数へ収める。
  *   フィルタ（アーカイブ除外等）は呼び出し側が別途行うため、ここで返す件数は
  *   フィルタ前の生の取得件数であることに注意。
- * @param pushedSince 指定すると、`item.pushed_at` がこの値より古いアイテムに遭遇した
- *   時点でページ取得自体を打ち切る。呼び出し側が push 日時の新しい順
- *   （`sort=pushed&direction=desc`）で問い合わせている前提に依存する並び順依存の最適化で、
- *   その並びが崩れると古いリポジトリを取りこぼす。
+ * @param pushedSince 指定すると、`item.pushed_at` がこの値より古い（パース可能な日時として
+ *   確定できる）アイテムに遭遇した時点でページ取得自体を打ち切る。呼び出し側が push 日時の
+ *   新しい順（`sort=pushed&direction=desc`）で問い合わせている前提に依存する並び順依存の
+ *   最適化で、その並びが崩れると古いリポジトリを取りこぼす。`pushed_at: null`（push 履歴の
+ *   無い空リポジトリ）はこの並び基準での位置が保証されないため、候補からは除くがこの
+ *   打ち切りの根拠にはしない（{@link classifyPushedSince}）。
  */
 async function fetchAllRepoPages(
   baseUrl: string,
@@ -1757,10 +1836,16 @@ async function fetchAllRepoPages(
     if (!res.ok) throw githubResponseError(res);
     const items = await parseGitHubJson<readonly GitHubRepoListItem[]>(res);
     for (const item of items) {
-      if (pushedSince !== undefined && !isPushedSince(item, pushedSince)) {
-        // push 日時の新しい順で取得しているため、ここから先は同じページの残りも
-        // 以降のページも全て閾値より古いと確定する。追加のページ取得はしない。
-        return acc;
+      if (pushedSince !== undefined) {
+        const check = match(classifyPushedSince(item, pushedSince))
+          .with({ _tag: "include" }, () => "include" as const)
+          .with({ _tag: "excludeContinue" }, () => "excludeContinue" as const)
+          // push 日時の新しい順で取得しているため、ここから先は同じページの残りも
+          // 以降のページも全て閾値より古いと確定する。追加のページ取得はしない。
+          .with({ _tag: "excludeStop" }, () => "excludeStop" as const)
+          .exhaustive();
+        if (check === "excludeStop") return acc;
+        if (check === "excludeContinue") continue;
       }
       acc.push(item);
       if (maxItems !== undefined && acc.length >= maxItems) return acc;
