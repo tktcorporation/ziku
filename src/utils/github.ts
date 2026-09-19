@@ -17,7 +17,7 @@ import { blobShaSchema, commitShaSchema } from "../modules/schemas";
 import { log } from "../ui/renderer";
 import { transportTextToBytes } from "./file-content";
 import { lsRemoteCommitSha, lsRemoteDefaultBranch } from "./git-remote";
-import { RATE_LIMIT_SAFETY_MARGIN, mergeObservedRateLimit } from "./rate-limit-budget";
+import { mergeObservedRateLimit } from "./rate-limit-budget";
 import type { ObservedRateLimit, RateLimitStatus } from "./rate-limit-budget";
 import { ZIKU_CONFIG_FILE } from "./ziku-config";
 
@@ -1806,6 +1806,17 @@ function decideRepoPageItem(
 }
 
 /**
+ * {@link fetchAllRepoPages} が 1 回の呼び出しで発行するページ取得リクエストの上限。
+ *
+ * `aggregate.ts` の `RATE_LIMIT_SAFETY_MARGIN`（候補ごとの処理を始める前の準備フェーズ
+ * 全体に割り当てた予算）より小さい値にしてある。一覧取得はその準備フェーズで発生する
+ * 呼び出しの一つに過ぎず（owner 種別判定・テンプレート ref 解決・テンプレート内容の
+ * ダウンロードも同じ予算を分け合う）、一覧取得だけで予算全体を使い切ると、それらの
+ * 呼び出し分が残らない。値を変えても影響がここに閉じるよう、独立した定数として持つ。
+ */
+const MAX_LISTING_PAGES = 5;
+
+/**
  * リポジトリ一覧 API をページネーションしながら取得する。
  *
  * 返却件数がページサイズ未満になったページを最後と判定する（GitHub の Link ヘッダを
@@ -1834,8 +1845,10 @@ function decideRepoPageItem(
  *   枠から押し出される。ただし、この除外は `maxItems` へ達するまでページ取得を続けさせる
  *   ため、除外対象が大量に連続する owner（アーカイブ・空リポジトリが極端に多い等）では
  *   ページ取得自体の回数が際限なく増えうる。それを防ぐため、このページ取得ループ全体を
- *   {@link RATE_LIMIT_SAFETY_MARGIN}（候補ごとの処理を始める前の準備フェーズに割り当てた
- *   予算）でも打ち切る。
+ *   {@link MAX_LISTING_PAGES} 回でも打ち切る。この上限に達した場合、`acc` が `maxItems` に
+ *   届いていてもいなくても、一覧が実際に尽きたのか打ち切りで途中なのか呼び出し側は区別
+ *   できない（次のページに適格な候補が続いていた可能性を否定できない）ため、`acc` を
+ *   返さず `ZikuFailure`（`GitHubUnusableResponse`）で失敗する。
  */
 async function fetchAllRepoPages(
   baseUrl: string,
@@ -1857,9 +1870,12 @@ async function fetchAllRepoPages(
   // ページ取得 1 回 = リクエスト 1 回なので、ループの反復回数がそのままこの一覧取得が
   // 消費するリクエスト数になる。`isEligible` による除外は打ち切りの根拠にならないため
   // （上記 `@param isEligible` 参照）、除外対象が大量に連続すると `maxItems` に達しないまま
-  // ページ取得だけが積み上がりうる。候補ごとの処理を始める前の準備フェーズに割り当てた予算
-  // （{@link RATE_LIMIT_SAFETY_MARGIN}）を超えてまで一覧取得を続けない。
-  for (let page = 1; page <= RATE_LIMIT_SAFETY_MARGIN; page += 1) {
+  // ページ取得だけが積み上がりうる。`RATE_LIMIT_SAFETY_MARGIN`（候補ごとの処理を始める前の
+  // 準備フェーズ全体に割り当てた予算）をこのループだけで使い切ると、同じ準備フェーズで
+  // この後に発生する他の呼び出し（owner 種別判定・テンプレート ref 解決・テンプレート
+  // 内容のダウンロード等）の分が残らない。それらより小さい {@link MAX_LISTING_PAGES} で
+  // 独立に頭打ちにする。
+  for (let page = 1; page <= MAX_LISTING_PAGES; page += 1) {
     const url = new URL(baseUrl);
     url.searchParams.set("per_page", String(perPage));
     url.searchParams.set("page", String(page));
@@ -1880,7 +1896,11 @@ async function fetchAllRepoPages(
     }
     if (items.length < perPage) return acc;
   }
-  return acc;
+  throw zikuFailure({
+    kind: "GitHubUnusableResponse",
+    operation: `list repositories from ${baseUrl}`,
+    detail: `did not reach the end of the listing within ${MAX_LISTING_PAGES} pages; the result would not reliably reflect the full repository list`,
+  });
 }
 
 /**

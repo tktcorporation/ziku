@@ -5,7 +5,6 @@ import { commitSha, repoRelPath } from "../../__tests__/brands";
 import type { DeletablePath } from "../../modules/schemas";
 import { asDeletablePath, asPushContent } from "../../modules/schemas";
 import { classifySyncPath } from "../ziku-config";
-import { RATE_LIMIT_SAFETY_MARGIN } from "../rate-limit-budget";
 import { ZikuFailure } from "../../errors";
 import {
   checkRepoExists,
@@ -1605,9 +1604,11 @@ describe("listOwnerRepos", () => {
   // isEligible による除外は maxCandidates のカウントより前に行われ、除外そのものは以降の
   // ページ取得を打ち切らない（上のテスト参照）。owner 配下がアーカイブ済みリポジトリで
   // 埋め尽くされていると、maxCandidates に到達しないままページ取得だけが積み上がる。
-  // このページ取得ループ全体が RATE_LIMIT_SAFETY_MARGIN（候補ごとの処理を始める前の準備
-  // フェーズに割り当てた予算）で頭打ちになることを固定する。
-  it("isEligible の除外が大量に連続しても、ページ取得は RATE_LIMIT_SAFETY_MARGIN 回で打ち切る", async () => {
+  // このページ取得ループ全体は一定回数（MAX_LISTING_PAGES）で頭打ちになり、その時点で
+  // 一覧が本当に尽きたのか打ち切りで途中なのか区別できないため、部分的な結果を返さず
+  // 失敗することを固定する。黙って空配列を返すと「このリポジトリはテンプレート未使用」
+  // と誤読されるレポートになる。
+  it("isEligible の除外が大量に連続しても、ページ取得は一定回数で打ち切り失敗する", async () => {
     const listUrls: string[] = [];
     globalThis.fetch = vi.fn().mockImplementation((url: string) => {
       if (url === "https://api.github.com/orgs/acme") {
@@ -1622,10 +1623,10 @@ describe("listOwnerRepos", () => {
       return Promise.resolve(mockJsonResponse(200, items));
     });
 
-    const result = await listOwnerRepos("acme", { maxCandidates: 5 });
-
-    expect(result).toEqual([]);
-    expect(listUrls).toHaveLength(RATE_LIMIT_SAFETY_MARGIN);
+    await expect(listOwnerRepos("acme", { maxCandidates: 5 })).rejects.toBeInstanceOf(ZikuFailure);
+    // 無制限にページを取得し続けない。上限（MAX_LISTING_PAGES、github.ts 内のプライベート
+    // 定数）に達した時点のリクエスト数で打ち切ったことを、具体的な件数で固定する。
+    expect(listUrls).toHaveLength(5);
   });
 
   it("maxCandidates: 0 なら一覧取得そのものを行わず空配列を返す", async () => {
