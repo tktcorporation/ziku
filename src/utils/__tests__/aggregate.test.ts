@@ -1330,6 +1330,64 @@ describe("aggregateTemplateUsage", () => {
     expect(maxInFlight).toBeLessThanOrEqual(2);
   });
 
+  // tryGitHubGated の事後ゲートは実際に 403/429 を受け取って初めて発動するため、変更
+  // ファイルが多いリポジトリでは、枯渇するまでファイルごとに新規リクエストを送り続けて
+  // しまう。ファイル単位の動的ブレーキ（cannotAffordRemainingRequests）が、実際に
+  // レート制限へ達する前に以降のファイルへの getLastCommitDate 呼び出しを止めることを
+  // 固定する回帰ケース。
+  it("--since 指定時、コミット日時取得中に観測残量が枯渇に近づいたら、以降のファイルへは getLastCommitDate を呼ばない", async () => {
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "many-files-rl" })]);
+    const paths = ["f1.txt", "f2.txt", "f3.txt", "f4.txt"];
+    const baseHashes = Object.fromEntries(paths.map((p) => [p, hashContent("v1")]));
+    setLockFixture(lockFixtures, "acme", "many-files-rl", () =>
+      Promise.resolve(Option.some(lockJson({ baseHashes }))),
+    );
+    shaFixtures.set("acme/many-files-rl", sha("mfrl-sha"));
+    dirsBySource.set("gh:acme/many-files-rl#mfrl-sha", "/mfrl-dir");
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-mfrl");
+
+    vol.fromJSON({
+      "/mfrl-dir/.ziku/ziku.jsonc": JSON.stringify({ include: paths }),
+      "/mfrl-dir/f1.txt": "v2",
+      "/mfrl-dir/f2.txt": "v2",
+      "/mfrl-dir/f3.txt": "v2",
+      "/mfrl-dir/f4.txt": "v2",
+      "/tmpl-dir-mfrl/.ziku/ziku.jsonc": JSON.stringify({ include: paths }),
+      "/tmpl-dir-mfrl/f1.txt": "v1",
+      "/tmpl-dir-mfrl/f2.txt": "v1",
+      "/tmpl-dir-mfrl/f3.txt": "v1",
+      "/tmpl-dir-mfrl/f4.txt": "v1",
+    });
+    queueGlobResults(paths, paths);
+
+    mockGetLastCommitDate.mockImplementation(() =>
+      Promise.resolve(Option.some("2026-08-10T00:00:00Z")),
+    );
+
+    // 1 回目（評価フェーズ）と f1・f2 の直前（2・3 回目）は未観測のままとし、f3 の直前
+    // （4 回目）で観測残量 1 を返す。f3 の必要見積もりは (remainingAfter(1)+1) * 1 = 2 なので
+    // 1 < 2 でブレーキが発動し、f3・f4 は getLastCommitDate を呼ばれない。
+    let observedCallCount = 0;
+    mockGetObservedRateLimitRemaining.mockImplementation(() => {
+      observedCallCount += 1;
+      return observedCallCount <= 3 ? undefined : { remaining: 1, resetAt: undefined };
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+        since: "2026-08-01T00:00:00.000Z",
+      }),
+    );
+
+    expect(mockGetLastCommitDate).toHaveBeenCalledTimes(2);
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(1);
+    expect(report.skipped[0]).toMatchObject({ owner: "acme", repo: "many-files-rl" });
+  });
+
   it("skipped の reason は英語である（後段のエージェント/他の CLI 出力との一貫性）", async () => {
     mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "broken" })]);
     shaFixtures.set("acme/broken", sha("broken-sha"));

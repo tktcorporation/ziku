@@ -1821,11 +1821,13 @@ function decideRepoPageItem(
  *
  * @param extraParams `baseUrl` だけでは表現できない追加クエリパラメータ
  *   （例: `/user/repos?affiliation=owner` の `affiliation`）。
- * @param maxItems 指定すると、累積取得件数がこの値に達した時点でページ取得を打ち切る。
- *   ページサイズ自体も `maxItems` に合わせて縮める（`maxItems` が 100 未満なら
- *   `per_page` をその値にする）ことで、1 ページ目だけで正確にこの件数へ収める。
- *   カウントするのは `isEligible` を通過したアイテムだけなので、`isEligible` で弾かれる
- *   アイテムが一覧の先頭付近に来ても、後続の候補が押し出されない。
+ * @param maxItems 指定すると、累積取得件数（`isEligible` を通過したアイテムだけをカウントする）
+ *   がこの値に達した時点でページ取得を打ち切る。`per_page` は `maxItems` の値に関わらず常に
+ *   GitHub API の上限（100）を使う。`isEligible` による除外（アーカイブ済み・テンプレート自身
+ *   など）は `maxItems` のカウントより前に行われるため、一覧の先頭付近に不適格なアイテムが
+ *   連続する owner では、`per_page` を `maxItems` に合わせて縮めると 1 ページに含まれる適格な
+ *   アイテムが極端に少なくなり、狙いどおりの件数に達するまでのページ取得（＝GitHub API
+ *   リクエスト）回数がかえって増える。`maxItems` が小さいときほどこの逆効果が大きい。
  * @param pushedSince 指定すると、`item.pushed_at` がこの値より古い（パース可能な日時として
  *   確定できる）アイテムに遭遇した時点でページ取得自体を打ち切る。呼び出し側が push 日時の
  *   新しい順（`sort=pushed&direction=desc`）で問い合わせている前提に依存する並び順依存の
@@ -1847,11 +1849,14 @@ async function fetchAllRepoPages(
   isEligible?: (item: GitHubRepoListItem) => boolean,
 ): Promise<readonly GitHubRepoListItem[]> {
   // 上限が 0（安全マージンを引くと候補を 1 件もまかなえない）なら、一覧取得そのものを
-  // 行わない。`per_page=0` は GitHub API が受け付けないため、`Math.max(1, ...)` で
-  // 最低 1 に底上げすると 0 件の意図に反して 1 件取得してしまう。
+  // 行わない。`per_page=0` は GitHub API が受け付けないため、`per_page` を固定値にした
+  // 後もこの早期リターンは別途必要。
   if (maxItems === 0) return [];
 
-  const perPage = maxItems === undefined ? 100 : Math.min(100, maxItems);
+  // `maxItems` に合わせて縮めない（{@link fetchAllRepoPages} の `maxItems` の説明を参照）。
+  // 累積取得件数が `maxItems` に達した時点でページ取得を打ち切るローカルのカウントだけで、
+  // 1 ページ目に収まる分には十分に対応できる。
+  const perPage = 100;
   const acc: GitHubRepoListItem[] = [];
   for (let page = 1; ; page += 1) {
     const url = new URL(baseUrl);

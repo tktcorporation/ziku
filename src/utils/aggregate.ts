@@ -55,7 +55,8 @@ import { absPath } from "./paths";
 import {
   DEFAULT_MAX_CANDIDATES,
   DEFAULT_RECENT_PUSH_DAYS,
-  cannotAffordRemainingCandidates,
+  ESTIMATED_REQUESTS_PER_CANDIDATE,
+  cannotAffordRemainingRequests,
   candidateLimitFromRemaining,
   rateLimitSkipReason,
 } from "./rate-limit-budget";
@@ -745,13 +746,17 @@ function evaluateCandidate(
     }
 
     // 実際に 403 を受け取る前に、直近のレスポンスヘッダーから観測した残量で先読みする。
-    // まかなえなければ（{@link cannotAffordRemainingCandidates}）この候補以降は新規リクエストを
+    // まかなえなければ（{@link cannotAffordRemainingRequests}）この候補以降は新規リクエストを
     // 送らず、既存の事後ゲートへ「検知済み」として合流させる。以降の候補処理は
     // evaluateCandidate 冒頭の早期打ち切りにそのまま乗る。
     const observed = getObservedRateLimitRemaining();
     if (
       observed !== undefined &&
-      cannotAffordRemainingCandidates(observed.remaining, remainingAfter)
+      cannotAffordRemainingRequests(
+        observed.remaining,
+        remainingAfter,
+        ESTIMATED_REQUESTS_PER_CANDIDATE,
+      )
     ) {
       const detection: RateLimitDetection = { _tag: "preemptive", resetAt: observed.resetAt };
       yield* Ref.set(rateLimitGate, Option.some(detection));
@@ -1326,6 +1331,12 @@ interface AttachLastCommittedAtResult<T> {
  * 変更ファイル 1 件ごとに直列で呼ぶと差分の多いリポジトリほど遅くなる。並列に投げるが、
  * 同時実行数は呼び出し元が全リポジトリ横断で 1 つだけ作ったセマフォで抑える。ここに
  * リポジトリ側と同じ並列度の数値を置くと、外側の並列度と掛け算になって上限が効かない。
+ *
+ * `tryGitHubGated` は実際に 403/429 を受け取った後の事後ゲートとしては働くが、それだけでは
+ * 変更ファイルが多いリポジトリで、実際にレート制限へ達するまで新規リクエストを送り続けて
+ * しまう。`evaluateCandidate` と同じ動的ブレーキ（{@link cannotAffordRemainingRequests}、
+ * ファイル 1 件 = リクエスト 1 回として計算）をエントリ 1 件ごとに適用し、直近の観測残量で
+ * 残りエントリ分をまかなえないと分かった時点で以降のエントリへ新規リクエストを送らない。
  */
 function attachLastCommittedAt<T extends { readonly path: RepoRelPath }>(
   repoInfo: OwnerRepoInfo,
@@ -1336,13 +1347,37 @@ function attachLastCommittedAt<T extends { readonly path: RepoRelPath }>(
 ): Effect.Effect<AttachLastCommittedAtResult<T>> {
   return Effect.gen(function* () {
     const results = yield* Effect.forEach(
-      entries,
-      (entry) =>
+      entries.map((entry, index) => ({
+        entry,
+        // 自分より後ろに並ぶエントリの数。動的ブレーキが「残りエントリ数分をまかなえるか」を
+        // 見積もるために使う（`evaluateCandidate` と同じ、配列上の位置による近似で十分）。
+        remainingAfter: entries.length - index - 1,
+      })),
+      ({ entry, remainingAfter }) =>
         Effect.either(
           commitDateLimit.withPermits(1)(
-            tryGitHubGated(rateLimitGate, () =>
-              getLastCommitDate(repoInfo.owner, repoInfo.repo, entry.path, ref),
-            ),
+            Effect.gen(function* () {
+              // 実際に 403 を受け取る前に、直近のレスポンスヘッダーから観測した残量で
+              // 先読みする。permit を取ってから確認するのは、まだ処理順が回ってこない
+              // エントリの分まで早合点して打ち切らないため。
+              const alreadyLimited = yield* Ref.get(rateLimitGate);
+              if (Option.isNone(alreadyLimited)) {
+                const observed = getObservedRateLimitRemaining();
+                if (
+                  observed !== undefined &&
+                  cannotAffordRemainingRequests(observed.remaining, remainingAfter, 1)
+                ) {
+                  const detection: RateLimitDetection = {
+                    _tag: "preemptive",
+                    resetAt: observed.resetAt,
+                  };
+                  yield* Ref.set(rateLimitGate, Option.some(detection));
+                }
+              }
+              return yield* tryGitHubGated(rateLimitGate, () =>
+                getLastCommitDate(repoInfo.owner, repoInfo.repo, entry.path, ref),
+              );
+            }),
           ),
         ).pipe(
           Effect.map((result) =>

@@ -1603,26 +1603,53 @@ describe("listOwnerRepos", () => {
     expect(params.get("direction")).toBe("desc");
   });
 
-  it("maxCandidates 指定時は、その件数でページ取得を打ち切る（per_page もその値に合わせる）", async () => {
+  it("maxCandidates 指定時は、その件数でページ取得を打ち切る（per_page は縮めない）", async () => {
     const listUrls: string[] = [];
-    // owner 配下に 5 件あるが、GitHub API は要求された per_page 件数までしか返さない。
-    // 実サーバーの挙動を模して perPage で切り詰める。
     const allRepos = Array.from({ length: 5 }, (_, i) => repoListItem(`repo-${i}`));
     globalThis.fetch = vi.fn().mockImplementation((url: string) => {
       if (url === "https://api.github.com/orgs/acme") {
         return Promise.resolve(mockResponse({ status: 200 }));
       }
       listUrls.push(url);
-      const perPage = Number(new URL(url).searchParams.get("per_page"));
-      return Promise.resolve(mockJsonResponse(200, allRepos.slice(0, perPage)));
+      return Promise.resolve(mockJsonResponse(200, allRepos));
     });
 
     const result = await listOwnerRepos("acme", { maxCandidates: 3 });
 
     expect(result).toHaveLength(3);
-    // 1 ページ目だけで打ち切れる per_page にしているため、追加のページ取得は起きない。
+    // ローカルでの累積カウントが maxCandidates に達した時点で打ち切るため、
+    // per_page を縮めなくても追加のページ取得は起きない。
     expect(listUrls).toHaveLength(1);
-    expect(new URL(listUrls[0]).searchParams.get("per_page")).toBe("3");
+    expect(new URL(listUrls[0]).searchParams.get("per_page")).toBe("100");
+  });
+
+  // isEligible（アーカイブ除外等）による除外は maxCandidates のカウントより前に行われる。
+  // per_page を maxCandidates に合わせて縮めると、一覧の先頭付近に不適格なアイテムが
+  // 連続したときページごとに 1 件も候補を積めないことがあり、狙いどおりの件数に達するまで
+  // ページ取得（＝GitHub API リクエスト）を重ねる羽目になる。per_page を固定 100 のまま
+  // 使えば、除外対象が複数あっても 1 ページで完結する回帰ケース。
+  it("isEligible で除外される候補が複数あっても、per_page を縮めず 1 ページで取得を試みる", async () => {
+    const listUrls: string[] = [];
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(mockResponse({ status: 200 }));
+      }
+      listUrls.push(url);
+      return Promise.resolve(
+        mockJsonResponse(200, [
+          repoListItem("archived-1", { archived: true }),
+          repoListItem("archived-2", { archived: true }),
+          repoListItem("archived-3", { archived: true }),
+          repoListItem("eligible"),
+        ]),
+      );
+    });
+
+    const result = await listOwnerRepos("acme", { maxCandidates: 1 });
+
+    expect(result.map((r) => r.repo)).toEqual(["eligible"]);
+    expect(listUrls).toHaveLength(1);
+    expect(new URL(listUrls[0]).searchParams.get("per_page")).toBe("100");
   });
 
   it("maxCandidates: 0 なら一覧取得そのものを行わず空配列を返す", async () => {

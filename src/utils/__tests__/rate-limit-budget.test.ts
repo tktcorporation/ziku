@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ESTIMATED_REQUESTS_PER_CANDIDATE,
   RATE_LIMIT_SAFETY_MARGIN,
-  cannotAffordRemainingCandidates,
+  cannotAffordRemainingRequests,
   candidateLimitFromRemaining,
   mergeObservedRateLimit,
   rateLimitSkipReason,
@@ -26,23 +26,31 @@ describe("candidateLimitFromRemaining", () => {
   });
 });
 
-describe("cannotAffordRemainingCandidates", () => {
-  it("観測残量が、自分自身を含む残り候補数分の想定リクエスト数を下回るなら true を返す", () => {
-    // 残り候補 0 件（自分自身のみ）の必要見積もりは 1 * 7 = 7
-    expect(cannotAffordRemainingCandidates(6, 0)).toBe(true);
-    expect(cannotAffordRemainingCandidates(7, 0)).toBe(false);
+describe("cannotAffordRemainingRequests", () => {
+  it("観測残量が、自分自身を含む残り件数分の想定リクエスト数を下回るなら true を返す", () => {
+    // 残り 0 件（自分自身のみ）、1 件あたり想定リクエスト数 7 の必要見積もりは 1 * 7 = 7
+    expect(cannotAffordRemainingRequests(6, 0, ESTIMATED_REQUESTS_PER_CANDIDATE)).toBe(true);
+    expect(cannotAffordRemainingRequests(7, 0, ESTIMATED_REQUESTS_PER_CANDIDATE)).toBe(false);
   });
 
   it("安全マージンを引かない（candidateLimitFromRemaining とは別の判定基準）", () => {
     // マージン込みなら 0 と判定されうる残量でも、動的ブレーキは必要見積もりぶんだけを見る。
     const remaining = ESTIMATED_REQUESTS_PER_CANDIDATE;
-    expect(cannotAffordRemainingCandidates(remaining, 0)).toBe(false);
+    expect(cannotAffordRemainingRequests(remaining, 0, ESTIMATED_REQUESTS_PER_CANDIDATE)).toBe(
+      false,
+    );
   });
 
-  it("残り候補数が多いほど、まかなえないと判定される残量のしきい値が上がる", () => {
-    // 残り候補 3 件（自分自身を含め 4 件分）の必要見積もりは 4 * 7 = 28
-    expect(cannotAffordRemainingCandidates(27, 3)).toBe(true);
-    expect(cannotAffordRemainingCandidates(28, 3)).toBe(false);
+  it("残り件数が多いほど、まかなえないと判定される残量のしきい値が上がる", () => {
+    // 残り 3 件（自分自身を含め 4 件分）、1 件あたり想定リクエスト数 7 の必要見積もりは 4 * 7 = 28
+    expect(cannotAffordRemainingRequests(27, 3, ESTIMATED_REQUESTS_PER_CANDIDATE)).toBe(true);
+    expect(cannotAffordRemainingRequests(28, 3, ESTIMATED_REQUESTS_PER_CANDIDATE)).toBe(false);
+  });
+
+  it("1 件あたりの想定リクエスト数を 1 にすると、ファイル単位（1 件 = 1 リクエスト）の見積もりになる", () => {
+    // 残り 2 件（自分自身を含め 3 件分）の必要見積もりは 3 * 1 = 3
+    expect(cannotAffordRemainingRequests(2, 2, 1)).toBe(true);
+    expect(cannotAffordRemainingRequests(3, 2, 1)).toBe(false);
   });
 });
 

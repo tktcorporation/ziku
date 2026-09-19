@@ -8,6 +8,12 @@
  * 「使い切ったとどう伝えるか」を、副作用（`Ref` の読み書き・HTTP 呼び出し）から切り離した
  * 型と純粋関数として表現する。可変状態の管理・HTTP 呼び出しは呼び出し側
  * （`aggregate.ts`/`github.ts`）の責務であり、ここには置かない。
+ *
+ * 動的ブレーキの判定（{@link cannotAffordRemainingRequests}）は候補（利用リポジトリ）単位・
+ * ファイル単位のどちらにも使う汎用形にしてある。「1 件あたりの想定リクエスト数」を呼び出し側が
+ * 渡すことで、候補 1 件を最後まで処理するのに複数リクエストかかるケースと、ファイル 1 件が
+ * 1 リクエストで済むケースの両方を同じ計算式で表す。呼び出し側ごとに同じ条件式を書き直すと、
+ * 見積もりの分母（安全マージンを引くか否か等）が呼び出し箇所ごとにズレていく。
  */
 import type { Option, Ref } from "effect";
 import { match } from "ts-pattern";
@@ -19,7 +25,7 @@ import { match } from "ts-pattern";
  *
  * owner 一覧取得・テンプレートの正規名解決など、候補ごとの処理以外にもこのスキャン中に
  * GitHub API 呼び出しが発生するため、残量をそのまま候補数の上限にすると、それらの
- * 呼び出し分だけ超過しうる。実行中の動的ブレーキ（{@link cannotAffordRemainingCandidates}）は
+ * 呼び出し分だけ超過しうる。実行中の動的ブレーキ（{@link cannotAffordRemainingRequests}）は
  * このマージンを使わない。候補処理が始まる前の準備段階の消費はここで既に見込み済みであり、
  * 動的ブレーキの判定でも重ねて差し引くと、候補数が事前算出の上限どおりで準備段階の消費が
  * 少なかった正常なシナリオでも初回候補から誤って発動する。
@@ -28,8 +34,8 @@ export const RATE_LIMIT_SAFETY_MARGIN = 10;
 
 /**
  * 候補 1 件を最後まで処理するのに実際にかかる GitHub API リクエスト数の下限見積もり。
- * {@link candidateLimitFromRemaining}（事前の候補数上限算出）と
- * {@link cannotAffordRemainingCandidates}（実行中の動的ブレーキ）の両方が、「候補 1 件 =
+ * {@link candidateLimitFromRemaining}（事前の候補数上限算出）と、候補単位で
+ * {@link cannotAffordRemainingRequests} を呼ぶ実行中の動的ブレーキの両方が、「候補 1 件 =
  * リクエスト 1 回」という過小評価を避けるためにこの係数で割る。両者が同じ定数を参照することで、
  * 事前の見積もりと実行中の判定が同じ予算感覚に基づく。
  *
@@ -74,7 +80,7 @@ export const DEFAULT_RECENT_PUSH_DAYS = 90;
  * - `observed`: GitHub から実際に 403/429 のレート制限応答を受け取った。
  * - `preemptive`: 403 をまだ受け取っておらず、直近のレスポンスヘッダーから観測した残量
  *   だけで「このまま候補を処理すると枯渇する」と見積もり、自発的に止まった
- *   （{@link cannotAffordRemainingCandidates}）。
+ *   （{@link cannotAffordRemainingRequests}）。
  */
 export type RateLimitDetection =
   | { readonly _tag: "observed"; readonly resetAt: Date | undefined }
@@ -128,11 +134,12 @@ export function candidateLimitFromRemaining(remaining: number): number {
 }
 
 /**
- * 直近に観測した残量で、これから処理する候補分の GitHub API 呼び出しをまかなえないかを判定する。
+ * 直近に観測した残量で、これから処理する分の GitHub API 呼び出しをまかなえないかを判定する。
  *
- * 自分自身と、まだ処理していない候補の分（`remainingCandidateCount` 件）を、候補 1 件あたりの
- * 想定リクエスト数（{@link ESTIMATED_REQUESTS_PER_CANDIDATE}。事前の候補数上限算出
- * （{@link candidateLimitFromRemaining}）と同じ定数）で見積もる。
+ * 自分自身と、まだ処理していない分（`remainingCount` 件）を、1 件あたりの想定リクエスト数
+ * （`requestsPerItem`）で見積もる。候補（利用リポジトリ）1 件を最後まで処理するのに複数
+ * リクエストかかる呼び出し元は {@link ESTIMATED_REQUESTS_PER_CANDIDATE} を渡し、1 件が
+ * 1 リクエストで済む呼び出し元（ファイル単位のコミット日時取得など）は `1` を渡す。
  *
  * {@link candidateLimitFromRemaining} と異なり {@link RATE_LIMIT_SAFETY_MARGIN} は引かない。
  * 事前の候補数上限算出が同じマージンを既に 1 回差し引いており、その分は候補処理が始まる前の
@@ -140,11 +147,12 @@ export function candidateLimitFromRemaining(remaining: number): number {
  * だから。ここでも同じマージンを重ねて要求すると、候補数が事前算出の上限どおりで準備段階の
  * 消費が少なかった正常なシナリオでも、初回候補から誤って発動する。
  */
-export function cannotAffordRemainingCandidates(
+export function cannotAffordRemainingRequests(
   observedRemaining: number,
-  remainingCandidateCount: number,
+  remainingCount: number,
+  requestsPerItem: number,
 ): boolean {
-  return observedRemaining < (remainingCandidateCount + 1) * ESTIMATED_REQUESTS_PER_CANDIDATE;
+  return observedRemaining < (remainingCount + 1) * requestsPerItem;
 }
 
 /**
