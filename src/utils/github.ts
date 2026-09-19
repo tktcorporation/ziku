@@ -933,10 +933,12 @@ export function rateLimitedError(
 /**
  * HTTP レスポンスを RepoExistence に分類する。
  *
- * GitHub のレート制限応答は「403 + x-ratelimit-remaining: 0」で判定する。
- * 403 でも二要素認証要求など別原因のケースがあるため、ヘッダで明示的に確認する。
- * 401 は無効/失効トークンのシグナル（パブリックリポジトリへの未認証アクセスは
- * 200 や 404 を返すので、401 は付与した Authorization が拒否されたことを意味する）。
+ * GitHub のレート制限応答は {@link detectRateLimitFromResponse} で判定する（コアクォータ
+ * 超過の 403 + `x-ratelimit-remaining: 0`、secondary rate limit の `retry-after` 付き 403、
+ * および 429 のいずれも含む）。403 でも二要素認証要求など別原因のケースがあるため、
+ * ヘッダで明示的に確認する。401 は無効/失効トークンのシグナル（パブリックリポジトリへの
+ * 未認証アクセスは 200 や 404 を返すので、401 は付与した Authorization が拒否されたことを
+ * 意味する）。
  */
 function classifyRepoResponse(res: Response, authenticated: boolean): RepoExistence {
   if (res.ok) return { _tag: "Exists" };
@@ -944,12 +946,9 @@ function classifyRepoResponse(res: Response, authenticated: boolean): RepoExiste
   if (res.status === 401) {
     return { _tag: "Unauthorized", message: res.statusText || "Bad credentials" };
   }
-  if (res.status === 403 && res.headers.get("x-ratelimit-remaining") === "0") {
-    const resetHeader = res.headers.get("x-ratelimit-reset") ?? "";
-    // 数値にパースして有限値でなければ undefined（タイムスタンプ不明）とする。
-    const resetEpoch = resetHeader !== "" ? Number(resetHeader) : Number.NaN;
-    const resetAt = Number.isFinite(resetEpoch) ? new Date(resetEpoch * 1000) : undefined;
-    return { _tag: "RateLimited", resetAt, authenticated };
+  const rateLimit = detectRateLimitFromResponse(res);
+  if (rateLimit !== undefined) {
+    return { _tag: "RateLimited", resetAt: rateLimit.resetAt, authenticated };
   }
   return {
     _tag: "Unknown",
@@ -1072,13 +1071,17 @@ async function scaffoldTemplateRepoUnclassified(
 /**
  * GitHub への問い合わせが値を返せなかった理由。
  *
- * 2 ケースに分けるのは、呼び出し側が取れる行動が違うため。
+ * 3 ケースに分けるのは、呼び出し側が取れる行動が違うため。
  *
  * - `AuthRejected`: 付与したトークンを GitHub が拒否した（401）。人がトークンを直すまで
  *   何度問い合わせても結果は変わらないので、黙って続けると壊れた前提のまま進み続ける。
  *   プライベートリポジトリでは「見えるはずのものが見えない」状態でもあるため、続行の判断を
  *   ツールが代わりに下してよい失敗ではない。
- * - `Unresolved`: ネットワーク断・5xx・レート制限・対象が見つからない。再実行や時間経過で
+ * - `RateLimited`: GitHub のレート制限（429、またはコアクォータ超過とは別に短時間の連投を
+ *   弾く secondary rate limit を示す `retry-after` 付きの 403）。待てば解消しうる点は
+ *   `Unresolved` と同じだが、owner 横断のスキャン（`aggregate.ts`）はこの区別が無いと
+ *   同じ throttling を候補ごとに踏み続けてしまうため、専用のケースとして分ける。
+ * - `Unresolved`: ネットワーク断・5xx・対象が見つからない・上記以外の 403。再実行や時間経過で
  *   解消しうるので、呼び出し側は手持ちの値で続行するかを選べる。
  */
 export type GitHubLookupFailure =
@@ -1086,6 +1089,11 @@ export type GitHubLookupFailure =
       readonly _tag: "AuthRejected";
       /** GitHub が返したメッセージ（例: "Bad credentials"）。 */
       readonly detail: string;
+    }
+  | {
+      readonly _tag: "RateLimited";
+      /** `retry-after` / `x-ratelimit-reset` から算出したリセット時刻。読めなければ undefined。 */
+      readonly resetAt: Date | undefined;
     }
   | {
       readonly _tag: "Unresolved";
@@ -1137,9 +1145,9 @@ export type DefaultBranchDecision =
  * - 401（トークン拒否）: 控えがあっても倒さない。同じトークンで何度問い合わせても結果は
  *   変わらず、プライベートリポジトリでは「見えるはずのものが見えない」状態でもある。控えへ
  *   倒すと、権限の切れたトークンのまま同期が進み続ける。
- * - レート制限・5xx・接続断・対象が見つからない: 控えがあればその名前で続行する。待てば直る
- *   失敗で中断すると、テンプレートの取得も PR の作成も揃って動かなくなる。控えが無ければ
- *   名前が決まらないので中断する。
+ * - レート制限（`RateLimited`）・5xx・接続断・対象が見つからない（`Unresolved`）: 控えが
+ *   あればその名前で続行する。待てば直る失敗で中断すると、テンプレートの取得も PR の作成も
+ *   揃って動かなくなる。控えが無ければ名前が決まらないので中断する。
  *
  * 既定ブランチ名は 1 回の実行の中で複数の場所が要る（テンプレートの取得先・lock へ記録する
  * コミット SHA・push が PR を向ける宛先）。規則をこの関数へ閉じることで、片方だけが控えへ
@@ -1157,24 +1165,40 @@ export function decideDefaultBranch(
       _tag: "AuthRejected",
       detail: f.detail,
     }))
-    .with({ _tag: "Unresolved" }, (f): DefaultBranchDecision =>
-      recorded === undefined
-        ? { _tag: "Unresolved", reason: f.reason }
-        : { _tag: "Recorded", name: recorded, reason: f.reason },
-    )
+    .with(P.union({ _tag: "Unresolved" }, { _tag: "RateLimited" }), (f): DefaultBranchDecision => {
+      const reason = f._tag === "RateLimited" ? describeRateLimitReason(f.resetAt) : f.reason;
+      return recorded === undefined
+        ? { _tag: "Unresolved", reason }
+        : { _tag: "Recorded", name: recorded, reason };
+    })
     .exhaustive();
 }
 
 /**
- * 値を返さなかった HTTP レスポンスを、呼び出し側の行動が変わる 2 つの理由へ分類する。
+ * {@link GitHubLookupFailure} の `RateLimited` ケースを、`reason` フィールド（自由形式の
+ * 一言）が要る箇所向けの短い説明文にする。`resetAt` が読めた場合だけ時刻を添える。
+ */
+function describeRateLimitReason(resetAt: Date | undefined): string {
+  return resetAt === undefined
+    ? "GitHub API rate limit"
+    : `GitHub API rate limit (resets ${resetAt.toISOString()})`;
+}
+
+/**
+ * 値を返さなかった HTTP レスポンスを、呼び出し側の行動が変わる理由へ分類する。
  *
  * 401 だけを認証拒否として扱う。401 は付与した Authorization が拒否されたことを意味し、
  * 未認証アクセスでは返らない（公開リポジトリは 200、プライベートリポジトリは 404）。
- * 403 のレート制限・5xx・404 は待つか再実行すれば解消しうるので分けない。
+ * レート制限（429、または secondary rate limit を示す 403）は {@link detectRateLimitFromResponse}
+ * で検知する。それ以外の 403・5xx・404 は待つか再実行すれば解消しうるので分けない。
  */
 function classifyLookupFailure(res: Response): GitHubLookupFailure {
   if (res.status === 401) {
     return { _tag: "AuthRejected", detail: res.statusText || "Bad credentials" };
+  }
+  const rateLimit = detectRateLimitFromResponse(res);
+  if (rateLimit !== undefined) {
+    return { _tag: "RateLimited", resetAt: rateLimit.resetAt };
   }
   return { _tag: "Unresolved", reason: res.statusText || `HTTP ${res.status}` };
 }
@@ -1183,13 +1207,15 @@ function classifyLookupFailure(res: Response): GitHubLookupFailure {
  * Octokit が投げた例外を {@link classifyLookupFailure} と同じ基準で分類する。
  *
  * Octokit の RequestError は HTTP ステータスを `status` に載せる。ネットワーク断のように
- * ステータスを持たない例外も飛んでくるため、形を確かめてから読む。
+ * ステータスを持たない例外も飛んでくるため、形を確かめてから読む。レート制限の判定は
+ * {@link detectGitHubRateLimit} に委ねる（Octokit の例外が持つ `response.headers` を読む）。
  */
 function classifyOctokitFailure(cause: unknown): GitHubLookupFailure {
   const detail = cause instanceof Error ? cause.message : String(cause);
-  return httpStatusOf(cause) === 401
-    ? { _tag: "AuthRejected", detail }
-    : { _tag: "Unresolved", reason: detail };
+  if (httpStatusOf(cause) === 401) return { _tag: "AuthRejected", detail };
+  const rateLimit = detectGitHubRateLimit(cause);
+  if (rateLimit !== undefined) return { _tag: "RateLimited", resetAt: rateLimit.resetAt };
+  return { _tag: "Unresolved", reason: detail };
 }
 
 /** 例外オブジェクトに載っている HTTP ステータス。持たない例外では undefined。 */
@@ -1332,6 +1358,46 @@ function rateLimitResetOf(cause: unknown): Date | undefined {
   }
 
   const resetEpoch = Number(responseHeaderOf(cause, "x-ratelimit-reset"));
+  return Number.isFinite(resetEpoch) ? new Date(resetEpoch * 1000) : undefined;
+}
+
+/**
+ * fetch の生の `Response` から、GitHub のレート制限応答（429、または
+ * `x-ratelimit-remaining: 0` / `retry-after` 付きの 403）を検知する。
+ *
+ * {@link isRateLimitResponse}・{@link rateLimitResetOf}・{@link detectGitHubRateLimit} は
+ * Octokit の例外（`cause.status` / `cause.response.headers`）を対象にしており、
+ * `classifyLookupFailure`・`classifyRepoResponse` のように `githubFetch`/`fetch` の
+ * `Response` を直接持つ呼び出し元はこちらを使う。判定基準は揃えてあるので、Octokit 経由か
+ * 生の fetch 経由かで同じ状況が別の分類結果になることはない。
+ */
+function detectRateLimitFromResponse(
+  res: Response,
+): { readonly resetAt: Date | undefined } | undefined {
+  // ヘッダーの読み取りは {@link readHeaderValue} に委ねる。`res.headers` を直接
+  // `.get()` すると、`headers` を持たない部分的な `Response`（テストの簡易フィクスチャ等）
+  // で例外になる。
+  const isSecondaryRateLimit =
+    res.status === 403 &&
+    (readHeaderValue(res.headers, "x-ratelimit-remaining") === "0" ||
+      readHeaderValue(res.headers, "retry-after") !== undefined);
+  if (res.status !== 429 && !isSecondaryRateLimit) return undefined;
+  return { resetAt: rateLimitResetOfResponse(res) };
+}
+
+/**
+ * レート制限が解ける時刻を `Response` のヘッダーから算出する。{@link rateLimitResetOf} と
+ * 同じロジックを `Response` 向けに書き直したもの（`retry-after` は「あと何秒」、
+ * `x-ratelimit-reset` は「いつ（epoch 秒）」で意味が違うため、同じ時刻へ直してから返す）。
+ * 読めるヘッダが無ければ undefined。
+ */
+function rateLimitResetOfResponse(res: Response): Date | undefined {
+  const retryAfterSeconds = Number(readHeaderValue(res.headers, "retry-after"));
+  if (Number.isFinite(retryAfterSeconds)) {
+    return new Date(Date.now() + retryAfterSeconds * 1000);
+  }
+
+  const resetEpoch = Number(readHeaderValue(res.headers, "x-ratelimit-reset"));
   return Number.isFinite(resetEpoch) ? new Date(resetEpoch * 1000) : undefined;
 }
 
@@ -1500,13 +1566,25 @@ export async function fetchDefaultBranch(
   return match(viaApi)
     .with({ _tag: "Resolved" }, (r): DefaultBranchResolution => r)
     .with({ _tag: "AuthRejected" }, (f): DefaultBranchResolution => f)
-    .with({ _tag: "Unresolved" }, async (f): Promise<DefaultBranchResolution> => {
-      const name = await lsRemoteDefaultBranch(owner, repo);
-      if (name === undefined) return f;
-      logGitFallback(`the default branch of ${owner}/${repo}`, f.reason);
-      return { _tag: "Resolved", name };
-    })
+    .with(
+      P.union({ _tag: "Unresolved" }, { _tag: "RateLimited" }),
+      async (f): Promise<DefaultBranchResolution> => {
+        // git ls-remote は REST API とは別のプロトコル（git smart HTTP）を使うため、
+        // REST API のレート制限とは別物として試す価値がある。
+        const name = await lsRemoteDefaultBranch(owner, repo);
+        if (name === undefined) return f;
+        logGitFallback(`the default branch of ${owner}/${repo}`, describeLookupFailureReason(f));
+        return { _tag: "Resolved", name };
+      },
+    )
     .exhaustive();
+}
+
+/** {@link GitHubLookupFailure} の `Unresolved`/`RateLimited` を、通知 1 行に載せる理由文へ揃える。 */
+function describeLookupFailureReason(
+  f: Extract<GitHubLookupFailure, { readonly _tag: "Unresolved" | "RateLimited" }>,
+): string {
+  return f._tag === "RateLimited" ? describeRateLimitReason(f.resetAt) : f.reason;
 }
 
 /**
@@ -1584,13 +1662,18 @@ async function fetchCommitSha(
   return match(viaApi)
     .with({ _tag: "Resolved" }, (r): CommitShaResolution => r)
     .with({ _tag: "AuthRejected" }, (f): CommitShaResolution => f)
-    .with({ _tag: "Unresolved" }, async (f): Promise<CommitShaResolution> => {
-      // git の出力も外の世界から入ってくる値なので、API レスポンスと同じスキーマを通す。
-      const parsed = commitShaSchema.safeParse(await lsRemoteCommitSha(owner, repo, ref));
-      if (!parsed.success) return f;
-      logGitFallback(`${ref} of ${owner}/${repo}`, f.reason);
-      return { _tag: "Resolved", sha: parsed.data };
-    })
+    .with(
+      P.union({ _tag: "Unresolved" }, { _tag: "RateLimited" }),
+      async (f): Promise<CommitShaResolution> => {
+        // git ls-remote は REST API とは別のプロトコル（git smart HTTP）を使うため、
+        // REST API のレート制限とは別物として試す価値がある。git の出力も外の世界から
+        // 入ってくる値なので、API レスポンスと同じスキーマを通す。
+        const parsed = commitShaSchema.safeParse(await lsRemoteCommitSha(owner, repo, ref));
+        if (!parsed.success) return f;
+        logGitFallback(`${ref} of ${owner}/${repo}`, describeLookupFailureReason(f));
+        return { _tag: "Resolved", sha: parsed.data };
+      },
+    )
     .exhaustive();
 }
 
@@ -1614,6 +1697,7 @@ export async function resolveLatestCommitSha(
   return match(await fetchDefaultBranch(owner, repo))
     .with({ _tag: "Resolved" }, (r) => fetchCommitSha(owner, repo, r.name))
     .with({ _tag: "AuthRejected" }, (f): CommitShaResolution => f)
+    .with({ _tag: "RateLimited" }, (f): CommitShaResolution => f)
     .with({ _tag: "Unresolved" }, (f): CommitShaResolution => ({
       _tag: "Unresolved",
       reason: `could not resolve the default branch: ${f.reason}`,
@@ -1663,6 +1747,7 @@ export async function resolveSourceCommitSha(
   return match(await resolveSourceCommit(owner, repo, ref))
     .with({ _tag: "Resolved" }, (r) => r.sha)
     .with({ _tag: "AuthRejected" }, () => undefined)
+    .with({ _tag: "RateLimited" }, () => undefined)
     .with({ _tag: "Unresolved" }, () => undefined)
     .exhaustive();
 }

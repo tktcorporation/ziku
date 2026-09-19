@@ -1842,6 +1842,50 @@ describe("aggregateTemplateUsage", () => {
     expect(third?.reason).toBe(second?.reason);
   });
 
+  // resolveCandidateRef（比較用 commit SHA の解決）自体がレート制限で失敗した場合も、
+  // fetchRepoTextFile の失敗経由（上のテスト）と同じくゲートを立て、以降の候補は
+  // lock.json の取得（評価の入口）にすら進まないことを固定する。
+  it("resolveCandidateRef がレート制限で失敗すると、以降の候補は評価に進まずスキップされる", async () => {
+    const repos = ["rl-1", "rl-2"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+    for (const repo of repos) {
+      setLockFixture(lockFixtures, "acme", repo, () => Promise.resolve(Option.some(lockJson())));
+    }
+
+    mockResolveLatestCommitSha.mockImplementation((_owner: string, repo: string) => {
+      if (repo === "rl-1") {
+        return Promise.resolve({ _tag: "RateLimited", resetAt: undefined });
+      }
+      // rl-2 でここに到達したら、ゲートが後続候補への呼び出しを止められていない。
+      return Promise.resolve({ _tag: "Resolved", sha: sha(`${repo}-sha`) });
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+      }),
+    );
+
+    // resolveLatestCommitSha が呼ばれるのは最初にレート制限を検知する rl-1 だけ。
+    expect(mockResolveLatestCommitSha).toHaveBeenCalledTimes(1);
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(2);
+
+    const [first, second] = report.skipped;
+    expect(first).toMatchObject({ owner: "acme", repo: "rl-1" });
+    expect(first?.reason).toBe(
+      "GitHub API rate limit reached; not checking further repositories in this scan.",
+    );
+    expect(second).toMatchObject({ owner: "acme", repo: "rl-2" });
+    expect(second?.reason).toBe(first?.reason);
+    // rl-2 は lock.json の取得（評価の入口）にすら進まない。
+    expect(
+      mockFetchRepoTextFile.mock.calls.some(([owner, repo]) => owner === "acme" && repo === "rl-2"),
+    ).toBe(false);
+  });
+
   // 評価フェーズを通過した後、差分処理フェーズ（利用リポジトリ内容のダウンロード）で
   // 実際にレート制限を受けた場合も、evaluateCandidate と同じゲートへ反映され、以降の候補は
   // テンプレート内容のダウンロードすら行わない。
@@ -2178,6 +2222,35 @@ describe("aggregateTemplateUsage", () => {
         "acme",
         expect.objectContaining({ maxCandidates: 100 }),
       );
+    });
+
+    // `/rate_limit` 自体がレート制限で引けなかった場合、残量が分からない。ネットワーク断
+    // （Unresolved）とは違い GitHub 側のクォータが逼迫している確度が高いので、既定値へ
+    // 倒さず GitHubRateLimited として失敗させる。
+    it("/rate_limit 自体がレート制限で引けなければ、GitHubRateLimited として失敗する", async () => {
+      mockFetchRateLimitStatus.mockResolvedValue({
+        _tag: "RateLimited",
+        resetAt: new Date("2026-01-01T00:00:00Z"),
+      });
+
+      const result = await Effect.runPromise(
+        Effect.either(
+          aggregateTemplateUsage({
+            template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+            tmpBaseDir: "/tmp-base",
+          }),
+        ),
+      );
+
+      expect(Either.isLeft(result)).toBe(true);
+      if (Either.isLeft(result)) {
+        expect(result.left).toBeInstanceOf(ZikuFailure);
+        expect(result.left.reason).toMatchObject({
+          kind: "GitHubRateLimited",
+          resetAt: new Date("2026-01-01T00:00:00Z"),
+        });
+      }
+      expect(mockListOwnerRepos).not.toHaveBeenCalled();
     });
   });
 

@@ -2458,6 +2458,21 @@ describe("decideDefaultBranch", () => {
       decideDefaultBranch({ _tag: "AuthRejected", detail: "Bad credentials" }, "master"),
     ).toEqual({ _tag: "AuthRejected", detail: "Bad credentials" });
   });
+
+  // レート制限も「待てば直る失敗」として Unresolved と同じ扱いにする（JSDoc の方針どおり）。
+  it("レート制限でも、控えがあればその名前へ倒す", () => {
+    const resetAt = new Date("2026-01-01T00:00:00Z");
+    const decision = decideDefaultBranch({ _tag: "RateLimited", resetAt }, "master");
+
+    expect(decision._tag).toBe("Recorded");
+    expect(decision).toMatchObject({ name: "master" });
+  });
+
+  it("レート制限で、控えが無ければ名前を決めない", () => {
+    const decision = decideDefaultBranch({ _tag: "RateLimited", resetAt: undefined }, undefined);
+
+    expect(decision._tag).toBe("Unresolved");
+  });
 });
 
 /** `Accept: application/vnd.github.sha` の応答（SHA 文字列のみ）を模す */
@@ -2607,6 +2622,100 @@ describe("resolveLatestCommitSha", () => {
     expect(
       await resolveLatestCommitSha("owner", "repo", { kind: "branch", name: "develop" }),
     ).toEqual({ _tag: "AuthRejected", detail: "Unauthorized" });
+  });
+
+  // 429、または secondary rate limit を示す 403（x-ratelimit-remaining: 0 か retry-after
+  // 付き）は、汎用的な Unresolved ではなく RateLimited として分類する。owner 横断探索
+  // （aggregate.ts）はこの区別が無いと、実際にはレート制限で失敗しているのに気づけず
+  // 候補ごとに同じ throttling を踏み続ける。
+  describe("レート制限応答の分類", () => {
+    it("429 は RateLimited を返す", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 429,
+        statusText: "Too Many Requests",
+        headers: new Map(Object.entries({ "retry-after": "30" })) as unknown as Headers,
+      });
+      mockLsRemoteFailure();
+
+      const resolution = await resolveLatestCommitSha("owner", "repo", {
+        kind: "branch",
+        name: "develop",
+      });
+
+      expect(resolution._tag).toBe("RateLimited");
+    });
+
+    it("403 + x-ratelimit-remaining: 0 は RateLimited を返す", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        statusText: "API rate limit exceeded",
+        headers: new Map(Object.entries({ "x-ratelimit-remaining": "0" })) as unknown as Headers,
+      });
+      mockLsRemoteFailure();
+
+      const resolution = await resolveLatestCommitSha("owner", "repo", {
+        kind: "branch",
+        name: "develop",
+      });
+
+      expect(resolution._tag).toBe("RateLimited");
+    });
+
+    // secondary rate limit はコアクォータの残量を健全なまま保つことがある
+    // （x-ratelimit-remaining が 0 でなくても起こりうる）。retry-after の有無だけで
+    // 検知できることを固定する。
+    it("403 + retry-after は、コアクォータが健全でも RateLimited を返す", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        statusText: "You have exceeded a secondary rate limit",
+        headers: new Map(
+          Object.entries({ "retry-after": "60", "x-ratelimit-remaining": "4999" }),
+        ) as unknown as Headers,
+      });
+      mockLsRemoteFailure();
+
+      const resolution = await resolveLatestCommitSha("owner", "repo", {
+        kind: "branch",
+        name: "develop",
+      });
+
+      expect(resolution._tag).toBe("RateLimited");
+    });
+
+    it("git ls-remote が引ければ RateLimited でもフォールバックする", async () => {
+      const sha = "2222222222222222222222222222222222222222";
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 429,
+        statusText: "Too Many Requests",
+        headers: new Map() as unknown as Headers,
+      });
+      mockLsRemoteOutput(`${sha}\trefs/heads/develop\n`);
+
+      expect(
+        await resolveLatestCommitSha("owner", "repo", { kind: "branch", name: "develop" }),
+      ).toEqual({ _tag: "Resolved", sha });
+    });
+
+    it("git でも引けなければ RateLimited のまま返す", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 429,
+        statusText: "Too Many Requests",
+        headers: new Map() as unknown as Headers,
+      });
+      mockLsRemoteFailure();
+
+      const resolution = await resolveLatestCommitSha("owner", "repo", {
+        kind: "branch",
+        name: "develop",
+      });
+
+      expect(resolution._tag).toBe("RateLimited");
+    });
   });
 });
 

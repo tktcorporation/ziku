@@ -250,6 +250,7 @@ function toBaseRef(
     .with({ _tag: "AuthRejected" }, (r) =>
       Effect.fail(zikuFailure({ kind: "GitHubAuthRejected", detail: r.detail })),
     )
+    .with({ _tag: "RateLimited" }, () => Effect.succeed(Option.none<CommitSha>()))
     .with({ _tag: "Unresolved" }, () => Effect.succeed(Option.none<CommitSha>()))
     .exhaustive();
 }

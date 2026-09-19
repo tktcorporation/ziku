@@ -445,26 +445,42 @@ function resolveCandidateLimit(
   rateLimitStatus: RateLimitStatusResolution,
   userMaxCandidates: number | undefined,
 ): Effect.Effect<number, ZikuFailure> {
-  return match(rateLimitStatus)
-    .with({ _tag: "Resolved" }, (r) => {
-      const derived = candidateLimitFromRemaining(r.status.remaining);
-      if (derived <= 0) {
-        return Effect.fail(
+  return (
+    match(rateLimitStatus)
+      .with({ _tag: "Resolved" }, (r) => {
+        const derived = candidateLimitFromRemaining(r.status.remaining);
+        if (derived <= 0) {
+          return Effect.fail(
+            zikuFailure({
+              kind: "GitHubRateLimited",
+              authenticated: r.status.authenticated,
+              resetAt: r.status.resetAt,
+            }),
+          );
+        }
+        const requestedLimit = userMaxCandidates ?? DEFAULT_MAX_CANDIDATES;
+        return Effect.succeed(Math.min(derived, requestedLimit));
+      })
+      .with({ _tag: "AuthRejected" }, (f) =>
+        Effect.fail(zikuFailure({ kind: "GitHubAuthRejected", detail: f.detail })),
+      )
+      // `/rate_limit` 自体がレート制限で引けなかった場合、残量が分からないまま候補数上限を
+      // 決めることになる。`Unresolved`（ネットワーク断等）とは違い、この状況は GitHub 側の
+      // クォータが実際に逼迫している確度が高いので、既定値へ倒さずレート制限として失敗させる。
+      .with({ _tag: "RateLimited" }, (f) =>
+        Effect.fail(
           zikuFailure({
             kind: "GitHubRateLimited",
-            authenticated: r.status.authenticated,
-            resetAt: r.status.resetAt,
+            authenticated: getGitHubToken() !== undefined,
+            resetAt: f.resetAt,
           }),
-        );
-      }
-      const requestedLimit = userMaxCandidates ?? DEFAULT_MAX_CANDIDATES;
-      return Effect.succeed(Math.min(derived, requestedLimit));
-    })
-    .with({ _tag: "AuthRejected" }, (f) =>
-      Effect.fail(zikuFailure({ kind: "GitHubAuthRejected", detail: f.detail })),
-    )
-    .with({ _tag: "Unresolved" }, () => Effect.succeed(userMaxCandidates ?? DEFAULT_MAX_CANDIDATES))
-    .exhaustive();
+        ),
+      )
+      .with({ _tag: "Unresolved" }, () =>
+        Effect.succeed(userMaxCandidates ?? DEFAULT_MAX_CANDIDATES),
+      )
+      .exhaustive()
+  );
 }
 
 /**
@@ -659,6 +675,18 @@ function resolveTemplateRef(
       .with({ _tag: "AuthRejected" }, (f) =>
         Effect.fail(zikuFailure({ kind: "GitHubAuthRejected", detail: f.detail })),
       )
+      // レート制限は「テンプレートが無い/取得できない」（TemplateUnavailable）とは原因が
+      // 別で、待てば解消する。専用の失敗種別を返すことで、エラーメッセージ・hint が
+      // レート制限向けの正確な案内になる。
+      .with({ _tag: "RateLimited" }, (f) =>
+        Effect.fail(
+          zikuFailure({
+            kind: "GitHubRateLimited",
+            authenticated: getGitHubToken() !== undefined,
+            resetAt: f.resetAt,
+          }),
+        ),
+      )
       .with({ _tag: "Unresolved" }, (f) =>
         Effect.fail(
           zikuFailure({
@@ -722,11 +750,13 @@ type CandidateRefResolution =
  *
  * `.ziku/lock.json` の取得とリポジトリ内容のダウンロードを同じ ref に固定するために使う。
  * `resolveLatestCommitSha` は失敗を戻り値で表すため（`Effect.promise` に例外は飛ばない）、
- * `AuthRejected` / `Unresolved` のどちらも同じ `failed` として扱う。
+ * `AuthRejected` / `Unresolved` はどちらも同じ `failed` として扱う。
  *
- * `resolveLatestCommitSha` の戻り値にはレート制限専用のケースが無く、失敗はすべて
- * `Unresolved` に丸められるため、`tryGitHub` 系のゲートには乗せられない。代わりに呼び出し前に
- * ゲートを確認し、既に検知済みなら呼び出し自体をスキップして `failed` を返す。
+ * `RateLimited` だけは特別扱いする。`resolveLatestCommitSha` は fetch の生レスポンスへ
+ * 直接アクセスできるため、レート制限（429、または secondary rate limit を示す 403）を
+ * `Unresolved` と区別して返せる。この関数はその結果を受けて `rateLimitGate` へ自ら書き込み、
+ * owner 横断で共有するゲートを立てる。それ以外の呼び出し前チェック（既にゲートが立っていれば
+ * 呼び出し自体をスキップして `failed` を返す）は変わらない。
  */
 function resolveCandidateRef(
   candidate: OwnerRepoInfo,
@@ -741,29 +771,40 @@ function resolveCandidateRef(
       };
     }
 
-    return yield* Effect.promise(() =>
+    const resolution = yield* Effect.promise(() =>
       resolveLatestCommitSha(candidate.owner, candidate.repo, {
         kind: "branch",
         name: candidate.defaultBranch,
       }),
-    ).pipe(
-      Effect.map((resolution) =>
-        match(resolution)
-          .with({ _tag: "Resolved" }, (r): CandidateRefResolution => ({
-            _tag: "resolved" as const,
-            ref: r.sha,
-          }))
-          .with({ _tag: "AuthRejected" }, (f): CandidateRefResolution => ({
-            _tag: "failed" as const,
-            reason: `Could not resolve the latest commit SHA: GitHub rejected the authentication token (${f.detail})`,
-          }))
-          .with({ _tag: "Unresolved" }, (f): CandidateRefResolution => ({
-            _tag: "failed" as const,
-            reason: `Could not resolve the latest commit SHA: ${f.reason}`,
-          }))
-          .exhaustive(),
-      ),
     );
+
+    return yield* match(resolution)
+      .with({ _tag: "Resolved" }, (r): Effect.Effect<CandidateRefResolution> =>
+        Effect.succeed({ _tag: "resolved" as const, ref: r.sha }),
+      )
+      .with({ _tag: "AuthRejected" }, (f): Effect.Effect<CandidateRefResolution> =>
+        Effect.succeed({
+          _tag: "failed" as const,
+          reason: `Could not resolve the latest commit SHA: GitHub rejected the authentication token (${f.detail})`,
+        }),
+      )
+      .with({ _tag: "Unresolved" }, (f): Effect.Effect<CandidateRefResolution> =>
+        Effect.succeed({
+          _tag: "failed" as const,
+          reason: `Could not resolve the latest commit SHA: ${f.reason}`,
+        }),
+      )
+      .with({ _tag: "RateLimited" }, (f) =>
+        Effect.gen(function* () {
+          const detection: RateLimitDetection = { _tag: "observed", resetAt: f.resetAt };
+          yield* Ref.set(rateLimitGate, Option.some(detection));
+          return {
+            _tag: "failed" as const,
+            reason: rateLimitSkipReason(detection),
+          };
+        }),
+      )
+      .exhaustive();
   });
 }
 
@@ -878,6 +919,11 @@ function checkPinnedRef(
           { _tag: "Unresolved" },
           (f) =>
             `Pinned to template ref "${templateRefToString(pinnedRef)}", which could not be resolved to a commit in ${template.owner}/${template.repo}: ${f.reason}`,
+        )
+        .with(
+          { _tag: "RateLimited" },
+          () =>
+            `Pinned to template ref "${templateRefToString(pinnedRef)}", which could not be resolved to a commit in ${template.owner}/${template.repo}: GitHub API rate limit`,
         )
         .exhaustive(),
     ),
