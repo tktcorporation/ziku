@@ -1717,6 +1717,87 @@ describe("aggregateTemplateUsage", () => {
     );
   });
 
+  // --since のクォータリフレッシュも他の呼び出し元と同じ陳腐化判定（gateObservedRateLimit）
+  // を通す。concurrency > 1 ではこのリフレッシュ自体が複数候補にまたがって並行に発行され
+  // うるため、await して即座に使っても、クォータリセットをまたいだ古いウィンドウの応答が
+  // 後から届くことがある。
+  it("--since 指定時、fetchRateLimitStatus のリフレッシュがレート制限を検知しても、既に観測済みのより新しいウィンドウより古ければゲートを立てない", async () => {
+    const repos = ["rl-refresh-stale-1", "rl-refresh-stale-2"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+    const baseHashes = { "f.txt": hashContent("v1") };
+    for (const repo of repos) {
+      setLockFixture(lockFixtures, "acme", repo, () =>
+        Promise.resolve(Option.some(lockJson({ baseHashes }))),
+      );
+      shaFixtures.set(`acme/${repo}`, sha(`${repo}-sha`));
+    }
+
+    const downloadedRepos: string[] = [];
+    const files: Record<string, string> = {
+      "/tmpl-dir-refresh-stale/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/tmpl-dir-refresh-stale/f.txt": "v1",
+    };
+    for (const repo of repos) {
+      files[`/${repo}-dir/.ziku/ziku.jsonc`] = JSON.stringify({ include: ["f.txt"] });
+      files[`/${repo}-dir/f.txt`] = "v2";
+    }
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-refresh-stale");
+    for (const repo of repos) {
+      dirsBySource.set(`gh:acme/${repo}#${repo}-sha`, `/${repo}-dir`);
+    }
+    vol.fromJSON(files);
+    for (const _ of repos) queueGlobResults(["f.txt"], ["f.txt"]);
+
+    mockAcquireTempTemplate.mockImplementation((_targetDir: string, source: string) => {
+      if (source === "gh:acme/template#tmpl-sha") {
+        return Effect.succeed(absPath("/tmpl-dir-refresh-stale"));
+      }
+      downloadedRepos.push(source);
+      const dir = dirsBySource.get(source);
+      if (dir === undefined) {
+        return Effect.fail(
+          new TemplateError({ message: `no fixture dir registered for source: ${source}` }),
+        );
+      }
+      return Effect.succeed(absPath(dir));
+    });
+
+    const oldResetAt = new Date(Date.now() - 60 * 60_000);
+    const newResetAt = new Date(Date.now() + 60 * 60_000);
+    // 既に新しいウィンドウ（補充済み）が観測済みという状況を再現する。
+    mockGetObservedRateLimitRemaining.mockReturnValue({ remaining: 5000, resetAt: newResetAt });
+
+    // 1 回目（resolveCandidateLimit の事前見積もり）は健全な残量を返し、以降は候補ダウンロード
+    // 後のリフレッシュとして、既に過去に終わった旧ウィンドウの RateLimited を返す。
+    let callCount = 0;
+    mockFetchRateLimitStatus.mockImplementation(() => {
+      callCount += 1;
+      if (callCount === 1) {
+        return Promise.resolve({
+          _tag: "Resolved",
+          status: { limit: 5000, remaining: 4000, resetAt: undefined, authenticated: false },
+        });
+      }
+      return Promise.resolve({ _tag: "RateLimited", resetAt: oldResetAt });
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        since: "2026-08-01T00:00:00.000Z",
+        concurrency: 1,
+      }),
+    );
+
+    // ゲートが立っていないため、2 件目もダウンロードされる（ゲートで止められていない）。
+    expect(downloadedRepos).toEqual([
+      "gh:acme/rl-refresh-stale-1#rl-refresh-stale-1-sha",
+      "gh:acme/rl-refresh-stale-2#rl-refresh-stale-2-sha",
+    ]);
+    expect(report.skipped.some((s) => s.reason.includes("GitHub API rate limit"))).toBe(false);
+  });
+
   // fetchRateLimitStatus のリフレッシュは 403/429 を受け取らなくても、GitHub 自身が
   // remaining: 0（成功レスポンス）と申告することがある。この候補が pendingPush/conflicts を
   // 持たなければ attachLastCommittedAt のループが一度も回らず動的ブレーキを通らないため、
@@ -1806,6 +1887,89 @@ describe("aggregateTemplateUsage", () => {
     expect(report.skipped[0]?.reason).toBe(
       "Stopped short of the GitHub API rate limit based on the observed remaining quota; not checking further repositories in this scan.",
     );
+  });
+
+  // remaining:0 の preemptive 検知も、RateLimited と同じ陳腐化判定を通す。
+  it("--since 指定時、fetchRateLimitStatus のリフレッシュが成功かつremaining:0でも、既に観測済みのより新しいウィンドウより古ければゲートを立てない", async () => {
+    const repos = ["rl-zero-stale-1", "rl-zero-stale-2"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+    const baseHashes = { "f.txt": hashContent("v1") };
+    for (const repo of repos) {
+      setLockFixture(lockFixtures, "acme", repo, () =>
+        Promise.resolve(Option.some(lockJson({ baseHashes }))),
+      );
+      shaFixtures.set(`acme/${repo}`, sha(`${repo}-sha`));
+    }
+
+    const downloadedRepos: string[] = [];
+    const files: Record<string, string> = {
+      "/tmpl-dir-rl-zero-stale/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/tmpl-dir-rl-zero-stale/f.txt": "v1",
+      // rl-zero-stale-1 はテンプレートと完全同期（ドリフト無し）にする。pendingPush/conflicts
+      // が空になり attachLastCommittedAt のループが一度も回らないため、このリフレッシュでの
+      // 検知が唯一の伝播経路になるシナリオを再現する。
+      "/rl-zero-stale-1-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/rl-zero-stale-1-dir/f.txt": "v1",
+      "/rl-zero-stale-2-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/rl-zero-stale-2-dir/f.txt": "v2",
+    };
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-rl-zero-stale");
+    for (const repo of repos) {
+      dirsBySource.set(`gh:acme/${repo}#${repo}-sha`, `/${repo}-dir`);
+    }
+    vol.fromJSON(files);
+    for (const _ of repos) queueGlobResults(["f.txt"], ["f.txt"]);
+
+    mockAcquireTempTemplate.mockImplementation((_targetDir: string, source: string) => {
+      if (source === "gh:acme/template#tmpl-sha") {
+        return Effect.succeed(absPath("/tmpl-dir-rl-zero-stale"));
+      }
+      downloadedRepos.push(source);
+      const dir = dirsBySource.get(source);
+      if (dir === undefined) {
+        return Effect.fail(
+          new TemplateError({ message: `no fixture dir registered for source: ${source}` }),
+        );
+      }
+      return Effect.succeed(absPath(dir));
+    });
+
+    const oldResetAt = new Date(Date.now() - 60 * 60_000);
+    const newResetAt = new Date(Date.now() + 60 * 60_000);
+    // 既に新しいウィンドウ（補充済み）が観測済みという状況を再現する。
+    mockGetObservedRateLimitRemaining.mockReturnValue({ remaining: 5000, resetAt: newResetAt });
+
+    let callCount = 0;
+    mockFetchRateLimitStatus.mockImplementation(() => {
+      callCount += 1;
+      if (callCount === 1) {
+        return Promise.resolve({
+          _tag: "Resolved",
+          status: { limit: 5000, remaining: 4000, resetAt: undefined, authenticated: false },
+        });
+      }
+      // 過去に終わった旧ウィンドウの remaining:0 申告（遅延到着した想定）。
+      return Promise.resolve({
+        _tag: "Resolved",
+        status: { limit: 5000, remaining: 0, resetAt: oldResetAt, authenticated: false },
+      });
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        since: "2026-08-01T00:00:00.000Z",
+        concurrency: 1,
+      }),
+    );
+
+    // ゲートが立っていないため、2 件目もダウンロードされる（ゲートで止められていない）。
+    expect(downloadedRepos).toEqual([
+      "gh:acme/rl-zero-stale-1#rl-zero-stale-1-sha",
+      "gh:acme/rl-zero-stale-2#rl-zero-stale-2-sha",
+    ]);
+    expect(report.skipped.some((s) => s.reason.includes("GitHub API rate limit"))).toBe(false);
   });
 
   it("since 未指定時は attachLastCommittedAt を呼ばず、fetchRateLimitStatus を候補処理中に追加で呼ばない", async () => {

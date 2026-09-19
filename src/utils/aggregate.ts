@@ -485,11 +485,12 @@ function resolveCandidateLimit(
 }
 
 /**
- * 実際に受け取った 403/429 の resetAt を共有ゲートへ反映する。
+ * レート制限の検知（実際に受け取った 403/429、または成功レスポンスでの残量ゼロ申告）の
+ * resetAt を共有ゲートへ反映する。
  *
- * ただし、この応答自体がクォータリセットをまたいで遅延到着したものだと、ゲートを無条件で
+ * ただし、この検知自体がクォータリセットをまたいで遅延到着したものだと、ゲートを無条件で
  * 立てるのは誤り。並行リクエストの中で既により新しいウィンドウの成功レスポンス
- * （{@link getObservedRateLimitRemaining} に反映済み）が観測されていれば、この失敗は
+ * （{@link getObservedRateLimitRemaining} に反映済み）が観測されていれば、この検知は
  * 既に陳腐化した旧ウィンドウの結果でしかなく、実際には枠が補充されている。
  * {@link isOlderRateLimitWindow} でそれを検知できる場合はゲートを立てない。
  *
@@ -502,16 +503,22 @@ function resolveCandidateLimit(
  * `resetAt` は既にリセットを終えているはず（＝過去）なので、「未来を指す」`resetAt` を
  * 陳腐化判定の対象から外すことでこれを避ける。
  *
+ * `tag` は既定で `"observed"`（実際に 403/429 を受け取った）。`--since` のクォータリフレッシュ
+ * が `remaining: 0` の成功レスポンスを申告した場合のように、403/429 をまだ受け取っていない
+ * 予防的な検知には `"preemptive"` を渡す。
+ *
  * ゲートを実際に立てられたかどうかを `Option` で返す。理由文がゲートの有無に依存する
  * 呼び出し元（`resolveCandidateRef`・`checkPinnedRef`・差分処理フェーズの分類失敗）は、
  * 立てられた場合はスキャン全体を打ち切った前提の理由文（{@link rateLimitSkipReason}）を、
  * 立てられなかった場合はその候補単体の失敗を表す理由文を使い分ける必要がある（立てなかった
- * 場合、他の候補は影響を受けずスキャンを継続するため）。`tryGitHubGated` は失敗自体を
- * そのまま伝播し、理由文がゲートの有無に依存しないため戻り値を見ない。
+ * 場合、他の候補は影響を受けずスキャンを継続するため）。`tryGitHubGated` や `--since` の
+ * クォータリフレッシュは失敗・観測結果自体をそのまま扱い、理由文がゲートの有無に依存しない
+ * ため戻り値を見ない。
  */
 function gateObservedRateLimit(
   gate: RateLimitGate,
   resetAt: Date | undefined,
+  tag: RateLimitDetection["_tag"] = "observed",
 ): Effect.Effect<Option.Option<RateLimitDetection>> {
   return Effect.gen(function* () {
     const observed = getObservedRateLimitRemaining();
@@ -519,7 +526,7 @@ function gateObservedRateLimit(
     if (alreadyElapsed && isOlderRateLimitWindow(resetAt, observed?.resetAt)) {
       return Option.none();
     }
-    const detection: RateLimitDetection = { _tag: "observed", resetAt };
+    const detection: RateLimitDetection = { _tag: tag, resetAt };
     yield* Ref.set(gate, Option.some(detection));
     return Option.some(detection);
   });
@@ -1268,24 +1275,19 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
       // 未観測時の挙動のまま動く）。この呼び出し自体がレート制限（ヘッダー無しの
       // secondary rate limit を含む）を検知した場合は、`attachLastCommittedAt` の判定を
       // 待たずここで直接ゲートを立てる。待つと、並行実行中の他候補が同じ throttling を
-      // 個別に踏んでからでないとゲートが立たない。
+      // 個別に踏んでからでないとゲートが立たない。`concurrency > 1` ではこのリフレッシュ
+      // 自体が複数候補にまたがって並行に発行されうるため、await して即座に使っても
+      // クォータリセットをまたいだ古いウィンドウの応答が後から届くことがある。
+      // `gateObservedRateLimit` で他の呼び出し元と同じ陳腐化判定を通す。
       const rateLimitRefresh = yield* Effect.promise(() => fetchRateLimitStatus());
       if (rateLimitRefresh._tag === "RateLimited") {
-        const detection: RateLimitDetection = {
-          _tag: "observed",
-          resetAt: rateLimitRefresh.resetAt,
-        };
-        yield* Ref.set(rateLimitGate, Option.some(detection));
+        yield* gateObservedRateLimit(rateLimitGate, rateLimitRefresh.resetAt);
       } else if (rateLimitRefresh._tag === "Resolved" && rateLimitRefresh.status.remaining === 0) {
         // 403/429 はまだ受け取っていないが、GitHub 自身が「残量ゼロ」と申告している。
         // このリフレッシュを使わない候補（pendingPush/conflicts が空）は動的ブレーキの
         // 判定を一度も通らないため、observedRateLimit の更新だけでは以降の候補への伝播が
         // 実際に別の候補が 403/429 を踏むまで遅れる。ここで直接ゲートを立てて即座に伝える。
-        const detection: RateLimitDetection = {
-          _tag: "preemptive",
-          resetAt: rateLimitRefresh.status.resetAt,
-        };
-        yield* Ref.set(rateLimitGate, Option.some(detection));
+        yield* gateObservedRateLimit(rateLimitGate, rateLimitRefresh.status.resetAt, "preemptive");
       }
 
       // pendingPull はテンプレート側発の変更（テンプレートの更新を配布するだけ）であり、
