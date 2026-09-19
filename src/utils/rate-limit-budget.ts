@@ -182,8 +182,14 @@ function sameRateLimitWindow(a: Date | undefined, b: Date | undefined): boolean 
  * `next` の `resetAt` が `current` より確実に古い（= 別ウィンドウの遅延到着観測である）と
  * 判定できるか。両方の `resetAt` が分かる場合のみ判定でき、片方でも読めなければ false
  * （古いとは断定しない）を返す。
+ *
+ * {@link mergeObservedRateLimit} が単調な観測残量のマージに使うほか、`aggregate.ts` の
+ * `gateObservedRateLimit` が「実際に受け取った 403/429 が遅延到着した陳腐化済みのもので、
+ * 共有ゲートを立てるべきでない」と判定する条件の一方としても使う（もう一方の条件である
+ * 「resetAt が既に過去」と組にしないと、コアクォータとは無関係な secondary rate limit の
+ * resetAt まで古いウィンドウ扱いになる。詳細は `gateObservedRateLimit` の JSDoc）。
  */
-function isOlderRateLimitWindow(next: Date | undefined, current: Date | undefined): boolean {
+export function isOlderRateLimitWindow(next: Date | undefined, current: Date | undefined): boolean {
   if (next === undefined || current === undefined) return false;
   return next.getTime() < current.getTime();
 }

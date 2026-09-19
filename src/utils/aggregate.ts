@@ -58,6 +58,7 @@ import {
   ESTIMATED_REQUESTS_PER_CANDIDATE,
   cannotAffordRemainingRequests,
   candidateLimitFromRemaining,
+  isOlderRateLimitWindow,
   rateLimitSkipReason,
 } from "./rate-limit-budget";
 import type { RateLimitDetection, RateLimitGate } from "./rate-limit-budget";
@@ -484,11 +485,53 @@ function resolveCandidateLimit(
 }
 
 /**
+ * 実際に受け取った 403/429 の resetAt を共有ゲートへ反映する。
+ *
+ * ただし、この応答自体がクォータリセットをまたいで遅延到着したものだと、ゲートを無条件で
+ * 立てるのは誤り。並行リクエストの中で既により新しいウィンドウの成功レスポンス
+ * （{@link getObservedRateLimitRemaining} に反映済み）が観測されていれば、この失敗は
+ * 既に陳腐化した旧ウィンドウの結果でしかなく、実際には枠が補充されている。
+ * {@link isOlderRateLimitWindow} でそれを検知できる場合はゲートを立てない。
+ *
+ * ただし `isOlderRateLimitWindow` の比較は、両辺が同じ種類のウィンドウ（コアクォータの
+ * `x-ratelimit-reset`）由来であることを前提にしている。`resetAt` は `retry-after` 付きの
+ * secondary rate limit の場合「今 + retry-after 秒」という、コアクォータの `resetAt`
+ * （最大 1 時間先）とは無関係な短い未来時刻になりうる。この場合 `resetAt` がコアクォータの
+ * `observed.resetAt` より数値上小さいだけで「陳腐化した旧ウィンドウ」と誤判定してしまい、
+ * 今まさに有効な secondary rate limit でゲートが立たなくなる。陳腐化した旧ウィンドウの
+ * `resetAt` は既にリセットを終えているはず（＝過去）なので、「未来を指す」`resetAt` を
+ * 陳腐化判定の対象から外すことでこれを避ける。
+ *
+ * ゲートを実際に立てられたかどうかを `Option` で返す。理由文がゲートの有無に依存する
+ * 呼び出し元（`resolveCandidateRef`・`checkPinnedRef`・差分処理フェーズの分類失敗）は、
+ * 立てられた場合はスキャン全体を打ち切った前提の理由文（{@link rateLimitSkipReason}）を、
+ * 立てられなかった場合はその候補単体の失敗を表す理由文を使い分ける必要がある（立てなかった
+ * 場合、他の候補は影響を受けずスキャンを継続するため）。`tryGitHubGated` は失敗自体を
+ * そのまま伝播し、理由文がゲートの有無に依存しないため戻り値を見ない。
+ */
+function gateObservedRateLimit(
+  gate: RateLimitGate,
+  resetAt: Date | undefined,
+): Effect.Effect<Option.Option<RateLimitDetection>> {
+  return Effect.gen(function* () {
+    const observed = getObservedRateLimitRemaining();
+    const alreadyElapsed = resetAt !== undefined && resetAt.getTime() <= Date.now();
+    if (alreadyElapsed && isOlderRateLimitWindow(resetAt, observed?.resetAt)) {
+      return Option.none();
+    }
+    const detection: RateLimitDetection = { _tag: "observed", resetAt };
+    yield* Ref.set(gate, Option.some(detection));
+    return Option.some(detection);
+  });
+}
+
+/**
  * `tryGitHub` にレート制限ゲートを重ねる。
  *
  * 呼び出し前に Ref を確認し、既に検知済みなら実際の GitHub API 呼び出しをせずに、記録済みの
  * resetAt で同じ `GitHubRateLimited` 失敗を返す。未検知なら呼び出し、結果が
- * `GitHubRateLimited` であれば Ref に記録してから失敗を伝播する。
+ * `GitHubRateLimited` であれば {@link gateObservedRateLimit} でゲートへ反映してから
+ * 失敗を伝播する。
  *
  * 未認証の 60 req/hour クォータを使い切った後も候補ごとに新規リクエストを送り続けると、
  * 残り候補数分がそのまま同じレート制限応答を受け取るだけの無駄になる。リセットまで最大
@@ -507,10 +550,7 @@ function tryGitHubGated<A>(
     const result = yield* Effect.either(tryGitHub(run));
     if (Either.isLeft(result)) {
       if (result.left.reason.kind === "GitHubRateLimited") {
-        yield* Ref.set(
-          gate,
-          Option.some({ _tag: "observed" as const, resetAt: result.left.reason.resetAt }),
-        );
+        yield* gateObservedRateLimit(gate, result.left.reason.resetAt);
       }
       return yield* Effect.fail(result.left);
     }
@@ -754,9 +794,9 @@ type CandidateRefResolution =
  *
  * `RateLimited` だけは特別扱いする。`resolveLatestCommitSha` は fetch の生レスポンスへ
  * 直接アクセスできるため、レート制限（429、または secondary rate limit を示す 403）を
- * `Unresolved` と区別して返せる。この関数はその結果を受けて `rateLimitGate` へ自ら書き込み、
- * owner 横断で共有するゲートを立てる。それ以外の呼び出し前チェック（既にゲートが立っていれば
- * 呼び出し自体をスキップして `failed` を返す）は変わらない。
+ * `Unresolved` と区別して返せる。この関数はその結果を {@link gateObservedRateLimit} へ渡し、
+ * 陳腐化した失敗でなければ owner 横断で共有するゲートを立てる。それ以外の呼び出し前チェック
+ * （既にゲートが立っていれば呼び出し自体をスキップして `failed` を返す）は変わらない。
  */
 function resolveCandidateRef(
   candidate: OwnerRepoInfo,
@@ -796,11 +836,12 @@ function resolveCandidateRef(
       )
       .with({ _tag: "RateLimited" }, (f) =>
         Effect.gen(function* () {
-          const detection: RateLimitDetection = { _tag: "observed", resetAt: f.resetAt };
-          yield* Ref.set(rateLimitGate, Option.some(detection));
+          const detection = yield* gateObservedRateLimit(rateLimitGate, f.resetAt);
           return {
             _tag: "failed" as const,
-            reason: rateLimitSkipReason(detection),
+            reason: Option.isSome(detection)
+              ? rateLimitSkipReason(detection.value)
+              : "Could not resolve the latest commit SHA: GitHub API rate limit (the quota has already been replenished for other candidates in this scan)",
           };
         }),
       )
@@ -898,10 +939,11 @@ function evaluateCandidate(
  * `resolveSourceCommit` で種別を問わず同じコミットへ解決してから比べる。
  *
  * `RateLimited` を受け取った場合は {@link resolveCandidateRef} と同じパターンで
- * `rateLimitGate` へ書き込み、owner 横断で共有するゲートを立てる。`readCandidateLock` の
- * もう一方の GitHub 呼び出し（`fetchRepoTextFile`）は `tryGitHubGated` 経由でゲートに
- * 乗っているのに対し、この関数は独自に `resolveSourceCommit` を呼ぶためゲートの外側に
- * あった。呼び出し前にゲートが既に立っていれば `resolveSourceCommit` 自体を呼ばない。
+ * {@link gateObservedRateLimit} へ渡し、陳腐化した失敗でなければ owner 横断で共有する
+ * ゲートを立てる。`readCandidateLock` のもう一方の GitHub 呼び出し（`fetchRepoTextFile`）は
+ * `tryGitHubGated` 経由でゲートに乗るのに対し、この関数は独自に `resolveSourceCommit` を
+ * 呼ぶため `tryGitHubGated` のゲートを経由しない。呼び出し前にゲートが既に立っていれば
+ * `resolveSourceCommit` 自体を呼ばない。
  * `readCandidateLock` は `checkPinnedRef` を呼ぶ前に `fetchRepoTextFile` を経由するが、
  * `concurrency` が 1 を超える場合、その成功から `checkPinnedRef` に到達するまでの間に
  * 別の候補（別 fiber）がゲートを立てうる。このチェックはその隙間を塞ぐ。
@@ -942,9 +984,11 @@ function checkPinnedRef(
       )
       .with({ _tag: "RateLimited" }, (f): Effect.Effect<string | undefined> =>
         Effect.gen(function* () {
-          const detection: RateLimitDetection = { _tag: "observed", resetAt: f.resetAt };
-          yield* Ref.set(rateLimitGate, Option.some(detection));
-          return `Pinned to template ref "${templateRefToString(pinnedRef)}", which could not be resolved to a commit in ${template.owner}/${template.repo}: GitHub API rate limit`;
+          const detection = yield* gateObservedRateLimit(rateLimitGate, f.resetAt);
+          const detail = Option.isSome(detection)
+            ? "GitHub API rate limit"
+            : "GitHub API rate limit (the quota has already been replenished for other candidates in this scan)";
+          return `Pinned to template ref "${templateRefToString(pinnedRef)}", which could not be resolved to a commit in ${template.owner}/${template.repo}: ${detail}`;
         }),
       )
       .exhaustive();
@@ -1190,14 +1234,16 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
       // テンプレート/リポジトリ内容のダウンロードがレート制限で失敗した場合、その事実が
       // ここまで（`classifyAgainstTemplate` のエラーチャネルが string に潰されていたため）
       // 失われていた。`ZikuFailure` のまま受け取り、ゲートへ反映してから以降の候補を
-      // 打ち切る。
+      // 打ち切る。ただし resetAt が既に陳腐化していればゲートは立てず、この候補単体の
+      // 失敗として下の汎用フォールバックへ落とす。giget 経由のこの失敗は resetAt を
+      // 持たない（`detectGigetRateLimit` はヘッダーを読めない）ため、陳腐化判定は
+      // この分岐では成立しない防御的な措置。giget が resetAt を返す形になれば、
+      // `gateObservedRateLimit` の基準がそのまま効く。
       if (failure instanceof ZikuFailure && failure.reason.kind === "GitHubRateLimited") {
-        const detection: RateLimitDetection = {
-          _tag: "observed",
-          resetAt: failure.reason.resetAt,
-        };
-        yield* Ref.set(rateLimitGate, Option.some(detection));
-        return processSkipped(repoInfo, rateLimitSkipReason(detection));
+        const detection = yield* gateObservedRateLimit(rateLimitGate, failure.reason.resetAt);
+        if (Option.isSome(detection)) {
+          return processSkipped(repoInfo, rateLimitSkipReason(detection.value));
+        }
       }
       const detail = failure instanceof ZikuFailure ? failure.message : failure;
       return processSkipped(
