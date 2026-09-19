@@ -1230,6 +1230,16 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
           resetAt: rateLimitRefresh.resetAt,
         };
         yield* Ref.set(rateLimitGate, Option.some(detection));
+      } else if (rateLimitRefresh._tag === "Resolved" && rateLimitRefresh.status.remaining === 0) {
+        // 403/429 はまだ受け取っていないが、GitHub 自身が「残量ゼロ」と申告している。
+        // このリフレッシュを使わない候補（pendingPush/conflicts が空）は動的ブレーキの
+        // 判定を一度も通らないため、observedRateLimit の更新だけでは以降の候補への伝播が
+        // 実際に別の候補が 403/429 を踏むまで遅れる。ここで直接ゲートを立てて即座に伝える。
+        const detection: RateLimitDetection = {
+          _tag: "preemptive",
+          resetAt: rateLimitRefresh.status.resetAt,
+        };
+        yield* Ref.set(rateLimitGate, Option.some(detection));
       }
 
       // pendingPull はテンプレート側発の変更（テンプレートの更新を配布するだけ）であり、

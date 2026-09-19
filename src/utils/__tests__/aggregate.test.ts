@@ -1717,6 +1717,97 @@ describe("aggregateTemplateUsage", () => {
     );
   });
 
+  // fetchRateLimitStatus のリフレッシュは 403/429 を受け取らなくても、GitHub 自身が
+  // remaining: 0（成功レスポンス）と申告することがある。この候補が pendingPush/conflicts を
+  // 持たなければ attachLastCommittedAt のループが一度も回らず動的ブレーキを通らないため、
+  // ここで直接ゲートを立てないと以降の候補が同じ枯渇状態へ無駄にリクエストを送ってしまう。
+  it("--since 指定時、fetchRateLimitStatus のリフレッシュが成功かつ remaining:0 なら直ちにゲートを立てる", async () => {
+    const repos = ["rl-zero-1", "rl-zero-2"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+    const baseHashes = { "f.txt": hashContent("v1") };
+    for (const repo of repos) {
+      setLockFixture(lockFixtures, "acme", repo, () =>
+        Promise.resolve(Option.some(lockJson({ baseHashes }))),
+      );
+      shaFixtures.set(`acme/${repo}`, sha(`${repo}-sha`));
+    }
+
+    const downloadedRepos: string[] = [];
+    const files: Record<string, string> = {
+      "/tmpl-dir-rl-zero/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/tmpl-dir-rl-zero/f.txt": "v1",
+      // rl-zero-1 はテンプレートと完全同期（ドリフト無し）にする。pendingPush/conflicts が
+      // 空になり attachLastCommittedAt のループが一度も回らないため、このリフレッシュでの
+      // 検知が唯一の伝播経路になるシナリオを実際に再現する。
+      "/rl-zero-1-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/rl-zero-1-dir/f.txt": "v1",
+      "/rl-zero-2-dir/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/rl-zero-2-dir/f.txt": "v2",
+    };
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-rl-zero");
+    for (const repo of repos) {
+      dirsBySource.set(`gh:acme/${repo}#${repo}-sha`, `/${repo}-dir`);
+    }
+    vol.fromJSON(files);
+    for (const _ of repos) queueGlobResults(["f.txt"], ["f.txt"]);
+
+    mockAcquireTempTemplate.mockImplementation((_targetDir: string, source: string) => {
+      if (source === "gh:acme/template#tmpl-sha") {
+        return Effect.succeed(absPath("/tmpl-dir-rl-zero"));
+      }
+      downloadedRepos.push(source);
+      const dir = dirsBySource.get(source);
+      if (dir === undefined) {
+        return Effect.fail(
+          new TemplateError({ message: `no fixture dir registered for source: ${source}` }),
+        );
+      }
+      return Effect.succeed(absPath(dir));
+    });
+
+    // 1 回目（resolveCandidateLimit の事前見積もり）は健全な残量を返し、以降は
+    // 候補ダウンロード後のリフレッシュとして常に remaining: 0 の成功レスポンスを返す。
+    let callCount = 0;
+    mockFetchRateLimitStatus.mockImplementation(() => {
+      callCount += 1;
+      if (callCount === 1) {
+        return Promise.resolve({
+          _tag: "Resolved",
+          status: { limit: 5000, remaining: 4000, resetAt: undefined, authenticated: false },
+        });
+      }
+      return Promise.resolve({
+        _tag: "Resolved",
+        status: { limit: 5000, remaining: 0, resetAt: undefined, authenticated: false },
+      });
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        since: "2026-08-01T00:00:00.000Z",
+        concurrency: 1,
+      }),
+    );
+
+    // 2 件目の利用リポジトリ内容のダウンロードは行われない
+    // （processCandidate 冒頭の早期チェックで止まる）。
+    expect(downloadedRepos).toEqual(["gh:acme/rl-zero-1#rl-zero-1-sha"]);
+    expect(mockGetLastCommitDate).not.toHaveBeenCalled();
+    expect(report.repositories).toEqual([]);
+    // rl-zero-1 はドリフト無し（pendingPush/conflicts が空）のため filteredBySince となり
+    // skipped には含まれない。ここで固定したいのは、その pendingPush/conflicts が空という
+    // まさにその状況でも、リフレッシュ自体の remaining:0 検知でゲートが立ち、後続の
+    // rl-zero-2 がダウンロードすら行わずスキップされること。
+    expect(report.skipped).toHaveLength(1);
+    expect(report.skipped[0]).toMatchObject({ owner: "acme", repo: "rl-zero-2" });
+    // 403/429 をまだ受け取っていない（成功レスポンスの申告のみ）ため preemptive の文言になる。
+    expect(report.skipped[0]?.reason).toBe(
+      "Stopped short of the GitHub API rate limit based on the observed remaining quota; not checking further repositories in this scan.",
+    );
+  });
+
   it("since 未指定時は attachLastCommittedAt を呼ばず、fetchRateLimitStatus を候補処理中に追加で呼ばない", async () => {
     mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "no-since" })]);
     const baseHashes = { "f.txt": hashContent("v1") };

@@ -85,9 +85,10 @@ export const DEFAULT_RECENT_PUSH_DAYS = 90;
  * 実際に起きたことと一致させるために区別する。
  *
  * - `observed`: GitHub から実際に 403/429 のレート制限応答を受け取った。
- * - `preemptive`: 403 をまだ受け取っておらず、直近のレスポンスヘッダーから観測した残量
- *   だけで「このまま候補を処理すると枯渇する」と見積もり、自発的に止まった
- *   （{@link cannotAffordRemainingRequests}）。
+ * - `preemptive`: 403/429 をまだ受け取っておらず、観測した残量（直近のレスポンスヘッダー、
+ *   または `GET /rate_limit` が成功レスポンスで申告した値）だけで「このまま候補を処理すると
+ *   枯渇する」と見積もり、自発的に止まった（{@link cannotAffordRemainingRequests} による
+ *   見積もり、または残量ゼロの申告を直接受けた場合）。
  */
 export type RateLimitDetection =
   | { readonly _tag: "observed"; readonly resetAt: Date | undefined }
