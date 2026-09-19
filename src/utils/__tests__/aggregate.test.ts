@@ -2291,6 +2291,47 @@ describe("aggregateTemplateUsage", () => {
     expect(rl3?.reason).not.toContain("GitHub API rate limit reached");
   });
 
+  // 新しいウィンドウが観測されていても、その観測自体が remaining: 0（枠が残っていない）
+  // なら、ウィンドウが新しいというだけでゲートをクリアしてはいけない。現在のクォータが
+  // 実際に枯渇していることを示す直接の証拠を無視して問い合わせを再開してしまうため。
+  it("新ウィンドウの観測がremaining:0（枠を持たない）なら、ゲートをクリアしない", async () => {
+    const repos = ["rl-exhausted-1", "rl-exhausted-2", "rl-exhausted-3"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+
+    const oldResetAt = new Date(Date.now() - 60 * 60_000);
+    const newResetAt = new Date(Date.now() + 60 * 60_000);
+    let observedCallCount = 0;
+    mockGetObservedRateLimitRemaining.mockImplementation(() => {
+      observedCallCount += 1;
+      // 新ウィンドウが観測されるが、その時点で既に remaining: 0（枠を持たない）。
+      return observedCallCount <= 3 ? undefined : { remaining: 0, resetAt: newResetAt };
+    });
+
+    mockFetchRepoTextFile.mockImplementation((_owner: string, repo: string) => {
+      if (repo === "rl-exhausted-1") {
+        return Promise.reject(
+          zikuFailure({ kind: "GitHubRateLimited", authenticated: false, resetAt: oldResetAt }),
+        );
+      }
+      return Promise.resolve(Option.some(lockJson()));
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+      }),
+    );
+
+    // rl-exhausted-2 も rl-exhausted-3 も、ゲートがクリアされずスキップされ続ける。
+    expect(mockFetchRepoTextFile).toHaveBeenCalledTimes(1);
+    const rl2 = report.skipped.find((s) => s.repo === "rl-exhausted-2");
+    const rl3 = report.skipped.find((s) => s.repo === "rl-exhausted-3");
+    expect(rl2?.reason).toContain("GitHub API rate limit reached");
+    expect(rl3?.reason).toContain("GitHub API rate limit reached");
+  });
+
   // tryGitHubGated が実際に 403/429 を受け取っても、既に観測済みのより新しいウィンドウ
   // （リセット後に補充済み）より古い resetAt を持つ場合、遅延到着した陳腐化済みの失敗と
   // みなしてゲートを立てない。その候補自身の呼び出しは失敗するが、後続の候補は影響を

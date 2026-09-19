@@ -547,6 +547,11 @@ function gateObservedRateLimit(
  * 陳腐化しているとみなしてクリアする。「既に過去」を要求する理由は {@link gateObservedRateLimit}
  * と同じ（secondary rate limit の未来を指す resetAt を、無関係なコアクォータの観測値と
  * 比べて誤って陳腐化扱いしないため）。
+ *
+ * ただし、新しいウィンドウの観測自体が `remaining: 0`（＝補充直後に別の並行リクエストで
+ * 即座に使い切られた等）なら、ウィンドウが新しいというだけでクリアしてはいけない。現在の
+ * クォータが実際に枯渇していることを示す直接の証拠があるのに、それを無視して問い合わせを
+ * 再開してしまう。新しい観測が実際に枠を残している（`remaining > 0`）場合に限ってクリアする。
  */
 function checkRateLimitGate(gate: RateLimitGate): Effect.Effect<Option.Option<RateLimitDetection>> {
   return Effect.gen(function* () {
@@ -557,7 +562,12 @@ function checkRateLimitGate(gate: RateLimitGate): Effect.Effect<Option.Option<Ra
     const observed = getObservedRateLimitRemaining();
     const gateResetAt = current.value.resetAt;
     const alreadyElapsed = gateResetAt !== undefined && gateResetAt.getTime() <= Date.now();
-    if (alreadyElapsed && isOlderRateLimitWindow(gateResetAt, observed?.resetAt)) {
+    if (
+      alreadyElapsed &&
+      observed !== undefined &&
+      observed.remaining > 0 &&
+      isOlderRateLimitWindow(gateResetAt, observed.resetAt)
+    ) {
       yield* Ref.set(gate, Option.none());
       return Option.none();
     }
