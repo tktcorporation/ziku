@@ -32,16 +32,25 @@ const mockGetRepoIdentity = vi.fn();
 const mockFetchRateLimitStatus = vi.fn();
 const mockGetObservedRateLimitRemaining = vi.fn();
 
-vi.mock("../github", () => ({
-  listOwnerRepos: (...args: unknown[]) => mockListOwnerRepos(...args),
-  fetchRepoTextFile: (...args: unknown[]) => mockFetchRepoTextFile(...args),
-  getLastCommitDate: (...args: unknown[]) => mockGetLastCommitDate(...args),
-  resolveLatestCommitSha: (...args: unknown[]) => mockResolveLatestCommitSha(...args),
-  resolveSourceCommit: (...args: unknown[]) => mockResolveSourceCommit(...args),
-  getRepoIdentity: (...args: unknown[]) => mockGetRepoIdentity(...args),
-  fetchRateLimitStatus: (...args: unknown[]) => mockFetchRateLimitStatus(...args),
-  getObservedRateLimitRemaining: (...args: unknown[]) => mockGetObservedRateLimitRemaining(...args),
-}));
+vi.mock("../github", async (importOriginal) => {
+  // 純粋な判定関数（getGitHubToken の形式検査・detectGitHubRateLimit の HTTP ステータス/
+  // ヘッダー判定）や、この分割ではモックしない他の export は実装のまま使う。
+  // aggregate.ts からの named import はモックオブジェクトに存在しないと
+  // vitest がエラーにするため、個別にモックする関数だけを上書きする形にする。
+  const actual = await importOriginal<typeof import("../github")>();
+  return {
+    ...actual,
+    listOwnerRepos: (...args: unknown[]) => mockListOwnerRepos(...args),
+    fetchRepoTextFile: (...args: unknown[]) => mockFetchRepoTextFile(...args),
+    getLastCommitDate: (...args: unknown[]) => mockGetLastCommitDate(...args),
+    resolveLatestCommitSha: (...args: unknown[]) => mockResolveLatestCommitSha(...args),
+    resolveSourceCommit: (...args: unknown[]) => mockResolveSourceCommit(...args),
+    getRepoIdentity: (...args: unknown[]) => mockGetRepoIdentity(...args),
+    fetchRateLimitStatus: (...args: unknown[]) => mockFetchRateLimitStatus(...args),
+    getObservedRateLimitRemaining: (...args: unknown[]) =>
+      mockGetObservedRateLimitRemaining(...args),
+  };
+});
 
 const mockAcquireTempTemplate = vi.fn();
 
@@ -1524,9 +1533,63 @@ describe("aggregateTemplateUsage", () => {
     expect(first).toMatchObject({ owner: "acme", repo: "rl-1" });
     expect(first?.reason).toContain("Failed to fetch lock.json");
     expect(second).toMatchObject({ owner: "acme", repo: "rl-2" });
-    expect(second?.reason).toContain("rate limit");
+    // 実際に 403 を受け取って検知したケース（"observed"）なので、予防的な打ち切り
+    // （"preemptive"、動的ブレーキ）とは文言を分ける。
+    expect(second?.reason).toBe(
+      "GitHub API rate limit reached; not checking further repositories in this scan.",
+    );
     expect(third).toMatchObject({ owner: "acme", repo: "rl-3" });
-    expect(third?.reason).toContain("rate limit");
+    expect(third?.reason).toBe(second?.reason);
+  });
+
+  // 評価フェーズを通過した後、差分処理フェーズ（利用リポジトリ内容のダウンロード）で
+  // 実際にレート制限を受けた場合も、evaluateCandidate と同じゲートへ反映され、以降の候補は
+  // テンプレート内容のダウンロードすら行わない。
+  it("差分処理フェーズでレート制限を受けると、以降の候補もゲートに反映されてスキップされる", async () => {
+    const repos = ["rl-1", "rl-2"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+    for (const repo of repos) {
+      shaFixtures.set(`acme/${repo}`, sha(`${repo}-sha`));
+      setLockFixture(lockFixtures, "acme", repo, () => Promise.resolve(Option.some(lockJson())));
+    }
+
+    const downloadedRepos: string[] = [];
+    mockAcquireTempTemplate.mockImplementation((_targetDir: string, source: string) => {
+      if (source === "gh:acme/template#tmpl-sha") {
+        return Effect.succeed(absPath("/template-dir"));
+      }
+      downloadedRepos.push(source);
+      return Effect.fail(
+        new TemplateError({
+          message: "Failed to download template",
+          cause: Object.assign(new Error("rate limited"), {
+            status: 403,
+            response: { status: 403, headers: { "x-ratelimit-remaining": "0" } },
+          }),
+        }),
+      );
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+      }),
+    );
+
+    // 利用リポジトリ内容のダウンロードは最初の候補だけ。ゲートが立った以降は
+    // テンプレート内容のダウンロードそのものを行わない。
+    expect(downloadedRepos).toHaveLength(1);
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(2);
+    const [first, second] = report.skipped;
+    expect(first).toMatchObject({ owner: "acme", repo: "rl-1" });
+    expect(first?.reason).toBe(
+      "GitHub API rate limit reached; not checking further repositories in this scan.",
+    );
+    expect(second).toMatchObject({ owner: "acme", repo: "rl-2" });
+    expect(second?.reason).toBe(first?.reason);
   });
 
   // `--since` のコミット日時取得（attachLastCommittedAt）も同じゲートを共有するため、
@@ -1559,7 +1622,7 @@ describe("aggregateTemplateUsage", () => {
     it("レート制限の残量から候補数上限を算出し、listOwnerRepos に渡す", async () => {
       mockFetchRateLimitStatus.mockResolvedValue({
         _tag: "Resolved",
-        status: { limit: 60, remaining: 15, resetAt: undefined, authenticated: false },
+        status: { limit: 60, remaining: 50, resetAt: undefined, authenticated: false },
       });
       mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "only-one" })]);
 
@@ -1570,13 +1633,68 @@ describe("aggregateTemplateUsage", () => {
         }),
       );
 
-      // remaining(15) - 安全マージン(10) = 5
+      // (remaining(50) - 安全マージン(10)) / 候補あたりの想定リクエスト数(4) = 10
       expect(mockListOwnerRepos).toHaveBeenCalledWith(
         "acme",
-        expect.objectContaining({ maxCandidates: 5 }),
+        expect.objectContaining({ maxCandidates: 10 }),
       );
-      expect(report.summary.candidateScanLimit).toBe(5);
+      expect(report.summary.candidateScanLimit).toBe(10);
       expect(report.summary.candidatesScanned).toBe(1);
+    });
+
+    it("換算後の候補数上限が 0 以下になるほど枠が無ければ、GitHubRateLimited として失敗する", async () => {
+      mockFetchRateLimitStatus.mockResolvedValue({
+        _tag: "Resolved",
+        status: {
+          limit: 60,
+          remaining: 10,
+          resetAt: new Date("2026-01-01T00:00:00Z"),
+          authenticated: false,
+        },
+      });
+
+      const result = await Effect.runPromise(
+        Effect.either(
+          aggregateTemplateUsage({
+            template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+            tmpBaseDir: "/tmp-base",
+          }),
+        ),
+      );
+
+      expect(Either.isLeft(result)).toBe(true);
+      if (Either.isLeft(result)) {
+        expect(result.left).toBeInstanceOf(ZikuFailure);
+        expect(result.left.reason).toMatchObject({
+          kind: "GitHubRateLimited",
+          authenticated: false,
+          resetAt: new Date("2026-01-01T00:00:00Z"),
+        });
+      }
+      // 候補を 1 件もまかなえないと分かった時点で失敗するので、列挙にすら進まない。
+      expect(mockListOwnerRepos).not.toHaveBeenCalled();
+    });
+
+    it("換算後の候補数上限が 1 件以上まかなえるぎりぎりの残量なら、失敗せず続行する", async () => {
+      // (remaining(14) - 安全マージン(10)) / 4 = 1（境界値）
+      mockFetchRateLimitStatus.mockResolvedValue({
+        _tag: "Resolved",
+        status: { limit: 60, remaining: 14, resetAt: undefined, authenticated: false },
+      });
+      mockListOwnerRepos.mockResolvedValue([]);
+
+      const report = await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+          tmpBaseDir: "/tmp-base",
+        }),
+      );
+
+      expect(mockListOwnerRepos).toHaveBeenCalledWith(
+        "acme",
+        expect.objectContaining({ maxCandidates: 1 }),
+      );
+      expect(report.summary.candidateScanLimit).toBe(1);
     });
 
     it("呼び出し側が指定した maxCandidates と、レート制限由来の上限の小さい方を使う", async () => {
@@ -1795,7 +1913,11 @@ describe("aggregateTemplateUsage", () => {
       expect(report.skipped).toHaveLength(2);
       expect(report.skipped.map((s) => s.repo)).toEqual(["rl-2", "rl-3"]);
       for (const s of report.skipped) {
-        expect(s.reason).toContain("rate limit");
+        // 実際にはまだ 403 を受け取っておらず、観測残量からの予防的な打ち切り
+        // （"preemptive"）なので、実際に検知した場合（"observed"）とは文言を分ける。
+        expect(s.reason).toBe(
+          "Stopped short of the GitHub API rate limit based on the observed remaining quota; not checking further repositories in this scan.",
+        );
       }
     });
 
@@ -1814,6 +1936,36 @@ describe("aggregateTemplateUsage", () => {
 
       expect(mockFetchRepoTextFile).toHaveBeenCalledTimes(2);
       expect(report.skipped).toEqual([]);
+    });
+
+    // 候補 1 件の処理には複数回の GitHub API リクエストがかかるため、動的ブレーキは
+    // 「残り候補数」ではなく「残り候補数 × 候補あたりの想定リクエスト数」で見積もる。
+    // この係数を掛けなければブレーキが発動しない残量でも、掛けた結果発動することを確認する。
+    it("候補あたりの想定リクエスト数を考慮し、残り候補数だけの見積もりより早めに止まる", async () => {
+      const repos = ["ok", "rl"];
+      mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+
+      let observedCallCount = 0;
+      mockGetObservedRateLimitRemaining.mockImplementation(() => {
+        observedCallCount += 1;
+        // ok を評価する時点ではまだ何も観測していない。
+        // rl の直前の時点で remaining(13) - margin(10) = 3 が観測されたとする。
+        // 残り候補数（1 件、自分自身のみ）だけの見積もりでは 3 < 1 は false で発動しないが、
+        // 候補あたりの想定リクエスト数（4）を掛けた見積もりでは 3 < 1*4 で発動する。
+        return observedCallCount === 1 ? undefined : { remaining: 13, resetAt: undefined };
+      });
+
+      const report = await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+          tmpBaseDir: "/tmp-base",
+          concurrency: 1,
+        }),
+      );
+
+      expect(mockFetchRepoTextFile).toHaveBeenCalledTimes(1);
+      expect(report.skipped).toHaveLength(1);
+      expect(report.skipped[0]).toMatchObject({ owner: "acme", repo: "rl" });
     });
   });
 });

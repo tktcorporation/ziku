@@ -56,8 +56,17 @@ function renderSkippedLines(report: AggregateReport): string[] {
 }
 
 /**
- * ヘッダー行の括弧内に添える補足（skipped 件数・`--since` による除外件数）を作る。
- * どちらも 0 件なら空配列を返し、呼び出し側は括弧そのものを省略する。
+ * ヘッダー行の括弧内に添える補足（skipped 件数・`--since` による除外件数・候補数上限による
+ * 打ち切り）を作る。いずれも該当が無ければ空配列を返し、呼び出し側は括弧そのものを省略する。
+ *
+ * 候補数上限による打ち切りの注記は、`renderSkippedLines` / `aggregateOutroLine` と同じ設計
+ * 意図（0 件は「使っているリポジトリが無い」ことの証明ではない）を、候補の絞り込みそのものに
+ * まで広げたもの。owner 配下に候補数上限を超えるリポジトリがあると、その分はそもそも
+ * テンプレート利用の判定すら受けていない。
+ *
+ * `candidatesScanned >= candidateScanLimit` は近似であり、常に正確に打ち切りの有無を表すとは
+ * 限らない（`candidatesScanned` の由来と近似の理由は `modules/schemas.ts` の
+ * `candidateScanLimit` を参照）。
  */
 function headerNotes(report: AggregateReport): string[] {
   const notes: string[] = [];
@@ -66,6 +75,12 @@ function headerNotes(report: AggregateReport): string[] {
   }
   if (report.summary.excludedBySince > 0) {
     notes.push(`${pc.bold(String(report.summary.excludedBySince))} excluded by --since`);
+  }
+  const { candidateScanLimit, candidatesScanned } = report.summary;
+  if (candidateScanLimit !== undefined && candidatesScanned >= candidateScanLimit) {
+    notes.push(
+      `candidate scan stopped at ${pc.bold(String(candidateScanLimit))} — the owner may have more repositories that were not checked`,
+    );
   }
   return notes;
 }

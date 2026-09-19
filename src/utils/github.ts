@@ -587,7 +587,7 @@ let ghCliTokenCache: { readonly token: string | undefined } | undefined;
  * gh CLI の `gh auth token` からトークンを取得する。
  * gh CLI が未インストール or 未ログインの場合は undefined を返す。
  *
- * 結果はプロセス内でキャッシュされる（{@link resetGitHubTokenCaches} 参照）。
+ * 結果はプロセス内でキャッシュされる（{@link resetGitHubRequestState} 参照）。
  */
 export function getGhCliToken(): string | undefined {
   if (ghCliTokenCache !== undefined) return ghCliTokenCache.token;
@@ -621,7 +621,7 @@ export function getGhCliToken(): string | undefined {
  * 観測済みのレート制限状態を次のテストへ持ち越したくないときに呼ぶこと。プロダクション
  * コードから呼ぶ必要はない（プロセス寿命の間はどれも意図して保持し続ける状態のため）。
  */
-export function resetGitHubTokenCaches(): void {
+export function resetGitHubRequestState(): void {
   ghCliTokenCache = undefined;
   warnedInvalidEnvTokens.clear();
   observedRateLimit = undefined;
@@ -704,6 +704,27 @@ interface GitHubRateLimitResponse {
   };
 }
 
+/**
+ * `GET /rate_limit` のレスポンスから読み取った `resources.core` が、候補数上限の
+ * 見積もりに使える形（`limit`/`remaining`/`reset` がいずれも number）かどうかを判定する。
+ *
+ * 200 のレスポンスでもこの形を検証せず読むと、期待した形でない JSON が返った場合に
+ * プロパティアクセスで例外が起き、呼び出し元の `Effect.tryPromise` の外側で defect になる
+ * （`aggregateTemplateUsage` はこの関数を `Effect.promise` 越しに呼ぶため、tryPromise の
+ * 保護が及ばない）。検証を通らない場合は例外を投げず `Unresolved` として返す。
+ */
+function isUsableRateLimitCore(
+  value: unknown,
+): value is GitHubRateLimitResponse["resources"]["core"] {
+  if (typeof value !== "object" || value === null) return false;
+  const core = value as Record<string, unknown>;
+  return (
+    typeof core.limit === "number" &&
+    typeof core.remaining === "number" &&
+    typeof core.reset === "number"
+  );
+}
+
 /** GitHub API のレート制限（`core` リソース）の現在値。 */
 export interface RateLimitStatus {
   readonly limit: number;
@@ -736,13 +757,21 @@ export function fetchRateLimitStatus(): Promise<RateLimitStatusResolution> {
     if (!res.ok) return classifyLookupFailure(res);
 
     const data = yield* Effect.tryPromise({
-      try: () => res.json() as Promise<GitHubRateLimitResponse>,
+      try: () => res.json() as Promise<unknown>,
       catch: (cause): GitHubLookupFailure => ({
         _tag: "Unresolved" as const,
         reason: cause instanceof Error ? cause.message : String(cause),
       }),
     });
-    const core = data.resources.core;
+    const core = (data as { readonly resources?: { readonly core?: unknown } } | null)?.resources
+      ?.core;
+    if (!isUsableRateLimitCore(core)) {
+      return {
+        _tag: "Unresolved" as const,
+        reason:
+          "the /rate_limit response did not include a usable resources.core (limit/remaining/reset)",
+      };
+    }
     return {
       _tag: "Resolved" as const,
       status: {
@@ -1301,10 +1330,32 @@ function rateLimitResetOf(cause: unknown): Date | undefined {
   return Number.isFinite(resetEpoch) ? new Date(resetEpoch * 1000) : undefined;
 }
 
+/**
+ * 任意の例外が GitHub のレート制限応答（429、または `x-ratelimit-remaining: 0` /
+ * `retry-after` 付きの 403）の形をしているかを判定する。
+ *
+ * {@link classifyGitHubApiFailure} と同じ判定基準を、GitHub API を直接呼ぶ経路以外の失敗にも
+ * 適用できるよう公開する。テンプレート取得（giget 経由の tarball ダウンロード）はこのモジュールの
+ * 外（`utils/template.ts`）で行われるが、失敗時の例外が同じ HTTP ステータス/ヘッダーの形を
+ * 保っていれば、その呼び出し元でも「レート制限で落ちたのか」を区別できる。
+ */
+export function detectGitHubRateLimit(
+  cause: unknown,
+): { readonly resetAt: Date | undefined } | undefined {
+  const status = httpStatusOf(cause);
+  if (status === 429) return { resetAt: rateLimitResetOf(cause) };
+  if (status === 403 && isRateLimitResponse(cause)) return { resetAt: rateLimitResetOf(cause) };
+  return undefined;
+}
+
+/** 例外に載っているレスポンスヘッダ全体。Octokit の `RequestError` は `response.headers` に持つ。 */
+function octokitErrorHeaders(cause: unknown): unknown {
+  return propertyOf(propertyOf(cause, "response"), "headers");
+}
+
 /** 例外に載っているレスポンスヘッダ。Octokit の `RequestError` は小文字の名前で持つ。 */
 function responseHeaderOf(cause: unknown, name: string): string | undefined {
-  const headers = propertyOf(propertyOf(cause, "response"), "headers");
-  const value = propertyOf(headers, name);
+  const value = propertyOf(octokitErrorHeaders(cause), name);
   return typeof value === "string" ? value : undefined;
 }
 
@@ -1375,7 +1426,14 @@ export async function fetchDefaultBranch(
   const viaApi = await Effect.runPromise(
     Effect.tryPromise({
       try: () => octokit.repos.get({ owner, repo }),
-      catch: classifyOctokitFailure,
+      // `githubFetch`（fetch 直叩き系）は成功・失敗どちらのレスポンスからも観測するのに対し、
+      // Octokit 経由のこの呼び出しは失敗時に `res` を受け取らない。RequestError が持つ
+      // `response.headers` から読めるだけ読んでおく（無ければ observeRateLimitHeaders が
+      // 何もしない）。
+      catch: (cause): GitHubLookupFailure => {
+        observeRateLimitHeaders(octokitErrorHeaders(cause));
+        return classifyOctokitFailure(cause);
+      },
     }).pipe(
       Effect.map(({ data, headers }): DefaultBranchResolution => {
         observeRateLimitHeaders(headers);
@@ -1643,10 +1701,18 @@ async function isOrganization(owner: string): Promise<boolean> {
  * `item.pushed_at` が `pushedSince`（ISO 8601 文字列）以降かどうかを判定する。
  * push 履歴の無い空リポジトリ（`pushed_at: null`）は対象に含めない
  * （`.ziku/lock.json` を持ちようがなく、期間内としても意味を持たないため）。
+ *
+ * `pushed_at` がパース不能な値の場合は false ではなく true を返す。この関数の結果は
+ * {@link fetchAllRepoPages} で「これより古いページの取得を打ち切ってよいか」の判定にも
+ * 使われており、false は「古い」と「ページ取得を止めてよい」の両方を意味する。パース不能な
+ * 値を古いとみなすと、push 日時の新しい順という前提が崩れている箇所で以降の正当なページを
+ * 巻き込んで取りこぼす。判定不能なら安全側（除外・打ち切りをしない）に倒す。
  */
 function isPushedSince(item: GitHubRepoListItem, pushedSince: string): boolean {
   if (item.pushed_at === null) return false;
-  return new Date(item.pushed_at).getTime() >= new Date(pushedSince).getTime();
+  const pushedAtMs = new Date(item.pushed_at).getTime();
+  if (Number.isNaN(pushedAtMs)) return true;
+  return pushedAtMs >= new Date(pushedSince).getTime();
 }
 
 /**
@@ -1788,7 +1854,7 @@ export interface ListOwnerReposOptions {
    * 指定すると、取得段階でこの件数に達した時点でページ取得を打ち切る（フィルタ前の件数で
    * 判定する。{@link fetchAllRepoPages} 参照）。owner 配下に多数のリポジトリがある未認証
    * 環境では、1 候補につき最低 1 回の GitHub API 呼び出しが発生するため、無制限に列挙する
-   * と後続の候補ごとの処理でクォータを使い切る。省略時は上限無し（従来どおり全件列挙）。
+   * と後続の候補ごとの処理でクォータを使い切る。省略時は件数の上限を設けず全件列挙する。
    */
   readonly maxCandidates?: number;
   /**

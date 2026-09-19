@@ -158,18 +158,17 @@ function isRealTimeOfDay(hour = 0, minute = 0, second = 0): boolean {
   return hour <= 23 && minute <= 59 && second <= 60;
 }
 
-type ConcurrencyParseResult =
+type PositiveIntegerParseResult =
   | { readonly ok: true; readonly value: number | undefined }
   | { readonly ok: false };
 
-/** `--concurrency` の期待フォーマット。CLI ガード節が `InvalidArgument` の `expected` に使う。 */
-export const CONCURRENCY_FORMAT_HINT = "a positive integer, e.g. --concurrency=4";
-
 /**
- * `--concurrency` を正の整数として検証する。
- * 未指定（undefined）は `aggregateTemplateUsage` 側の既定値に委ねる。
+ * 「未指定なら ok、指定されていれば正の整数でなければ ok:false」という、この 3 つの CLI
+ * オプション（`--concurrency` / `--max-candidates` / `--recent-days`）に共通のパース規則。
+ * 未指定（undefined）を許すのは、いずれも `aggregateTemplateUsage` 側に既定値があり、
+ * それに委ねてよいため。
  */
-export function parseConcurrency(raw: string | undefined): ConcurrencyParseResult {
+function parsePositiveInteger(raw: string | undefined): PositiveIntegerParseResult {
   if (raw === undefined) return { ok: true, value: undefined };
   const value = Number(raw);
   if (!Number.isInteger(value) || value <= 0) {
@@ -178,9 +177,16 @@ export function parseConcurrency(raw: string | undefined): ConcurrencyParseResul
   return { ok: true, value };
 }
 
-type MaxCandidatesParseResult =
-  | { readonly ok: true; readonly value: number | undefined }
-  | { readonly ok: false };
+/** `--concurrency` の期待フォーマット。CLI ガード節が `InvalidArgument` の `expected` に使う。 */
+export const CONCURRENCY_FORMAT_HINT = "a positive integer, e.g. --concurrency=4";
+
+/**
+ * `--concurrency` を正の整数として検証する。
+ * 未指定（undefined）は `aggregateTemplateUsage` 側の既定値に委ねる。
+ */
+export function parseConcurrency(raw: string | undefined): PositiveIntegerParseResult {
+  return parsePositiveInteger(raw);
+}
 
 /** `--max-candidates` の期待フォーマット。CLI ガード節が `InvalidArgument` の `expected` に使う。 */
 export const MAX_CANDIDATES_FORMAT_HINT = "a positive integer, e.g. --max-candidates=200";
@@ -192,18 +198,9 @@ export const MAX_CANDIDATES_FORMAT_HINT = "a positive integer, e.g. --max-candid
  * 残量から算出した上限の小さい方）に委ねる。指定した場合は、その値を「既定値より緩めてよい
  * 明示的な意思表示」として扱う（レート制限由来の上限との小さい方が使われる）。
  */
-export function parseMaxCandidates(raw: string | undefined): MaxCandidatesParseResult {
-  if (raw === undefined) return { ok: true, value: undefined };
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value <= 0) {
-    return { ok: false };
-  }
-  return { ok: true, value };
+export function parseMaxCandidates(raw: string | undefined): PositiveIntegerParseResult {
+  return parsePositiveInteger(raw);
 }
-
-type RecentDaysParseResult =
-  | { readonly ok: true; readonly value: number | undefined }
-  | { readonly ok: false };
 
 /** `--recent-days` の期待フォーマット。CLI ガード節が `InvalidArgument` の `expected` に使う。 */
 export const RECENT_DAYS_FORMAT_HINT = "a positive integer, e.g. --recent-days=30";
@@ -214,13 +211,8 @@ export const RECENT_DAYS_FORMAT_HINT = "a positive integer, e.g. --recent-days=3
  *
  * 未指定（undefined）は `aggregateTemplateUsage` 側の既定値に委ねる。
  */
-export function parseRecentDays(raw: string | undefined): RecentDaysParseResult {
-  if (raw === undefined) return { ok: true, value: undefined };
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value <= 0) {
-    return { ok: false };
-  }
-  return { ok: true, value };
+export function parseRecentDays(raw: string | undefined): PositiveIntegerParseResult {
+  return parsePositiveInteger(raw);
 }
 
 /**

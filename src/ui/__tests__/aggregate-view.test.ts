@@ -109,6 +109,51 @@ describe("renderAggregateSummary", () => {
     const line = strip(renderAggregateSummary(report));
     expect(line).toContain("Report includes 0 repositories (2 excluded by --since).");
   });
+
+  it("候補数上限まで問い合わせていれば、owner 配下にさらにリポジトリがある可能性を注記する", () => {
+    const report = makeReport({
+      repositories: [
+        {
+          owner: "acme",
+          repo: "consumer-a",
+          defaultBranch: "main",
+          ref: sha("deadbeef"),
+          pendingPush: [],
+          pendingPull: [],
+          conflicts: [],
+        },
+      ],
+      summary: {
+        totalRepositories: 1,
+        repositoriesWithPendingPush: 0,
+        pendingPushFiles: 0,
+        conflictFiles: 0,
+        excludedBySince: 0,
+        candidatesScanned: 30,
+        candidateScanLimit: 30,
+      },
+    });
+
+    const line = strip(renderAggregateSummary(report));
+    expect(line).toContain("candidate scan stopped at 30");
+  });
+
+  it("候補数上限に届いていなければ注記しない", () => {
+    const report = makeReport({
+      summary: {
+        totalRepositories: 0,
+        repositoriesWithPendingPush: 0,
+        pendingPushFiles: 0,
+        conflictFiles: 0,
+        excludedBySince: 0,
+        candidatesScanned: 5,
+        candidateScanLimit: 30,
+      },
+    });
+
+    const line = strip(renderAggregateSummary(report));
+    expect(line).not.toContain("candidate scan stopped");
+  });
 });
 
 describe("aggregateOutroLine", () => {

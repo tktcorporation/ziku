@@ -9,6 +9,7 @@ import { ZikuFailure } from "../../errors";
 import {
   checkRepoExists,
   checkRepoSetup,
+  detectGitHubRateLimit,
   fetchRateLimitStatus,
   fetchRepoTextFile,
   getGhCliToken,
@@ -19,7 +20,7 @@ import {
   isGitHubTokenFormat,
   listOwnerRepos,
   rateLimitedError,
-  resetGitHubTokenCaches,
+  resetGitHubRequestState,
   unauthorizedError,
 } from "../github";
 import { log } from "../../ui/renderer";
@@ -56,12 +57,12 @@ function mockLsRemoteOutput(stdout: string): void {
   }) as unknown as typeof execFile);
 }
 
-// `getGhCliToken` はプロセス内キャッシュを持つ（{@link resetGitHubTokenCaches}）。
+// `getGhCliToken` はプロセス内キャッシュを持つ（{@link resetGitHubRequestState}）。
 // テストの独立性を保つため、モックの呼び出し履歴・戻り値設定とキャッシュを毎テスト後に消す。
 afterEach(() => {
   vi.mocked(execFileSync).mockReset();
   vi.mocked(execFile).mockReset();
-  resetGitHubTokenCaches();
+  resetGitHubRequestState();
 });
 
 // 既定は「git でも引けない」。API の失敗をそのまま観察したいテストが、git フォールバックの
@@ -1246,6 +1247,33 @@ describe("GitHub API の失敗の分類", () => {
   });
 });
 
+/**
+ * GitHub API 呼び出し以外の失敗（giget 経由のテンプレート/リポジトリ内容ダウンロード等）が
+ * レート制限の形をしているかを判定する、classifyGitHubApiFailure 相当の公開版。
+ */
+describe("detectGitHubRateLimit", () => {
+  it("429 をレート制限として検出し、retry-after から resetAt を組み立てる", () => {
+    const cause = apiError(429, "Too Many Requests", { "retry-after": "60" });
+    const result = detectGitHubRateLimit(cause);
+    expect(result).not.toBeUndefined();
+    expect(result?.resetAt?.getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it("x-ratelimit-remaining: 0 付きの 403 をレート制限として検出する", () => {
+    const cause = apiError(403, "API rate limit exceeded", { "x-ratelimit-remaining": "0" });
+    expect(detectGitHubRateLimit(cause)).toEqual({ resetAt: undefined });
+  });
+
+  it("権限不足の 403（レート制限ヘッダー無し）はレート制限として検出しない", () => {
+    const cause = apiError(403, "Resource not accessible by personal access token");
+    expect(detectGitHubRateLimit(cause)).toBeUndefined();
+  });
+
+  it("ステータスを持たない例外はレート制限として検出しない", () => {
+    expect(detectGitHubRateLimit(new Error("something else"))).toBeUndefined();
+  });
+});
+
 describe("checkRepoSetup", () => {
   const originalFetch = globalThis.fetch;
 
@@ -1609,6 +1637,32 @@ describe("listOwnerRepos", () => {
 
     expect(result.map((r) => r.repo).toSorted()).toEqual(["ancient", "recent"]);
   });
+
+  // pushed_at がパースできない値の場合、それを「古い」と早合点して以降のページ取得を
+  // 打ち切ると、push 日時の新しい順という前提が崩れている箇所を境に、以降にある正当な
+  // （閾値以降の）候補まで巻き込んで取りこぼす。判定不能なら安全側（除外・打ち切りをしない）
+  // に倒し、候補には含めつつページ取得も続ける。
+  it("pushed_at がパースできない値なら、古いと決めつけず候補に含めページ取得も続ける", async () => {
+    const threshold = "2026-01-01T00:00:00Z";
+    const page1 = [
+      repoListItem("new", { pushedAt: "2026-03-01T00:00:00Z" }),
+      // 判定不能。除外も早期終了もしない。
+      repoListItem("unparseable", { pushedAt: "not-a-date" }),
+      repoListItem("also-new", { pushedAt: "2026-02-01T00:00:00Z" }),
+    ];
+    const listUrls: string[] = [];
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(mockResponse({ status: 200 }));
+      }
+      listUrls.push(url);
+      return Promise.resolve(mockJsonResponse(200, page1));
+    });
+
+    const result = await listOwnerRepos("acme", { pushedSince: threshold });
+
+    expect(result.map((r) => r.repo)).toEqual(["new", "unparseable", "also-new"]);
+  });
 });
 
 describe("fetchRateLimitStatus", () => {
@@ -1691,6 +1745,34 @@ describe("fetchRateLimitStatus", () => {
       reason: "API rate limit exceeded",
     });
   });
+
+  // 200 でも resources.core が期待した形（limit/remaining/reset が number）でなければ、
+  // プロパティアクセスで例外を起こさず Unresolved として返す。呼び出し元
+  // （aggregateTemplateUsage）は Effect.promise 越しにこの関数を呼ぶため、ここで
+  // 例外を投げると tryPromise の保護が及ばず defect になる。
+  it("200 でも resources.core が期待した形でなければ Unresolved として返す", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      mockJsonResponse(200, {
+        resources: { core: { limit: 60 } },
+      }),
+    );
+
+    expect(await fetchRateLimitStatus()).toEqual({
+      _tag: "Unresolved",
+      reason:
+        "the /rate_limit response did not include a usable resources.core (limit/remaining/reset)",
+    });
+  });
+
+  it("200 で resources 自体が欠けていても Unresolved として返す", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(mockJsonResponse(200, {}));
+
+    expect(await fetchRateLimitStatus()).toEqual({
+      _tag: "Unresolved",
+      reason:
+        "the /rate_limit response did not include a usable resources.core (limit/remaining/reset)",
+    });
+  });
 });
 
 describe("観測したレート制限残量（getObservedRateLimitRemaining）", () => {
@@ -1749,7 +1831,7 @@ describe("観測したレート制限残量（getObservedRateLimitRemaining）",
     expect(getObservedRateLimitRemaining()).toEqual({ remaining: 2, resetAt: undefined });
   });
 
-  it("resetGitHubTokenCaches() で観測値もクリアされる", async () => {
+  it("resetGitHubRequestState() で観測値もクリアされる", async () => {
     globalThis.fetch = vi
       .fn()
       .mockResolvedValue(
@@ -1762,7 +1844,7 @@ describe("観測したレート制限残量（getObservedRateLimitRemaining）",
     await getRepoIdentity("acme", "widgets");
     expect(getObservedRateLimitRemaining()).not.toBeUndefined();
 
-    resetGitHubTokenCaches();
+    resetGitHubRequestState();
     expect(getObservedRateLimitRemaining()).toBeUndefined();
   });
 });
@@ -1903,11 +1985,11 @@ describe("getGhCliToken のキャッシュ", () => {
     expect(execFileSync).toHaveBeenCalledTimes(1);
   });
 
-  it("resetGitHubTokenCaches() の後は再実行する", () => {
+  it("resetGitHubRequestState() の後は再実行する", () => {
     vi.mocked(execFileSync).mockReturnValue("ghp_first\n");
     expect(getGhCliToken()).toBe("ghp_first");
 
-    resetGitHubTokenCaches();
+    resetGitHubRequestState();
     vi.mocked(execFileSync).mockReturnValue("ghp_second\n");
     expect(getGhCliToken()).toBe("ghp_second");
 
@@ -2045,6 +2127,27 @@ describe("fetchDefaultBranch", () => {
     await fetchDefaultBranch("owner", "repo");
 
     expect(getObservedRateLimitRemaining()).toEqual({ remaining: 4, resetAt: undefined });
+  });
+
+  // githubFetch（fetch 直叩き系）は成功・失敗どちらのレスポンスからも観測するのに対し、
+  // Octokit 経由のこの呼び出しは以前、成功時（Effect.map 内）でしか観測していなかった。
+  // RequestError が response.headers を持つ場合は、失敗時にもそこから観測できるようにする。
+  it("失敗レスポンスのヘッダーからもレート制限残量を観測する", async () => {
+    mockReposGet.mockRejectedValue(
+      apiError(403, "API rate limit exceeded", { "x-ratelimit-remaining": "0" }),
+    );
+
+    await fetchDefaultBranch("owner", "repo");
+
+    expect(getObservedRateLimitRemaining()).toEqual({ remaining: 0, resetAt: undefined });
+  });
+
+  it("失敗した例外が response.headers を持たなければ、観測値を更新しない", async () => {
+    mockReposGet.mockRejectedValue(new Error("Not Found"));
+
+    await fetchDefaultBranch("owner", "repo");
+
+    expect(getObservedRateLimitRemaining()).toBeUndefined();
   });
 });
 

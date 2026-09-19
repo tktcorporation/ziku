@@ -34,6 +34,7 @@ import type {
 import { baseCommitSha, baseHashesOf, lockSchema, templateRefToString } from "../modules/schemas";
 import { analyzeConfigDrift } from "./config-merge";
 import {
+  detectGitHubRateLimit,
   fetchRateLimitStatus,
   fetchRepoTextFile,
   getGitHubToken,
@@ -119,13 +120,30 @@ const DEFAULT_CONCURRENCY = 4;
 
 /**
  * レート制限の残量から候補数上限を算出するとき、および実行中の動的ブレーキ
- * （{@link evaluateCandidate}）の判定に使う安全マージン。
+ * （{@link evaluateCandidate}）の判定に使う安全マージン。単位は GitHub API リクエスト数
+ * （{@link ESTIMATED_REQUESTS_PER_CANDIDATE} で候補数へ変換する前の値）。
  *
  * owner 一覧取得・テンプレートの正規名解決など、候補ごとの処理以外にもこのスキャン中に
  * GitHub API 呼び出しが発生するため、残量をそのまま候補数の上限にすると、それらの
  * 呼び出し分だけ超過しうる。
  */
 const RATE_LIMIT_SAFETY_MARGIN = 10;
+
+/**
+ * 候補 1 件を最後まで処理するのに実際にかかる GitHub API リクエスト数の下限見積もり。
+ * `resolveCandidateLimit` の候補数上限算出と、実行中の動的ブレーキ（{@link evaluateCandidate}）
+ * の両方が、「候補 1 件 = リクエスト 1 回」という過小評価を避けるためにこの係数で割る。
+ *
+ * 内訳（`evaluateCandidate` → `processCandidate` の経路で 1 候補ごとに必ず発生する呼び出し）:
+ * 1. lock.json の初回取得（ふるい用、`readCandidateLock`）
+ * 2. commit SHA の解決（`resolveCandidateRef`）
+ * 3. 固定した commit での lock.json 再取得（`readCandidateLock`）
+ * 4. 利用リポジトリ内容のダウンロード（`processCandidate` → `classifyAgainstTemplate`）
+ *
+ * `since` フィルタ指定時のコミット日時取得など、これを超える呼び出しが発生するケースも
+ * あるため、あくまで下限の見積もりであることに注意。
+ */
+const ESTIMATED_REQUESTS_PER_CANDIDATE = 4;
 
 /**
  * 候補数上限を呼び出し側が明示指定しなかったときの既定値。
@@ -193,9 +211,7 @@ export function aggregateTemplateUsage(
       // 使い切った後も候補ごとに新規リクエストを送り続けると、残り候補数分がそのまま同じ
       // レート制限応答を受け取るだけの無駄になる。リセットまで最大 1 時間かかりうるため、
       // 待たずに検知した時点で以降の GitHub 呼び出しを打ち切り、まとめて報告する。
-      const rateLimitGate: RateLimitGate = yield* Ref.make(
-        Option.none<{ readonly resetAt: Date | undefined }>(),
-      );
+      const rateLimitGate: RateLimitGate = yield* Ref.make(Option.none<RateLimitDetection>());
 
       // owner 配下の候補数を、レート制限の残量から安全に処理できる件数まで事前に絞り込む。
       // 401（トークン拒否）はここで即座にスキャン全体を失敗させ、取得自体の失敗
@@ -392,10 +408,16 @@ function tryGitHub<A>(run: () => Promise<A>): Effect.Effect<A, ZikuFailure> {
 /**
  * owner 横断探索を始める前に、安全に処理できる候補数の上限を決める。
  *
- * - 残量が取得できた場合: 安全マージンを引いた値と、`userMaxCandidates ?? DEFAULT_MAX_CANDIDATES`
- *   （呼び出し側が明示指定しなければ固定の既定値を使う）の小さい方を上限にする。
- *   明示指定した `maxCandidates` は「既定値より緩めてよい意思表示」として扱うため、
- *   既定値と掛け合わせて狭めることはしない（レート制限由来の上限は緩めない）。
+ * - 残量が取得できた場合: 安全マージンを引いた残りを {@link ESTIMATED_REQUESTS_PER_CANDIDATE}
+ *   で割り、候補 1 件をまかなうリクエスト数に換算してから候補数上限を出す。その値と
+ *   `userMaxCandidates ?? DEFAULT_MAX_CANDIDATES`（呼び出し側が明示指定しなければ固定の
+ *   既定値を使う）の小さい方を上限にする。明示指定した `maxCandidates` は「既定値より
+ *   緩めてよい意思表示」として扱うため、既定値と掛け合わせて狭めることはしない
+ *   （レート制限由来の上限は緩めない）。
+ *   換算後の値が 0 以下（候補を 1 件もまかなえないほど枠が無い）なら、`listOwnerRepos` を
+ *   `maxCandidates: 0` で呼んで静かに空レポートを返すのではなく、`GitHubRateLimited` として
+ *   失敗させる。空レポートは「利用リポジトリが無かった」と読めてしまうが、実際には
+ *   「枯渇していて 1 件も確認できなかった」ため、両者を混同させない。
  * - トークンが拒否された場合（401）: 人がトークンを直すまで結果は変わらないので、
  *   候補ごとの絞り込みロジックに入る前にスキャン全体を失敗させる。
  * - 残量を取得できなかった場合（ネットワーク断等）: レート制限由来の上限だけは適用できないが、
@@ -405,21 +427,46 @@ function tryGitHub<A>(run: () => Promise<A>): Effect.Effect<A, ZikuFailure> {
 function resolveCandidateLimit(
   rateLimitStatus: RateLimitStatusResolution,
   userMaxCandidates: number | undefined,
-): Effect.Effect<number | undefined, ZikuFailure> {
+): Effect.Effect<number, ZikuFailure> {
   return match(rateLimitStatus)
     .with({ _tag: "Resolved" }, (r) => {
-      const derived = Math.max(0, r.status.remaining - RATE_LIMIT_SAFETY_MARGIN);
+      const derived = Math.floor(
+        Math.max(0, r.status.remaining - RATE_LIMIT_SAFETY_MARGIN) /
+          ESTIMATED_REQUESTS_PER_CANDIDATE,
+      );
+      if (derived <= 0) {
+        return Effect.fail(
+          zikuFailure({
+            kind: "GitHubRateLimited",
+            authenticated: r.status.authenticated,
+            resetAt: r.status.resetAt,
+          }),
+        );
+      }
       const requestedLimit = userMaxCandidates ?? DEFAULT_MAX_CANDIDATES;
       return Effect.succeed(Math.min(derived, requestedLimit));
     })
     .with({ _tag: "AuthRejected" }, (f) =>
       Effect.fail(zikuFailure({ kind: "GitHubAuthRejected", detail: f.detail })),
     )
-    .with({ _tag: "Unresolved" }, () =>
-      Effect.succeed(userMaxCandidates ?? DEFAULT_MAX_CANDIDATES),
-    )
+    .with({ _tag: "Unresolved" }, () => Effect.succeed(userMaxCandidates ?? DEFAULT_MAX_CANDIDATES))
     .exhaustive();
 }
+
+/**
+ * レート制限を検知した経緯。呼び出し側が読む理由文（{@link rateLimitSkipReason}）を
+ * 実際に起きたことと一致させるために区別する。
+ *
+ * - `observed`: GitHub から実際に 403/429 のレート制限応答を受け取った
+ *   （{@link tryGitHubGated} 経由、または `processCandidate` がテンプレート/リポジトリ内容の
+ *   ダウンロード失敗から検知した場合）。
+ * - `preemptive`: 403 をまだ受け取っておらず、直近のレスポンスヘッダーから観測した残量
+ *   （`getObservedRateLimitRemaining`）だけで「このまま候補を処理すると枯渇する」と
+ *   見積もり、自発的に止まった（{@link evaluateCandidate} の動的ブレーキ）。
+ */
+type RateLimitDetection =
+  | { readonly _tag: "observed"; readonly resetAt: Date | undefined }
+  | { readonly _tag: "preemptive"; readonly resetAt: Date | undefined };
 
 /**
  * owner 横断のスキャン全体で共有する、レート制限を検知したかどうかの状態。
@@ -428,7 +475,7 @@ function resolveCandidateLimit(
  * 持つような組み合わせを型が許してしまう。検知済みのときだけ resetAt を持つ形にするため
  * `Option` で包む。
  */
-type RateLimitGate = Ref.Ref<Option.Option<{ readonly resetAt: Date | undefined }>>;
+type RateLimitGate = Ref.Ref<Option.Option<RateLimitDetection>>;
 
 /**
  * `tryGitHub` にレート制限ゲートを重ねる。
@@ -454,7 +501,10 @@ function tryGitHubGated<A>(
     const result = yield* Effect.either(tryGitHub(run));
     if (Either.isLeft(result)) {
       if (result.left.reason.kind === "GitHubRateLimited") {
-        yield* Ref.set(gate, Option.some({ resetAt: result.left.reason.resetAt }));
+        yield* Ref.set(
+          gate,
+          Option.some({ _tag: "observed" as const, resetAt: result.left.reason.resetAt }),
+        );
       }
       return yield* Effect.fail(result.left);
     }
@@ -474,15 +524,24 @@ function githubRateLimitedFailure(resetAt: Date | undefined): ZikuFailure {
 /**
  * ゲートが立っている状態で候補の処理に入ったときの `skipped` 理由文。
  *
+ * 実際に 403/429 を受け取った（`observed`）のか、まだ受け取っておらず観測残量からの
+ * 予防的な打ち切り（`preemptive`）なのかで文言を分ける。後者は「このまま続けると
+ * 危険と判断して自発的に止めた」ことが伝わらないと、実際にはまだ枠が残っていたかも
+ * しれないのに GitHub 側から拒否されたと読める。
+ *
  * リセットまでの残り時間を分単位で示す部分は `errors.ts` の `describeQuotaReset` と
  * 同じ考え方だが、新しい依存を増やさずここに書く。
  */
-function rateLimitSkipReason(resetAt: Date | undefined): string {
-  if (resetAt === undefined) {
-    return "GitHub API rate limit reached; not checking further repositories in this scan.";
+function rateLimitSkipReason(detection: RateLimitDetection): string {
+  const verb =
+    detection._tag === "observed"
+      ? "GitHub API rate limit reached"
+      : "Stopped short of the GitHub API rate limit based on the observed remaining quota";
+  if (detection.resetAt === undefined) {
+    return `${verb}; not checking further repositories in this scan.`;
   }
-  const minutes = Math.max(0, Math.ceil((resetAt.getTime() - Date.now()) / 60000));
-  return `GitHub API rate limit reached; not checking further repositories in this scan (resets in ~${minutes} min).`;
+  const minutes = Math.max(0, Math.ceil((detection.resetAt.getTime() - Date.now()) / 60000));
+  return `${verb}; not checking further repositories in this scan (resets in ~${minutes} min).`;
 }
 
 /**
@@ -507,8 +566,28 @@ function containDefect<A>(
   );
 }
 
-/** `acquireTempTemplate` が返す `TemplateError` を `ZikuFailure` へ変換する。 */
+/**
+ * `acquireTempTemplate` が返す `TemplateError` を `ZikuFailure` へ変換する。
+ *
+ * ダウンロード失敗の原因が GitHub のレート制限（403/429）の形をしている場合は
+ * `GitHubRateLimited` として分類する。`acquireTempTemplate` は giget 経由の tarball
+ * ダウンロードで、`utils/github.ts` の `classified()` を経由しない（GitHub API 呼び出しの
+ * 分類ロジックの外側にある）ため、ここで明示的に検出しないとレート制限による失敗が
+ * 汎用の `TemplateUnavailable` に潰れ、呼び出し側（`processCandidate`）がレート制限
+ * ゲートへ反映できない。
+ */
 function toTemplateFailure(e: TemplateError): ZikuFailure {
+  const rateLimit = detectGitHubRateLimit(e.cause);
+  if (rateLimit !== undefined) {
+    return zikuFailure(
+      {
+        kind: "GitHubRateLimited",
+        authenticated: getGitHubToken() !== undefined,
+        resetAt: rateLimit.resetAt,
+      },
+      { cause: e.cause },
+    );
+  }
   return zikuFailure({ kind: "TemplateUnavailable", detail: e.message }, { cause: e.cause });
 }
 
@@ -650,7 +729,7 @@ function resolveCandidateRef(
     if (Option.isSome(alreadyLimited)) {
       return {
         _tag: "failed" as const,
-        reason: rateLimitSkipReason(alreadyLimited.value.resetAt),
+        reason: rateLimitSkipReason(alreadyLimited.value),
       };
     }
 
@@ -718,21 +797,23 @@ function evaluateCandidate(
     // 律儀に 1 件ずつ問い合わせ続けるのが、この設計で防ぎたい無駄そのものだから。
     const alreadyLimited = yield* Ref.get(rateLimitGate);
     if (Option.isSome(alreadyLimited)) {
-      return skippedEvaluation(candidate, rateLimitSkipReason(alreadyLimited.value.resetAt));
+      return skippedEvaluation(candidate, rateLimitSkipReason(alreadyLimited.value));
     }
 
     // 実際に 403 を受け取る前に、直近のレスポンスヘッダーから観測した残量で先読みする。
-    // 自分自身とまだ処理していない候補の分（最低 1 回ずつの lock.json 取得）を安全マージン
-    // 込みでまかなえなければ、この候補以降は新規リクエストを送らず、既存の事後ゲートへ
-    // 「検知済み」として合流させる。以降の候補処理は evaluateCandidate 冒頭の
-    // 早期打ち切りにそのまま乗る。
+    // 自分自身とまだ処理していない候補の分を、候補 1 件あたりの想定リクエスト数
+    // （{@link ESTIMATED_REQUESTS_PER_CANDIDATE}）で見積もり、安全マージン込みでまかなえ
+    // なければ、この候補以降は新規リクエストを送らず、既存の事後ゲートへ「検知済み」として
+    // 合流させる。以降の候補処理は evaluateCandidate 冒頭の早期打ち切りにそのまま乗る。
     const observed = getObservedRateLimitRemaining();
     if (
       observed !== undefined &&
-      observed.remaining - RATE_LIMIT_SAFETY_MARGIN < remainingAfter + 1
+      observed.remaining - RATE_LIMIT_SAFETY_MARGIN <
+        (remainingAfter + 1) * ESTIMATED_REQUESTS_PER_CANDIDATE
     ) {
-      yield* Ref.set(rateLimitGate, Option.some({ resetAt: observed.resetAt }));
-      return skippedEvaluation(candidate, rateLimitSkipReason(observed.resetAt));
+      const detection: RateLimitDetection = { _tag: "preemptive", resetAt: observed.resetAt };
+      yield* Ref.set(rateLimitGate, Option.some(detection));
+      return skippedEvaluation(candidate, rateLimitSkipReason(detection));
     }
 
     const screening = yield* readCandidateLock(
@@ -996,6 +1077,13 @@ interface ProcessCandidateOptions {
  * 時点と内容をダウンロードする時点で対象リポジトリの既定ブランチが進んでいた場合に
  * 別コミットを見てしまい、新しいファイルと古い base ハッシュを突き合わせて実在しない
  * conflict/pending を報告する原因になる。
+ *
+ * `classifyAgainstTemplate` の呼び出しでレート制限（403/429）を検知した場合、
+ * `evaluateCandidate` フェーズと同じ `rateLimitGate` へ書き込む。評価フェーズが全件
+ * 終わってからこのフェーズが始まる構成上、ここで検知したレート制限は「評価済みで
+ * 利用リポジトリと確定していた候補」も含めて残り全件を `skipped` にする。クォータが
+ * 尽きた以上それらの詳細な差分比較も実行できないため、正確な差分を報告する代わりに
+ * 理由付きで `skipped` として報告するのが実情に即している。
  */
 function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessOutcome> {
   const {
@@ -1010,12 +1098,10 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
   const { repoInfo, lock, ref } = candidate;
 
   return Effect.gen(function* () {
-    // 既に検知済みなら、この候補のテンプレート内容ダウンロードも行わない。evaluateCandidate
-    // フェーズが全件終わってから processCandidate フェーズが始まる構成上、評価中に検知した
-    // レート制限は、既に採用済みの候補すべてに対してここで効く。
+    // 既に検知済みなら、この候補のテンプレート内容ダウンロードも行わない。
     const alreadyLimited = yield* Ref.get(rateLimitGate);
     if (Option.isSome(alreadyLimited)) {
-      return processSkipped(repoInfo, rateLimitSkipReason(alreadyLimited.value.resetAt));
+      return processSkipped(repoInfo, rateLimitSkipReason(alreadyLimited.value));
     }
 
     const classificationResult = yield* Effect.either(
@@ -1031,9 +1117,23 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
       ),
     );
     if (Either.isLeft(classificationResult)) {
+      const failure = classificationResult.left;
+      // テンプレート/リポジトリ内容のダウンロードがレート制限で失敗した場合、その事実が
+      // ここまで（`classifyAgainstTemplate` のエラーチャネルが string に潰されていたため）
+      // 失われていた。`ZikuFailure` のまま受け取り、ゲートへ反映してから以降の候補を
+      // 打ち切る。
+      if (failure instanceof ZikuFailure && failure.reason.kind === "GitHubRateLimited") {
+        const detection: RateLimitDetection = {
+          _tag: "observed",
+          resetAt: failure.reason.resetAt,
+        };
+        yield* Ref.set(rateLimitGate, Option.some(detection));
+        return processSkipped(repoInfo, rateLimitSkipReason(detection));
+      }
+      const detail = failure instanceof ZikuFailure ? failure.message : failure;
       return processSkipped(
         repoInfo,
-        `Failed to classify the diff against the template: ${classificationResult.left}`,
+        `Failed to classify the diff against the template: ${detail}`,
       );
     }
     const files = classificationResult.right;
@@ -1116,10 +1216,16 @@ interface ClassifyAgainstTemplateOptions {
  * 利用リポジトリをテンポラリへ取得し、取得済みのテンプレートと {@link analyzeSync} で
  * 3-way ハッシュ比較して分類する。`Effect.scoped` で包んで呼び出すこと
  * （Scope クローズ時にテンポラリが削除される）。
+ *
+ * エラーチャネルが `ZikuFailure | string` の union なのは、ダウンロード失敗
+ * （`acquireTempTemplate`）だけを `toTemplateFailure` で分類済みの `ZikuFailure` として運び、
+ * それ以外（ローカル読み取り・ハッシュ計算）は引き続き文字列で運ぶため。呼び出し側
+ * （`processCandidate`）はレート制限（`reason.kind === "GitHubRateLimited"`）かどうかを
+ * 判別してゲートへ反映する必要があり、文字列に潰すとその情報が失われる。
  */
 function classifyAgainstTemplate(
   opts: ClassifyAgainstTemplateOptions,
-): Effect.Effect<FileClassification, string, Scope.Scope> {
+): Effect.Effect<FileClassification, ZikuFailure | string, Scope.Scope> {
   const { templateDir, repoInfo, ref, candidateIndex, tmpBaseDir, baseHashes } = opts;
   // sanitizeLabel は記号を "_" に潰すだけなので、owner/repo が違っても衝突しうる
   // （例: "foo.bar" と "foo_bar"）。candidateIndex を付与して一意性を保証する。
@@ -1130,7 +1236,7 @@ function classifyAgainstTemplate(
       tmpBaseDir,
       buildCommitPinnedSource({ kind: "github", owner: repoInfo.owner, repo: repoInfo.repo }, ref),
       `${label}-repo`,
-    ).pipe(Effect.mapError(toMessage));
+    ).pipe(Effect.mapError(toTemplateFailure));
 
     const repoConfig = yield* loadZikuConfig(repoDir).pipe(
       Effect.mapError(describeConfigLoadError),
@@ -1347,7 +1453,11 @@ function buildReport(
   skipped: SkippedRepository[],
   excludedBySince: number,
   candidatesScanned: number,
-  candidateScanLimit: number | undefined,
+  // resolveCandidateLimit は常に具体的な上限値を返す（レート制限で 1 件もまかなえない
+  // 場合は上限 0 で続行せず、この関数へ来る前に失敗する）。スキーマ側の
+  // `candidateScanLimit` は他の生成元との互換のため引き続き optional だが、この関数の
+  // 呼び出し元は必ず値を渡す。
+  candidateScanLimit: number,
 ): AggregateReport {
   return {
     template: { owner: template.owner, repo: template.repo, ref: templateRefSha },

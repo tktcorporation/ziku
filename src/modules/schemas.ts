@@ -880,11 +880,17 @@ export const aggregateSummarySchema = z.object({
   candidatesScanned: z.number().int().nonnegative(),
   /**
    * このスキャンに適用された候補数上限（レート制限の残量から算出した値と、呼び出し側が
-   * 指定した上限の小さい方）。undefined は上限が適用されなかったことを示す。
+   * 指定した上限の小さい方）。`aggregateTemplateUsage` は常に具体的な値を設定する
+   * （上限が 0 以下になるほど枠が無ければ、レポートを作らず `GitHubRateLimited` で失敗する
+   * ため）。フィールド自体は他の生成元（手書き・別ツール産のレポート）との互換のため
+   * optional のまま残す。
    *
    * `candidatesScanned` がこの値に達している場合、owner 配下にはこの上限を超えて
    * リポジトリが存在した可能性がある。それらは候補にすら含まれておらず、このテンプレートの
-   * 利用リポジトリかどうかの判定を受けていない。
+   * 利用リポジトリかどうかの判定を受けていない。ただし取得段階の生の件数に対する近似であり、
+   * アーカイブ除外や `pushedSince` による早期終了（`utils/github.ts` の
+   * `fetchAllRepoPages`）で `candidatesScanned` がこの値へ届かないまま実際には打ち切られて
+   * いることがある。
    */
   candidateScanLimit: z.number().int().nonnegative().optional(),
 });
