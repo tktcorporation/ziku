@@ -1311,14 +1311,19 @@ describe("checkRepoSetup", () => {
 /** owner 横断探索系の関数が読む `/orgs/{owner}/repos` 等の 1 要素を組み立てる。 */
 function repoListItem(
   name: string,
-  overrides: { archived?: boolean; owner?: string; private?: boolean } = {},
+  overrides: {
+    archived?: boolean;
+    owner?: string;
+    private?: boolean;
+    pushedAt?: string | null;
+  } = {},
 ) {
   return {
     name,
     owner: { login: overrides.owner ?? "acme" },
     default_branch: "main",
     archived: overrides.archived ?? false,
-    pushed_at: "2026-01-01T00:00:00Z",
+    pushed_at: overrides.pushedAt === undefined ? "2026-01-01T00:00:00Z" : overrides.pushedAt,
     private: overrides.private ?? false,
   };
 }
@@ -1538,6 +1543,71 @@ describe("listOwnerRepos", () => {
     await listOwnerRepos("acme");
 
     expect(new URL(listUrls[0]).searchParams.get("per_page")).toBe("100");
+  });
+
+  it("pushedSince より古い pushed_at に遭遇したら、それ以降のページを取得しない", async () => {
+    const threshold = "2026-01-01T00:00:00Z";
+    // push 日時の新しい順（sort=pushed&direction=desc）で返る前提で、1 ページ目の途中から
+    // 閾値より古くなる。
+    const page1 = [
+      repoListItem("new-1", { pushedAt: "2026-03-01T00:00:00Z" }),
+      repoListItem("new-2", { pushedAt: "2026-02-01T00:00:00Z" }),
+      repoListItem("old-1", { pushedAt: "2025-06-01T00:00:00Z" }),
+    ];
+    const listUrls: string[] = [];
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(mockResponse({ status: 200 }));
+      }
+      listUrls.push(url);
+      // 1 ページ目で閾値より古いアイテムに当たった時点で打ち切るはずなので、
+      // 2 ページ目が要求されたらテスト失敗にする。
+      if (listUrls.length > 1) {
+        return Promise.reject(new Error("must not fetch a second page"));
+      }
+      return Promise.resolve(mockJsonResponse(200, page1));
+    });
+
+    const result = await listOwnerRepos("acme", { pushedSince: threshold });
+
+    expect(result.map((r) => r.repo)).toEqual(["new-1", "new-2"]);
+    expect(listUrls).toHaveLength(1);
+  });
+
+  it("pushedSince 指定時、pushed_at が null の（push 履歴の無い）リポジトリは対象外", async () => {
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(mockResponse({ status: 200 }));
+      }
+      return Promise.resolve(
+        mockJsonResponse(200, [
+          repoListItem("active", { pushedAt: "2026-03-01T00:00:00Z" }),
+          repoListItem("empty", { pushedAt: null }),
+        ]),
+      );
+    });
+
+    const result = await listOwnerRepos("acme", { pushedSince: "2026-01-01T00:00:00Z" });
+
+    expect(result.map((r) => r.repo)).toEqual(["active"]);
+  });
+
+  it("pushedSince 未指定なら push 日時での絞り込みをしない", async () => {
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(mockResponse({ status: 200 }));
+      }
+      return Promise.resolve(
+        mockJsonResponse(200, [
+          repoListItem("recent", { pushedAt: "2026-03-01T00:00:00Z" }),
+          repoListItem("ancient", { pushedAt: "2010-01-01T00:00:00Z" }),
+        ]),
+      );
+    });
+
+    const result = await listOwnerRepos("acme");
+
+    expect(result.map((r) => r.repo).toSorted()).toEqual(["ancient", "recent"]);
   });
 });
 

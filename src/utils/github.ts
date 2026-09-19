@@ -1640,6 +1640,16 @@ async function isOrganization(owner: string): Promise<boolean> {
 }
 
 /**
+ * `item.pushed_at` が `pushedSince`（ISO 8601 文字列）以降かどうかを判定する。
+ * push 履歴の無い空リポジトリ（`pushed_at: null`）は対象に含めない
+ * （`.ziku/lock.json` を持ちようがなく、期間内としても意味を持たないため）。
+ */
+function isPushedSince(item: GitHubRepoListItem, pushedSince: string): boolean {
+  if (item.pushed_at === null) return false;
+  return new Date(item.pushed_at).getTime() >= new Date(pushedSince).getTime();
+}
+
+/**
  * リポジトリ一覧 API をページネーションしながら取得する。
  *
  * 返却件数がページサイズ未満になったページを最後と判定する（GitHub の Link ヘッダを
@@ -1652,11 +1662,16 @@ async function isOrganization(owner: string): Promise<boolean> {
  *   `per_page` をその値にする）ことで、1 ページ目だけで正確にこの件数へ収める。
  *   フィルタ（アーカイブ除外等）は呼び出し側が別途行うため、ここで返す件数は
  *   フィルタ前の生の取得件数であることに注意。
+ * @param pushedSince 指定すると、`item.pushed_at` がこの値より古いアイテムに遭遇した
+ *   時点でページ取得自体を打ち切る。呼び出し側が push 日時の新しい順
+ *   （`sort=pushed&direction=desc`）で問い合わせている前提に依存する並び順依存の最適化で、
+ *   その並びが崩れると古いリポジトリを取りこぼす。
  */
 async function fetchAllRepoPages(
   baseUrl: string,
   extraParams?: Record<string, string>,
   maxItems?: number,
+  pushedSince?: string,
 ): Promise<readonly GitHubRepoListItem[]> {
   // 上限が 0（安全マージンを引くと候補を 1 件もまかなえない）なら、一覧取得そのものを
   // 行わない。`per_page=0` は GitHub API が受け付けないため、`Math.max(1, ...)` で
@@ -1675,9 +1690,16 @@ async function fetchAllRepoPages(
     const res = await githubFetch(url.toString());
     if (!res.ok) throw githubResponseError(res);
     const items = await parseGitHubJson<readonly GitHubRepoListItem[]>(res);
-    acc.push(...items);
+    for (const item of items) {
+      if (pushedSince !== undefined && !isPushedSince(item, pushedSince)) {
+        // push 日時の新しい順で取得しているため、ここから先は同じページの残りも
+        // 以降のページも全て閾値より古いと確定する。追加のページ取得はしない。
+        return acc;
+      }
+      acc.push(item);
+      if (maxItems !== undefined && acc.length >= maxItems) return acc;
+    }
     if (items.length < perPage) return acc;
-    if (maxItems !== undefined && acc.length >= maxItems) return acc;
   }
 }
 
@@ -1726,6 +1748,7 @@ async function fetchPersonalOwnerRepoPages(
   owner: string,
   extraParams: Record<string, string>,
   maxCandidates: number | undefined,
+  pushedSince: string | undefined,
 ): Promise<readonly GitHubRepoListItem[]> {
   const authenticatedLogin = await resolveAuthenticatedUserLogin();
   // login はケースを区別しないため、比較前に正規化する。
@@ -1735,12 +1758,14 @@ async function fetchPersonalOwnerRepoPages(
       "https://api.github.com/user/repos",
       { affiliation: "owner", ...extraParams },
       maxCandidates,
+      pushedSince,
     );
   }
   return fetchAllRepoPages(
     `https://api.github.com/users/${encodeURIComponent(owner)}/repos`,
     extraParams,
     maxCandidates,
+    pushedSince,
   );
 }
 
@@ -1766,6 +1791,13 @@ export interface ListOwnerReposOptions {
    * と後続の候補ごとの処理でクォータを使い切る。省略時は上限無し（従来どおり全件列挙）。
    */
   readonly maxCandidates?: number;
+  /**
+   * 指定すると、`pushed_at` がこの値（ISO 8601 文字列）より古いリポジトリを候補から除く。
+   * push 履歴の無い空リポジトリ（`pushed_at: null`）も除かれる。`sort=pushed&direction=desc`
+   * の並びを利用して、閾値より古いアイテムに遭遇した時点でページ取得自体を打ち切る
+   * （{@link fetchAllRepoPages} 参照）。省略時は push 日時での絞り込みをしない。
+   */
+  readonly pushedSince?: string;
 }
 
 /**
@@ -1783,7 +1815,9 @@ export interface ListOwnerReposOptions {
  *   返る件数は `maxCandidates` を下回りうる（{@link ListOwnerReposOptions.maxCandidates}）。
  * - 一覧は push 日時の新しい順（`sort=pushed&direction=desc`）で取得する。`maxCandidates`
  *   で打ち切ったとき、長期間放置されたリポジトリより最近アクティブなリポジトリを優先して
- *   残すため。
+ *   残すため。同じ並びを `pushedSince` の早期終了にも利用する。
+ * - `pushedSince` を指定すると、`pushed_at` がそれより古いリポジトリ（push 履歴の無い
+ *   空リポジトリを含む）を候補から除く（{@link ListOwnerReposOptions.pushedSince}）。
  * - 認証は `getGitHubToken()` に委ねる。トークンが無くても public リポジトリの一覧は取得できる
  *   （未認証は 60req/h に制限されるため、クォータに達すると `ZikuFailure`
  *   （`kind: "GitHubRateLimited"`）で失敗する）。
@@ -1794,6 +1828,7 @@ export function listOwnerRepos(
 ): Promise<OwnerRepoInfo[]> {
   const includeArchived = options?.includeArchived ?? false;
   const maxCandidates = options?.maxCandidates;
+  const pushedSince = options?.pushedSince;
   const sortParams = { sort: "pushed", direction: "desc" };
   return classified(
     `list repositories under ${owner}`,
@@ -1805,8 +1840,9 @@ export function listOwnerRepos(
             `https://api.github.com/orgs/${encodeURIComponent(owner)}/repos`,
             sortParams,
             maxCandidates,
+            pushedSince,
           )
-        : await fetchPersonalOwnerRepoPages(owner, sortParams, maxCandidates);
+        : await fetchPersonalOwnerRepoPages(owner, sortParams, maxCandidates, pushedSince);
       return items
         .filter((item) => includeArchived || !item.archived)
         .map((item): OwnerRepoInfo => ({

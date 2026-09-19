@@ -188,10 +188,33 @@ export const MAX_CANDIDATES_FORMAT_HINT = "a positive integer, e.g. --max-candid
 /**
  * `--max-candidates` を正の整数として検証する。
  *
- * 未指定（undefined）は `aggregateTemplateUsage` 側の既定値（レート制限の残量から算出した
- * 上限のみ）に委ねる。指定した場合は、算出した上限との小さい方が使われる。
+ * 未指定（undefined）は `aggregateTemplateUsage` 側の既定値（固定の既定値とレート制限の
+ * 残量から算出した上限の小さい方）に委ねる。指定した場合は、その値を「既定値より緩めてよい
+ * 明示的な意思表示」として扱う（レート制限由来の上限との小さい方が使われる）。
  */
 export function parseMaxCandidates(raw: string | undefined): MaxCandidatesParseResult {
+  if (raw === undefined) return { ok: true, value: undefined };
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    return { ok: false };
+  }
+  return { ok: true, value };
+}
+
+type RecentDaysParseResult =
+  | { readonly ok: true; readonly value: number | undefined }
+  | { readonly ok: false };
+
+/** `--recent-days` の期待フォーマット。CLI ガード節が `InvalidArgument` の `expected` に使う。 */
+export const RECENT_DAYS_FORMAT_HINT = "a positive integer, e.g. --recent-days=30";
+
+/**
+ * `--recent-days` を正の整数として検証する。`--since`（pendingPush/conflicts の最終コミット
+ * 日時での絞り込み）とは別物で、こちらは owner 配下の候補そのものを push 日時で絞り込む。
+ *
+ * 未指定（undefined）は `aggregateTemplateUsage` 側の既定値に委ねる。
+ */
+export function parseRecentDays(raw: string | undefined): RecentDaysParseResult {
   if (raw === undefined) return { ok: true, value: undefined };
   const value = Number(raw);
   if (!Number.isInteger(value) || value <= 0) {
@@ -261,7 +284,12 @@ export const aggregateCommand = defineCommand({
     "max-candidates": {
       type: "string",
       description:
-        "Maximum number of candidate repositories to check (default: derived from the current GitHub API rate limit)",
+        "Maximum number of candidate repositories to check (default: 30, further reduced when the current GitHub API rate limit is low)",
+    },
+    "recent-days": {
+      type: "string",
+      description:
+        "Only consider repositories pushed within this many days (default: 90; distinct from --since, which filters by the last commit date of pending-push/conflict files)",
     },
   },
   async run({ args }) {
@@ -318,6 +346,14 @@ export const aggregateCommand = defineCommand({
       MAX_CANDIDATES_FORMAT_HINT,
     );
 
+    const recentDaysRaw = args["recent-days"] as string | undefined;
+    const recentPushDays = requireParsedOption(
+      parseRecentDays(recentDaysRaw),
+      "--recent-days",
+      recentDaysRaw,
+      RECENT_DAYS_FORMAT_HINT,
+    );
+
     const includeArchived = args["include-archived"] as boolean;
 
     if (!jsonMode) {
@@ -332,6 +368,7 @@ export const aggregateCommand = defineCommand({
       concurrency,
       since,
       maxCandidates,
+      recentPushDays,
     });
 
     const report: AggregateReport = jsonMode

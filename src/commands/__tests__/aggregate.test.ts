@@ -49,7 +49,7 @@ vi.mock("../../ui/renderer", () => ({
   },
 }));
 
-const { aggregateCommand, normalizeSince, parseConcurrency, parseMaxCandidates } =
+const { aggregateCommand, normalizeSince, parseConcurrency, parseMaxCandidates, parseRecentDays } =
   await import("../aggregate");
 const { aggregateTemplateUsage } = await import("../../utils/aggregate");
 const { detectGitHubRepo } = await import("../../utils/git-remote");
@@ -209,6 +209,28 @@ describe("parseMaxCandidates", () => {
   });
 });
 
+describe("parseRecentDays", () => {
+  it("未指定は undefined として成功扱い", () => {
+    expect(parseRecentDays(undefined)).toEqual({ ok: true, value: undefined });
+  });
+
+  it("正の整数はそのまま受理する", () => {
+    expect(parseRecentDays("30")).toEqual({ ok: true, value: 30 });
+  });
+
+  it("0 はエラーになる", () => {
+    expect(parseRecentDays("0").ok).toBe(false);
+  });
+
+  it("負値はエラーになる", () => {
+    expect(parseRecentDays("-1").ok).toBe(false);
+  });
+
+  it("数値でない入力はエラーになる", () => {
+    expect(parseRecentDays("abc").ok).toBe(false);
+  });
+});
+
 describe("aggregateCommand", () => {
   beforeEach(() => {
     vol.reset();
@@ -289,6 +311,32 @@ describe("aggregateCommand", () => {
 
       expect(mockAggregateTemplateUsage).toHaveBeenCalledWith(
         expect.objectContaining({ maxCandidates: undefined }),
+      );
+    });
+
+    it("--recent-days=0 は ZikuFailure（aggregateTemplateUsage は呼ばれない）", async () => {
+      const thrown = await runAggregate({ "recent-days": "0" }).catch((e: unknown) => e);
+      expect(thrown).toBeInstanceOf(ZikuFailure);
+      expect((thrown as ZikuFailure).reason).toMatchObject({
+        kind: "InvalidArgument",
+        argument: "--recent-days",
+      });
+      expect(mockAggregateTemplateUsage).not.toHaveBeenCalled();
+    });
+
+    it("--recent-days=30 は数値として aggregateTemplateUsage に渡る", async () => {
+      await runAggregate({ "recent-days": "30" });
+
+      expect(mockAggregateTemplateUsage).toHaveBeenCalledWith(
+        expect.objectContaining({ recentPushDays: 30 }),
+      );
+    });
+
+    it("--recent-days 未指定なら recentPushDays は undefined のまま渡る", async () => {
+      await runAggregate({});
+
+      expect(mockAggregateTemplateUsage).toHaveBeenCalledWith(
+        expect.objectContaining({ recentPushDays: undefined }),
       );
     });
 

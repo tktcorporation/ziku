@@ -1601,7 +1601,7 @@ describe("aggregateTemplateUsage", () => {
       );
     });
 
-    it("レート制限の事前確認に失敗しても、絞り込み無しでスキャンを続ける", async () => {
+    it("レート制限の事前確認に失敗しても、既定の候補数上限でスキャンを続ける", async () => {
       mockFetchRateLimitStatus.mockResolvedValue({
         _tag: "Unresolved",
         reason: "network down",
@@ -1617,9 +1617,31 @@ describe("aggregateTemplateUsage", () => {
 
       expect(mockListOwnerRepos).toHaveBeenCalledWith(
         "acme",
-        expect.objectContaining({ maxCandidates: undefined }),
+        expect.objectContaining({ maxCandidates: 30 }),
       );
-      expect(report.summary.candidateScanLimit).toBeUndefined();
+      expect(report.summary.candidateScanLimit).toBe(30);
+    });
+
+    it("レート制限の事前確認に失敗しても、ユーザー指定の候補数上限は尊重する", async () => {
+      mockFetchRateLimitStatus.mockResolvedValue({
+        _tag: "Unresolved",
+        reason: "network down",
+      });
+      mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "proj" })]);
+
+      const report = await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+          tmpBaseDir: "/tmp-base",
+          maxCandidates: 5,
+        }),
+      );
+
+      expect(mockListOwnerRepos).toHaveBeenCalledWith(
+        "acme",
+        expect.objectContaining({ maxCandidates: 5 }),
+      );
+      expect(report.summary.candidateScanLimit).toBe(5);
     });
 
     it("レート制限の事前確認が 401 なら、候補の絞り込みロジックに入らず即座に失敗する", async () => {
@@ -1645,6 +1667,101 @@ describe("aggregateTemplateUsage", () => {
       }
       // 401 は待っても解消しないため、候補の列挙にすら進まない。
       expect(mockListOwnerRepos).not.toHaveBeenCalled();
+    });
+
+    it("ユーザー指定が無ければ、レート制限由来の上限が大きくても固定の既定値(30)で頭打ちにする", async () => {
+      mockFetchRateLimitStatus.mockResolvedValue({
+        _tag: "Resolved",
+        status: { limit: 5000, remaining: 5000, resetAt: undefined, authenticated: true },
+      });
+      mockListOwnerRepos.mockResolvedValue([]);
+
+      await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+          tmpBaseDir: "/tmp-base",
+        }),
+      );
+
+      // レート制限由来の上限（5000 - 10 = 4990）より固定の既定値（30）の方が小さい。
+      expect(mockListOwnerRepos).toHaveBeenCalledWith(
+        "acme",
+        expect.objectContaining({ maxCandidates: 30 }),
+      );
+    });
+
+    it("ユーザー指定が固定の既定値(30)より大きくても、レート制限由来の上限の範囲内ならそちらを使う", async () => {
+      mockFetchRateLimitStatus.mockResolvedValue({
+        _tag: "Resolved",
+        status: { limit: 5000, remaining: 5000, resetAt: undefined, authenticated: true },
+      });
+      mockListOwnerRepos.mockResolvedValue([]);
+
+      await Effect.runPromise(
+        aggregateTemplateUsage({
+          template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+          tmpBaseDir: "/tmp-base",
+          maxCandidates: 100,
+        }),
+      );
+
+      // ユーザー指定（100）は既定値（30）より緩めてよい意思表示として扱われ、
+      // レート制限由来の上限（5000 - 10 = 4990）の範囲内なのでそのまま使われる。
+      expect(mockListOwnerRepos).toHaveBeenCalledWith(
+        "acme",
+        expect.objectContaining({ maxCandidates: 100 }),
+      );
+    });
+  });
+
+  describe("直近 push フィルタ", () => {
+    it("既定では 90 日前を pushedSince として listOwnerRepos に渡す", async () => {
+      const now = new Date("2026-09-19T00:00:00.000Z");
+      vi.useFakeTimers();
+      vi.setSystemTime(now);
+      try {
+        mockListOwnerRepos.mockResolvedValue([]);
+
+        await Effect.runPromise(
+          aggregateTemplateUsage({
+            template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+            tmpBaseDir: "/tmp-base",
+          }),
+        );
+
+        const expected = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString();
+        expect(mockListOwnerRepos).toHaveBeenCalledWith(
+          "acme",
+          expect.objectContaining({ pushedSince: expected }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("recentPushDays を指定すると、その日数分前を pushedSince として渡す", async () => {
+      const now = new Date("2026-09-19T00:00:00.000Z");
+      vi.useFakeTimers();
+      vi.setSystemTime(now);
+      try {
+        mockListOwnerRepos.mockResolvedValue([]);
+
+        await Effect.runPromise(
+          aggregateTemplateUsage({
+            template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+            tmpBaseDir: "/tmp-base",
+            recentPushDays: 30,
+          }),
+        );
+
+        const expected = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        expect(mockListOwnerRepos).toHaveBeenCalledWith(
+          "acme",
+          expect.objectContaining({ pushedSince: expected }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 

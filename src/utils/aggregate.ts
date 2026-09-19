@@ -100,11 +100,19 @@ export interface AggregateOptions {
    */
   readonly tmpBaseDir?: string;
   /**
-   * 候補として問い合わせるリポジトリ数の上限を明示指定する。省略時はレート制限の残量から
-   * 算出した上限（{@link resolveCandidateLimit}）だけが働く。指定した場合は、その値と
-   * レート制限由来の上限の小さい方を使う（レート制限由来の上限を緩めることはできない）。
+   * 候補として問い合わせるリポジトリ数の上限を明示指定する。省略時は固定の既定値
+   * （{@link DEFAULT_MAX_CANDIDATES}）が使われる。レート制限の残量が分かっている間は、
+   * 指定してもそこから算出した上限（{@link resolveCandidateLimit}）を緩めることはできず、
+   * 常にそれとの小さい方になる。
    */
   readonly maxCandidates?: number;
+  /**
+   * 候補に含める push 日時の下限を「何日前まで」で指定する。省略時は
+   * {@link DEFAULT_RECENT_PUSH_DAYS}。owner 配下を全量問い合わせるのを避けるための
+   * 既定値で、この下限より前が最後の push だったリポジトリ（push 履歴の無い空リポジトリを
+   * 含む）は候補にしない。
+   */
+  readonly recentPushDays?: number;
 }
 
 const DEFAULT_CONCURRENCY = 4;
@@ -118,6 +126,27 @@ const DEFAULT_CONCURRENCY = 4;
  * 呼び出し分だけ超過しうる。
  */
 const RATE_LIMIT_SAFETY_MARGIN = 10;
+
+/**
+ * 候補数上限を呼び出し側が明示指定しなかったときの既定値。
+ * owner 配下を全量問い合わせるのを避けるための既定値であり、レート制限の残量から
+ * 算出した上限がこれより大きくても、明示指定が無ければこの値で頭打ちにする
+ * （{@link resolveCandidateLimit}）。
+ */
+const DEFAULT_MAX_CANDIDATES = 30;
+
+/**
+ * 候補に含める push 日時の下限を呼び出し側が明示指定しなかったときの既定値（日数）。
+ * owner 配下を全量問い合わせるのを避けるための既定値。暦月の厳密な計算はせず、
+ * 固定の日数で計算する（{@link recentPushSinceIso}）。
+ */
+const DEFAULT_RECENT_PUSH_DAYS = 90;
+
+/** `days` 日前の時刻を ISO 8601（UTC）文字列にする。`listOwnerRepos` の `pushedSince` に渡す。 */
+function recentPushSinceIso(days: number): string {
+  const millisPerDay = 24 * 60 * 60 * 1000;
+  return new Date(Date.now() - days * millisPerDay).toISOString();
+}
 
 /**
  * owner 配下のリポジトリを列挙し、指定テンプレートの利用リポジトリだけを
@@ -174,8 +203,17 @@ export function aggregateTemplateUsage(
       const rateLimitStatus = yield* Effect.promise(() => fetchRateLimitStatus());
       const candidateLimit = yield* resolveCandidateLimit(rateLimitStatus, options.maxCandidates);
 
+      // 件数上限とは別に、そもそも母集団を「直近に push されたリポジトリ」だけへ絞る。
+      // 長期間放置されたリポジトリまで毎回問い合わせに含めない既定値
+      // （{@link DEFAULT_RECENT_PUSH_DAYS}）。
+      const pushedSince = recentPushSinceIso(options.recentPushDays ?? DEFAULT_RECENT_PUSH_DAYS);
+
       const allRepos = yield* tryGitHub(() =>
-        listOwnerRepos(searchOwner, { includeArchived, maxCandidates: candidateLimit }),
+        listOwnerRepos(searchOwner, {
+          includeArchived,
+          maxCandidates: candidateLimit,
+          pushedSince,
+        }),
       );
 
       // owner/repo の正規名解決（GitHub のリネーム・移管リダイレクト経由）をキャッシュする。
@@ -354,13 +392,15 @@ function tryGitHub<A>(run: () => Promise<A>): Effect.Effect<A, ZikuFailure> {
 /**
  * owner 横断探索を始める前に、安全に処理できる候補数の上限を決める。
  *
- * - 残量が取得できた場合: 安全マージンを引いた値を上限にする。呼び出し側が
- *   `maxCandidates` を指定していれば、その値との小さい方を使う（レート制限由来の
- *   上限を緩めることはできない）。
+ * - 残量が取得できた場合: 安全マージンを引いた値と、`userMaxCandidates ?? DEFAULT_MAX_CANDIDATES`
+ *   （呼び出し側が明示指定しなければ固定の既定値を使う）の小さい方を上限にする。
+ *   明示指定した `maxCandidates` は「既定値より緩めてよい意思表示」として扱うため、
+ *   既定値と掛け合わせて狭めることはしない（レート制限由来の上限は緩めない）。
  * - トークンが拒否された場合（401）: 人がトークンを直すまで結果は変わらないので、
  *   候補ごとの絞り込みロジックに入る前にスキャン全体を失敗させる。
- * - 残量を取得できなかった場合（ネットワーク断等）: 取得できないこと自体は処理を
- *   止める理由にならないため、`maxCandidates`（無指定なら上限無し）のまま続行する。
+ * - 残量を取得できなかった場合（ネットワーク断等）: レート制限由来の上限だけは適用できないが、
+ *   owner 配下を全量問い合わせるのを避ける既定値（`DEFAULT_MAX_CANDIDATES`）は、
+ *   レート制限の情報が引けるかどうかと無関係に働かせる。
  */
 function resolveCandidateLimit(
   rateLimitStatus: RateLimitStatusResolution,
@@ -369,14 +409,15 @@ function resolveCandidateLimit(
   return match(rateLimitStatus)
     .with({ _tag: "Resolved" }, (r) => {
       const derived = Math.max(0, r.status.remaining - RATE_LIMIT_SAFETY_MARGIN);
-      const limit =
-        userMaxCandidates === undefined ? derived : Math.min(derived, userMaxCandidates);
-      return Effect.succeed(limit);
+      const requestedLimit = userMaxCandidates ?? DEFAULT_MAX_CANDIDATES;
+      return Effect.succeed(Math.min(derived, requestedLimit));
     })
     .with({ _tag: "AuthRejected" }, (f) =>
       Effect.fail(zikuFailure({ kind: "GitHubAuthRejected", detail: f.detail })),
     )
-    .with({ _tag: "Unresolved" }, () => Effect.succeed(userMaxCandidates))
+    .with({ _tag: "Unresolved" }, () =>
+      Effect.succeed(userMaxCandidates ?? DEFAULT_MAX_CANDIDATES),
+    )
     .exhaustive();
 }
 

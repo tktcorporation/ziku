@@ -349,12 +349,14 @@ ARGUMENTS
 
 OPTIONS
 
-              --owner=<owner>    GitHub owner to search for template usage (default: origin owner)
-              --since=<since>    Only include repositories with pending-push/conflict changes on or after this date/time (ISO 8601; interpreted as UTC unless an explicit offset is given)
-                       --json    Print the JSON report to stdout (no decoration; safe to pipe) (Default: false)
-                  --out=<out>    Write the JSON report to this file path
-           --include-archived    Include archived repositories (Default: false)
-  --concurrency=<concurrency>    Number of repositories to process concurrently (default: 4)
+                    --owner=<owner>    GitHub owner to search for template usage (default: origin owner)
+                    --since=<since>    Only include repositories with pending-push/conflict changes on or after this date/time (ISO 8601; interpreted as UTC unless an explicit offset is given)
+                             --json    Print the JSON report to stdout (no decoration; safe to pipe) (Default: false)
+                        --out=<out>    Write the JSON report to this file path
+                 --include-archived    Include archived repositories (Default: false)
+        --concurrency=<concurrency>    Number of repositories to process concurrently (default: 4)
+  --max-candidates=<max_candidates>    Maximum number of candidate repositories to check (default: 30, further reduced when the current GitHub API rate limit is low)
+        --recent-days=<recent_days>    Only consider repositories pushed within this many days (default: 90; distinct from --since, which filters by the last commit date of pending-push/conflict files)
 ```
 
 <!-- COMMANDS:END -->
