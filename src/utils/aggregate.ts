@@ -233,6 +233,7 @@ export function aggregateTemplateUsage(
           includeArchived,
           maxCandidates: candidateLimit,
           pushedSince,
+          excludeRepo: { owner: template.owner, repo: template.repo },
         }),
       );
 
@@ -247,6 +248,9 @@ export function aggregateTemplateUsage(
 
       const templateRefSha = template.ref ?? (yield* resolveTemplateRef(template, resolveIdentity));
 
+      // `listOwnerRepos` に渡した `excludeRepo` が既にテンプレート自身を除いて返す。ここでの
+      // 絞り込みは、探索対象 owner とテンプレートの owner が異なり `excludeRepo` の一致条件に
+      // 掛からないケース（テンプレートが自分以外の owner 配下にある構成）への防御。
       const candidates = allRepos.filter((r) => !isSameRepo(r, template));
 
       const evaluations = yield* Effect.forEach(

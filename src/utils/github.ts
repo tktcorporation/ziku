@@ -674,11 +674,35 @@ function readHeaderValue(headers: unknown, name: string): string | undefined {
 }
 
 /**
+ * 2 つの `resetAt` が同じレート制限リセットウィンドウを指しているとみなせるか。
+ *
+ * 両方とも読めた場合はエポック値そのもので比較する。片方だけ読めない場合は、ウィンドウの
+ * 同一性を確認できないので「異なる」に倒す（新しい観測値をそのまま採用する側へ）。両方とも
+ * 読めない場合は同一性を確認する手立てが無いが、単調減少の想定自体はウィンドウが分からなくても
+ * 成り立つため、`observeRateLimitHeaders` 側の「同じウィンドウ」の扱い（残量が既存より小さい
+ * ときだけ採用）に委ねる。
+ */
+function sameRateLimitWindow(a: Date | undefined, b: Date | undefined): boolean {
+  if (a === undefined && b === undefined) return true;
+  if (a === undefined || b === undefined) return false;
+  return a.getTime() === b.getTime();
+}
+
+/**
  * GitHub のレスポンスヘッダーから、レート制限の残量を観測して記録する。
  *
  * `x-ratelimit-remaining` は成功レスポンスにも乗るため、実際に 403 を受け取る前に
  * 枯渇の兆候へ気づける。ヘッダーが無い・数値としてパースできない場合は何もしない
  * （直前の観測値を「情報が無い」で上書きしない）。
+ *
+ * `aggregate.ts` の owner 横断探索は複数の GitHub リクエストを並行して発行するため、
+ * レスポンスは発行順ではなく完了順に届く。後から発行した（実際には残量が少ない）
+ * リクエストが先に完了して小さい値を記録した後、先に発行したが完了が遅かった
+ * リクエスト（届いた時点では既に古い、値としては大きい観測）が無条件で上書きすると、
+ * 動的ブレーキが実際より楽観的な残量を見てしまう。同じリセットウィンドウ内では残量は
+ * 単調減少するはずなので、新しい観測値が既存より大きければ採用せず、より保守的な
+ * （小さい）既存の値を残す。ウィンドウが変わった（{@link sameRateLimitWindow} が false）
+ * 場合は、新しいウィンドウの値として無条件に採用する。
  */
 function observeRateLimitHeaders(headers: unknown): void {
   const remainingHeader = readHeaderValue(headers, "x-ratelimit-remaining");
@@ -689,7 +713,15 @@ function observeRateLimitHeaders(headers: unknown): void {
   const resetHeader = readHeaderValue(headers, "x-ratelimit-reset");
   const resetEpoch = resetHeader !== undefined ? Number(resetHeader) : Number.NaN;
   const resetAt = Number.isFinite(resetEpoch) ? new Date(resetEpoch * 1000) : undefined;
-  observedRateLimit = { remaining, resetAt };
+  const next: ObservedRateLimit = { remaining, resetAt };
+
+  if (
+    observedRateLimit === undefined ||
+    !sameRateLimitWindow(observedRateLimit.resetAt, resetAt) ||
+    remaining < observedRateLimit.remaining
+  ) {
+    observedRateLimit = next;
+  }
 }
 
 /** `GET /rate_limit` のレスポンス。必要フィールドのみ */
@@ -1793,6 +1825,28 @@ function classifyPushedSince(item: GitHubRepoListItem, pushedSince: string): Pus
 }
 
 /**
+ * `pushedSince` と `isEligible` の両方から、アイテム 1 件を候補に含めてよいかを、
+ * {@link PushedSinceCheck} と同じ形（含める / 除外して続行 / 除外して打ち切り）で決める。
+ *
+ * `pushedSince` の判定を先に評価するのは、`excludeStop`（以降のページ取得も打ち切ってよい）
+ * が push 日時の並び順に依存する判定だから。`isEligible` を先に評価して `excludeStop` の
+ * 判定そのものを飛ばすと、打ち切ってよいタイミングを見誤る。`isEligible` による除外は
+ * 打ち切りの根拠にはならないため、常に `excludeContinue` として扱う。
+ */
+function decideRepoPageItem(
+  item: GitHubRepoListItem,
+  pushedSince: string | undefined,
+  isEligible: ((item: GitHubRepoListItem) => boolean) | undefined,
+): PushedSinceCheck {
+  if (pushedSince !== undefined) {
+    const check = classifyPushedSince(item, pushedSince);
+    if (check._tag !== "include") return check;
+  }
+  if (isEligible !== undefined && !isEligible(item)) return { _tag: "excludeContinue" };
+  return { _tag: "include" };
+}
+
+/**
  * リポジトリ一覧 API をページネーションしながら取得する。
  *
  * 返却件数がページサイズ未満になったページを最後と判定する（GitHub の Link ヘッダを
@@ -1803,20 +1857,27 @@ function classifyPushedSince(item: GitHubRepoListItem, pushedSince: string): Pus
  * @param maxItems 指定すると、累積取得件数がこの値に達した時点でページ取得を打ち切る。
  *   ページサイズ自体も `maxItems` に合わせて縮める（`maxItems` が 100 未満なら
  *   `per_page` をその値にする）ことで、1 ページ目だけで正確にこの件数へ収める。
- *   フィルタ（アーカイブ除外等）は呼び出し側が別途行うため、ここで返す件数は
- *   フィルタ前の生の取得件数であることに注意。
+ *   カウントするのは `isEligible` を通過したアイテムだけなので、`isEligible` で弾かれる
+ *   アイテムが一覧の先頭付近に来ても、後続の候補が押し出されない。
  * @param pushedSince 指定すると、`item.pushed_at` がこの値より古い（パース可能な日時として
  *   確定できる）アイテムに遭遇した時点でページ取得自体を打ち切る。呼び出し側が push 日時の
  *   新しい順（`sort=pushed&direction=desc`）で問い合わせている前提に依存する並び順依存の
  *   最適化で、その並びが崩れると古いリポジトリを取りこぼす。`pushed_at: null`（push 履歴の
  *   無い空リポジトリ）はこの並び基準での位置が保証されないため、候補からは除くがこの
  *   打ち切りの根拠にはしない（{@link classifyPushedSince}）。
+ * @param isEligible 指定すると、この述語を満たさないアイテムは候補として数えない（`acc` に
+ *   積まず `maxItems` のカウントにも含めない）。`pushedSince` の打ち切り判定とは独立していて、
+ *   除外はしても以降のページ取得を打ち切りはしない。アーカイブ除外・特定リポジトリの除外
+ *   （テンプレート自身を候補から外す等）に使う（{@link listOwnerRepos}）。除外を
+ *   `maxItems` のカウント後に行うと、除外予定のアイテムが枠を消費し、後続の有効な候補が
+ *   枠から押し出される。
  */
 async function fetchAllRepoPages(
   baseUrl: string,
   extraParams?: Record<string, string>,
   maxItems?: number,
   pushedSince?: string,
+  isEligible?: (item: GitHubRepoListItem) => boolean,
 ): Promise<readonly GitHubRepoListItem[]> {
   // 上限が 0（安全マージンを引くと候補を 1 件もまかなえない）なら、一覧取得そのものを
   // 行わない。`per_page=0` は GitHub API が受け付けないため、`Math.max(1, ...)` で
@@ -1836,17 +1897,11 @@ async function fetchAllRepoPages(
     if (!res.ok) throw githubResponseError(res);
     const items = await parseGitHubJson<readonly GitHubRepoListItem[]>(res);
     for (const item of items) {
-      if (pushedSince !== undefined) {
-        const check = match(classifyPushedSince(item, pushedSince))
-          .with({ _tag: "include" }, () => "include" as const)
-          .with({ _tag: "excludeContinue" }, () => "excludeContinue" as const)
-          // push 日時の新しい順で取得しているため、ここから先は同じページの残りも
-          // 以降のページも全て閾値より古いと確定する。追加のページ取得はしない。
-          .with({ _tag: "excludeStop" }, () => "excludeStop" as const)
-          .exhaustive();
-        if (check === "excludeStop") return acc;
-        if (check === "excludeContinue") continue;
-      }
+      const decision = decideRepoPageItem(item, pushedSince, isEligible);
+      // push 日時の新しい順で取得しているため、excludeStop に達したら、ここから先は同じ
+      // ページの残りも以降のページも全て閾値より古いと確定する。追加のページ取得はしない。
+      if (decision._tag === "excludeStop") return acc;
+      if (decision._tag === "excludeContinue") continue;
       acc.push(item);
       if (maxItems !== undefined && acc.length >= maxItems) return acc;
     }
@@ -1900,6 +1955,7 @@ async function fetchPersonalOwnerRepoPages(
   extraParams: Record<string, string>,
   maxCandidates: number | undefined,
   pushedSince: string | undefined,
+  isEligible: ((item: GitHubRepoListItem) => boolean) | undefined,
 ): Promise<readonly GitHubRepoListItem[]> {
   const authenticatedLogin = await resolveAuthenticatedUserLogin();
   // login はケースを区別しないため、比較前に正規化する。
@@ -1910,6 +1966,7 @@ async function fetchPersonalOwnerRepoPages(
       { affiliation: "owner", ...extraParams },
       maxCandidates,
       pushedSince,
+      isEligible,
     );
   }
   return fetchAllRepoPages(
@@ -1917,6 +1974,7 @@ async function fetchPersonalOwnerRepoPages(
     extraParams,
     maxCandidates,
     pushedSince,
+    isEligible,
   );
 }
 
@@ -1949,6 +2007,32 @@ export interface ListOwnerReposOptions {
    * （{@link fetchAllRepoPages} 参照）。省略時は push 日時での絞り込みをしない。
    */
   readonly pushedSince?: string;
+  /**
+   * 指定すると、この owner/repo と一致するリポジトリを候補から除く。大文字小文字は
+   * 区別しない（GitHub の owner/repo 名の比較基準に合わせる）。
+   *
+   * `maxCandidates` のカウントより前（{@link fetchAllRepoPages} の `isEligible`）で除外する。
+   * 呼び出し後に `.filter()` で除くと、このリポジトリが一覧の先頭付近に来たときに
+   * `maxCandidates` の枠を 1 つ消費してから除外され、本来枠に入るはずだった次のリポジトリが
+   * 弾かれる。テンプレート自身を owner 配下の候補一覧から除く用途（`aggregateTemplateUsage`）
+   * を想定している。
+   */
+  readonly excludeRepo?: { readonly owner: string; readonly repo: string };
+}
+
+/**
+ * `GitHubRepoListItem` と `{ owner, repo }` 形の値が同じリポジトリを指すか。
+ *
+ * GitHub の owner/repo 名は大文字小文字を区別しないため、比較は正規化してから行う。
+ */
+function sameOwnerRepo(
+  item: GitHubRepoListItem,
+  target: { readonly owner: string; readonly repo: string },
+): boolean {
+  return (
+    item.owner.login.toLowerCase() === target.owner.toLowerCase() &&
+    item.name.toLowerCase() === target.repo.toLowerCase()
+  );
 }
 
 /**
@@ -1962,13 +2046,16 @@ export interface ListOwnerReposOptions {
  * - ページネーションを最後まで辿るため、リポジトリ数が多い owner でも全件返る（1 ページ目だけ
  *   で打ち切らない）。
  * - `includeArchived` が false（既定）の場合、アーカイブ済みリポジトリは結果から除く。
- *   `maxCandidates` による打ち切りは取得段階（フィルタ前）で行うため、この除外が働くと
- *   返る件数は `maxCandidates` を下回りうる（{@link ListOwnerReposOptions.maxCandidates}）。
+ *   除外は `maxCandidates` のカウントより前（取得段階の `isEligible`）で行うため、
+ *   `maxCandidates` はアーカイブ除外・`excludeRepo` 除外の後で有効な候補の数を表す
+ *   （{@link ListOwnerReposOptions.maxCandidates}）。
  * - 一覧は push 日時の新しい順（`sort=pushed&direction=desc`）で取得する。`maxCandidates`
  *   で打ち切ったとき、長期間放置されたリポジトリより最近アクティブなリポジトリを優先して
  *   残すため。同じ並びを `pushedSince` の早期終了にも利用する。
  * - `pushedSince` を指定すると、`pushed_at` がそれより古いリポジトリ（push 履歴の無い
  *   空リポジトリを含む）を候補から除く（{@link ListOwnerReposOptions.pushedSince}）。
+ * - `excludeRepo` を指定すると、それと一致するリポジトリを候補から除く
+ *   （{@link ListOwnerReposOptions.excludeRepo}）。
  * - 認証は `getGitHubToken()` に委ねる。トークンが無くても public リポジトリの一覧は取得できる
  *   （未認証は 60req/h に制限されるため、クォータに達すると `ZikuFailure`
  *   （`kind: "GitHubRateLimited"`）で失敗する）。
@@ -1980,7 +2067,13 @@ export function listOwnerRepos(
   const includeArchived = options?.includeArchived ?? false;
   const maxCandidates = options?.maxCandidates;
   const pushedSince = options?.pushedSince;
+  const excludeRepo = options?.excludeRepo;
   const sortParams = { sort: "pushed", direction: "desc" };
+  const isEligible = (item: GitHubRepoListItem): boolean => {
+    if (!includeArchived && item.archived) return false;
+    if (excludeRepo !== undefined && sameOwnerRepo(item, excludeRepo)) return false;
+    return true;
+  };
   return classified(
     `list repositories under ${owner}`,
     getGitHubToken() !== undefined,
@@ -1992,18 +2085,23 @@ export function listOwnerRepos(
             sortParams,
             maxCandidates,
             pushedSince,
+            isEligible,
           )
-        : await fetchPersonalOwnerRepoPages(owner, sortParams, maxCandidates, pushedSince);
-      return items
-        .filter((item) => includeArchived || !item.archived)
-        .map((item): OwnerRepoInfo => ({
-          owner: item.owner.login,
-          repo: item.name,
-          defaultBranch: item.default_branch,
-          archived: item.archived,
-          pushedAt: item.pushed_at,
-          isPrivate: item.private,
-        }));
+        : await fetchPersonalOwnerRepoPages(
+            owner,
+            sortParams,
+            maxCandidates,
+            pushedSince,
+            isEligible,
+          );
+      return items.map((item): OwnerRepoInfo => ({
+        owner: item.owner.login,
+        repo: item.name,
+        defaultBranch: item.default_branch,
+        archived: item.archived,
+        pushedAt: item.pushed_at,
+        isPrivate: item.private,
+      }));
     },
   );
 }

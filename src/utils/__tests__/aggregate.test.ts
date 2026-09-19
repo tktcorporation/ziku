@@ -1159,6 +1159,22 @@ describe("aggregateTemplateUsage", () => {
     expect(report.template.ref).toBe("resolved-sha");
   });
 
+  it("listOwnerRepos にテンプレート自身を excludeRepo として渡す", async () => {
+    mockListOwnerRepos.mockResolvedValue([]);
+
+    await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+      }),
+    );
+
+    expect(mockListOwnerRepos).toHaveBeenCalledWith(
+      "acme",
+      expect.objectContaining({ excludeRepo: { owner: "acme", repo: "template" } }),
+    );
+  });
+
   it("tmpBaseDir 省略時は Scope クローズ時に tmpBaseDir を削除する", async () => {
     mockListOwnerRepos.mockResolvedValue([]);
 

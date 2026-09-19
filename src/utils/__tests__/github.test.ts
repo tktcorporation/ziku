@@ -1769,6 +1769,88 @@ describe("listOwnerRepos", () => {
 
     expect(result.map((r) => r.repo)).toEqual(["new", "unparseable", "also-new"]);
   });
+
+  // excludeRepo / アーカイブ除外は maxCandidates のカウントより前で効くべき回帰ケース。
+  // 除外がカウント後（`.filter()`）に働くと、除外予定のリポジトリが一覧の先頭付近に来た
+  // ときにその 1 枠が無駄に消費され、後続の有効な候補が maxCandidates から押し出される。
+  it("excludeRepo に一致するリポジトリが先頭にあっても maxCandidates の枠を消費しない", async () => {
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(mockResponse({ status: 200 }));
+      }
+      return Promise.resolve(
+        mockJsonResponse(200, [
+          repoListItem("template"),
+          repoListItem("cand-1"),
+          repoListItem("cand-2"),
+        ]),
+      );
+    });
+
+    const result = await listOwnerRepos("acme", {
+      maxCandidates: 2,
+      excludeRepo: { owner: "acme", repo: "template" },
+    });
+
+    expect(result.map((r) => r.repo)).toEqual(["cand-1", "cand-2"]);
+  });
+
+  it("excludeRepo が候補数上限 1 のような小さい値でも、有効な候補を返す", async () => {
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(mockResponse({ status: 200 }));
+      }
+      return Promise.resolve(
+        mockJsonResponse(200, [repoListItem("template"), repoListItem("cand-1")]),
+      );
+    });
+
+    const result = await listOwnerRepos("acme", {
+      maxCandidates: 1,
+      excludeRepo: { owner: "acme", repo: "template" },
+    });
+
+    expect(result.map((r) => r.repo)).toEqual(["cand-1"]);
+  });
+
+  it("excludeRepo の owner/repo は大文字小文字を無視して比較する", async () => {
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(mockResponse({ status: 200 }));
+      }
+      return Promise.resolve(
+        mockJsonResponse(200, [
+          repoListItem("Template", { owner: "ACME" }),
+          repoListItem("cand-1"),
+        ]),
+      );
+    });
+
+    const result = await listOwnerRepos("acme", {
+      excludeRepo: { owner: "acme", repo: "template" },
+    });
+
+    expect(result.map((r) => r.repo)).toEqual(["cand-1"]);
+  });
+
+  it("アーカイブ済みリポジトリが先頭にあっても maxCandidates の枠を消費しない", async () => {
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(mockResponse({ status: 200 }));
+      }
+      return Promise.resolve(
+        mockJsonResponse(200, [
+          repoListItem("archived-first", { archived: true }),
+          repoListItem("cand-1"),
+          repoListItem("cand-2"),
+        ]),
+      );
+    });
+
+    const result = await listOwnerRepos("acme", { maxCandidates: 2 });
+
+    expect(result.map((r) => r.repo)).toEqual(["cand-1", "cand-2"]);
+  });
 });
 
 describe("fetchRateLimitStatus", () => {
@@ -1952,6 +2034,91 @@ describe("観測したレート制限残量（getObservedRateLimitRemaining）",
 
     resetGitHubRequestState();
     expect(getObservedRateLimitRemaining()).toBeUndefined();
+  });
+
+  // 並行リクエストは発行順ではなく完了順に届く。後から発行した（実際には残量が少ない）
+  // リクエストが先に完了して小さい値を記録した後、先に発行したが完了が遅かった
+  // リクエスト（届いた時点では既に古い、値としては大きい観測）が無条件で上書きすると、
+  // 動的ブレーキが実際より楽観的な残量を見てしまう回帰ケース。
+  it("同じウィンドウで、大きい値の観測の後に小さい値が届いたら採用する", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        mockJsonResponse(
+          200,
+          { full_name: "acme/widgets", default_branch: "main" },
+          { "x-ratelimit-remaining": "50", "x-ratelimit-reset": "1700000000" },
+        ),
+      )
+      .mockResolvedValueOnce(
+        mockJsonResponse(
+          200,
+          { full_name: "acme/widgets", default_branch: "main" },
+          { "x-ratelimit-remaining": "10", "x-ratelimit-reset": "1700000000" },
+        ),
+      );
+
+    await getRepoIdentity("acme", "widgets");
+    await getRepoIdentity("acme", "widgets");
+
+    expect(getObservedRateLimitRemaining()).toEqual({
+      remaining: 10,
+      resetAt: new Date(1700000000 * 1000),
+    });
+  });
+
+  it("同じウィンドウで、小さい値の観測の後に大きい値が届いても上書きしない", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        mockJsonResponse(
+          200,
+          { full_name: "acme/widgets", default_branch: "main" },
+          { "x-ratelimit-remaining": "10", "x-ratelimit-reset": "1700000000" },
+        ),
+      )
+      .mockResolvedValueOnce(
+        mockJsonResponse(
+          200,
+          { full_name: "acme/widgets", default_branch: "main" },
+          { "x-ratelimit-remaining": "50", "x-ratelimit-reset": "1700000000" },
+        ),
+      );
+
+    await getRepoIdentity("acme", "widgets");
+    await getRepoIdentity("acme", "widgets");
+
+    expect(getObservedRateLimitRemaining()).toEqual({
+      remaining: 10,
+      resetAt: new Date(1700000000 * 1000),
+    });
+  });
+
+  it("resetAt が変わった（新しいウィンドウに入った）場合は、大きい値でも採用する", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        mockJsonResponse(
+          200,
+          { full_name: "acme/widgets", default_branch: "main" },
+          { "x-ratelimit-remaining": "10", "x-ratelimit-reset": "1700000000" },
+        ),
+      )
+      .mockResolvedValueOnce(
+        mockJsonResponse(
+          200,
+          { full_name: "acme/widgets", default_branch: "main" },
+          { "x-ratelimit-remaining": "60", "x-ratelimit-reset": "1700003600" },
+        ),
+      );
+
+    await getRepoIdentity("acme", "widgets");
+    await getRepoIdentity("acme", "widgets");
+
+    expect(getObservedRateLimitRemaining()).toEqual({
+      remaining: 60,
+      resetAt: new Date(1700003600 * 1000),
+    });
   });
 });
 
