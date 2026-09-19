@@ -1475,4 +1475,67 @@ describe("aggregateTemplateUsage", () => {
     expect(report.summary.totalRepositories).toBe(0);
     expect(report.summary.excludedBySince).toBe(2);
   });
+
+  // レート制限を検知した後も候補ごとに新規リクエストを送り続けると、枠切れ後の残り候補
+  // 全件が同じレート制限応答を受け取るだけの無駄になる。検知した時点で以降の候補への
+  // GitHub API 呼び出し自体を止めることを固定する。
+  it("レート制限を検知した後は、残りの候補へ GitHub API 呼び出しを行わない", async () => {
+    const repos = ["rl-1", "rl-2", "rl-3"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+
+    mockFetchRepoTextFile.mockImplementation((_owner: string, repo: string) => {
+      if (repo === "rl-1") {
+        return Promise.reject(
+          zikuFailure({ kind: "GitHubRateLimited", authenticated: false, resetAt: undefined }),
+        );
+      }
+      // rl-2 / rl-3 でここに到達したら、ゲートが後続候補への呼び出しを止められていない。
+      return Promise.resolve(Option.some(lockJson()));
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+      }),
+    );
+
+    // fetchRepoTextFile が呼ばれるのは最初にレート制限を検知する rl-1 だけ。
+    expect(mockFetchRepoTextFile).toHaveBeenCalledTimes(1);
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(3);
+
+    const [first, second, third] = report.skipped;
+    expect(first).toMatchObject({ owner: "acme", repo: "rl-1" });
+    expect(first?.reason).toContain("Failed to fetch lock.json");
+    expect(second).toMatchObject({ owner: "acme", repo: "rl-2" });
+    expect(second?.reason).toContain("rate limit");
+    expect(third).toMatchObject({ owner: "acme", repo: "rl-3" });
+    expect(third?.reason).toContain("rate limit");
+  });
+
+  // `--since` のコミット日時取得（attachLastCommittedAt）も同じゲートを共有するため、
+  // 評価フェーズでレート制限を検知した候補は、差分処理フェーズのコミット日時取得にも進まない。
+  it("評価フェーズでレート制限を検知した候補は、--since のコミット日時取得にも進まない", async () => {
+    mockListOwnerRepos.mockResolvedValue([repoInfo({ owner: "acme", repo: "rl-since" })]);
+    mockFetchRepoTextFile.mockImplementation(() =>
+      Promise.reject(
+        zikuFailure({ kind: "GitHubRateLimited", authenticated: false, resetAt: undefined }),
+      ),
+    );
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        since: "2026-08-01T00:00:00.000Z",
+      }),
+    );
+
+    expect(mockGetLastCommitDate).not.toHaveBeenCalled();
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(1);
+    expect(report.skipped[0]).toMatchObject({ owner: "acme", repo: "rl-since" });
+  });
 });

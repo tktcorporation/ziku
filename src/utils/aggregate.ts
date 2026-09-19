@@ -11,7 +11,7 @@
  * （owner が存在しない・認証エラー）とテンプレート自身の解決失敗だけは全体の失敗として返る。
  */
 import { tmpdir } from "node:os";
-import { Effect, Either, Equivalence, Option } from "effect";
+import { Effect, Either, Equivalence, Option, Ref } from "effect";
 import type { Scope } from "effect";
 import { join } from "pathe";
 import { match } from "ts-pattern";
@@ -35,6 +35,7 @@ import { baseCommitSha, baseHashesOf, lockSchema, templateRefToString } from "..
 import { analyzeConfigDrift } from "./config-merge";
 import {
   fetchRepoTextFile,
+  getGitHubToken,
   getLastCommitDate,
   getRepoIdentity,
   listOwnerRepos,
@@ -141,13 +142,22 @@ export function aggregateTemplateUsage(
       // 掛け算になり、指定した値の 2 乗まで同時リクエストが膨らむ。
       const commitDateLimit = yield* Effect.makeSemaphore(concurrency);
 
+      // owner 横断でレート制限を検知したかどうかを共有する。未認証の 60 req/hour クォータを
+      // 使い切った後も候補ごとに新規リクエストを送り続けると、残り候補数分がそのまま同じ
+      // レート制限応答を受け取るだけの無駄になる。リセットまで最大 1 時間かかりうるため、
+      // 待たずに検知した時点で以降の GitHub 呼び出しを打ち切り、まとめて報告する。
+      const rateLimitGate: RateLimitGate = yield* Ref.make(
+        Option.none<{ readonly resetAt: Date | undefined }>(),
+      );
+
       const allRepos = yield* tryGitHub(() => listOwnerRepos(searchOwner, { includeArchived }));
 
       // owner/repo の正規名解決（GitHub のリネーム・移管リダイレクト経由）をキャッシュする。
       // 同じ owner/repo への同時・重複呼び出しを 1 回の GitHub API 呼び出しにまとめる
       // （{@link resolveTemplateRef} と {@link resolveCanonicalMatch} の双方から使う）。
       const resolveIdentity: ResolveRepoIdentity = yield* Effect.cachedFunction(
-        ([owner, repo]: readonly [string, string]) => tryGitHub(() => getRepoIdentity(owner, repo)),
+        ([owner, repo]: readonly [string, string]) =>
+          tryGitHubGated(rateLimitGate, () => getRepoIdentity(owner, repo)),
         Equivalence.tuple(Equivalence.string, Equivalence.string),
       );
 
@@ -159,7 +169,7 @@ export function aggregateTemplateUsage(
         candidates,
         (candidate) =>
           containDefect(candidate, () =>
-            evaluateCandidate(template, templateRefSha, candidate, resolveIdentity),
+            evaluateCandidate(template, templateRefSha, candidate, resolveIdentity, rateLimitGate),
           ),
         { concurrency },
       );
@@ -194,6 +204,7 @@ export function aggregateTemplateUsage(
                     tmpBaseDir,
                     since,
                     commitDateLimit,
+                    rateLimitGate,
                   }),
                 ),
               { concurrency },
@@ -298,6 +309,70 @@ function tryGitHub<A>(run: () => Promise<A>): Effect.Effect<A, ZikuFailure> {
       cause instanceof ZikuFailure ? Effect.fail(cause) : Effect.die(cause),
     ),
   );
+}
+
+/**
+ * owner 横断のスキャン全体で共有する、レート制限を検知したかどうかの状態。
+ *
+ * 「検知したか」と「resetAt」を別々のフィールドに分けると、未検知なのに resetAt を
+ * 持つような組み合わせを型が許してしまう。検知済みのときだけ resetAt を持つ形にするため
+ * `Option` で包む。
+ */
+type RateLimitGate = Ref.Ref<Option.Option<{ readonly resetAt: Date | undefined }>>;
+
+/**
+ * `tryGitHub` にレート制限ゲートを重ねる。
+ *
+ * 呼び出し前に Ref を確認し、既に検知済みなら実際の GitHub API 呼び出しをせずに、記録済みの
+ * resetAt で同じ `GitHubRateLimited` 失敗を返す。未検知なら呼び出し、結果が
+ * `GitHubRateLimited` であれば Ref に記録してから失敗を伝播する。
+ *
+ * 未認証の 60 req/hour クォータを使い切った後も候補ごとに新規リクエストを送り続けると、
+ * 残り候補数分がそのまま同じレート制限応答を受け取るだけの無駄になる。リセットまで最大
+ * 1 時間かかりうるため、待たずに検知した時点で新規リクエストを止める。
+ */
+function tryGitHubGated<A>(
+  gate: RateLimitGate,
+  run: () => Promise<A>,
+): Effect.Effect<A, ZikuFailure> {
+  return Effect.gen(function* () {
+    const alreadyLimited = yield* Ref.get(gate);
+    if (Option.isSome(alreadyLimited)) {
+      return yield* Effect.fail(githubRateLimitedFailure(alreadyLimited.value.resetAt));
+    }
+
+    const result = yield* Effect.either(tryGitHub(run));
+    if (Either.isLeft(result)) {
+      if (result.left.reason.kind === "GitHubRateLimited") {
+        yield* Ref.set(gate, Option.some({ resetAt: result.left.reason.resetAt }));
+      }
+      return yield* Effect.fail(result.left);
+    }
+    return result.right;
+  });
+}
+
+/** ゲートが検知済みのときに、新規リクエストなしで返す `GitHubRateLimited` 失敗。 */
+function githubRateLimitedFailure(resetAt: Date | undefined): ZikuFailure {
+  return zikuFailure({
+    kind: "GitHubRateLimited",
+    authenticated: getGitHubToken() !== undefined,
+    resetAt,
+  });
+}
+
+/**
+ * ゲートが立っている状態で候補の処理に入ったときの `skipped` 理由文。
+ *
+ * リセットまでの残り時間を分単位で示す部分は `errors.ts` の `describeQuotaReset` と
+ * 同じ考え方だが、新しい依存を増やさずここに書く。
+ */
+function rateLimitSkipReason(resetAt: Date | undefined): string {
+  if (resetAt === undefined) {
+    return "GitHub API rate limit reached; not checking further repositories in this scan.";
+  }
+  const minutes = Math.max(0, Math.ceil((resetAt.getTime() - Date.now()) / 60000));
+  return `GitHub API rate limit reached; not checking further repositories in this scan (resets in ~${minutes} min).`;
 }
 
 /**
@@ -451,31 +526,48 @@ type CandidateRefResolution =
  * `.ziku/lock.json` の取得とリポジトリ内容のダウンロードを同じ ref に固定するために使う。
  * `resolveLatestCommitSha` は失敗を戻り値で表すため（`Effect.promise` に例外は飛ばない）、
  * `AuthRejected` / `Unresolved` のどちらも同じ `failed` として扱う。
+ *
+ * `resolveLatestCommitSha` の戻り値にはレート制限専用のケースが無く、失敗はすべて
+ * `Unresolved` に丸められるため、`tryGitHub` 系のゲートには乗せられない。代わりに呼び出し前に
+ * ゲートを確認し、既に検知済みなら呼び出し自体をスキップして `failed` を返す。
  */
-function resolveCandidateRef(candidate: OwnerRepoInfo): Effect.Effect<CandidateRefResolution> {
-  return Effect.promise(() =>
-    resolveLatestCommitSha(candidate.owner, candidate.repo, {
-      kind: "branch",
-      name: candidate.defaultBranch,
-    }),
-  ).pipe(
-    Effect.map((resolution) =>
-      match(resolution)
-        .with({ _tag: "Resolved" }, (r): CandidateRefResolution => ({
-          _tag: "resolved" as const,
-          ref: r.sha,
-        }))
-        .with({ _tag: "AuthRejected" }, (f): CandidateRefResolution => ({
-          _tag: "failed" as const,
-          reason: `Could not resolve the latest commit SHA: GitHub rejected the authentication token (${f.detail})`,
-        }))
-        .with({ _tag: "Unresolved" }, (f): CandidateRefResolution => ({
-          _tag: "failed" as const,
-          reason: `Could not resolve the latest commit SHA: ${f.reason}`,
-        }))
-        .exhaustive(),
-    ),
-  );
+function resolveCandidateRef(
+  candidate: OwnerRepoInfo,
+  rateLimitGate: RateLimitGate,
+): Effect.Effect<CandidateRefResolution> {
+  return Effect.gen(function* () {
+    const alreadyLimited = yield* Ref.get(rateLimitGate);
+    if (Option.isSome(alreadyLimited)) {
+      return {
+        _tag: "failed" as const,
+        reason: rateLimitSkipReason(alreadyLimited.value.resetAt),
+      };
+    }
+
+    return yield* Effect.promise(() =>
+      resolveLatestCommitSha(candidate.owner, candidate.repo, {
+        kind: "branch",
+        name: candidate.defaultBranch,
+      }),
+    ).pipe(
+      Effect.map((resolution) =>
+        match(resolution)
+          .with({ _tag: "Resolved" }, (r): CandidateRefResolution => ({
+            _tag: "resolved" as const,
+            ref: r.sha,
+          }))
+          .with({ _tag: "AuthRejected" }, (f): CandidateRefResolution => ({
+            _tag: "failed" as const,
+            reason: `Could not resolve the latest commit SHA: GitHub rejected the authentication token (${f.detail})`,
+          }))
+          .with({ _tag: "Unresolved" }, (f): CandidateRefResolution => ({
+            _tag: "failed" as const,
+            reason: `Could not resolve the latest commit SHA: ${f.reason}`,
+          }))
+          .exhaustive(),
+      ),
+    );
+  });
 }
 
 /**
@@ -508,18 +600,27 @@ function evaluateCandidate(
   templateRefSha: CommitSha,
   candidate: OwnerRepoInfo,
   resolveIdentity: ResolveRepoIdentity,
+  rateLimitGate: RateLimitGate,
 ): Effect.Effect<CandidateEvaluation> {
   return Effect.gen(function* () {
+    // 既に検知済みなら、この候補の lock.json 取得すら行わない。owner 配下の残り全候補へ
+    // 律儀に 1 件ずつ問い合わせ続けるのが、この設計で防ぎたい無駄そのものだから。
+    const alreadyLimited = yield* Ref.get(rateLimitGate);
+    if (Option.isSome(alreadyLimited)) {
+      return skippedEvaluation(candidate, rateLimitSkipReason(alreadyLimited.value.resetAt));
+    }
+
     const screening = yield* readCandidateLock(
       template,
       templateRefSha,
       candidate,
       undefined,
       resolveIdentity,
+      rateLimitGate,
     );
     if (screening._tag !== "usable") return screening;
 
-    const refResolution = yield* resolveCandidateRef(candidate);
+    const refResolution = yield* resolveCandidateRef(candidate, rateLimitGate);
     if (refResolution._tag === "failed") {
       return skippedEvaluation(candidate, refResolution.reason);
     }
@@ -533,6 +634,7 @@ function evaluateCandidate(
       candidate,
       ref,
       resolveIdentity,
+      rateLimitGate,
     );
     if (pinned._tag !== "usable") return pinned;
 
@@ -648,10 +750,13 @@ function readCandidateLock(
   candidate: OwnerRepoInfo,
   ref: CommitSha | undefined,
   resolveIdentity: ResolveRepoIdentity,
+  rateLimitGate: RateLimitGate,
 ): Effect.Effect<LockReadResult> {
   return Effect.gen(function* () {
     const fetched = yield* Effect.either(
-      tryGitHub(() => fetchRepoTextFile(candidate.owner, candidate.repo, LOCK_FILE, ref)),
+      tryGitHubGated(rateLimitGate, () =>
+        fetchRepoTextFile(candidate.owner, candidate.repo, LOCK_FILE, ref),
+      ),
     );
     if (Either.isLeft(fetched)) {
       return skippedEvaluation(candidate, `Failed to fetch lock.json: ${fetched.left.message}`);
@@ -746,6 +851,11 @@ interface ProcessCandidateOptions {
    * `aggregateTemplateUsage` が 1 つだけ作ったものを共有する。
    */
   readonly commitDateLimit: Effect.Semaphore;
+  /**
+   * owner 横断で共有するレート制限ゲート。既に検知済みなら、この候補のテンプレート内容の
+   * ダウンロードもコミット日時の取得も行わず、理由付きで skipped として返す。
+   */
+  readonly rateLimitGate: RateLimitGate;
 }
 
 /**
@@ -763,10 +873,19 @@ interface ProcessCandidateOptions {
  * conflict/pending を報告する原因になる。
  */
 function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessOutcome> {
-  const { templateDir, candidate, candidateIndex, tmpBaseDir, since, commitDateLimit } = opts;
+  const { templateDir, candidate, candidateIndex, tmpBaseDir, since, commitDateLimit, rateLimitGate } =
+    opts;
   const { repoInfo, lock, ref } = candidate;
 
   return Effect.gen(function* () {
+    // 既に検知済みなら、この候補のテンプレート内容ダウンロードも行わない。evaluateCandidate
+    // フェーズが全件終わってから processCandidate フェーズが始まる構成上、評価中に検知した
+    // レート制限は、既に採用済みの候補すべてに対してここで効く。
+    const alreadyLimited = yield* Ref.get(rateLimitGate);
+    if (Option.isSome(alreadyLimited)) {
+      return processSkipped(repoInfo, rateLimitSkipReason(alreadyLimited.value.resetAt));
+    }
+
     const classificationResult = yield* Effect.either(
       Effect.scoped(
         classifyAgainstTemplate({
@@ -796,12 +915,19 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
       // 「利用リポジトリ側でいつ変更されたか」という since フィルタの関心事に該当しない。
       // 対象を pendingPush/conflicts だけに絞ることで、この関数の GitHub API 呼び出し回数を
       // 増やさない。
-      const pushResult = yield* attachLastCommittedAt(repoInfo, ref, pendingPush, commitDateLimit);
+      const pushResult = yield* attachLastCommittedAt(
+        repoInfo,
+        ref,
+        pendingPush,
+        commitDateLimit,
+        rateLimitGate,
+      );
       const conflictResult = yield* attachLastCommittedAt(
         repoInfo,
         ref,
         conflicts,
         commitDateLimit,
+        rateLimitGate,
       );
       pendingPush = pushResult.entries;
       conflicts = conflictResult.entries;
@@ -1026,6 +1152,7 @@ function attachLastCommittedAt<T extends { readonly path: RepoRelPath }>(
   ref: CommitSha,
   entries: readonly T[],
   commitDateLimit: Effect.Semaphore,
+  rateLimitGate: RateLimitGate,
 ): Effect.Effect<AttachLastCommittedAtResult<T>> {
   return Effect.gen(function* () {
     const results = yield* Effect.forEach(
@@ -1033,7 +1160,9 @@ function attachLastCommittedAt<T extends { readonly path: RepoRelPath }>(
       (entry) =>
         Effect.either(
           commitDateLimit.withPermits(1)(
-            tryGitHub(() => getLastCommitDate(repoInfo.owner, repoInfo.repo, entry.path, ref)),
+            tryGitHubGated(rateLimitGate, () =>
+              getLastCommitDate(repoInfo.owner, repoInfo.repo, entry.path, ref),
+            ),
           ),
         ).pipe(
           Effect.map((result) =>
