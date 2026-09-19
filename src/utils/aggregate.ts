@@ -272,7 +272,7 @@ export function aggregateTemplateUsage(
       // 確認する。評価フェーズ中の動的ブレーキ（予防的な打ち切り）が発動していても、採用済み
       // 候補が 1 件でもあれば、このチェックが無いとテンプレート tarball を 1 回無駄にダウン
       // ロードしてしまう（その直後にどのみち全 processCandidate が skipped で返るだけなので）。
-      const gateBeforeTemplateDownload = yield* Ref.get(rateLimitGate);
+      const gateBeforeTemplateDownload = yield* checkRateLimitGate(rateLimitGate);
 
       // テンプレートは全リポジトリ共通の比較基準なので、この Scope に 1 度だけ取得して
       // 使い回す。リポジトリごとに取得すると同じ commit を候補数だけダウンロードすることになる。
@@ -533,6 +533,39 @@ function gateObservedRateLimit(
 }
 
 /**
+ * 共有ゲートの現在値を読み、既に立っているならそれがなお有効か確認してから返す。
+ * ゲートを短絡チェックする箇所は、素の `Ref.get` ではなくこの関数を通す。
+ *
+ * `gateObservedRateLimit` の陳腐化判定は「立てる直前」にしか働かない。旧ウィンドウの
+ * 403 が先に完了してゲートが立った時点では、まだ新ウィンドウの観測が無いため陳腐化と
+ * 判定できず、正しくゲートが立つ。その後で新ウィンドウの成功レスポンスが届いて
+ * `observedRateLimit` が更新されても、ゲート自身は誰も再確認しない限り立ったまま残り、
+ * 実際には枠が補充されているのに残りの候補が永久にスキップされ続けてしまう。
+ *
+ * ゲートに記録された resetAt が既に過去（＝リセット済み）で、かつ今読める最新の観測
+ * （{@link getObservedRateLimitRemaining}）より古いと判定できる場合、その検知は今となっては
+ * 陳腐化しているとみなしてクリアする。「既に過去」を要求する理由は {@link gateObservedRateLimit}
+ * と同じ（secondary rate limit の未来を指す resetAt を、無関係なコアクォータの観測値と
+ * 比べて誤って陳腐化扱いしないため）。
+ */
+function checkRateLimitGate(gate: RateLimitGate): Effect.Effect<Option.Option<RateLimitDetection>> {
+  return Effect.gen(function* () {
+    const current = yield* Ref.get(gate);
+    if (Option.isNone(current)) {
+      return current;
+    }
+    const observed = getObservedRateLimitRemaining();
+    const gateResetAt = current.value.resetAt;
+    const alreadyElapsed = gateResetAt !== undefined && gateResetAt.getTime() <= Date.now();
+    if (alreadyElapsed && isOlderRateLimitWindow(gateResetAt, observed?.resetAt)) {
+      yield* Ref.set(gate, Option.none());
+      return Option.none();
+    }
+    return current;
+  });
+}
+
+/**
  * `tryGitHub` にレート制限ゲートを重ねる。
  *
  * 呼び出し前に Ref を確認し、既に検知済みなら実際の GitHub API 呼び出しをせずに、記録済みの
@@ -549,7 +582,7 @@ function tryGitHubGated<A>(
   run: () => Promise<A>,
 ): Effect.Effect<A, ZikuFailure> {
   return Effect.gen(function* () {
-    const alreadyLimited = yield* Ref.get(gate);
+    const alreadyLimited = yield* checkRateLimitGate(gate);
     if (Option.isSome(alreadyLimited)) {
       return yield* Effect.fail(githubRateLimitedFailure(alreadyLimited.value.resetAt));
     }
@@ -587,7 +620,7 @@ function preemptivelyGateIfUnaffordable(
   requestsPerItem: number,
 ): Effect.Effect<Option.Option<RateLimitDetection>> {
   return Effect.gen(function* () {
-    const alreadyLimited = yield* Ref.get(rateLimitGate);
+    const alreadyLimited = yield* checkRateLimitGate(rateLimitGate);
     if (Option.isSome(alreadyLimited)) {
       return alreadyLimited;
     }
@@ -810,7 +843,7 @@ function resolveCandidateRef(
   rateLimitGate: RateLimitGate,
 ): Effect.Effect<CandidateRefResolution> {
   return Effect.gen(function* () {
-    const alreadyLimited = yield* Ref.get(rateLimitGate);
+    const alreadyLimited = yield* checkRateLimitGate(rateLimitGate);
     if (Option.isSome(alreadyLimited)) {
       return {
         _tag: "failed" as const,
@@ -962,7 +995,7 @@ function checkPinnedRef(
   rateLimitGate: RateLimitGate,
 ): Effect.Effect<string | undefined> {
   return Effect.gen(function* () {
-    const alreadyLimited = yield* Ref.get(rateLimitGate);
+    const alreadyLimited = yield* checkRateLimitGate(rateLimitGate);
     if (Option.isSome(alreadyLimited)) {
       return rateLimitSkipReason(alreadyLimited.value);
     }
@@ -1219,7 +1252,7 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
 
   return Effect.gen(function* () {
     // 既に検知済みなら、この候補のテンプレート内容ダウンロードも行わない。
-    const alreadyLimited = yield* Ref.get(rateLimitGate);
+    const alreadyLimited = yield* checkRateLimitGate(rateLimitGate);
     if (Option.isSome(alreadyLimited)) {
       return processSkipped(repoInfo, rateLimitSkipReason(alreadyLimited.value));
     }
