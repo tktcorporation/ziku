@@ -2162,6 +2162,28 @@ describe("getRepoIdentity", () => {
 
     await expect(getRepoIdentity("owner", "repo")).rejects.toThrow();
   });
+
+  // owner 横断探索の候補ごとに呼ばれる（テンプレート自身の正規名解決を含む）。
+  // ヘッダー無しの secondary rate limit でも GitHubRateLimited として失敗することを固定する。
+  it("ヘッダー無しの secondary rate limit（403、本文の message のみ）は GitHubRateLimited として失敗する", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      statusText: "Forbidden",
+      headers: new Map() as unknown as Headers,
+      text: () =>
+        Promise.resolve(
+          JSON.stringify({
+            message: "You have exceeded a secondary rate limit. Please wait a few minutes.",
+          }),
+        ),
+    });
+
+    const thrown = await getRepoIdentity("owner", "repo").catch((e: unknown) => e);
+
+    expect(thrown).toBeInstanceOf(ZikuFailure);
+    expect((thrown as ZikuFailure).reason).toMatchObject({ kind: "GitHubRateLimited" });
+  });
 });
 
 describe("fetchRepoTextFile", () => {
@@ -2211,6 +2233,32 @@ describe("fetchRepoTextFile", () => {
       fetchRepoTextFile("owner", "repo", repoRelPath(".ziku/lock.json")),
     ).rejects.toBeInstanceOf(ZikuFailure);
   });
+
+  // lock.json 取得は候補ごとに最大 2 回発生し、owner 横断探索が評価する全候補を通る。
+  // ヘッダーを持たない secondary rate limit の 403（本文の message にのみレート制限で
+  // ある旨が書かれる）でも、汎用的な失敗ではなく GitHubRateLimited として失敗することを
+  // 固定する。
+  it("ヘッダー無しの secondary rate limit（403、本文の message のみ）は GitHubRateLimited として失敗する", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      statusText: "Forbidden",
+      headers: new Map() as unknown as Headers,
+      text: () =>
+        Promise.resolve(
+          JSON.stringify({
+            message: "You have exceeded a secondary rate limit. Please wait a few minutes.",
+          }),
+        ),
+    });
+
+    const thrown = await fetchRepoTextFile("owner", "repo", repoRelPath(".ziku/lock.json")).catch(
+      (e: unknown) => e,
+    );
+
+    expect(thrown).toBeInstanceOf(ZikuFailure);
+    expect((thrown as ZikuFailure).reason).toMatchObject({ kind: "GitHubRateLimited" });
+  });
 });
 
 describe("getLastCommitDate", () => {
@@ -2248,6 +2296,31 @@ describe("getLastCommitDate", () => {
     const result = await getLastCommitDate("owner", "repo", repoRelPath(".ziku/lock.json"));
 
     expect(Option.getOrUndefined(result)).toBe("2026-01-01T00:00:00Z");
+  });
+
+  // --since 指定時、候補ごとの変更ファイル数だけ並行して発行される
+  // （attachLastCommittedAt）。secondary rate limit を誘発しやすい同時実行の形そのもの。
+  // ヘッダー無しでも GitHubRateLimited として失敗することを固定する。
+  it("ヘッダー無しの secondary rate limit（403、本文の message のみ）は GitHubRateLimited として失敗する", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      statusText: "Forbidden",
+      headers: new Map() as unknown as Headers,
+      text: () =>
+        Promise.resolve(
+          JSON.stringify({
+            message: "You have exceeded a secondary rate limit. Please wait a few minutes.",
+          }),
+        ),
+    });
+
+    const thrown = await getLastCommitDate("owner", "repo", repoRelPath(".ziku/lock.json")).catch(
+      (e: unknown) => e,
+    );
+
+    expect(thrown).toBeInstanceOf(ZikuFailure);
+    expect((thrown as ZikuFailure).reason).toMatchObject({ kind: "GitHubRateLimited" });
   });
 });
 

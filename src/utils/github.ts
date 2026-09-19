@@ -1891,6 +1891,33 @@ function githubResponseError(res: Response): Error {
 }
 
 /**
+ * 2xx 以外のレスポンスから、投げるべき失敗を組み立てる。
+ *
+ * secondary rate limit の 403 はヘッダーを持たないことがあり（{@link detectRateLimitFromResponse}
+ * 参照）、{@link githubResponseError} はステータスとヘッダーしか保持しないため、ヘッダーが
+ * 無いとレート制限だと分からないまま `classified()` が汎用的な失敗に分類してしまう。ここで
+ * 先に本文まで確認し、レート制限と判定できた場合は分類済みの `ZikuFailure` を返す
+ * （`classified()` は分類済みの失敗をそのまま通す）。
+ *
+ * owner 横断探索の候補ループは `tryGitHubGated` 経由で複数候補・複数ファイルを並行して
+ * 呼ぶため、secondary rate limit を誘発しやすい。候補単位で繰り返し呼ばれる経路
+ * （`fetchRepoTextFile`・`getRepoIdentity`・`getLastCommitDate`）で使う。呼び出し前に
+ * `res.ok` を確認済みであること（`res.status === 404` 等、専用の分岐がある呼び出し元は
+ * そちらを先に処理してから使う）。
+ */
+async function githubResponseFailure(res: Response): Promise<Error> {
+  const rateLimit = await detectRateLimitFromResponse(res);
+  if (rateLimit !== undefined) {
+    return zikuFailure({
+      kind: "GitHubRateLimited",
+      authenticated: getGitHubToken() !== undefined,
+      resetAt: rateLimit.resetAt,
+    });
+  }
+  return githubResponseError(res);
+}
+
+/**
  * レスポンスボディを JSON としてパースする。GitHub がステータス 200 で不正な JSON を
  * 返すことは通常無いが、`.json()` 自体が reject しうるため、その reject は呼び出し元の
  * `classified()` が拾い、HTTP ステータスを持たない例外として `Unclassified` に分類する。
@@ -2316,7 +2343,7 @@ export function getRepoIdentity(owner: string, repo: string): Promise<RepoIdenti
       const res = await githubFetch(
         `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
       );
-      if (!res.ok) throw githubResponseError(res);
+      if (!res.ok) throw await githubResponseFailure(res);
       const data = await parseGitHubJson<GitHubRepoDetail>(res);
       const segments = data.full_name.split("/");
       const [canonicalOwner, canonicalRepo] = segments;
@@ -2391,7 +2418,10 @@ export function fetchRepoTextFile(
     async () => {
       const res = await githubFetch(buildContentsUrl(owner, repo, path, ref));
       if (res.status === 404) return Option.none<string>();
-      if (!res.ok) throw githubResponseError(res);
+      // lock.json 取得は候補ごとに最大 2 回（ふるい用・pinned commit 確定後の読み直し）
+      // 発生し、owner 横断探索が評価する全候補を通るため、ヘッダー無しの secondary rate
+      // limit（{@link githubResponseFailure} 参照）を最も踏みやすい経路の一つ。
+      if (!res.ok) throw await githubResponseFailure(res);
 
       const data = await parseGitHubJson<GitHubContentFile | GitHubContentFile[]>(res);
       if (Array.isArray(data)) {
@@ -2452,7 +2482,10 @@ export function getLastCommitDate(
       if (ref) url.searchParams.set("sha", ref);
 
       const res = await githubFetch(url.toString());
-      if (!res.ok) throw githubResponseError(res);
+      // --since 指定時、候補ごとの変更ファイル数だけ並行して発行される（attachLastCommittedAt）。
+      // secondary rate limit を誘発しやすい同時実行の形そのものなので、他の候補間並行呼び出し
+      // 経路と同じく本文まで確認する（{@link githubResponseFailure} 参照）。
+      if (!res.ok) throw await githubResponseFailure(res);
 
       const commits = await parseGitHubJson<readonly GitHubCommitListItem[]>(res);
       if (commits.length === 0) return Option.none<string>();
