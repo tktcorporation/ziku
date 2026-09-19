@@ -1216,11 +1216,21 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
       // するが、giget は githubFetch を経由しないためレスポンスヘッダーのレート制限残量が
       // 観測されない。ダウンロード直後・動的ブレーキの判定に入る前に GET /rate_limit を
       // 1 回呼び、副作用として observedRateLimit を最新化する。このエンドポイント自体は
-      // クォータを消費せず、戻り値も使わない（呼ぶこと自体が目的）。401 やネットワーク
-      // エラーで取得できなくても、動的ブレーキの精度が上がらないだけで害は無いため、
-      // ここでは結果を無視して続行する（`attachLastCommittedAt` は observedRateLimit が
-      // 更新されていなければ既存の未観測時の挙動のまま動く）。
-      yield* Effect.promise(() => fetchRateLimitStatus());
+      // クォータを消費しない。401 やネットワークエラーで取得できなくても、動的ブレーキの
+      // 精度が上がらないだけで害は無いため、その場合は結果を無視して続行する
+      // （`attachLastCommittedAt` は observedRateLimit が更新されていなければ既存の
+      // 未観測時の挙動のまま動く）。この呼び出し自体がレート制限（ヘッダー無しの
+      // secondary rate limit を含む）を検知した場合は、`attachLastCommittedAt` の判定を
+      // 待たずここで直接ゲートを立てる。待つと、並行実行中の他候補が同じ throttling を
+      // 個別に踏んでからでないとゲートが立たない。
+      const rateLimitRefresh = yield* Effect.promise(() => fetchRateLimitStatus());
+      if (rateLimitRefresh._tag === "RateLimited") {
+        const detection: RateLimitDetection = {
+          _tag: "observed",
+          resetAt: rateLimitRefresh.resetAt,
+        };
+        yield* Ref.set(rateLimitGate, Option.some(detection));
+      }
 
       // pendingPull はテンプレート側発の変更（テンプレートの更新を配布するだけ）であり、
       // 「利用リポジトリ側でいつ変更されたか」という since フィルタの関心事に該当しない。
