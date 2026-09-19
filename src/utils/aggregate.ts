@@ -128,10 +128,23 @@ export interface AggregateOptions {
 
 const DEFAULT_CONCURRENCY = 4;
 
+const MILLIS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * `days` 日前が `Date` として表現可能かを判定する。
+ *
+ * `--recent-days` は正の整数であれば `parsePositiveInteger`（`commands/aggregate.ts`）を
+ * 通過するが、`Date` が表現できる範囲（エポックから前後約 2 億7千万年）を超える値を渡すと
+ * {@link recentPushSinceIso} の `toISOString()` が `RangeError` を投げる。CLI 層がこの関数で
+ * 事前に検証し、範囲外なら GitHub への問い合わせに入る前に `InvalidArgument` として拒否する。
+ */
+export function isRepresentableRecentPushDays(days: number): boolean {
+  return !Number.isNaN(new Date(Date.now() - days * MILLIS_PER_DAY).getTime());
+}
+
 /** `days` 日前の時刻を ISO 8601（UTC）文字列にする。`listOwnerRepos` の `pushedSince` に渡す。 */
 function recentPushSinceIso(days: number): string {
-  const millisPerDay = 24 * 60 * 60 * 1000;
-  return new Date(Date.now() - days * millisPerDay).toISOString();
+  return new Date(Date.now() - days * MILLIS_PER_DAY).toISOString();
 }
 
 /**

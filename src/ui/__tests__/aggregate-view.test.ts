@@ -227,6 +227,48 @@ describe("aggregateOutroLine", () => {
     );
   });
 
+  // ヘッダーの注記（headerNotes）は直近 push フィルタ・候補数上限による打ち切りを示すが、
+  // outro（この関数）が同じ条件を見ていないと、ヘッダーは「絞り込みで 0 件になった」と
+  // 示しているのに outro だけが「見つからなかった」と読めるメッセージを出し、両者が
+  // 矛盾するレポートになる。
+  it("直近 push フィルタで全件除外された場合（repositories=0, skipped=0）は「見つからなかった」と読めるメッセージを出さない", () => {
+    const report = makeReport({
+      summary: {
+        totalRepositories: 0,
+        repositoriesWithPendingPush: 0,
+        pendingPushFiles: 0,
+        conflictFiles: 0,
+        excludedBySince: 0,
+        candidatesScanned: 0,
+        recentPushSince: "2026-06-21T00:00:00.000Z",
+      },
+    });
+
+    const line = strip(aggregateOutroLine(report));
+    expect(line).not.toContain("No repositories found using this template.");
+    expect(line).toContain(
+      "only repositories pushed on/after 2026-06-21T00:00:00.000Z were scanned",
+    );
+  });
+
+  it("候補数上限で打ち切られた場合（repositories=0, skipped=0）は「見つからなかった」と読めるメッセージを出さない", () => {
+    const report = makeReport({
+      summary: {
+        totalRepositories: 0,
+        repositoriesWithPendingPush: 0,
+        pendingPushFiles: 0,
+        conflictFiles: 0,
+        excludedBySince: 0,
+        candidatesScanned: 30,
+        candidateScanLimit: 30,
+      },
+    });
+
+    const line = strip(aggregateOutroLine(report));
+    expect(line).not.toContain("No repositories found using this template.");
+    expect(line).toContain("the candidate scan stopped at 30 repositories");
+  });
+
   it("repositories が 1 件以上あれば通常の案内を返す", () => {
     const report = makeReport({
       repositories: [

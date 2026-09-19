@@ -8,7 +8,7 @@ import type { AggregateReport } from "../modules/schemas";
 import { runCommandEffect } from "../services/command-context";
 import { aggregateOutroLine, renderAggregateSummary } from "../ui/aggregate-view";
 import { intro, log, outro, pc, withSpinner } from "../ui/renderer";
-import { aggregateTemplateUsage } from "../utils/aggregate";
+import { aggregateTemplateUsage, isRepresentableRecentPushDays } from "../utils/aggregate";
 import { detectGitHubRepo } from "../utils/git-remote";
 import { LOCK_FILE } from "../utils/lock";
 import { absPath } from "../utils/paths";
@@ -327,6 +327,16 @@ export const aggregateCommand = defineCommand({
       recentDaysRaw,
       RECENT_DAYS_FORMAT_HINT,
     );
+    // `parsePositiveInteger` は正の整数であることしか見ないため、Date が表現できる範囲を
+    // 超える値（例: 2 億日）も通過する。GitHub への問い合わせに入る前にここで弾く。
+    if (recentPushDays !== undefined && !isRepresentableRecentPushDays(recentPushDays)) {
+      throw zikuFailure({
+        kind: "InvalidArgument",
+        argument: "--recent-days",
+        value: recentDaysRaw ?? "",
+        expected: RECENT_DAYS_FORMAT_HINT,
+      });
+    }
 
     const includeArchived = args["include-archived"] as boolean;
 

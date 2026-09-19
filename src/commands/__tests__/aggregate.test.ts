@@ -16,10 +16,16 @@ vi.mock("node:fs/promises", async () => {
   return memfs.fs.promises;
 });
 
-// utils/aggregate をモック（集約ロジック本体はテスト対象外。src/utils/__tests__/aggregate.test.ts が別途カバー）
-vi.mock("../../utils/aggregate", () => ({
-  aggregateTemplateUsage: vi.fn(),
-}));
+// utils/aggregate をモック（集約ロジック本体はテスト対象外。src/utils/__tests__/aggregate.test.ts が別途カバー）。
+// isRepresentableRecentPushDays は CLI 層の入力検証（--recent-days の範囲チェック）が使う
+// 純粋関数なので、モックに差し替えず実装をそのまま使う。
+vi.mock("../../utils/aggregate", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../utils/aggregate")>();
+  return {
+    ...actual,
+    aggregateTemplateUsage: vi.fn(),
+  };
+});
 
 // utils/git-remote をモック
 vi.mock("../../utils/git-remote", () => ({
@@ -270,6 +276,20 @@ describe("aggregateCommand", () => {
 
     it("--recent-days=0 は ZikuFailure（aggregateTemplateUsage は呼ばれない）", async () => {
       const thrown = await runAggregate({ "recent-days": "0" }).catch((e: unknown) => e);
+      expect(thrown).toBeInstanceOf(ZikuFailure);
+      expect((thrown as ZikuFailure).reason).toMatchObject({
+        kind: "InvalidArgument",
+        argument: "--recent-days",
+      });
+      expect(mockAggregateTemplateUsage).not.toHaveBeenCalled();
+    });
+
+    // parsePositiveInteger は正の整数であることしか見ないため、Date が表現できる範囲
+    // （エポックから前後約 2 億7千万年）を超える値も素通りする。GitHub への問い合わせに
+    // 入る前に弾かれ、`toISOString()` の RangeError が未分類の defect として漏れないことを
+    // 固定する。
+    it("--recent-days=200000000（Date の範囲外）は ZikuFailure（aggregateTemplateUsage は呼ばれない）", async () => {
+      const thrown = await runAggregate({ "recent-days": "200000000" }).catch((e: unknown) => e);
       expect(thrown).toBeInstanceOf(ZikuFailure);
       expect((thrown as ZikuFailure).reason).toMatchObject({
         kind: "InvalidArgument",
