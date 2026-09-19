@@ -58,6 +58,7 @@ import {
   ESTIMATED_REQUESTS_PER_CANDIDATE,
   cannotAffordRemainingRequests,
   candidateLimitFromRemaining,
+  effectiveRemaining,
   rateLimitSkipReason,
 } from "./rate-limit-budget";
 import type { RateLimitDetection, RateLimitGate } from "./rate-limit-budget";
@@ -175,11 +176,39 @@ export function aggregateTemplateUsage(
       // 掛け算になり、指定した値の 2 乗まで同時リクエストが膨らむ。
       const commitDateLimit = yield* Effect.makeSemaphore(concurrency);
 
+      // `attachLastCommittedAt` が実際に発行しようとしている（＝発行済みだがまだレスポンスが
+      // 返っていない）GitHub API リクエストの件数を、全候補・全ファイル横断で共有する。
+      // `processCandidate` は複数の候補に対して `concurrency` 個並列に呼ばれ、各々が独立に
+      // `attachLastCommittedAt` を呼び出すため、動的ブレーキの判定が「自分の担当ファイル配列
+      // 内の残数」だけを見ると、他の候補が同時に消費中の分を考慮できない。この Ref を各
+      // リクエストの発行直前にアトミックに +1 し、完了時（成功・失敗を問わず）に -1 することで、
+      // 「観測残量 - 予約数」（{@link effectiveRemaining}）を実効残量として判定に使えるようにする。
+      const inFlightRequestReservations: Ref.Ref<number> = yield* Ref.make(0);
+
       // owner 横断でレート制限を検知したかどうかを共有する。未認証の 60 req/hour クォータを
       // 使い切った後も候補ごとに新規リクエストを送り続けると、残り候補数分がそのまま同じ
       // レート制限応答を受け取るだけの無駄になる。リセットまで最大 1 時間かかりうるため、
       // 待たずに検知した時点で以降の GitHub 呼び出しを打ち切り、まとめて報告する。
       const rateLimitGate: RateLimitGate = yield* Ref.make(Option.none<RateLimitDetection>());
+
+      // owner/repo の正規名解決（GitHub のリネーム・移管リダイレクト経由）をキャッシュする。
+      // 同じ owner/repo への同時・重複呼び出しを 1 回の GitHub API 呼び出しにまとめる
+      // （下の `templateIdentity` 解決と {@link resolveCanonicalMatch} の双方から使う）。
+      const resolveIdentity: ResolveRepoIdentity = yield* Effect.cachedFunction(
+        ([owner, repo]: readonly [string, string]) =>
+          tryGitHubGated(rateLimitGate, () => getRepoIdentity(owner, repo)),
+        Equivalence.tuple(Equivalence.string, Equivalence.string),
+      );
+
+      // テンプレート自身の正規名（GitHub 上のリネーム・移管リダイレクト後の表記）を、owner
+      // 配下の候補列挙より前に解決する。呼び出し側が渡す `template.owner`/`repo`（ローカルの
+      // git remote 等から検出した値）は、GitHub 上でリポジトリがリネーム・移管された後も
+      // 旧名のままでありうる。`listOwnerRepos` の `excludeRepo` は文字列比較のため、旧名を
+      // そのまま渡すと、リネーム後の一覧に含まれる正規名のテンプレート自身を除外できない。
+      // 解決に失敗した場合（存在しない・レート制限・認証エラー等）はテンプレート自身の識別が
+      // 取れておらず以降のどの処理も意味を持たないため、`resolveTemplateRef` の失敗時と同様に
+      // スキャン全体を失敗させる。
+      const templateIdentity = yield* resolveIdentity([template.owner, template.repo]);
 
       // owner 配下の候補数を、レート制限の残量から安全に処理できる件数まで事前に絞り込む。
       // 401（トークン拒否）はここで即座にスキャン全体を失敗させ、取得自体の失敗
@@ -197,25 +226,20 @@ export function aggregateTemplateUsage(
           includeArchived,
           maxCandidates: candidateLimit,
           pushedSince,
-          excludeRepo: { owner: template.owner, repo: template.repo },
+          excludeRepo: { owner: templateIdentity.owner, repo: templateIdentity.repo },
         }),
       );
 
-      // owner/repo の正規名解決（GitHub のリネーム・移管リダイレクト経由）をキャッシュする。
-      // 同じ owner/repo への同時・重複呼び出しを 1 回の GitHub API 呼び出しにまとめる
-      // （{@link resolveTemplateRef} と {@link resolveCanonicalMatch} の双方から使う）。
-      const resolveIdentity: ResolveRepoIdentity = yield* Effect.cachedFunction(
-        ([owner, repo]: readonly [string, string]) =>
-          tryGitHubGated(rateLimitGate, () => getRepoIdentity(owner, repo)),
-        Equivalence.tuple(Equivalence.string, Equivalence.string),
-      );
+      // `resolveIdentity` はキャッシュ済みなので、`templateIdentity` と同じキーであれば
+      // 追加の GitHub API 呼び出しなしで再利用できる。
+      const templateRefSha =
+        template.ref ?? (yield* resolveTemplateRef(template, templateIdentity));
 
-      const templateRefSha = template.ref ?? (yield* resolveTemplateRef(template, resolveIdentity));
-
-      // `listOwnerRepos` に渡した `excludeRepo` が既にテンプレート自身を除いて返す。ここでの
-      // 絞り込みは、探索対象 owner とテンプレートの owner が異なり `excludeRepo` の一致条件に
-      // 掛からないケース（テンプレートが自分以外の owner 配下にある構成）への防御。
-      const candidates = allRepos.filter((r) => !isSameRepo(r, template));
+      // `listOwnerRepos` に渡した `excludeRepo` は正規名で解決済みのテンプレート自身を
+      // 既に除いて返す。ここでの絞り込みは、それでもテンプレート自身が一覧に残っている
+      // ケースへの防御であり、`template`（呼び出し側が渡した可能性のある旧名）ではなく
+      // 正規名 `templateIdentity` で比較する。
+      const candidates = allRepos.filter((r) => !isSameRepo(r, templateIdentity));
 
       const evaluations = yield* Effect.forEach(
         candidates.map((candidate, index) => ({
@@ -275,6 +299,7 @@ export function aggregateTemplateUsage(
                     since,
                     commitDateLimit,
                     rateLimitGate,
+                    inFlightRequestReservations,
                   }),
                 ),
               { concurrency },
@@ -566,25 +591,20 @@ type ResolveRepoIdentity = (
 /**
  * テンプレートリポジトリ自身の比較用 commit SHA を解決する。
  *
- * 既定ブランチは `resolveIdentity` 経由で直接取得する（`GET /repos/{owner}/{repo}`）。
- * `listOwnerRepos` の列挙結果から owner/repo 一致で defaultBranch を引く方法だと、
- * `--owner`（searchOwner）がテンプレートと別 owner を指す場合や、テンプレートが
+ * 既定ブランチは呼び出し側が解決済みの `identity`（`GET /repos/{owner}/{repo}` 由来）を
+ * そのまま使う。`listOwnerRepos` の列挙結果から owner/repo 一致で defaultBranch を引く
+ * 方法だと、`--owner`（searchOwner）がテンプレートと別 owner を指す場合や、テンプレートが
  * アーカイブ済みで列挙結果に含まれない場合に defaultBranch が引けない。
  *
  * テンプレート側の基準 commit が定まらないとレポート全体の `template.ref` が埋められず
  * 後段のエージェントが決定的にファイルを取得できないため、個別リポジトリと違って
  * fatal 扱いにし、aggregate 全体を失敗させる。
- *
- * `resolveIdentity` はキャッシュ経由なので、この呼び出しでテンプレートの正規名
- * （owner/repo）もキャッシュへ積まれる。この後 {@link resolveCanonicalMatch} が
- * テンプレートの正規名を必要とした場合、追加の GitHub API 呼び出しなしで再利用できる。
  */
 function resolveTemplateRef(
   template: AggregateTemplateRepo,
-  resolveIdentity: ResolveRepoIdentity,
+  identity: RepoIdentity,
 ): Effect.Effect<CommitSha, ZikuFailure> {
   return Effect.gen(function* () {
-    const identity = yield* resolveIdentity([template.owner, template.repo]);
     const resolution = yield* Effect.promise(() =>
       resolveLatestCommitSha(template.owner, template.repo, {
         kind: "branch",
@@ -1009,6 +1029,12 @@ interface ProcessCandidateOptions {
    * ダウンロードもコミット日時の取得も行わず、理由付きで skipped として返す。
    */
   readonly rateLimitGate: RateLimitGate;
+  /**
+   * 全候補・全ファイル横断で共有する、発行しようとしている GitHub API リクエストの予約数。
+   * `attachLastCommittedAt` の動的ブレーキが、並行実行中の他候補の消費を考慮するために使う
+   * （{@link effectiveRemaining}）。
+   */
+  readonly inFlightRequestReservations: Ref.Ref<number>;
 }
 
 /**
@@ -1041,6 +1067,7 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
     since,
     commitDateLimit,
     rateLimitGate,
+    inFlightRequestReservations,
   } = opts;
   const { repoInfo, lock, ref } = candidate;
 
@@ -1100,6 +1127,7 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
         pendingPush,
         commitDateLimit,
         rateLimitGate,
+        inFlightRequestReservations,
       );
       const conflictResult = yield* attachLastCommittedAt(
         repoInfo,
@@ -1107,6 +1135,7 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
         conflicts,
         commitDateLimit,
         rateLimitGate,
+        inFlightRequestReservations,
       );
       pendingPush = pushResult.entries;
       conflicts = conflictResult.entries;
@@ -1337,6 +1366,16 @@ interface AttachLastCommittedAtResult<T> {
  * しまう。`evaluateCandidate` と同じ動的ブレーキ（{@link cannotAffordRemainingRequests}、
  * ファイル 1 件 = リクエスト 1 回として計算）をエントリ 1 件ごとに適用し、直近の観測残量で
  * 残りエントリ分をまかなえないと分かった時点で以降のエントリへ新規リクエストを送らない。
+ *
+ * `remainingAfter` はこの呼び出し（＝この 1 候補が持つエントリ配列）の中だけで完結した
+ * 「自分より後ろに並ぶエントリの数」であり、`processCandidate` は複数の候補に対して
+ * `concurrency` 個並列に呼ばれ、各候補が独立にこの関数を呼び出す。動的ブレーキの判定に
+ * 生の観測残量をそのまま使うと、複数候補がそれぞれ「自分の配列内では自分が最後の 1 件」と
+ * 見積もり、他候補が同時に消費している分（まだレスポンスが返らず観測残量に反映されていない
+ * 分）を考慮できないまま揃って通過してしまう。呼び出し元が全候補・全ファイル横断で共有する
+ * `inFlightRequestReservations` へ、実際にリクエストを発行する直前にアトミックに +1 し、
+ * 「観測残量 - 予約数」（{@link effectiveRemaining}）を判定に使うことで、並行して走る他候補の
+ * 消費予定分を考慮に入れる。完了時（成功・失敗を問わず `Effect.ensuring`）に -1 して解放する。
  */
 function attachLastCommittedAt<T extends { readonly path: RepoRelPath }>(
   repoInfo: OwnerRepoInfo,
@@ -1344,6 +1383,7 @@ function attachLastCommittedAt<T extends { readonly path: RepoRelPath }>(
   entries: readonly T[],
   commitDateLimit: Effect.Semaphore,
   rateLimitGate: RateLimitGate,
+  inFlightRequestReservations: Ref.Ref<number>,
 ): Effect.Effect<AttachLastCommittedAtResult<T>> {
   return Effect.gen(function* () {
     const results = yield* Effect.forEach(
@@ -1357,26 +1397,36 @@ function attachLastCommittedAt<T extends { readonly path: RepoRelPath }>(
         Effect.either(
           commitDateLimit.withPermits(1)(
             Effect.gen(function* () {
-              // 実際に 403 を受け取る前に、直近のレスポンスヘッダーから観測した残量で
-              // 先読みする。permit を取ってから確認するのは、まだ処理順が回ってこない
-              // エントリの分まで早合点して打ち切らないため。
-              const alreadyLimited = yield* Ref.get(rateLimitGate);
-              if (Option.isNone(alreadyLimited)) {
-                const observed = getObservedRateLimitRemaining();
-                if (
-                  observed !== undefined &&
-                  cannotAffordRemainingRequests(observed.remaining, remainingAfter, 1)
-                ) {
-                  const detection: RateLimitDetection = {
-                    _tag: "preemptive",
-                    resetAt: observed.resetAt,
-                  };
-                  yield* Ref.set(rateLimitGate, Option.some(detection));
+              // 実際にリクエストを発行する前に、プロセス全体で共有する予約カウンタへ
+              // アトミックに積む。他候補が並行して積んでいる分も合わせた予約総数を
+              // 実効残量の計算に使うため、まず自分の分を確定させてから判定する。
+              const reserved = yield* Ref.updateAndGet(inFlightRequestReservations, (n) => n + 1);
+              return yield* Effect.gen(function* () {
+                // 実際に 403 を受け取る前に、直近のレスポンスヘッダーから観測した残量で
+                // 先読みする。permit を取ってから確認するのは、まだ処理順が回ってこない
+                // エントリの分まで早合点して打ち切らないため。
+                const alreadyLimited = yield* Ref.get(rateLimitGate);
+                if (Option.isNone(alreadyLimited)) {
+                  const observed = getObservedRateLimitRemaining();
+                  if (
+                    observed !== undefined &&
+                    cannotAffordRemainingRequests(
+                      effectiveRemaining(observed.remaining, reserved),
+                      remainingAfter,
+                      1,
+                    )
+                  ) {
+                    const detection: RateLimitDetection = {
+                      _tag: "preemptive",
+                      resetAt: observed.resetAt,
+                    };
+                    yield* Ref.set(rateLimitGate, Option.some(detection));
+                  }
                 }
-              }
-              return yield* tryGitHubGated(rateLimitGate, () =>
-                getLastCommitDate(repoInfo.owner, repoInfo.repo, entry.path, ref),
-              );
+                return yield* tryGitHubGated(rateLimitGate, () =>
+                  getLastCommitDate(repoInfo.owner, repoInfo.repo, entry.path, ref),
+                );
+              }).pipe(Effect.ensuring(Ref.update(inFlightRequestReservations, (n) => n - 1)));
             }),
           ),
         ).pipe(

@@ -555,9 +555,11 @@ describe("aggregateTemplateUsage", () => {
       );
 
       expect(report.repositories.map((r) => r.repo)).toEqual(["exact-match"]);
-      // template.ref を明示指定しているため resolveTemplateRef 経由でも呼ばれず、
-      // lock.source が文字列一致するため canonical 解決経由でも呼ばれない。
-      expect(mockGetRepoIdentity).not.toHaveBeenCalled();
+      // template.ref を明示指定しているため resolveTemplateRef 経由では呼ばれず、
+      // lock.source が文字列一致するため canonical 解決経由でも呼ばれない。1 回だけ呼ばれるのは
+      // listOwnerRepos の excludeRepo に渡すテンプレート自身の正規名解決分。
+      expect(mockGetRepoIdentity).toHaveBeenCalledTimes(1);
+      expect(mockGetRepoIdentity).toHaveBeenCalledWith("acme", "template");
     });
   });
 
@@ -1175,6 +1177,34 @@ describe("aggregateTemplateUsage", () => {
     );
   });
 
+  // テンプレートがリネーム・移管された後、呼び出し側が渡す template.owner/repo が旧名の
+  // ままでも、listOwnerRepos へは正規名（GitHub のリダイレクト後の表記）を excludeRepo として
+  // 渡す。旧名のまま渡すと、リネーム後の一覧に含まれる正規名のテンプレート自身を
+  // 除外できない。
+  it("テンプレートがリネームされていても、listOwnerRepos へ正規名の excludeRepo を渡す", async () => {
+    mockListOwnerRepos.mockResolvedValue([]);
+    mockGetRepoIdentity.mockImplementation((owner: string, repo: string) =>
+      Promise.resolve(
+        owner === "old-owner" && repo === "old-template"
+          ? { owner: "new-owner", repo: "new-template", defaultBranch: "main" }
+          : { owner, repo, defaultBranch: "main" },
+      ),
+    );
+
+    await Effect.runPromise(
+      aggregateTemplateUsage({
+        // ローカルの git remote 等から検出した、リネーム前の旧名。
+        template: { owner: "old-owner", repo: "old-template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+      }),
+    );
+
+    expect(mockListOwnerRepos).toHaveBeenCalledWith(
+      "old-owner",
+      expect.objectContaining({ excludeRepo: { owner: "new-owner", repo: "new-template" } }),
+    );
+  });
+
   it("tmpBaseDir 省略時は Scope クローズ時に tmpBaseDir を削除する", async () => {
     mockListOwnerRepos.mockResolvedValue([]);
 
@@ -1386,6 +1416,75 @@ describe("aggregateTemplateUsage", () => {
     expect(report.repositories).toEqual([]);
     expect(report.skipped).toHaveLength(1);
     expect(report.skipped[0]).toMatchObject({ owner: "acme", repo: "many-files-rl" });
+  });
+
+  // 上の動的ブレーキのテストは 1 候補が持つファイル配列の中だけで完結する判定を固定する。
+  // ここでは複数の候補が `processCandidate` から並行して `attachLastCommittedAt` を呼び出す
+  // ケースを固定する。各候補が「自分の担当ファイル配列内の残数」だけを見ると、他候補が
+  // 同時に消費しようとしている分（まだレスポンスが返らず観測残量に反映されていない分）を
+  // 考慮できず、観測残量が全候補の合計をまかなえないのに全員が通過してしまう
+  // （予約カウンタ導入前の挙動）。
+  it("--since 指定時、複数の候補が並行してコミット日時を取得する場合、動的ブレーキは他候補の消費予定分も考慮する", async () => {
+    const repos = ["c1", "c2", "c3", "c4"];
+    const baseHashes = { "f.txt": hashContent("v1") };
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+
+    const files: Record<string, string> = {
+      "/tmpl-dir-race/.ziku/ziku.jsonc": JSON.stringify({ include: ["f.txt"] }),
+      "/tmpl-dir-race/f.txt": "v1",
+    };
+    for (const r of repos) {
+      setLockFixture(lockFixtures, "acme", r, () =>
+        Promise.resolve(Option.some(lockJson({ baseHashes }))),
+      );
+      shaFixtures.set(`acme/${r}`, sha(`${r}-sha`));
+      dirsBySource.set(`gh:acme/${r}#${r}-sha`, `/${r}-dir`);
+      files[`/${r}-dir/.ziku/ziku.jsonc`] = JSON.stringify({ include: ["f.txt"] });
+      files[`/${r}-dir/f.txt`] = "v2";
+    }
+    dirsBySource.set("gh:acme/template#tmpl-sha", "/tmpl-dir-race");
+    vol.fromJSON(files);
+    for (const _ of repos) queueGlobResults(["f.txt"], ["f.txt"]);
+
+    // 評価フェーズ（候補ごとに 1 回、計 4 回）は観測残量なしのまま進める。その後の
+    // --since のコミット日時取得フェーズに入ってから、4 候補・計 4 リクエストの合計を
+    // まかなえない観測残量 3 を返し続ける。
+    let observedCallCount = 0;
+    mockGetObservedRateLimitRemaining.mockImplementation(() => {
+      observedCallCount += 1;
+      return observedCallCount <= repos.length ? undefined : { remaining: 3, resetAt: undefined };
+    });
+
+    // レスポンスを遅延させ、複数候補が「他候補のレスポンスがまだ 1 件も返っていない」
+    // 状態で並行してリクエストを発行しようとする状況を再現する
+    // （`--since 指定時、コミット日時の取得は concurrency 分だけ並列実行される` と同じ手法）。
+    mockGetLastCommitDate.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          setTimeout(() => resolve(Option.some("2026-08-10T00:00:00Z")), 10);
+        }),
+    );
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: repos.length,
+        since: "2026-08-01T00:00:00.000Z",
+      }),
+    );
+
+    // 観測残量 3 に対し、4 候補が予約を共有せずに各々「自分は最後の 1 件」と判定すると
+    // 4 件とも通過してしまう（修正前の挙動）。予約を共有していれば、実際に GitHub へ
+    // 発行されるリクエストは観測残量の範囲に収まり、残りは動的ブレーキで止まる。
+    expect(mockGetLastCommitDate.mock.calls.length).toBeLessThan(repos.length);
+    expect(report.repositories.length + report.skipped.length).toBe(repos.length);
+    expect(report.skipped.length).toBeGreaterThan(0);
+    for (const skip of report.skipped) {
+      expect(skip.reason).toContain(
+        "Could not determine the --since filter because fetching the commit date failed for some files",
+      );
+    }
   });
 
   it("skipped の reason は英語である（後段のエージェント/他の CLI 出力との一貫性）", async () => {
