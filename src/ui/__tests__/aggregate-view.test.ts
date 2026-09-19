@@ -154,6 +154,39 @@ describe("renderAggregateSummary", () => {
     const line = strip(renderAggregateSummary(report));
     expect(line).not.toContain("candidate scan stopped");
   });
+
+  it("直近 push フィルタの下限があれば、totalRepositories が 0 件でも常に注記する", () => {
+    const report = makeReport({
+      summary: {
+        totalRepositories: 0,
+        repositoriesWithPendingPush: 0,
+        pendingPushFiles: 0,
+        conflictFiles: 0,
+        excludedBySince: 0,
+        candidatesScanned: 0,
+        recentPushSince: "2026-06-21T00:00:00.000Z",
+      },
+    });
+
+    const line = strip(renderAggregateSummary(report));
+    expect(line).toContain("only repositories pushed on/after 2026-06-21T00:00:00.000Z");
+  });
+
+  it("直近 push フィルタの下限が無ければ注記しない", () => {
+    const report = makeReport({
+      summary: {
+        totalRepositories: 0,
+        repositoriesWithPendingPush: 0,
+        pendingPushFiles: 0,
+        conflictFiles: 0,
+        excludedBySince: 0,
+        candidatesScanned: 0,
+      },
+    });
+
+    const line = strip(renderAggregateSummary(report));
+    expect(line).not.toContain("only repositories pushed");
+  });
 });
 
 describe("aggregateOutroLine", () => {

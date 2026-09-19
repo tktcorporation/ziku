@@ -142,12 +142,17 @@ const RATE_LIMIT_SAFETY_MARGIN = 10;
  * 1. lock.json の初回取得（ふるい用、`readCandidateLock`）
  * 2. commit SHA の解決（`resolveCandidateRef`）
  * 3. 固定した commit での lock.json 再取得（`readCandidateLock`）
- * 4. 利用リポジトリ内容のダウンロード（`processCandidate` → `classifyAgainstTemplate`）
+ * 4. 利用リポジトリ内容のダウンロード（`processCandidate` → `classifyAgainstTemplate` →
+ *    `acquireTempTemplate` が使う giget の `download()`。候補ごとに commit SHA 固定でダウンロード
+ *    URL が変わるため常にコールドキャッシュになり、etag 確認の `HEAD` と実体取得の `GET` で
+ *    2 リクエストを消費する）
+ *
+ * 1〜3 で 3 リクエスト、4 で 2 リクエストの計 5。
  *
  * `since` フィルタ指定時のコミット日時取得など、これを超える呼び出しが発生するケースも
  * あるため、あくまで下限の見積もりであることに注意。
  */
-const ESTIMATED_REQUESTS_PER_CANDIDATE = 4;
+const ESTIMATED_REQUESTS_PER_CANDIDATE = 5;
 
 /**
  * 候補数上限を呼び出し側が明示指定しなかったときの既定値。
@@ -337,6 +342,7 @@ export function aggregateTemplateUsage(
         excludedBySince,
         allRepos.length,
         candidateLimit,
+        pushedSince,
       );
     }),
   );
@@ -1497,6 +1503,10 @@ function buildReport(
   // `candidateScanLimit` は他の生成元との互換のため引き続き optional だが、この関数の
   // 呼び出し元は必ず値を渡す。
   candidateScanLimit: number,
+  // recentPushSinceIso は既定値・明示指定のどちらでも必ず具体的な ISO 文字列を返す。
+  // スキーマ側の `recentPushSince` は `candidateScanLimit` と同じ理由で optional だが、
+  // この関数の呼び出し元は必ず値を渡す。
+  recentPushSince: string,
 ): AggregateReport {
   return {
     template: { owner: template.owner, repo: template.repo, ref: templateRefSha },
@@ -1511,6 +1521,7 @@ function buildReport(
       excludedBySince,
       candidatesScanned,
       candidateScanLimit,
+      recentPushSince,
     },
   };
 }

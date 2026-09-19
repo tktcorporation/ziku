@@ -893,6 +893,18 @@ export const aggregateSummarySchema = z.object({
    * いることがある。
    */
   candidateScanLimit: z.number().int().nonnegative().optional(),
+  /**
+   * このスキャンが候補に含めた push 日時の下限（ISO 8601、`listOwnerRepos` の `pushedSince` に
+   * 渡した値）。`aggregateTemplateUsage` は常に具体的な値を設定する（この下限は常に何らかの
+   * 既定値または明示指定から計算されるため）。フィールド自体は他の生成元（手書き・別ツール産の
+   * レポート）との互換のため `candidateScanLimit` と同じ方針で optional のまま残す。
+   *
+   * owner 配下の全リポジトリがこの下限より前にしか push されていない場合、
+   * `listOwnerRepos` は 1 件も返さず `totalRepositories: 0` になる。この値が無いと、
+   * 「利用リポジトリが無かった」のか「直近 push フィルタで最初から母集団に入らなかった」のか
+   * レポートの消費者が区別できない。
+   */
+  recentPushSince: z.string().datetime({ offset: true }).optional(),
 });
 export type AggregateSummary = z.infer<typeof aggregateSummarySchema>;
 

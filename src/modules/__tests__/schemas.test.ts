@@ -829,6 +829,31 @@ describe("aggregateSummarySchema", () => {
     expect(aggregateSummarySchema.parse(summary)).toEqual(summary);
   });
 
+  it("recentPushSince（直近 push フィルタの下限、ISO 8601）を受け入れる", () => {
+    const summary = {
+      totalRepositories: 3,
+      repositoriesWithPendingPush: 1,
+      pendingPushFiles: 2,
+      conflictFiles: 0,
+      excludedBySince: 0,
+      candidatesScanned: 5,
+      recentPushSince: "2026-06-21T00:00:00.000Z",
+    };
+    expect(aggregateSummarySchema.parse(summary)).toEqual(summary);
+  });
+
+  it("recentPushSince は省略できる（他の生成元との互換のため。ziku 自身は常に値を設定する）", () => {
+    const summary = {
+      totalRepositories: 3,
+      repositoriesWithPendingPush: 1,
+      pendingPushFiles: 2,
+      conflictFiles: 0,
+      excludedBySince: 0,
+      candidatesScanned: 5,
+    };
+    expect(aggregateSummarySchema.parse(summary)).toEqual(summary);
+  });
+
   it("負の値を拒否する", () => {
     expect(() =>
       aggregateSummarySchema.parse({

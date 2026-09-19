@@ -57,7 +57,8 @@ function renderSkippedLines(report: AggregateReport): string[] {
 
 /**
  * ヘッダー行の括弧内に添える補足（skipped 件数・`--since` による除外件数・候補数上限による
- * 打ち切り）を作る。いずれも該当が無ければ空配列を返し、呼び出し側は括弧そのものを省略する。
+ * 打ち切り・直近 push フィルタの下限）を作る。いずれも該当が無ければ空配列を返し、
+ * 呼び出し側は括弧そのものを省略する。
  *
  * 候補数上限による打ち切りの注記は、`renderSkippedLines` / `aggregateOutroLine` と同じ設計
  * 意図（0 件は「使っているリポジトリが無い」ことの証明ではない）を、候補の絞り込みそのものに
@@ -67,6 +68,12 @@ function renderSkippedLines(report: AggregateReport): string[] {
  * `candidatesScanned >= candidateScanLimit` は近似であり、常に正確に打ち切りの有無を表すとは
  * 限らない（`candidatesScanned` の由来と近似の理由は `modules/schemas.ts` の
  * `candidateScanLimit` を参照）。
+ *
+ * 直近 push フィルタの注記は、候補数上限とは異なり「実際に除外が起きたか」を検知できない
+ * （`listOwnerRepos` が早期終了した件数はレポートに残らない）ため、フィルタが適用されている
+ * こと自体を常に示す。owner 配下の全リポジトリがこの下限より前にしか push されていない場合、
+ * `totalRepositories: 0` だけでは「利用リポジトリが無い」のか「直近 push フィルタで最初から
+ * 対象に入らなかった」のか読み手が区別できない。
  */
 function headerNotes(report: AggregateReport): string[] {
   const notes: string[] = [];
@@ -76,11 +83,14 @@ function headerNotes(report: AggregateReport): string[] {
   if (report.summary.excludedBySince > 0) {
     notes.push(`${pc.bold(String(report.summary.excludedBySince))} excluded by --since`);
   }
-  const { candidateScanLimit, candidatesScanned } = report.summary;
+  const { candidateScanLimit, candidatesScanned, recentPushSince } = report.summary;
   if (candidateScanLimit !== undefined && candidatesScanned >= candidateScanLimit) {
     notes.push(
       `candidate scan stopped at ${pc.bold(String(candidateScanLimit))} — the owner may have more repositories that were not checked`,
     );
+  }
+  if (recentPushSince !== undefined) {
+    notes.push(`only repositories pushed on/after ${pc.bold(recentPushSince)} were scanned`);
   }
   return notes;
 }
