@@ -1117,6 +1117,16 @@ function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessO
     const pendingPull = toPendingPullEntries(files);
 
     if (since !== undefined) {
+      // classifyAgainstTemplate は giget 経由でテンプレート/候補リポジトリ内容をダウンロード
+      // するが、giget は githubFetch を経由しないためレスポンスヘッダーのレート制限残量が
+      // 観測されない。ダウンロード直後・動的ブレーキの判定に入る前に GET /rate_limit を
+      // 1 回呼び、副作用として observedRateLimit を最新化する。このエンドポイント自体は
+      // クォータを消費せず、戻り値も使わない（呼ぶこと自体が目的）。401 やネットワーク
+      // エラーで取得できなくても、動的ブレーキの精度が上がらないだけで害は無いため、
+      // ここでは結果を無視して続行する（`attachLastCommittedAt` は observedRateLimit が
+      // 更新されていなければ既存の未観測時の挙動のまま動く）。
+      yield* Effect.promise(() => fetchRateLimitStatus());
+
       // pendingPull はテンプレート側発の変更（テンプレートの更新を配布するだけ）であり、
       // 「利用リポジトリ側でいつ変更されたか」という since フィルタの関心事に該当しない。
       // 対象を pendingPush/conflicts だけに絞ることで、この関数の GitHub API 呼び出し回数を
@@ -1373,9 +1383,12 @@ interface AttachLastCommittedAtResult<T> {
  * 生の観測残量をそのまま使うと、複数候補がそれぞれ「自分の配列内では自分が最後の 1 件」と
  * 見積もり、他候補が同時に消費している分（まだレスポンスが返らず観測残量に反映されていない
  * 分）を考慮できないまま揃って通過してしまう。呼び出し元が全候補・全ファイル横断で共有する
- * `inFlightRequestReservations` へ、実際にリクエストを発行する直前にアトミックに +1 し、
- * 「観測残量 - 予約数」（{@link effectiveRemaining}）を判定に使うことで、並行して走る他候補の
- * 消費予定分を考慮に入れる。完了時（成功・失敗を問わず `Effect.ensuring`）に -1 して解放する。
+ * `inFlightRequestReservations` を使い、「他候補・他ファイルが既に予約している分」（自分の
+ * 分は含まない）で実効残量（{@link effectiveRemaining}）を計算して判定し、まかなえる場合に
+ * のみ自分の分を +1 する。判定と予約を `Ref.modify` で 1 つのアトミックな操作にまとめるのは、
+ * 自分自身の 1 リクエストを実効残量側と必要量側の両方で二重に数えないため（二重に数えると、
+ * 残量がちょうど自分の分だけまかなえる場合にも誤ってブレーキが発動する）。予約した場合のみ
+ * 完了時（成功・失敗を問わず `Effect.ensuring`）に -1 して解放する。
  */
 function attachLastCommittedAt<T extends { readonly path: RepoRelPath }>(
   repoInfo: OwnerRepoInfo,
@@ -1397,36 +1410,54 @@ function attachLastCommittedAt<T extends { readonly path: RepoRelPath }>(
         Effect.either(
           commitDateLimit.withPermits(1)(
             Effect.gen(function* () {
-              // 実際にリクエストを発行する前に、プロセス全体で共有する予約カウンタへ
-              // アトミックに積む。他候補が並行して積んでいる分も合わせた予約総数を
-              // 実効残量の計算に使うため、まず自分の分を確定させてから判定する。
-              const reserved = yield* Ref.updateAndGet(inFlightRequestReservations, (n) => n + 1);
-              return yield* Effect.gen(function* () {
-                // 実際に 403 を受け取る前に、直近のレスポンスヘッダーから観測した残量で
-                // 先読みする。permit を取ってから確認するのは、まだ処理順が回ってこない
-                // エントリの分まで早合点して打ち切らないため。
-                const alreadyLimited = yield* Ref.get(rateLimitGate);
-                if (Option.isNone(alreadyLimited)) {
-                  const observed = getObservedRateLimitRemaining();
-                  if (
-                    observed !== undefined &&
-                    cannotAffordRemainingRequests(
-                      effectiveRemaining(observed.remaining, reserved),
-                      remainingAfter,
-                      1,
-                    )
-                  ) {
-                    const detection: RateLimitDetection = {
-                      _tag: "preemptive",
-                      resetAt: observed.resetAt,
-                    };
-                    yield* Ref.set(rateLimitGate, Option.some(detection));
-                  }
-                }
-                return yield* tryGitHubGated(rateLimitGate, () =>
-                  getLastCommitDate(repoInfo.owner, repoInfo.repo, entry.path, ref),
-                );
-              }).pipe(Effect.ensuring(Ref.update(inFlightRequestReservations, (n) => n - 1)));
+              // 実際に 403 を受け取る前に、直近のレスポンスヘッダーから観測した残量で
+              // 先読みする。permit を取ってから確認するのは、まだ処理順が回ってこない
+              // エントリの分まで早合点して打ち切らないため。
+              const alreadyLimited = yield* Ref.get(rateLimitGate);
+              // 判定（まかなえるか）と予約（自分の分を +1 する）を Ref.modify で 1 つの
+              // アトミックな操作にまとめる。判定に使う予約数は「他候補・他ファイルが
+              // 既に予約している分」だけとし、まかなえると判定できた場合にのみ自分の
+              // 分を予約する。判定と予約を別々の Ref 操作に分けると、自分自身の
+              // 1 リクエストが実効残量を減らす側（{@link effectiveRemaining} の引数）と
+              // 必要量を増やす側（`remainingAfter + 1`）の両方で二重に数えられ、
+              // ちょうどまかなえる場合でも誤ってブレーキが発動する。
+              const observed = Option.isNone(alreadyLimited)
+                ? getObservedRateLimitRemaining()
+                : undefined;
+              const reservedSelf = Option.isSome(alreadyLimited)
+                ? false
+                : yield* Ref.modify(inFlightRequestReservations, (othersReserved) => {
+                    const canAfford =
+                      observed === undefined ||
+                      !cannotAffordRemainingRequests(
+                        effectiveRemaining(observed.remaining, othersReserved),
+                        remainingAfter,
+                        1,
+                      );
+                    return canAfford
+                      ? ([true, othersReserved + 1] as const)
+                      : ([false, othersReserved] as const);
+                  });
+
+              if (Option.isNone(alreadyLimited) && !reservedSelf) {
+                const detection: RateLimitDetection = {
+                  _tag: "preemptive",
+                  resetAt: observed?.resetAt,
+                };
+                yield* Ref.set(rateLimitGate, Option.some(detection));
+              }
+
+              const request = tryGitHubGated(rateLimitGate, () =>
+                getLastCommitDate(repoInfo.owner, repoInfo.repo, entry.path, ref),
+              );
+              // 予約した（+1 した）場合にのみ、完了時（成功・失敗を問わず）に対応する
+              // -1 を行う。ブレーキが発動して予約しなかった場合に -1 すると、他の
+              // in-flight なリクエストの予約分まで誤って解放してしまう。
+              return yield* reservedSelf
+                ? request.pipe(
+                    Effect.ensuring(Ref.update(inFlightRequestReservations, (n) => n - 1)),
+                  )
+                : request;
             }),
           ),
         ).pipe(
