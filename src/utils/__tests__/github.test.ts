@@ -1278,70 +1278,19 @@ describe("detectGitHubRateLimit", () => {
 /**
  * giget（テンプレート/リポジトリ内容の tarball ダウンロード）が投げるプレーンな Error から、
  * レート制限を検出できるかを確認する。giget はこの例外に `status`/`response` を持たせない
- * ため、`detectGitHubRateLimit` とは別の判定経路（メッセージ末尾のステータス解析 +
- * 観測済み残量による 403 の絞り込み）になる。
+ * ため、`detectGitHubRateLimit` とは別の判定経路（メッセージ末尾のステータス解析）になる。
+ * 429 のみを検出し、権限不足と区別できない 403 は意図的に検出しない
+ * （{@link detectGigetRateLimit} の JSDoc 参照）。
  */
 describe("detectGigetRateLimit", () => {
-  const originalFetch = globalThis.fetch;
-  const originalEnv = process.env;
-
-  beforeEach(() => {
-    process.env = { ...originalEnv };
-    delete process.env.GITHUB_TOKEN;
-    delete process.env.GH_TOKEN;
-    process.env.PATH = "";
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-    process.env = originalEnv;
-  });
-
-  it("429 は観測残量に関係なく無条件でレート制限として検出する", () => {
+  it("429 はレート制限として検出する（resetAt はヘッダーを持たないため常に undefined）", () => {
     const cause = new Error(
       "Failed to download https://api.github.com/repos/acme/widgets/tarball/deadbeef: 429 Too Many Requests",
     );
     expect(detectGigetRateLimit(cause)).toEqual({ resetAt: undefined });
   });
 
-  it("観測残量が無い状態での 403 は広くレート制限として扱う", () => {
-    expect(getObservedRateLimitRemaining()).toBeUndefined();
-    const cause = new Error(
-      "Failed to download https://api.github.com/repos/acme/widgets/tarball/deadbeef: 403 Forbidden",
-    );
-    expect(detectGigetRateLimit(cause)).toEqual({ resetAt: undefined });
-  });
-
-  it("観測残量が枯渇に近い 403 はレート制限として扱い、観測済みの resetAt を使う", async () => {
-    globalThis.fetch = vi
-      .fn()
-      .mockResolvedValue(
-        mockJsonResponse(
-          200,
-          { full_name: "acme/widgets", default_branch: "main" },
-          { "x-ratelimit-remaining": "3", "x-ratelimit-reset": "1700000000" },
-        ),
-      );
-    await getRepoIdentity("acme", "widgets");
-
-    const cause = new Error(
-      "Failed to download https://api.github.com/repos/acme/widgets/tarball/deadbeef: 403 Forbidden",
-    );
-    expect(detectGigetRateLimit(cause)).toEqual({ resetAt: new Date(1700000000 * 1000) });
-  });
-
-  it("観測残量に十分な余裕がある 403 は権限不足と判断し、レート制限として検出しない", async () => {
-    globalThis.fetch = vi
-      .fn()
-      .mockResolvedValue(
-        mockJsonResponse(
-          200,
-          { full_name: "acme/widgets", default_branch: "main" },
-          { "x-ratelimit-remaining": "4000" },
-        ),
-      );
-    await getRepoIdentity("acme", "widgets");
-
+  it("403 は権限不足と区別できないため検出しない", () => {
     const cause = new Error(
       "Failed to download https://api.github.com/repos/acme/widgets/tarball/deadbeef: 403 Forbidden",
     );

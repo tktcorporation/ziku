@@ -1367,46 +1367,38 @@ export function detectGitHubRateLimit(
 const GIGET_STATUS_SUFFIX_PATTERN = /(\d{3})\s+\S[^\n]*$/;
 
 /**
- * {@link detectGigetRateLimit} が 403 を「権限不足であってレート制限ではない」と言い切ってよい
- * とみなす、観測済み残量（{@link getObservedRateLimitRemaining}）のしきい値。
- *
- * `aggregate.ts` の `RATE_LIMIT_SAFETY_MARGIN`（候補数見積もりの安全マージン）と値は揃えて
- * あるが、意味は別（そちらは「候補ごとの処理以外で消費されうる分の余白」、こちらは
- * 「403 を権限不足と言い切れるほど枯渇から遠いか」）なので、値の変更が波及しないよう
- * 独立した定数として持つ。
- */
-const GIGET_403_HEALTHY_REMAINING_THRESHOLD = 10;
-
-/**
- * giget が投げるプレーンな `Error` のメッセージから、GitHub のレート制限（403/429）を検知する。
+ * giget が投げるプレーンな `Error` のメッセージから、GitHub の 429（レート制限専用の
+ * ステータス）だけを検知する。
  *
  * {@link detectGitHubRateLimit} は `cause.status` と `cause.response.headers` を前提にしており、
  * giget の tarball ダウンロード失敗はこの形を持たないため検知できない。この関数はメッセージ
  * 文字列のパース（{@link GIGET_STATUS_SUFFIX_PATTERN}）だけで代替する。
  *
- * ヘッダーが読めないため、429（GitHub 仕様上レート制限専用のステータス）と違い、403 は
- * 「レート制限」と「権限不足（fork の可否・private リポジトリへのアクセス権等）」を区別する
- * 材料がメッセージに無い。直近に観測したレート制限残量（同一プロセス内の他の GitHub API
- * 呼び出しから来る先読み情報）に十分な余裕（{@link GIGET_403_HEALTHY_REMAINING_THRESHOLD}
- * 超）があれば権限不足と判断し、それ以外（観測情報が無い、または枯渇に近い）は広くレート制限
- * として扱う。権限不足をレート制限と誤判定して待つより、レート制限を権限不足と誤判定して
- * 見逃す方が、owner 横断探索を無駄撃ちさせ続ける実害が大きいための判断。
+ * 403 は意図的に検知しない。giget はレスポンスヘッダーも本文も持たないプレーンな `Error` しか
+ * 投げないため、403 が「レート制限（プライマリ・セカンダリいずれも含む）」なのか「権限不足
+ * （fork の可否・private リポジトリへのアクセス権等）」なのかを区別する材料が無い。この関数の
+ * 戻り値は `aggregate.ts` の `toTemplateFailure` を経由して owner 横断で共有する
+ * `rateLimitGate` を立てる（一度立つとこのスキャン内では戻らない）ため、ここで誤って
+ * 権限不足を「レート制限」と判定すると、owner 配下にアクセス権の無いリポジトリが 1 つ
+ * あるだけでスキャン全体が打ち切られ、しかも案内するリセット時刻は無関係なコアクォータの
+ * ものになる。逆に本当にレート制限だった 403 を見逃しても、その候補が
+ * `TemplateUnavailable` として個別に skip されるだけで、他の候補の処理やスキャン全体には
+ * 影響しない。この非対称性から、区別できない 403 は広く見逃す側に倒す。評価フェーズ・
+ * `--since` のコミット日時取得フェーズでコアクォータが枯渇している場合は、`evaluateCandidate`
+ * 等の octokit 経由の呼び出し（正しいヘッダーを持つ）が {@link detectGitHubRateLimit} で
+ * 検知するか、観測残量に基づく事前ブレーキ（`preemptivelyGateIfUnaffordable`）が別途働く。
+ * 候補内容のダウンロードフェーズ（`processCandidate` が `classifyAgainstTemplate` を呼ぶ間）
+ * には、そのフェーズ内で完結する同等の安全網が無いため、このフェーズで実際にコアクォータが
+ * 枯渇すると、残り候補が採用件数の上限（既定 30 件、`DEFAULT_MAX_CANDIDATES`）まで 403 を
+ * 踏み続けてから個別に skip される。
  */
 export function detectGigetRateLimit(
   cause: unknown,
 ): { readonly resetAt: Date | undefined } | undefined {
   if (!(cause instanceof Error)) return undefined;
   const matched = GIGET_STATUS_SUFFIX_PATTERN.exec(cause.message);
-  if (!matched) return undefined;
-  const status = Number(matched[1]);
-  if (status === 429) return { resetAt: undefined };
-  if (status !== 403) return undefined;
-
-  const observed = getObservedRateLimitRemaining();
-  if (observed !== undefined && observed.remaining > GIGET_403_HEALTHY_REMAINING_THRESHOLD) {
-    return undefined;
-  }
-  return { resetAt: observed?.resetAt };
+  if (!matched || Number(matched[1]) !== 429) return undefined;
+  return { resetAt: undefined };
 }
 
 /** 例外に載っているレスポンスヘッダ全体。Octokit の `RequestError` は `response.headers` に持つ。 */
