@@ -17,7 +17,7 @@ import { blobShaSchema, commitShaSchema } from "../modules/schemas";
 import { log } from "../ui/renderer";
 import { transportTextToBytes } from "./file-content";
 import { lsRemoteCommitSha, lsRemoteDefaultBranch } from "./git-remote";
-import { mergeObservedRateLimit } from "./rate-limit-budget";
+import { RATE_LIMIT_SAFETY_MARGIN, mergeObservedRateLimit } from "./rate-limit-budget";
 import type { ObservedRateLimit, RateLimitStatus } from "./rate-limit-budget";
 import { ZIKU_CONFIG_FILE } from "./ziku-config";
 
@@ -1831,7 +1831,11 @@ function decideRepoPageItem(
  *   除外はしても以降のページ取得を打ち切りはしない。アーカイブ除外・特定リポジトリの除外
  *   （テンプレート自身を候補から外す等）に使う（{@link listOwnerRepos}）。除外を
  *   `maxItems` のカウント後に行うと、除外予定のアイテムが枠を消費し、後続の有効な候補が
- *   枠から押し出される。
+ *   枠から押し出される。ただし、この除外は `maxItems` へ達するまでページ取得を続けさせる
+ *   ため、除外対象が大量に連続する owner（アーカイブ・空リポジトリが極端に多い等）では
+ *   ページ取得自体の回数が際限なく増えうる。それを防ぐため、このページ取得ループ全体を
+ *   {@link RATE_LIMIT_SAFETY_MARGIN}（候補ごとの処理を始める前の準備フェーズに割り当てた
+ *   予算）でも打ち切る。
  */
 async function fetchAllRepoPages(
   baseUrl: string,
@@ -1850,7 +1854,12 @@ async function fetchAllRepoPages(
   // 1 ページ目に収まる分には十分に対応できる。
   const perPage = 100;
   const acc: GitHubRepoListItem[] = [];
-  for (let page = 1; ; page += 1) {
+  // ページ取得 1 回 = リクエスト 1 回なので、ループの反復回数がそのままこの一覧取得が
+  // 消費するリクエスト数になる。`isEligible` による除外は打ち切りの根拠にならないため
+  // （上記 `@param isEligible` 参照）、除外対象が大量に連続すると `maxItems` に達しないまま
+  // ページ取得だけが積み上がりうる。候補ごとの処理を始める前の準備フェーズに割り当てた予算
+  // （{@link RATE_LIMIT_SAFETY_MARGIN}）を超えてまで一覧取得を続けない。
+  for (let page = 1; page <= RATE_LIMIT_SAFETY_MARGIN; page += 1) {
     const url = new URL(baseUrl);
     url.searchParams.set("per_page", String(perPage));
     url.searchParams.set("page", String(page));
@@ -1871,6 +1880,7 @@ async function fetchAllRepoPages(
     }
     if (items.length < perPage) return acc;
   }
+  return acc;
 }
 
 /**

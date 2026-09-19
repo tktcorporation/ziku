@@ -5,6 +5,7 @@ import { commitSha, repoRelPath } from "../../__tests__/brands";
 import type { DeletablePath } from "../../modules/schemas";
 import { asDeletablePath, asPushContent } from "../../modules/schemas";
 import { classifySyncPath } from "../ziku-config";
+import { RATE_LIMIT_SAFETY_MARGIN } from "../rate-limit-budget";
 import { ZikuFailure } from "../../errors";
 import {
   checkRepoExists,
@@ -1599,6 +1600,32 @@ describe("listOwnerRepos", () => {
     expect(result.map((r) => r.repo)).toEqual(["eligible"]);
     expect(listUrls).toHaveLength(1);
     expect(new URL(listUrls[0]).searchParams.get("per_page")).toBe("100");
+  });
+
+  // isEligible による除外は maxCandidates のカウントより前に行われ、除外そのものは以降の
+  // ページ取得を打ち切らない（上のテスト参照）。owner 配下がアーカイブ済みリポジトリで
+  // 埋め尽くされていると、maxCandidates に到達しないままページ取得だけが積み上がる。
+  // このページ取得ループ全体が RATE_LIMIT_SAFETY_MARGIN（候補ごとの処理を始める前の準備
+  // フェーズに割り当てた予算）で頭打ちになることを固定する。
+  it("isEligible の除外が大量に連続しても、ページ取得は RATE_LIMIT_SAFETY_MARGIN 回で打ち切る", async () => {
+    const listUrls: string[] = [];
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(mockResponse({ status: 200 }));
+      }
+      listUrls.push(url);
+      // 常に 100 件全てアーカイブ済み（isEligible が全て false）のページを返し続け、
+      // 「次のページがまだある」という判定（items.length === per_page）を維持する。
+      const items = Array.from({ length: 100 }, (_, i) =>
+        repoListItem(`archived-${listUrls.length}-${i}`, { archived: true }),
+      );
+      return Promise.resolve(mockJsonResponse(200, items));
+    });
+
+    const result = await listOwnerRepos("acme", { maxCandidates: 5 });
+
+    expect(result).toEqual([]);
+    expect(listUrls).toHaveLength(RATE_LIMIT_SAFETY_MARGIN);
   });
 
   it("maxCandidates: 0 なら一覧取得そのものを行わず空配列を返す", async () => {
