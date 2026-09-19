@@ -1,5 +1,31 @@
 # @tktco/ziku
 
+## 2.2.0
+
+### Minor Changes
+
+- [#112](https://github.com/tktcorporation/ziku/pull/112) [`1b4eae0`](https://github.com/tktcorporation/ziku/commit/1b4eae0313a450d691e55bfe4c4bffedd850fa8c) Thanks [@tktcorporation](https://github.com/tktcorporation)! - `ziku aggregate` が既定で候補を「直近90日以内に push されたリポジトリ」かつ「先頭30件」に絞って問い合わせるようになった。未認証 GitHub API は 60 req/hour のレート制限があり、owner 配下を無条件に全量列挙すると、候補ごとの後続処理（lock.json 取得・commit SHA 解決・内容ダウンロード）に入る前にクォータを使い切っていた。絞り込みは `--recent-days` / `--max-candidates` で変更できる。
+  
+  `AggregateSummary`（JSON レポートのスキーマ）に必須フィールド `candidatesScanned`（実際に問い合わせた候補数）が増えた。JSON レポートを下流のツール・エージェントが消費する前提のコマンドであるため、これ以前のスキーマで検証していた消費側は追随が必要。
+  
+  絞り込み後もレート制限に達した場合、それ以降の候補は個別に問い合わせず `skipped` へ理由付きでまとめて記録するようになった（以前は残り候補へ律儀に問い合わせ続け、同じレート制限応答を受け取るだけの無駄なリクエストを送っていた）。
+
+### Patch Changes
+
+- [#112](https://github.com/tktcorporation/ziku/pull/112) [`1b4eae0`](https://github.com/tktcorporation/ziku/commit/1b4eae0313a450d691e55bfe4c4bffedd850fa8c) Thanks [@tktcorporation](https://github.com/tktcorporation)! - `ziku aggregate` の候補ごとの commit SHA 解決（`resolveCandidateRef`）・テンプレート固定リビジョンの検証（`checkPinnedRef`）・lock.json 取得（`fetchRepoTextFile`）・リポジトリ正規名解決（`getRepoIdentity`）・`--since` 指定時のコミット日時取得（`getLastCommitDate`）が、GitHub のレート制限（429、コアクォータ超過の 403、または secondary rate limit を示す 403）を汎用的な失敗と区別せずに扱っていたため、レート制限を検知しても owner 横断のスキャン全体で共有するレート制限ゲートを立てず、残りの候補へ問い合わせを送り続けていた。いずれも候補・ファイルをまたいで並行に呼ばれ、secondary rate limit を誘発しやすい経路。レート制限を専用の種別として分類し、検知した時点でゲートを立てて以降の候補への問い合わせを止めるようにした。secondary rate limit の 403 は `x-ratelimit-remaining` / `retry-after` ヘッダーを付けずに返ることがあるため、ヘッダーで判定できない場合はレスポンス本文の案内文も確認する。`--since` 指定時、観測残量のリフレッシュ呼び出し自体がレート制限（403/429）を検知した場合も、成功レスポンスで残量ゼロを申告した場合もゲートを立てる。対象候補が pendingPush/conflicts を持たない場合は動的ブレーキの判定を一度も通らないため、このリフレッシュでの検知が唯一の伝播経路になる。
+  
+  候補数の事前絞り込みが使う「候補 1 件あたりの想定リクエスト数」に、テンプレートがリネーム・移管された後も lock.json が旧名を記録している利用リポジトリの正規名解決（候補ごとに異なる旧名を持つ場合、候補の数だけ発生しうる）を追加した（7 → 8）。見積もりが実際の消費より少ないと、レート制限の残量から安全と判断した候補数が実際にはまかなえず、処理の途中でクォータを使い切る。
+  
+  観測残量のマージ（`mergeObservedRateLimit`）は、resetAt が異なれば「ウィンドウが変わった」とみなして新しい観測値を無条件に採用していたため、リセット直後の並行リクエストで、新ウィンドウ（補充済み）の応答が先に届いて採用された後に旧ウィンドウ（枯渇寸前）への遅延応答が届くと、有効な新ウィンドウの観測を陳腐化した旧ウィンドウの値で上書きしてしまっていた。両方の resetAt が分かっており、かつ新しい観測が既存より古いウィンドウのものだと判定できる場合は棄却するようにした。
+  
+  実際に 403/429 を受け取ったとき、または成功レスポンスで残量ゼロを申告されたときにゲートを立てる箇所（`tryGitHubGated`・`resolveCandidateRef`・`checkPinnedRef`・差分処理フェーズの分類失敗・`--since` のクォータリフレッシュ）も同じ理由で見直した。失敗/観測の resetAt が既に過去（=リセット済み）で、かつ観測済みのより新しいウィンドウより古いと判定できる場合、遅延到着した陳腐化済みの結果とみなしてゲートを立てないようにした（ゲートを立てないだけで、その候補自身の処理結果は変わらない。後続の候補も影響を受けない）。判定を共通ヘルパーへ寄せ、同じ基準で判定する。「resetAt が既に過去」を要求するのは、retry-after 付きの secondary rate limit の resetAt（今 + retry-after 秒という短い未来時刻）を、無関係なコアクォータの観測値と比べて誤って陳腐化扱いしないため。差分処理フェーズの分類失敗は、giget 経由の失敗が resetAt を持たないため実際には到達しない防御的な分岐。`--since` のクォータリフレッシュは応答を await した直後に使うが、`concurrency > 1` ではこのリフレッシュ自体が複数候補にまたがって並行に発行されうるため、待つだけでは遅延到着を防げない。
+  
+  旧ウィンドウの 403 が「まだ何も観測していない」時点で先に完了すると、その時点では比較対象が無く陳腐化と判定できないため、ゲートは（当時の情報としては正しく）立ってしまう。その後、別のレスポンスで新ウィンドウの補充が観測されても、ゲート自身は誰も再確認しない限り立ったままになり、実際には枠が補充されているのに残りの候補が永久にスキップされ続けてしまう。ゲートを短絡チェックする箇所すべてで、読み取り時にも同じ陳腐化判定を適用し、古いと判明したゲートはその場でクリアして問い合わせを再開するようにした。
+
+- [#109](https://github.com/tktcorporation/ziku/pull/109) [`45e2e1d`](https://github.com/tktcorporation/ziku/commit/45e2e1d2f6f4141f7101a6465bdc8d269b98d12a) Thanks [@tktcorporation](https://github.com/tktcorporation)! - 依存を更新する。ランタイム依存では `diff` を 9.0.0 へ上げた。unified diff の生成 (`createPatch`) と語単位ハイライト (`diffWords`) の出力は変わらない。
+
+- [#111](https://github.com/tktcorporation/ziku/pull/111) [`b0fde35`](https://github.com/tktcorporation/ziku/commit/b0fde353490c6c547f1dba086498f341b665e1da) Thanks [@tktcorporation](https://github.com/tktcorporation)! - ランタイム依存の zod を 4.5.4 へ更新する。zod は成果物にバンドルされず外部依存として解決されるため、ziku を install した利用者が引く zod のバージョンが変わる。
+
 ## 2.1.0
 
 ### Minor Changes
