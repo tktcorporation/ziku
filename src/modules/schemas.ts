@@ -876,6 +876,17 @@ export const aggregateSummarySchema = z.object({
    * 古かっただけと判別できる。
    */
   excludedBySince: z.number().int().nonnegative(),
+  /** owner 配下で実際に問い合わせた候補リポジトリ数（`listOwnerRepos` の結果件数） */
+  candidatesScanned: z.number().int().nonnegative(),
+  /**
+   * このスキャンに適用された候補数上限（レート制限の残量から算出した値と、呼び出し側が
+   * 指定した上限の小さい方）。undefined は上限が適用されなかったことを示す。
+   *
+   * `candidatesScanned` がこの値に達している場合、owner 配下にはこの上限を超えて
+   * リポジトリが存在した可能性がある。それらは候補にすら含まれておらず、このテンプレートの
+   * 利用リポジトリかどうかの判定を受けていない。
+   */
+  candidateScanLimit: z.number().int().nonnegative().optional(),
 });
 export type AggregateSummary = z.infer<typeof aggregateSummarySchema>;
 

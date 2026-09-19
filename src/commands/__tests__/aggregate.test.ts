@@ -49,7 +49,8 @@ vi.mock("../../ui/renderer", () => ({
   },
 }));
 
-const { aggregateCommand, normalizeSince, parseConcurrency } = await import("../aggregate");
+const { aggregateCommand, normalizeSince, parseConcurrency, parseMaxCandidates } =
+  await import("../aggregate");
 const { aggregateTemplateUsage } = await import("../../utils/aggregate");
 const { detectGitHubRepo } = await import("../../utils/git-remote");
 const { log, outro } = await import("../../ui/renderer");
@@ -82,6 +83,7 @@ function makeReport(overrides: Partial<AggregateReport> = {}): AggregateReport {
       pendingPushFiles: 0,
       conflictFiles: 0,
       excludedBySince: 0,
+      candidatesScanned: 0,
     },
     ...overrides,
   };
@@ -185,6 +187,28 @@ describe("parseConcurrency", () => {
   });
 });
 
+describe("parseMaxCandidates", () => {
+  it("未指定は undefined として成功扱い", () => {
+    expect(parseMaxCandidates(undefined)).toEqual({ ok: true, value: undefined });
+  });
+
+  it("正の整数はそのまま受理する", () => {
+    expect(parseMaxCandidates("200")).toEqual({ ok: true, value: 200 });
+  });
+
+  it("0 はエラーになる", () => {
+    expect(parseMaxCandidates("0").ok).toBe(false);
+  });
+
+  it("負値はエラーになる", () => {
+    expect(parseMaxCandidates("-1").ok).toBe(false);
+  });
+
+  it("数値でない入力はエラーになる", () => {
+    expect(parseMaxCandidates("abc").ok).toBe(false);
+  });
+});
+
 describe("aggregateCommand", () => {
   beforeEach(() => {
     vol.reset();
@@ -242,6 +266,32 @@ describe("aggregateCommand", () => {
       );
     });
 
+    it("--max-candidates=0 は ZikuFailure（aggregateTemplateUsage は呼ばれない）", async () => {
+      const thrown = await runAggregate({ "max-candidates": "0" }).catch((e: unknown) => e);
+      expect(thrown).toBeInstanceOf(ZikuFailure);
+      expect((thrown as ZikuFailure).reason).toMatchObject({
+        kind: "InvalidArgument",
+        argument: "--max-candidates",
+      });
+      expect(mockAggregateTemplateUsage).not.toHaveBeenCalled();
+    });
+
+    it("--max-candidates=200 は数値として aggregateTemplateUsage に渡る", async () => {
+      await runAggregate({ "max-candidates": "200" });
+
+      expect(mockAggregateTemplateUsage).toHaveBeenCalledWith(
+        expect.objectContaining({ maxCandidates: 200 }),
+      );
+    });
+
+    it("--max-candidates 未指定なら maxCandidates は undefined のまま渡る", async () => {
+      await runAggregate({});
+
+      expect(mockAggregateTemplateUsage).toHaveBeenCalledWith(
+        expect.objectContaining({ maxCandidates: undefined }),
+      );
+    });
+
     it("--owner 未指定時は検出した template owner を searchOwner に使う", async () => {
       await runAggregate({});
 
@@ -281,6 +331,7 @@ describe("aggregateCommand", () => {
           pendingPushFiles: 0,
           conflictFiles: 0,
           excludedBySince: 0,
+          candidatesScanned: 1,
         },
       });
       mockAggregateTemplateUsage.mockReturnValue(Effect.succeed(report));
@@ -334,6 +385,7 @@ describe("aggregateCommand", () => {
           pendingPushFiles: 1,
           conflictFiles: 0,
           excludedBySince: 0,
+          candidatesScanned: 1,
         },
       });
       mockAggregateTemplateUsage.mockReturnValue(Effect.succeed(report));

@@ -31,6 +31,7 @@ function makeReport(overrides: Partial<AggregateReport> = {}): AggregateReport {
       pendingPushFiles: 0,
       conflictFiles: 0,
       excludedBySince: 0,
+      candidatesScanned: 0,
     },
     ...overrides,
   };
@@ -56,6 +57,7 @@ describe("renderAggregateSummary", () => {
         pendingPushFiles: 0,
         conflictFiles: 0,
         excludedBySince: 0,
+        candidatesScanned: 1,
       },
     });
 
@@ -83,6 +85,7 @@ describe("renderAggregateSummary", () => {
         pendingPushFiles: 0,
         conflictFiles: 0,
         excludedBySince: 0,
+        candidatesScanned: 1,
       },
     });
 
@@ -99,6 +102,7 @@ describe("renderAggregateSummary", () => {
         pendingPushFiles: 0,
         conflictFiles: 0,
         excludedBySince: 2,
+        candidatesScanned: 2,
       },
     });
 
@@ -134,6 +138,7 @@ describe("aggregateOutroLine", () => {
         pendingPushFiles: 0,
         conflictFiles: 0,
         excludedBySince: 3,
+        candidatesScanned: 3,
       },
     });
 
@@ -163,6 +168,7 @@ describe("aggregateOutroLine", () => {
         pendingPushFiles: 0,
         conflictFiles: 0,
         excludedBySince: 0,
+        candidatesScanned: 1,
       },
     });
 

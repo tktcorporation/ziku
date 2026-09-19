@@ -178,6 +178,47 @@ export function parseConcurrency(raw: string | undefined): ConcurrencyParseResul
   return { ok: true, value };
 }
 
+type MaxCandidatesParseResult =
+  | { readonly ok: true; readonly value: number | undefined }
+  | { readonly ok: false };
+
+/** `--max-candidates` の期待フォーマット。CLI ガード節が `InvalidArgument` の `expected` に使う。 */
+export const MAX_CANDIDATES_FORMAT_HINT = "a positive integer, e.g. --max-candidates=200";
+
+/**
+ * `--max-candidates` を正の整数として検証する。
+ *
+ * 未指定（undefined）は `aggregateTemplateUsage` 側の既定値（レート制限の残量から算出した
+ * 上限のみ）に委ねる。指定した場合は、算出した上限との小さい方が使われる。
+ */
+export function parseMaxCandidates(raw: string | undefined): MaxCandidatesParseResult {
+  if (raw === undefined) return { ok: true, value: undefined };
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    return { ok: false };
+  }
+  return { ok: true, value };
+}
+
+/**
+ * `parseConcurrency` / `parseMaxCandidates` のような「未指定なら ok、そうでなければ検証する」
+ * パーサーの結果を、成功なら値へ、失敗なら `InvalidArgument` の `ZikuFailure` へ変換する。
+ *
+ * `run` 本体に同じ形の `if (!result.ok) throw ...` を並べると分岐が積み重なるため、
+ * 検証系のオプションが増えるたびに複雑度が上がる問題をここへ切り出して抑える。
+ */
+function requireParsedOption<T>(
+  result: { readonly ok: true; readonly value: T } | { readonly ok: false },
+  argument: string,
+  rawValue: string | undefined,
+  expected: string,
+): T {
+  if (!result.ok) {
+    throw zikuFailure({ kind: "InvalidArgument", argument, value: rawValue ?? "", expected });
+  }
+  return result.value;
+}
+
 export const aggregateCommand = defineCommand({
   meta: {
     name: "aggregate",
@@ -216,6 +257,11 @@ export const aggregateCommand = defineCommand({
     concurrency: {
       type: "string",
       description: "Number of repositories to process concurrently (default: 4)",
+    },
+    "max-candidates": {
+      type: "string",
+      description:
+        "Maximum number of candidate repositories to check (default: derived from the current GitHub API rate limit)",
     },
   },
   async run({ args }) {
@@ -257,15 +303,20 @@ export const aggregateCommand = defineCommand({
     }
 
     const concurrencyRaw = args.concurrency as string | undefined;
-    const parsedConcurrency = parseConcurrency(concurrencyRaw);
-    if (!parsedConcurrency.ok) {
-      throw zikuFailure({
-        kind: "InvalidArgument",
-        argument: "--concurrency",
-        value: concurrencyRaw ?? "",
-        expected: CONCURRENCY_FORMAT_HINT,
-      });
-    }
+    const concurrency = requireParsedOption(
+      parseConcurrency(concurrencyRaw),
+      "--concurrency",
+      concurrencyRaw,
+      CONCURRENCY_FORMAT_HINT,
+    );
+
+    const maxCandidatesRaw = args["max-candidates"] as string | undefined;
+    const maxCandidates = requireParsedOption(
+      parseMaxCandidates(maxCandidatesRaw),
+      "--max-candidates",
+      maxCandidatesRaw,
+      MAX_CANDIDATES_FORMAT_HINT,
+    );
 
     const includeArchived = args["include-archived"] as boolean;
 
@@ -278,8 +329,9 @@ export const aggregateCommand = defineCommand({
       template: { owner: templateRepo.owner, repo: templateRepo.repo },
       searchOwner: owner,
       includeArchived,
-      concurrency: parsedConcurrency.value,
+      concurrency,
       since,
+      maxCandidates,
     });
 
     const report: AggregateReport = jsonMode

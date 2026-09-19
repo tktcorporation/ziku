@@ -614,14 +614,147 @@ export function getGhCliToken(): string | undefined {
 
 /**
  * トークン取得がプロセス内に持つ状態（gh CLI の結果キャッシュと、形式不正な環境変数に
- * ついて警告済みかの記録）をリセットする。
+ * ついて警告済みかの記録）と、{@link observeRateLimitHeaders} が観測したレート制限残量を
+ * リセットする。
  *
- * テストで gh CLI の認証状態（またはそのモック）や環境変数を切り替える前に呼ぶこと。
- * プロダクションコードから呼ぶ必要はない（どちらもプロセス寿命の間は変わらない前提のため）。
+ * テストで gh CLI の認証状態（またはそのモック）や環境変数を切り替える前、あるいは
+ * 観測済みのレート制限状態を次のテストへ持ち越したくないときに呼ぶこと。プロダクション
+ * コードから呼ぶ必要はない（プロセス寿命の間はどれも意図して保持し続ける状態のため）。
  */
 export function resetGitHubTokenCaches(): void {
   ghCliTokenCache = undefined;
   warnedInvalidEnvTokens.clear();
+  observedRateLimit = undefined;
+}
+
+/**
+ * {@link observeRateLimitHeaders} が直近に観測したレート制限の残量。まだ 1 件も観測して
+ * いなければ undefined。
+ *
+ * GitHub のクォータそのものではなく「このプロセスが最後に見たレスポンスヘッダーの値」
+ * なので、他プロセスによる消費は反映されない。403 を実際に受け取る前に枯渇の兆候へ
+ * 気づくための先読み専用の値であり、正確な残量の問い合わせには {@link fetchRateLimitStatus}
+ * を使うこと。
+ */
+let observedRateLimit: ObservedRateLimit | undefined;
+
+/** {@link observeRateLimitHeaders} が記録する、直近に観測したレート制限の状態。 */
+export interface ObservedRateLimit {
+  readonly remaining: number;
+  readonly resetAt: Date | undefined;
+}
+
+/**
+ * 直近に観測したレート制限の残量を返す。
+ *
+ * owner 横断探索（`ziku aggregate`）が、次の候補へ新規リクエストを送る前にここを確認し、
+ * 残り候補数をまかなえないと分かった時点で自ら止まるために使う（実際に 403 を受け取るまで
+ * 待たない）。
+ */
+export function getObservedRateLimitRemaining(): ObservedRateLimit | undefined {
+  return observedRateLimit;
+}
+
+/**
+ * fetch の `Response.headers`（`Headers` インスタンス）と、Octokit のレスポンスが持つ
+ * プレーンなヘッダーオブジェクトの両方から、ヘッダー値を読む。
+ *
+ * `Headers` はメソッドがプロトタイプ上にあり自身のプロパティを持たないため、
+ * `in` 演算子でプロトタイプ鎖ごと確認してから呼び出す。プレーンオブジェクトなら
+ * 直接インデックスアクセスする。
+ */
+function readHeaderValue(headers: unknown, name: string): string | undefined {
+  if (typeof headers !== "object" || headers === null) return undefined;
+  if ("get" in headers && typeof (headers as { get: unknown }).get === "function") {
+    const value: unknown = (headers as { get: (key: string) => unknown }).get(name);
+    return typeof value === "string" ? value : undefined;
+  }
+  const value = (headers as Record<string, unknown>)[name];
+  return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * GitHub のレスポンスヘッダーから、レート制限の残量を観測して記録する。
+ *
+ * `x-ratelimit-remaining` は成功レスポンスにも乗るため、実際に 403 を受け取る前に
+ * 枯渇の兆候へ気づける。ヘッダーが無い・数値としてパースできない場合は何もしない
+ * （直前の観測値を「情報が無い」で上書きしない）。
+ */
+function observeRateLimitHeaders(headers: unknown): void {
+  const remainingHeader = readHeaderValue(headers, "x-ratelimit-remaining");
+  if (remainingHeader === undefined) return;
+  const remaining = Number(remainingHeader);
+  if (!Number.isFinite(remaining)) return;
+
+  const resetHeader = readHeaderValue(headers, "x-ratelimit-reset");
+  const resetEpoch = resetHeader !== undefined ? Number(resetHeader) : Number.NaN;
+  const resetAt = Number.isFinite(resetEpoch) ? new Date(resetEpoch * 1000) : undefined;
+  observedRateLimit = { remaining, resetAt };
+}
+
+/** `GET /rate_limit` のレスポンス。必要フィールドのみ */
+interface GitHubRateLimitResponse {
+  readonly resources: {
+    readonly core: {
+      readonly limit: number;
+      readonly remaining: number;
+      /** epoch 秒 */
+      readonly reset: number;
+    };
+  };
+}
+
+/** GitHub API のレート制限（`core` リソース）の現在値。 */
+export interface RateLimitStatus {
+  readonly limit: number;
+  readonly remaining: number;
+  readonly resetAt: Date | undefined;
+  readonly authenticated: boolean;
+}
+
+/** {@link fetchRateLimitStatus} の結果。失敗の分け方は {@link GitHubLookupFailure} と同じ。 */
+export type RateLimitStatusResolution =
+  | { readonly _tag: "Resolved"; readonly status: RateLimitStatus }
+  | GitHubLookupFailure;
+
+/**
+ * 現在のレート制限の残量を 1 回の呼び出しで取得する。
+ *
+ * `GET /rate_limit` はそれ自身のレスポンスがクォータを消費しない（GitHub の仕様）ため、
+ * owner 横断探索の候補数を事前に絞り込む見積もりに使っても、見積もり自体が枠を圧迫しない。
+ */
+export function fetchRateLimitStatus(): Promise<RateLimitStatusResolution> {
+  const token = getGitHubToken();
+  const program = Effect.gen(function* () {
+    const res = yield* Effect.tryPromise({
+      try: () => fetch("https://api.github.com/rate_limit", { headers: githubAuthHeaders(token) }),
+      catch: (cause): GitHubLookupFailure => ({
+        _tag: "Unresolved" as const,
+        reason: cause instanceof Error ? cause.message : String(cause),
+      }),
+    });
+    if (!res.ok) return classifyLookupFailure(res);
+
+    const data = yield* Effect.tryPromise({
+      try: () => res.json() as Promise<GitHubRateLimitResponse>,
+      catch: (cause): GitHubLookupFailure => ({
+        _tag: "Unresolved" as const,
+        reason: cause instanceof Error ? cause.message : String(cause),
+      }),
+    });
+    const core = data.resources.core;
+    return {
+      _tag: "Resolved" as const,
+      status: {
+        limit: core.limit,
+        remaining: core.remaining,
+        resetAt: Number.isFinite(core.reset) ? new Date(core.reset * 1000) : undefined,
+        authenticated: token !== undefined,
+      },
+    };
+  });
+
+  return Effect.runPromise(program.pipe(Effect.merge));
 }
 
 /**
@@ -1244,10 +1377,10 @@ export async function fetchDefaultBranch(
       try: () => octokit.repos.get({ owner, repo }),
       catch: classifyOctokitFailure,
     }).pipe(
-      Effect.map(({ data }): DefaultBranchResolution => ({
-        _tag: "Resolved",
-        name: data.default_branch,
-      })),
+      Effect.map(({ data, headers }): DefaultBranchResolution => {
+        observeRateLimitHeaders(headers);
+        return { _tag: "Resolved", name: data.default_branch };
+      }),
       // 成功も失敗も同じ union なので、エラーチャネルを戻り値へ畳む。
       Effect.merge,
     ),
@@ -1324,6 +1457,7 @@ async function fetchCommitSha(
       try: async (): Promise<CommitShaResolution> => {
         const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeGitHubPathSegments(ref)}`;
         const res = await fetch(url, { headers });
+        observeRateLimitHeaders(res.headers);
         if (!res.ok) return classifyLookupFailure(res);
         // API レスポンスがコミット SHA の入口。ここから先は brand 付きで流れる。
         // 想定外の本文（HTML のエラーページ等）はスキーマが弾き、下の catch が拾う。
@@ -1434,8 +1568,8 @@ export async function resolveSourceCommitSha(
  * 失敗する（名前解決不能・接続断等）場合は素の例外のまま reject され、`classified()` が
  * 例外チェーンの errno から `Unreachable` に分類する。
  */
-function githubFetch(url: string, init?: RequestInit): Promise<Response> {
-  return fetch(url, {
+async function githubFetch(url: string, init?: RequestInit): Promise<Response> {
+  const res = await fetch(url, {
     ...init,
     headers: {
       // API のバージョンを明示しない場合、GitHub 側の既定バージョンが変わると
@@ -1446,6 +1580,11 @@ function githubFetch(url: string, init?: RequestInit): Promise<Response> {
       ...(init?.headers as Record<string, string> | undefined),
     },
   });
+  // 成功・失敗どちらのレスポンスにもレート制限ヘッダーが乗るため、ステータスを見る前に
+  // 観測しておく。owner 横断探索の候補ごとの呼び出しはすべてこの関数を経由するので、
+  // ここで観測すれば個々の呼び出し側を変更せずに済む。
+  observeRateLimitHeaders(res.headers);
+  return res;
 }
 
 /**
@@ -1501,19 +1640,30 @@ async function isOrganization(owner: string): Promise<boolean> {
 }
 
 /**
- * リポジトリ一覧 API をページネーションしながら全件取得する。
+ * リポジトリ一覧 API をページネーションしながら取得する。
  *
- * `per_page=100` で取得し、返却件数が `per_page` 未満になったページを最後と判定する
- * （GitHub の Link ヘッダをパースする方法もあるが、この用途では単純な件数判定で十分）。
+ * 返却件数がページサイズ未満になったページを最後と判定する（GitHub の Link ヘッダを
+ * パースする方法もあるが、この用途では単純な件数判定で十分）。
  *
  * @param extraParams `baseUrl` だけでは表現できない追加クエリパラメータ
  *   （例: `/user/repos?affiliation=owner` の `affiliation`）。
+ * @param maxItems 指定すると、累積取得件数がこの値に達した時点でページ取得を打ち切る。
+ *   ページサイズ自体も `maxItems` に合わせて縮める（`maxItems` が 100 未満なら
+ *   `per_page` をその値にする）ことで、1 ページ目だけで正確にこの件数へ収める。
+ *   フィルタ（アーカイブ除外等）は呼び出し側が別途行うため、ここで返す件数は
+ *   フィルタ前の生の取得件数であることに注意。
  */
 async function fetchAllRepoPages(
   baseUrl: string,
   extraParams?: Record<string, string>,
+  maxItems?: number,
 ): Promise<readonly GitHubRepoListItem[]> {
-  const perPage = 100;
+  // 上限が 0（安全マージンを引くと候補を 1 件もまかなえない）なら、一覧取得そのものを
+  // 行わない。`per_page=0` は GitHub API が受け付けないため、`Math.max(1, ...)` で
+  // 最低 1 に底上げすると 0 件の意図に反して 1 件取得してしまう。
+  if (maxItems === 0) return [];
+
+  const perPage = maxItems === undefined ? 100 : Math.min(100, maxItems);
   const acc: GitHubRepoListItem[] = [];
   for (let page = 1; ; page += 1) {
     const url = new URL(baseUrl);
@@ -1527,6 +1677,7 @@ async function fetchAllRepoPages(
     const items = await parseGitHubJson<readonly GitHubRepoListItem[]>(res);
     acc.push(...items);
     if (items.length < perPage) return acc;
+    if (maxItems !== undefined && acc.length >= maxItems) return acc;
   }
 }
 
@@ -1571,14 +1722,26 @@ async function resolveAuthenticatedUserLogin(): Promise<string | undefined> {
  * 他人の Personal アカウントを探索する場合に public リポジトリしか見えないのは GitHub API 側の
  * 仕様上の制約であり、この関数の対処範囲外（挙動は変えない）。
  */
-async function fetchPersonalOwnerRepoPages(owner: string): Promise<readonly GitHubRepoListItem[]> {
+async function fetchPersonalOwnerRepoPages(
+  owner: string,
+  extraParams: Record<string, string>,
+  maxCandidates: number | undefined,
+): Promise<readonly GitHubRepoListItem[]> {
   const authenticatedLogin = await resolveAuthenticatedUserLogin();
   // login はケースを区別しないため、比較前に正規化する。
   const isSelf = authenticatedLogin?.toLowerCase() === owner.toLowerCase();
   if (isSelf) {
-    return fetchAllRepoPages("https://api.github.com/user/repos", { affiliation: "owner" });
+    return fetchAllRepoPages(
+      "https://api.github.com/user/repos",
+      { affiliation: "owner", ...extraParams },
+      maxCandidates,
+    );
   }
-  return fetchAllRepoPages(`https://api.github.com/users/${encodeURIComponent(owner)}/repos`);
+  return fetchAllRepoPages(
+    `https://api.github.com/users/${encodeURIComponent(owner)}/repos`,
+    extraParams,
+    maxCandidates,
+  );
 }
 
 /** `listOwnerRepos` が返すリポジトリ 1 件分の情報 */
@@ -1596,6 +1759,13 @@ export interface OwnerRepoInfo {
 export interface ListOwnerReposOptions {
   /** true の場合アーカイブ済みリポジトリも含める。既定は false（除外） */
   readonly includeArchived?: boolean;
+  /**
+   * 指定すると、取得段階でこの件数に達した時点でページ取得を打ち切る（フィルタ前の件数で
+   * 判定する。{@link fetchAllRepoPages} 参照）。owner 配下に多数のリポジトリがある未認証
+   * 環境では、1 候補につき最低 1 回の GitHub API 呼び出しが発生するため、無制限に列挙する
+   * と後続の候補ごとの処理でクォータを使い切る。省略時は上限無し（従来どおり全件列挙）。
+   */
+  readonly maxCandidates?: number;
 }
 
 /**
@@ -1609,6 +1779,11 @@ export interface ListOwnerReposOptions {
  * - ページネーションを最後まで辿るため、リポジトリ数が多い owner でも全件返る（1 ページ目だけ
  *   で打ち切らない）。
  * - `includeArchived` が false（既定）の場合、アーカイブ済みリポジトリは結果から除く。
+ *   `maxCandidates` による打ち切りは取得段階（フィルタ前）で行うため、この除外が働くと
+ *   返る件数は `maxCandidates` を下回りうる（{@link ListOwnerReposOptions.maxCandidates}）。
+ * - 一覧は push 日時の新しい順（`sort=pushed&direction=desc`）で取得する。`maxCandidates`
+ *   で打ち切ったとき、長期間放置されたリポジトリより最近アクティブなリポジトリを優先して
+ *   残すため。
  * - 認証は `getGitHubToken()` に委ねる。トークンが無くても public リポジトリの一覧は取得できる
  *   （未認証は 60req/h に制限されるため、クォータに達すると `ZikuFailure`
  *   （`kind: "GitHubRateLimited"`）で失敗する）。
@@ -1618,14 +1793,20 @@ export function listOwnerRepos(
   options?: ListOwnerReposOptions,
 ): Promise<OwnerRepoInfo[]> {
   const includeArchived = options?.includeArchived ?? false;
+  const maxCandidates = options?.maxCandidates;
+  const sortParams = { sort: "pushed", direction: "desc" };
   return classified(
     `list repositories under ${owner}`,
     getGitHubToken() !== undefined,
     async () => {
       const isOrg = await isOrganization(owner);
       const items = isOrg
-        ? await fetchAllRepoPages(`https://api.github.com/orgs/${encodeURIComponent(owner)}/repos`)
-        : await fetchPersonalOwnerRepoPages(owner);
+        ? await fetchAllRepoPages(
+            `https://api.github.com/orgs/${encodeURIComponent(owner)}/repos`,
+            sortParams,
+            maxCandidates,
+          )
+        : await fetchPersonalOwnerRepoPages(owner, sortParams, maxCandidates);
       return items
         .filter((item) => includeArchived || !item.archived)
         .map((item): OwnerRepoInfo => ({

@@ -34,15 +34,17 @@ import type {
 import { baseCommitSha, baseHashesOf, lockSchema, templateRefToString } from "../modules/schemas";
 import { analyzeConfigDrift } from "./config-merge";
 import {
+  fetchRateLimitStatus,
   fetchRepoTextFile,
   getGitHubToken,
   getLastCommitDate,
+  getObservedRateLimitRemaining,
   getRepoIdentity,
   listOwnerRepos,
   resolveLatestCommitSha,
   resolveSourceCommit,
 } from "./github";
-import type { OwnerRepoInfo, RepoIdentity } from "./github";
+import type { OwnerRepoInfo, RateLimitStatusResolution, RepoIdentity } from "./github";
 import { LOCK_FILE } from "./lock";
 import type { FileClassification } from "./merge/types";
 import type { ZikuConfigStatus } from "./merge/sync-plan";
@@ -97,9 +99,25 @@ export interface AggregateOptions {
    * 外から入ってくる値を brand する境界としてこの関数の内側で {@link absPath} を通す。
    */
   readonly tmpBaseDir?: string;
+  /**
+   * 候補として問い合わせるリポジトリ数の上限を明示指定する。省略時はレート制限の残量から
+   * 算出した上限（{@link resolveCandidateLimit}）だけが働く。指定した場合は、その値と
+   * レート制限由来の上限の小さい方を使う（レート制限由来の上限を緩めることはできない）。
+   */
+  readonly maxCandidates?: number;
 }
 
 const DEFAULT_CONCURRENCY = 4;
+
+/**
+ * レート制限の残量から候補数上限を算出するとき、および実行中の動的ブレーキ
+ * （{@link evaluateCandidate}）の判定に使う安全マージン。
+ *
+ * owner 一覧取得・テンプレートの正規名解決など、候補ごとの処理以外にもこのスキャン中に
+ * GitHub API 呼び出しが発生するため、残量をそのまま候補数の上限にすると、それらの
+ * 呼び出し分だけ超過しうる。
+ */
+const RATE_LIMIT_SAFETY_MARGIN = 10;
 
 /**
  * owner 配下のリポジトリを列挙し、指定テンプレートの利用リポジトリだけを
@@ -150,7 +168,15 @@ export function aggregateTemplateUsage(
         Option.none<{ readonly resetAt: Date | undefined }>(),
       );
 
-      const allRepos = yield* tryGitHub(() => listOwnerRepos(searchOwner, { includeArchived }));
+      // owner 配下の候補数を、レート制限の残量から安全に処理できる件数まで事前に絞り込む。
+      // 401（トークン拒否）はここで即座にスキャン全体を失敗させ、取得自体の失敗
+      // （ネットワーク断等）は絞り込み無しで続行する（{@link resolveCandidateLimit}）。
+      const rateLimitStatus = yield* Effect.promise(() => fetchRateLimitStatus());
+      const candidateLimit = yield* resolveCandidateLimit(rateLimitStatus, options.maxCandidates);
+
+      const allRepos = yield* tryGitHub(() =>
+        listOwnerRepos(searchOwner, { includeArchived, maxCandidates: candidateLimit }),
+      );
 
       // owner/repo の正規名解決（GitHub のリネーム・移管リダイレクト経由）をキャッシュする。
       // 同じ owner/repo への同時・重複呼び出しを 1 回の GitHub API 呼び出しにまとめる
@@ -166,10 +192,22 @@ export function aggregateTemplateUsage(
       const candidates = allRepos.filter((r) => !isSameRepo(r, template));
 
       const evaluations = yield* Effect.forEach(
-        candidates,
-        (candidate) =>
+        candidates.map((candidate, index) => ({
+          candidate,
+          // 自分より後ろに並ぶ候補の数。動的ブレーキが「残り候補数分をまかなえるか」を
+          // 見積もるために使う（厳密な実処理順ではなく配列上の位置による近似で十分）。
+          remainingAfter: candidates.length - index - 1,
+        })),
+        ({ candidate, remainingAfter }) =>
           containDefect(candidate, () =>
-            evaluateCandidate(template, templateRefSha, candidate, resolveIdentity, rateLimitGate),
+            evaluateCandidate(
+              template,
+              templateRefSha,
+              candidate,
+              resolveIdentity,
+              rateLimitGate,
+              remainingAfter,
+            ),
           ),
         { concurrency },
       );
@@ -218,6 +256,8 @@ export function aggregateTemplateUsage(
         repositories,
         [...skippedFromEvaluation, ...skippedFromProcessing],
         excludedBySince,
+        allRepos.length,
+        candidateLimit,
       );
     }),
   );
@@ -309,6 +349,35 @@ function tryGitHub<A>(run: () => Promise<A>): Effect.Effect<A, ZikuFailure> {
       cause instanceof ZikuFailure ? Effect.fail(cause) : Effect.die(cause),
     ),
   );
+}
+
+/**
+ * owner 横断探索を始める前に、安全に処理できる候補数の上限を決める。
+ *
+ * - 残量が取得できた場合: 安全マージンを引いた値を上限にする。呼び出し側が
+ *   `maxCandidates` を指定していれば、その値との小さい方を使う（レート制限由来の
+ *   上限を緩めることはできない）。
+ * - トークンが拒否された場合（401）: 人がトークンを直すまで結果は変わらないので、
+ *   候補ごとの絞り込みロジックに入る前にスキャン全体を失敗させる。
+ * - 残量を取得できなかった場合（ネットワーク断等）: 取得できないこと自体は処理を
+ *   止める理由にならないため、`maxCandidates`（無指定なら上限無し）のまま続行する。
+ */
+function resolveCandidateLimit(
+  rateLimitStatus: RateLimitStatusResolution,
+  userMaxCandidates: number | undefined,
+): Effect.Effect<number | undefined, ZikuFailure> {
+  return match(rateLimitStatus)
+    .with({ _tag: "Resolved" }, (r) => {
+      const derived = Math.max(0, r.status.remaining - RATE_LIMIT_SAFETY_MARGIN);
+      const limit =
+        userMaxCandidates === undefined ? derived : Math.min(derived, userMaxCandidates);
+      return Effect.succeed(limit);
+    })
+    .with({ _tag: "AuthRejected" }, (f) =>
+      Effect.fail(zikuFailure({ kind: "GitHubAuthRejected", detail: f.detail })),
+    )
+    .with({ _tag: "Unresolved" }, () => Effect.succeed(userMaxCandidates))
+    .exhaustive();
 }
 
 /**
@@ -601,6 +670,7 @@ function evaluateCandidate(
   candidate: OwnerRepoInfo,
   resolveIdentity: ResolveRepoIdentity,
   rateLimitGate: RateLimitGate,
+  remainingAfter: number,
 ): Effect.Effect<CandidateEvaluation> {
   return Effect.gen(function* () {
     // 既に検知済みなら、この候補の lock.json 取得すら行わない。owner 配下の残り全候補へ
@@ -608,6 +678,20 @@ function evaluateCandidate(
     const alreadyLimited = yield* Ref.get(rateLimitGate);
     if (Option.isSome(alreadyLimited)) {
       return skippedEvaluation(candidate, rateLimitSkipReason(alreadyLimited.value.resetAt));
+    }
+
+    // 実際に 403 を受け取る前に、直近のレスポンスヘッダーから観測した残量で先読みする。
+    // 自分自身とまだ処理していない候補の分（最低 1 回ずつの lock.json 取得）を安全マージン
+    // 込みでまかなえなければ、この候補以降は新規リクエストを送らず、既存の事後ゲートへ
+    // 「検知済み」として合流させる。以降の候補処理は evaluateCandidate 冒頭の
+    // 早期打ち切りにそのまま乗る。
+    const observed = getObservedRateLimitRemaining();
+    if (
+      observed !== undefined &&
+      observed.remaining - RATE_LIMIT_SAFETY_MARGIN < remainingAfter + 1
+    ) {
+      yield* Ref.set(rateLimitGate, Option.some({ resetAt: observed.resetAt }));
+      return skippedEvaluation(candidate, rateLimitSkipReason(observed.resetAt));
     }
 
     const screening = yield* readCandidateLock(
@@ -873,8 +957,15 @@ interface ProcessCandidateOptions {
  * conflict/pending を報告する原因になる。
  */
 function processCandidate(opts: ProcessCandidateOptions): Effect.Effect<ProcessOutcome> {
-  const { templateDir, candidate, candidateIndex, tmpBaseDir, since, commitDateLimit, rateLimitGate } =
-    opts;
+  const {
+    templateDir,
+    candidate,
+    candidateIndex,
+    tmpBaseDir,
+    since,
+    commitDateLimit,
+    rateLimitGate,
+  } = opts;
   const { repoInfo, lock, ref } = candidate;
 
   return Effect.gen(function* () {
@@ -1214,6 +1305,8 @@ function buildReport(
   repositories: AggregateRepositoryReport[],
   skipped: SkippedRepository[],
   excludedBySince: number,
+  candidatesScanned: number,
+  candidateScanLimit: number | undefined,
 ): AggregateReport {
   return {
     template: { owner: template.owner, repo: template.repo, ref: templateRefSha },
@@ -1226,6 +1319,8 @@ function buildReport(
       pendingPushFiles: repositories.reduce((sum, r) => sum + r.pendingPush.length, 0),
       conflictFiles: repositories.reduce((sum, r) => sum + r.conflicts.length, 0),
       excludedBySince,
+      candidatesScanned,
+      candidateScanLimit,
     },
   };
 }

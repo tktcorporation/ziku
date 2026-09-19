@@ -811,6 +811,20 @@ describe("aggregateSummarySchema", () => {
       pendingPushFiles: 2,
       conflictFiles: 0,
       excludedBySince: 0,
+      candidatesScanned: 5,
+      candidateScanLimit: 50,
+    };
+    expect(aggregateSummarySchema.parse(summary)).toEqual(summary);
+  });
+
+  it("candidateScanLimit は省略できる（上限が適用されなかったことを表す）", () => {
+    const summary = {
+      totalRepositories: 3,
+      repositoriesWithPendingPush: 1,
+      pendingPushFiles: 2,
+      conflictFiles: 0,
+      excludedBySince: 0,
+      candidatesScanned: 5,
     };
     expect(aggregateSummarySchema.parse(summary)).toEqual(summary);
   });
@@ -823,6 +837,7 @@ describe("aggregateSummarySchema", () => {
         pendingPushFiles: 0,
         conflictFiles: 0,
         excludedBySince: 0,
+        candidatesScanned: 0,
       }),
     ).toThrow();
   });
@@ -855,6 +870,7 @@ describe("aggregateReportSchema", () => {
         pendingPushFiles: 1,
         conflictFiles: 2,
         excludedBySince: 0,
+        candidatesScanned: 1,
       },
     };
     expect(aggregateReportSchema.parse(report)).toEqual(report);

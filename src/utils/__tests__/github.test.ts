@@ -9,10 +9,12 @@ import { ZikuFailure } from "../../errors";
 import {
   checkRepoExists,
   checkRepoSetup,
+  fetchRateLimitStatus,
   fetchRepoTextFile,
   getGhCliToken,
   getGitHubToken,
   getLastCommitDate,
+  getObservedRateLimitRemaining,
   getRepoIdentity,
   isGitHubTokenFormat,
   listOwnerRepos,
@@ -1467,6 +1469,232 @@ describe("listOwnerRepos", () => {
     expect(thrown).toBeInstanceOf(ZikuFailure);
     expect((thrown as ZikuFailure).reason).toMatchObject({ kind: "GitHubUnusableResponse" });
   });
+
+  it("push 日時の新しい順（sort=pushed&direction=desc）で問い合わせる", async () => {
+    const listUrls: string[] = [];
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(mockResponse({ status: 200 }));
+      }
+      listUrls.push(url);
+      return Promise.resolve(mockJsonResponse(200, [repoListItem("only")]));
+    });
+
+    await listOwnerRepos("acme");
+
+    const params = new URL(listUrls[0]).searchParams;
+    expect(params.get("sort")).toBe("pushed");
+    expect(params.get("direction")).toBe("desc");
+  });
+
+  it("maxCandidates 指定時は、その件数でページ取得を打ち切る（per_page もその値に合わせる）", async () => {
+    const listUrls: string[] = [];
+    // owner 配下に 5 件あるが、GitHub API は要求された per_page 件数までしか返さない。
+    // 実サーバーの挙動を模して perPage で切り詰める。
+    const allRepos = Array.from({ length: 5 }, (_, i) => repoListItem(`repo-${i}`));
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(mockResponse({ status: 200 }));
+      }
+      listUrls.push(url);
+      const perPage = Number(new URL(url).searchParams.get("per_page"));
+      return Promise.resolve(mockJsonResponse(200, allRepos.slice(0, perPage)));
+    });
+
+    const result = await listOwnerRepos("acme", { maxCandidates: 3 });
+
+    expect(result).toHaveLength(3);
+    // 1 ページ目だけで打ち切れる per_page にしているため、追加のページ取得は起きない。
+    expect(listUrls).toHaveLength(1);
+    expect(new URL(listUrls[0]).searchParams.get("per_page")).toBe("3");
+  });
+
+  it("maxCandidates: 0 なら一覧取得そのものを行わず空配列を返す", async () => {
+    const listUrls: string[] = [];
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(mockResponse({ status: 200 }));
+      }
+      listUrls.push(url);
+      return Promise.reject(new Error("must not fetch the repo list when maxCandidates is 0"));
+    });
+
+    const result = await listOwnerRepos("acme", { maxCandidates: 0 });
+
+    expect(result).toEqual([]);
+    expect(listUrls).toHaveLength(0);
+  });
+
+  it("maxCandidates 未指定なら per_page は既定の 100 のまま", async () => {
+    const listUrls: string[] = [];
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === "https://api.github.com/orgs/acme") {
+        return Promise.resolve(mockResponse({ status: 200 }));
+      }
+      listUrls.push(url);
+      return Promise.resolve(mockJsonResponse(200, [repoListItem("only")]));
+    });
+
+    await listOwnerRepos("acme");
+
+    expect(new URL(listUrls[0]).searchParams.get("per_page")).toBe("100");
+  });
+});
+
+describe("fetchRateLimitStatus", () => {
+  const originalFetch = globalThis.fetch;
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+    // gh CLI 経由のトークン混入を避け、未認証の挙動で検証する。
+    process.env.PATH = "";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    process.env = originalEnv;
+  });
+
+  it("成功時は resources.core から limit/remaining/resetAt/authenticated を組み立てる", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      mockJsonResponse(200, {
+        resources: { core: { limit: 60, remaining: 42, reset: 1700000000 } },
+      }),
+    );
+
+    expect(await fetchRateLimitStatus()).toEqual({
+      _tag: "Resolved",
+      status: {
+        limit: 60,
+        remaining: 42,
+        resetAt: new Date(1700000000 * 1000),
+        authenticated: false,
+      },
+    });
+  });
+
+  it("認証済みトークンがあれば authenticated: true を返す", async () => {
+    process.env.GITHUB_TOKEN = "ghp_test";
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      mockJsonResponse(200, {
+        resources: { core: { limit: 5000, remaining: 4999, reset: 1700000000 } },
+      }),
+    );
+
+    const result = await fetchRateLimitStatus();
+    expect(result).toMatchObject({ _tag: "Resolved", status: { authenticated: true } });
+  });
+
+  it("401 は AuthRejected として返す（レート制限とは区別する）", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ status: 401, statusText: "Bad credentials" }));
+
+    expect(await fetchRateLimitStatus()).toEqual({
+      _tag: "AuthRejected",
+      detail: "Bad credentials",
+    });
+  });
+
+  it("ネットワーク断は Unresolved として返す", async () => {
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("Network error"));
+
+    expect(await fetchRateLimitStatus()).toEqual({
+      _tag: "Unresolved",
+      reason: "Network error",
+    });
+  });
+
+  // この呼び出し自体は GitHub のクォータを消費しない仕様のため、レート制限中でも
+  // 見積もりに使える必要がある。403 レスポンスは classifyLookupFailure 側で
+  // Unresolved に分類される（401 だけを AuthRejected とする既存の基準どおり）。
+  it("403（クォータ超過）は Unresolved として返す", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(mockResponse({ status: 403, statusText: "API rate limit exceeded" }));
+
+    expect(await fetchRateLimitStatus()).toEqual({
+      _tag: "Unresolved",
+      reason: "API rate limit exceeded",
+    });
+  });
+});
+
+describe("観測したレート制限残量（getObservedRateLimitRemaining）", () => {
+  const originalFetch = globalThis.fetch;
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+    process.env.PATH = "";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    process.env = originalEnv;
+  });
+
+  it("githubFetch 経由の成功レスポンスのヘッダーから残量を観測する", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        mockJsonResponse(
+          200,
+          { full_name: "acme/widgets", default_branch: "main" },
+          { "x-ratelimit-remaining": "7", "x-ratelimit-reset": "1700000000" },
+        ),
+      );
+
+    expect(getObservedRateLimitRemaining()).toBeUndefined();
+    await getRepoIdentity("acme", "widgets");
+
+    expect(getObservedRateLimitRemaining()).toEqual({
+      remaining: 7,
+      resetAt: new Date(1700000000 * 1000),
+    });
+  });
+
+  it("ヘッダーが無いレスポンスでは観測値を更新しない", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(shaResponse("sha-no-headers"));
+
+    await resolveLatestCommitSha("acme", "widgets", { kind: "branch", name: "main" });
+
+    expect(getObservedRateLimitRemaining()).toBeUndefined();
+  });
+
+  it("fetchCommitSha（resolveLatestCommitSha 経由）もレスポンスヘッダーから観測する", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve("sha-abc\n"),
+      headers: new Map(Object.entries({ "x-ratelimit-remaining": "2" })) as unknown as Headers,
+    });
+
+    await resolveLatestCommitSha("acme", "widgets", { kind: "branch", name: "main" });
+
+    expect(getObservedRateLimitRemaining()).toEqual({ remaining: 2, resetAt: undefined });
+  });
+
+  it("resetGitHubTokenCaches() で観測値もクリアされる", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        mockJsonResponse(
+          200,
+          { full_name: "acme/widgets", default_branch: "main" },
+          { "x-ratelimit-remaining": "1" },
+        ),
+      );
+    await getRepoIdentity("acme", "widgets");
+    expect(getObservedRateLimitRemaining()).not.toBeUndefined();
+
+    resetGitHubTokenCaches();
+    expect(getObservedRateLimitRemaining()).toBeUndefined();
+  });
 });
 
 describe("getRepoIdentity", () => {
@@ -1736,6 +1964,17 @@ describe("fetchDefaultBranch", () => {
       _tag: "AuthRejected",
       detail: "Bad credentials",
     });
+  });
+
+  it("成功レスポンスのヘッダーからレート制限残量を観測する", async () => {
+    mockReposGet.mockResolvedValue({
+      data: { default_branch: "master" },
+      headers: { "x-ratelimit-remaining": "4" },
+    });
+
+    await fetchDefaultBranch("owner", "repo");
+
+    expect(getObservedRateLimitRemaining()).toEqual({ remaining: 4, resetAt: undefined });
   });
 });
 
