@@ -2236,6 +2236,61 @@ describe("aggregateTemplateUsage", () => {
     expect(third?.reason).toBe(second?.reason);
   });
 
+  // 旧ウィンドウの 403 が「まだ何も観測していない」時点で先に完了すると、gateObservedRateLimit
+  // の陳腐化判定は比較対象を持たずゲートを立てる（その時点では正しい判断）。その後、別の
+  // レスポンスで新ウィンドウ（補充済み）が観測されても、ゲート自身は誰かが再確認するまで
+  // 立ったままになる。ゲートを短絡チェックする箇所（checkRateLimitGate）がこの再確認を行い、
+  // 陳腐化したと判明した時点でゲートをクリアして、後続の候補への問い合わせを再開することを
+  // 固定する。
+  it("先にゲートを立てた旧ウィンドウの検知が、後から観測された新ウィンドウより古いと判明したら、ゲートをクリアして後続候補への問い合わせを再開する", async () => {
+    // 3 候補にして、中間の rl-reconcile-2 で「ゲートが実際に立って弾かれた」事実を
+    // 固定してから、rl-reconcile-3 で「その後クリアされて再開した」ことを見る。
+    // 2 候補だけだと `checkRateLimitGate` の実装を変異させて壊しても
+    // （観測呼び出しの順序がずれてゲートが一度も立たなくなるだけで）このテストが
+    // 無言で無検証化しうるため、中間候補で歯止めをかける。
+    const repos = ["rl-reconcile-1", "rl-reconcile-2", "rl-reconcile-3"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+
+    const oldResetAt = new Date(Date.now() - 60 * 60_000);
+    const newResetAt = new Date(Date.now() + 60 * 60_000);
+    // rl-reconcile-1 の評価中（動的ブレーキの事前チェック・実際の失敗時点）と、
+    // rl-reconcile-2 のゲート再確認時点までは「まだ何も観測していない」を返す
+    // （でなければ、失敗時点で既に新ウィンドウが見えてしまい、最初から陳腐化判定で
+    // 弾かれ、「一度ゲートが立ってから、後で陳腐化と判明する」という順序を再現できない）。
+    // rl-reconcile-3 のゲート再確認以降は「新ウィンドウが補充済み」を返す。
+    let observedCallCount = 0;
+    mockGetObservedRateLimitRemaining.mockImplementation(() => {
+      observedCallCount += 1;
+      return observedCallCount <= 3 ? undefined : { remaining: 5000, resetAt: newResetAt };
+    });
+
+    mockFetchRepoTextFile.mockImplementation((_owner: string, repo: string) => {
+      if (repo === "rl-reconcile-1") {
+        return Promise.reject(
+          zikuFailure({ kind: "GitHubRateLimited", authenticated: false, resetAt: oldResetAt }),
+        );
+      }
+      return Promise.resolve(Option.some(lockJson()));
+    });
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+      }),
+    );
+
+    // rl-reconcile-2 はゲートで弾かれている（ゲートが実際に立った事実を固定する）。
+    const rl2 = report.skipped.find((s) => s.repo === "rl-reconcile-2");
+    expect(rl2?.reason).toContain("GitHub API rate limit reached");
+    // ゲートがクリアされ、rl-reconcile-3 でも fetchRepoTextFile が呼ばれている
+    // （rl-reconcile-1 の失敗分と合わせて計 2 回）。
+    expect(mockFetchRepoTextFile).toHaveBeenCalledTimes(2);
+    const rl3 = report.skipped.find((s) => s.repo === "rl-reconcile-3");
+    expect(rl3?.reason).not.toContain("GitHub API rate limit reached");
+  });
+
   // tryGitHubGated が実際に 403/429 を受け取っても、既に観測済みのより新しいウィンドウ
   // （リセット後に補充済み）より古い resetAt を持つ場合、遅延到着した陳腐化済みの失敗と
   // みなしてゲートを立てない。その候補自身の呼び出しは失敗するが、後続の候補は影響を
