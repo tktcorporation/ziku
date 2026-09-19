@@ -1886,6 +1886,61 @@ describe("aggregateTemplateUsage", () => {
     ).toBe(false);
   });
 
+  // checkPinnedRef（lock.source.ref が指すテンプレートのリビジョン解決）自体がレート制限で
+  // 失敗した場合も、resolveCandidateRef 経由の失敗（上のテスト）と同じくゲートを立て、
+  // 以降の候補は評価に進まずスキップされることを固定する。
+  it("checkPinnedRef がレート制限で失敗すると、以降の候補は評価に進まずスキップされる", async () => {
+    const repos = ["rl-1", "rl-2"];
+    mockListOwnerRepos.mockResolvedValue(repos.map((r) => repoInfo({ owner: "acme", repo: r })));
+    for (const repo of repos) {
+      shaFixtures.set(`acme/${repo}`, sha(`${repo}-sha`));
+      setLockFixture(lockFixtures, "acme", repo, () =>
+        Promise.resolve(
+          Option.some(
+            lockJson({
+              source: { owner: "acme", repo: "template", ref: { kind: "branch", name: "main" } },
+            }),
+          ),
+        ),
+      );
+    }
+
+    mockResolveSourceCommit.mockImplementation(
+      async (owner: string, repo: string, ref?: LockJsonRef) => {
+        if (ref?.kind === "commit") return { _tag: "Resolved", sha: ref.sha };
+        if (owner === "acme" && repo === "template" && ref?.kind === "branch") {
+          return { _tag: "RateLimited", resetAt: undefined };
+        }
+        // rl-2 の候補評価でここに到達したら、ゲートが後続候補への呼び出しを止められていない。
+        return { _tag: "Unresolved", reason: "no fixture registered" };
+      },
+    );
+
+    const report = await Effect.runPromise(
+      aggregateTemplateUsage({
+        template: { owner: "acme", repo: "template", ref: sha("tmpl-sha") },
+        tmpBaseDir: "/tmp-base",
+        concurrency: 1,
+      }),
+    );
+
+    // resolveSourceCommit（checkPinnedRef 経由）が呼ばれるのは最初にレート制限を検知する
+    // rl-1 だけ。
+    expect(mockResolveSourceCommit).toHaveBeenCalledTimes(1);
+    expect(report.repositories).toEqual([]);
+    expect(report.skipped).toHaveLength(2);
+
+    const [first, second] = report.skipped;
+    expect(first).toMatchObject({ owner: "acme", repo: "rl-1" });
+    expect(first?.reason).toContain("GitHub API rate limit");
+    expect(second).toMatchObject({ owner: "acme", repo: "rl-2" });
+    // rl-1 が立てたゲートにより、rl-2 は候補の評価開始時点で弾かれ、checkPinnedRef 自体に
+    // 到達しない。
+    expect(second?.reason).toBe(
+      "GitHub API rate limit reached; not checking further repositories in this scan.",
+    );
+  });
+
   // 評価フェーズを通過した後、差分処理フェーズ（利用リポジトリ内容のダウンロード）で
   // 実際にレート制限を受けた場合も、evaluateCandidate と同じゲートへ反映され、以降の候補は
   // テンプレート内容のダウンロードすら行わない。

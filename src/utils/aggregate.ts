@@ -896,38 +896,59 @@ function evaluateCandidate(
  * `lock.source.ref` はブランチ名・タグ名・SHA のいずれも取りうる（判別 union の
  * {@link TemplateRef}）。比較基準 `templateRefSha` は解決済みの SHA なので、
  * `resolveSourceCommit` で種別を問わず同じコミットへ解決してから比べる。
+ *
+ * `RateLimited` を受け取った場合は {@link resolveCandidateRef} と同じパターンで
+ * `rateLimitGate` へ書き込み、owner 横断で共有するゲートを立てる。`readCandidateLock` の
+ * もう一方の GitHub 呼び出し（`fetchRepoTextFile`）は `tryGitHubGated` 経由でゲートに
+ * 乗っているのに対し、この関数は独自に `resolveSourceCommit` を呼ぶためゲートの外側に
+ * あった。呼び出し前にゲートが既に立っていれば `resolveSourceCommit` 自体を呼ばない。
+ * `readCandidateLock` は `checkPinnedRef` を呼ぶ前に `fetchRepoTextFile` を経由するが、
+ * `concurrency` が 1 を超える場合、その成功から `checkPinnedRef` に到達するまでの間に
+ * 別の候補（別 fiber）がゲートを立てうる。このチェックはその隙間を塞ぐ。
  */
 function checkPinnedRef(
   template: AggregateTemplateRepo,
   pinnedRef: TemplateRef,
   templateRefSha: CommitSha,
+  rateLimitGate: RateLimitGate,
 ): Effect.Effect<string | undefined> {
-  return Effect.promise(() => resolveSourceCommit(template.owner, template.repo, pinnedRef)).pipe(
-    Effect.map((resolution) =>
-      match(resolution)
-        .with({ _tag: "Resolved" }, (r) =>
+  return Effect.gen(function* () {
+    const alreadyLimited = yield* Ref.get(rateLimitGate);
+    if (Option.isSome(alreadyLimited)) {
+      return rateLimitSkipReason(alreadyLimited.value);
+    }
+
+    const resolution = yield* Effect.promise(() =>
+      resolveSourceCommit(template.owner, template.repo, pinnedRef),
+    );
+
+    return yield* match(resolution)
+      .with({ _tag: "Resolved" }, (r): Effect.Effect<string | undefined> =>
+        Effect.succeed(
           r.sha === templateRefSha
             ? undefined
             : `Pinned to template ref "${templateRefToString(pinnedRef)}" (${r.sha}), which is a different revision from the one this scan compares against (${templateRefSha})`,
-        )
-        .with(
-          { _tag: "AuthRejected" },
-          (f) =>
-            `Pinned to template ref "${templateRefToString(pinnedRef)}", which could not be resolved to a commit in ${template.owner}/${template.repo}: ${f.detail}`,
-        )
-        .with(
-          { _tag: "Unresolved" },
-          (f) =>
-            `Pinned to template ref "${templateRefToString(pinnedRef)}", which could not be resolved to a commit in ${template.owner}/${template.repo}: ${f.reason}`,
-        )
-        .with(
-          { _tag: "RateLimited" },
-          () =>
-            `Pinned to template ref "${templateRefToString(pinnedRef)}", which could not be resolved to a commit in ${template.owner}/${template.repo}: GitHub API rate limit`,
-        )
-        .exhaustive(),
-    ),
-  );
+        ),
+      )
+      .with({ _tag: "AuthRejected" }, (f): Effect.Effect<string | undefined> =>
+        Effect.succeed(
+          `Pinned to template ref "${templateRefToString(pinnedRef)}", which could not be resolved to a commit in ${template.owner}/${template.repo}: ${f.detail}`,
+        ),
+      )
+      .with({ _tag: "Unresolved" }, (f): Effect.Effect<string | undefined> =>
+        Effect.succeed(
+          `Pinned to template ref "${templateRefToString(pinnedRef)}", which could not be resolved to a commit in ${template.owner}/${template.repo}: ${f.reason}`,
+        ),
+      )
+      .with({ _tag: "RateLimited" }, (f): Effect.Effect<string | undefined> =>
+        Effect.gen(function* () {
+          const detection: RateLimitDetection = { _tag: "observed", resetAt: f.resetAt };
+          yield* Ref.set(rateLimitGate, Option.some(detection));
+          return `Pinned to template ref "${templateRefToString(pinnedRef)}", which could not be resolved to a commit in ${template.owner}/${template.repo}: GitHub API rate limit`;
+        }),
+      )
+      .exhaustive();
+  });
 }
 
 /** {@link readCandidateLock} の結果。`usable` は「対象テンプレートの利用リポジトリだった」 */
@@ -1056,7 +1077,12 @@ function readCandidateLock(
     // 対象外だが「見つかったのに比較しなかった」ことは伝える必要があるため、
     // 黙って除外せず理由付きで残す。
     if (lock.source.ref !== undefined) {
-      const pinnedCheck = yield* checkPinnedRef(template, lock.source.ref, templateRefSha);
+      const pinnedCheck = yield* checkPinnedRef(
+        template,
+        lock.source.ref,
+        templateRefSha,
+        rateLimitGate,
+      );
       if (pinnedCheck !== undefined) return skippedEvaluation(candidate, pinnedCheck);
     }
 

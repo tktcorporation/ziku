@@ -2716,6 +2716,96 @@ describe("resolveLatestCommitSha", () => {
 
       expect(resolution._tag).toBe("RateLimited");
     });
+
+    // secondary rate limit の 403 はヘッダーを一切含まないことがあり（GitHub の仕様）、その
+    // 場合は本文の message にレート制限である旨が書かれる。ヘッダーで判定できない 403 は
+    // 本文まで確認することを固定する。
+    it("403 でヘッダーが無くても、本文の message に secondary rate limit の文言があれば RateLimited を返す", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        headers: new Map() as unknown as Headers,
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({
+              message:
+                "You have exceeded a secondary rate limit. Please wait a few minutes before you try again.",
+            }),
+          ),
+      });
+      mockLsRemoteFailure();
+
+      const resolution = await resolveLatestCommitSha("owner", "repo", {
+        kind: "branch",
+        name: "develop",
+      });
+
+      expect(resolution._tag).toBe("RateLimited");
+    });
+
+    // 本文からは判定材料を読み取れない形（JSON でない・message フィールドが無い）は、
+    // ヘッダーでも判定できなかった 403 と同様に汎用的な Unresolved のままになることを固定する。
+    it("403 の本文が JSON でない場合は Unresolved のまま", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        headers: new Map() as unknown as Headers,
+        text: () => Promise.resolve("not json"),
+      });
+      mockLsRemoteFailure();
+
+      const resolution = await resolveLatestCommitSha("owner", "repo", {
+        kind: "branch",
+        name: "develop",
+      });
+
+      expect(resolution).toEqual({ _tag: "Unresolved", reason: "Forbidden" });
+    });
+
+    it("403 の本文に message フィールドが無い場合は Unresolved のまま", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        headers: new Map() as unknown as Headers,
+        text: () =>
+          Promise.resolve(JSON.stringify({ documentation_url: "https://docs.github.com" })),
+      });
+      mockLsRemoteFailure();
+
+      const resolution = await resolveLatestCommitSha("owner", "repo", {
+        kind: "branch",
+        name: "develop",
+      });
+
+      expect(resolution).toEqual({ _tag: "Unresolved", reason: "Forbidden" });
+    });
+
+    // レート制限と無関係な 403（権限不足）の実際の文言で、誤って RateLimited と判定しない
+    // ことを固定する。正規表現を緩めすぎると、この種の 403 でも owner 横断のスキャン全体を
+    // 打ち切ってしまう。
+    it("403 の本文が権限不足を示す message なら Unresolved のまま（レート制限と誤認しない）", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        headers: new Map() as unknown as Headers,
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({ message: "Resource not accessible by personal access token" }),
+          ),
+      });
+      mockLsRemoteFailure();
+
+      const resolution = await resolveLatestCommitSha("owner", "repo", {
+        kind: "branch",
+        name: "develop",
+      });
+
+      expect(resolution).toEqual({ _tag: "Unresolved", reason: "Forbidden" });
+    });
   });
 });
 

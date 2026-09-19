@@ -759,7 +759,15 @@ export function fetchRateLimitStatus(): Promise<RateLimitStatusResolution> {
         reason: cause instanceof Error ? cause.message : String(cause),
       }),
     });
-    if (!res.ok) return classifyLookupFailure(res);
+    if (!res.ok) {
+      return yield* Effect.tryPromise({
+        try: () => classifyLookupFailure(res),
+        catch: (cause): GitHubLookupFailure => ({
+          _tag: "Unresolved" as const,
+          reason: cause instanceof Error ? cause.message : String(cause),
+        }),
+      });
+    }
 
     const data = yield* Effect.tryPromise({
       try: () => res.json() as Promise<unknown>,
@@ -933,12 +941,17 @@ export function rateLimitedError(
 /**
  * HTTP レスポンスを RepoExistence に分類する。
  *
- * GitHub のレート制限応答は {@link detectRateLimitFromResponse} で判定する（コアクォータ
+ * GitHub のレート制限応答は {@link detectRateLimitFromResponseHeaders} で判定する（コアクォータ
  * 超過の 403 + `x-ratelimit-remaining: 0`、secondary rate limit の `retry-after` 付き 403、
  * および 429 のいずれも含む）。403 でも二要素認証要求など別原因のケースがあるため、
  * ヘッダで明示的に確認する。401 は無効/失効トークンのシグナル（パブリックリポジトリへの
  * 未認証アクセスは 200 や 404 を返すので、401 は付与した Authorization が拒否されたことを
  * 意味する）。
+ *
+ * ヘッダーだけで判定するのは、この関数の呼び出し元 {@link checkRepoExists} が HEAD
+ * リクエストで問い合わせており、レスポンスが本文を持たないため（HTTP の仕様上 HEAD の
+ * レスポンスに body は無い）。本文を読んでも判定材料が増えないので、本文まで確認する
+ * {@link detectRateLimitFromResponse} は使わない。
  */
 function classifyRepoResponse(res: Response, authenticated: boolean): RepoExistence {
   if (res.ok) return { _tag: "Exists" };
@@ -946,7 +959,7 @@ function classifyRepoResponse(res: Response, authenticated: boolean): RepoExiste
   if (res.status === 401) {
     return { _tag: "Unauthorized", message: res.statusText || "Bad credentials" };
   }
-  const rateLimit = detectRateLimitFromResponse(res);
+  const rateLimit = detectRateLimitFromResponseHeaders(res);
   if (rateLimit !== undefined) {
     return { _tag: "RateLimited", resetAt: rateLimit.resetAt, authenticated };
   }
@@ -1189,14 +1202,19 @@ function describeRateLimitReason(resetAt: Date | undefined): string {
  *
  * 401 だけを認証拒否として扱う。401 は付与した Authorization が拒否されたことを意味し、
  * 未認証アクセスでは返らない（公開リポジトリは 200、プライベートリポジトリは 404）。
- * レート制限（429、または secondary rate limit を示す 403）は {@link detectRateLimitFromResponse}
- * で検知する。それ以外の 403・5xx・404 は待つか再実行すれば解消しうるので分けない。
+ * レート制限（429、コアクォータ超過の 403、または secondary rate limit を示す 403）は
+ * {@link detectRateLimitFromResponse} で検知する。secondary rate limit の 403 はヘッダーを
+ * 持たないことがあり、本文まで確認する必要があるため非同期になる。それ以外の 403・5xx・404 は
+ * 待つか再実行すれば解消しうるので分けない。
+ *
+ * この関数の呼び出し元は GET リクエストのレスポンスを渡す（本文を持たない HEAD の
+ * レスポンスを渡す {@link checkRepoExists} は {@link classifyRepoResponse} を使う）。
  */
-function classifyLookupFailure(res: Response): GitHubLookupFailure {
+async function classifyLookupFailure(res: Response): Promise<GitHubLookupFailure> {
   if (res.status === 401) {
     return { _tag: "AuthRejected", detail: res.statusText || "Bad credentials" };
   }
-  const rateLimit = detectRateLimitFromResponse(res);
+  const rateLimit = await detectRateLimitFromResponse(res);
   if (rateLimit !== undefined) {
     return { _tag: "RateLimited", resetAt: rateLimit.resetAt };
   }
@@ -1204,11 +1222,15 @@ function classifyLookupFailure(res: Response): GitHubLookupFailure {
 }
 
 /**
- * Octokit が投げた例外を {@link classifyLookupFailure} と同じ基準で分類する。
+ * Octokit が投げた例外を、401 とレート制限を分ける方針は {@link classifyLookupFailure} と
+ * 揃えつつ分類する。
  *
  * Octokit の RequestError は HTTP ステータスを `status` に載せる。ネットワーク断のように
  * ステータスを持たない例外も飛んでくるため、形を確かめてから読む。レート制限の判定は
- * {@link detectGitHubRateLimit} に委ねる（Octokit の例外が持つ `response.headers` を読む）。
+ * {@link detectGitHubRateLimit} に委ねる（Octokit の例外が持つ `response.headers` を読む、
+ * ヘッダーのみの判定）。Octokit の例外からは本文を読めないため、ヘッダーを持たない
+ * secondary rate limit の 403（{@link classifyLookupFailure} が本文まで見て拾うケース）は
+ * ここでは検知できず `Unresolved` になる。
  */
 function classifyOctokitFailure(cause: unknown): GitHubLookupFailure {
   const detail = cause instanceof Error ? cause.message : String(cause);
@@ -1362,16 +1384,22 @@ function rateLimitResetOf(cause: unknown): Date | undefined {
 }
 
 /**
- * fetch の生の `Response` から、GitHub のレート制限応答（429、または
+ * fetch の生の `Response` のヘッダーだけから、GitHub のレート制限応答（429、または
  * `x-ratelimit-remaining: 0` / `retry-after` 付きの 403）を検知する。
  *
  * {@link isRateLimitResponse}・{@link rateLimitResetOf}・{@link detectGitHubRateLimit} は
  * Octokit の例外（`cause.status` / `cause.response.headers`）を対象にしており、
- * `classifyLookupFailure`・`classifyRepoResponse` のように `githubFetch`/`fetch` の
- * `Response` を直接持つ呼び出し元はこちらを使う。判定基準は揃えてあるので、Octokit 経由か
- * 生の fetch 経由かで同じ状況が別の分類結果になることはない。
+ * `classifyRepoResponse` のように `fetch` の `Response` を直接持ち、ヘッダーの範囲で
+ * 十分な呼び出し元はこちらを使う。判定基準はヘッダーで判定できる範囲では揃っているが、
+ * ヘッダーを持たない secondary rate limit の 403 は、本文を読める呼び出し元
+ * （{@link classifyLookupFailure} が使う {@link detectRateLimitFromResponse}）だけが検知
+ * でき、Octokit 経由の例外・HEAD リクエストのレスポンス（本文を持たない）では検知できない。
+ *
+ * 本文は読まない。HEAD リクエストのレスポンス（{@link classifyRepoResponse} が扱う）は
+ * そもそも本文を持たないため、ヘッダーで判定できない 403 まで secondary rate limit と
+ * 確定させたい呼び出し元は、本文まで確認する {@link detectRateLimitFromResponse} を使う。
  */
-function detectRateLimitFromResponse(
+function detectRateLimitFromResponseHeaders(
   res: Response,
 ): { readonly resetAt: Date | undefined } | undefined {
   // ヘッダーの読み取りは {@link readHeaderValue} に委ねる。`res.headers` を直接
@@ -1383,6 +1411,70 @@ function detectRateLimitFromResponse(
       readHeaderValue(res.headers, "retry-after") !== undefined);
   if (res.status !== 429 && !isSecondaryRateLimit) return undefined;
   return { resetAt: rateLimitResetOfResponse(res) };
+}
+
+/**
+ * GitHub の secondary rate limit を示すレスポンス本文の `message` に含まれる文言。
+ * 大文字小文字と区切り文字（空白 / `_` / `-`）の違いを許容する。`abuse detection mechanism`
+ * は同じ secondary rate limit を指す旧い文言（GitHub が新旧どちらの文言を返すかは
+ * エンドポイント・時期に依存し、こちらから選べない）。
+ */
+const SECONDARY_RATE_LIMIT_MESSAGE_PATTERN =
+  /secondary[\s_-]?rate[\s_-]?limit|abuse[\s_-]?detection/i;
+
+/**
+ * 403 のレスポンス本文が、secondary rate limit を示す `message` を含むか判定する。
+ *
+ * 本文が JSON でない・`message` フィールドが無い・本文の読み取り自体が失敗した
+ * （ストリーム消費済み等）場合は、判定不能として安全側（false）に倒す。呼び出し元は
+ * この結果を「本文からは確認できなかった」として扱い、例外を投げない。
+ */
+function bodyIndicatesSecondaryRateLimit(res: Response): Promise<boolean> {
+  return Effect.runPromise(
+    Effect.tryPromise({
+      try: () => res.text(),
+      catch: () => undefined,
+    }).pipe(
+      Effect.flatMap((text) =>
+        Effect.try({
+          try: () => JSON.parse(text) as unknown,
+          catch: () => undefined,
+        }),
+      ),
+      Effect.map((data): boolean => {
+        if (typeof data !== "object" || data === null) return false;
+        const message = (data as Record<string, unknown>).message;
+        return typeof message === "string" && SECONDARY_RATE_LIMIT_MESSAGE_PATTERN.test(message);
+      }),
+      Effect.catchAll(() => Effect.succeed(false)),
+    ),
+  );
+}
+
+/**
+ * fetch の生の `Response` から、GitHub のレート制限応答（429、コアクォータ超過の
+ * 403、または secondary rate limit の 403）を検知する。
+ *
+ * secondary rate limit の 403 は `x-ratelimit-remaining` も `retry-after` も付けずに
+ * 返ることがある（GitHub の仕様）。{@link detectRateLimitFromResponseHeaders} で判定できな
+ * かった 403 は、本文を読んで `message`（例: "You have exceeded a secondary rate limit.
+ * Please wait a few minutes before you try again."）を確認する。本文を読むのは非同期操作
+ * なので、この関数は Promise を返す。
+ */
+async function detectRateLimitFromResponse(
+  res: Response,
+): Promise<{ readonly resetAt: Date | undefined } | undefined> {
+  const fromHeaders = detectRateLimitFromResponseHeaders(res);
+  if (fromHeaders !== undefined) return fromHeaders;
+  if (res.status !== 403) return undefined;
+
+  const isSecondaryRateLimit = await bodyIndicatesSecondaryRateLimit(res);
+  // ここに来る時点で `detectRateLimitFromResponseHeaders` は `x-ratelimit-remaining: 0` も
+  // `retry-after` も見つけられていない。secondary rate limit のリセット時刻はコアクォータの
+  // リセット（`x-ratelimit-reset`）とは別物で、これらのヘッダーが読めない以上リセット時刻を
+  // 語る根拠が無いため、時刻を持たせず undefined のまま返す。呼び出し側
+  // （{@link describeRateLimitReason} 等）は resetAt が無ければ時刻を省いた文言を出す。
+  return isSecondaryRateLimit ? { resetAt: undefined } : undefined;
 }
 
 /**
