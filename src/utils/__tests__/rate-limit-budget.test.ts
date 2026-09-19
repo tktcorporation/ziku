@@ -98,6 +98,14 @@ describe("mergeObservedRateLimit", () => {
     expect(mergeObservedRateLimit(current, next)).toBe(next);
   });
 
+  it("次の観測が既存より古いウィンドウ（resetAt が過去）なら、残量の大小によらず既存を保持する（遅延到着した旧ウィンドウの観測を棄却する）", () => {
+    // リセット直後: 新ウィンドウ（resetAt が新しい・補充済み）の応答が先に届いて採用された後、
+    // 旧ウィンドウ（resetAt が古い・枯渇寸前）への遅延応答が届く状況を再現する。
+    const current = { remaining: 5000, resetAt: new Date("2026-01-01T01:00:00Z") };
+    const next = { remaining: 0, resetAt: new Date("2026-01-01T00:00:00Z") };
+    expect(mergeObservedRateLimit(current, next)).toBe(current);
+  });
+
   it("resetAt が片方だけ undefined なら、ウィンドウが変わったとみなして新しい観測値を採用する", () => {
     const current = { remaining: 10, resetAt: new Date("2026-01-01T00:00:00Z") };
     const next = { remaining: 5000, resetAt: undefined };

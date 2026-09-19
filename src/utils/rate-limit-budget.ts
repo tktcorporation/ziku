@@ -179,6 +179,16 @@ function sameRateLimitWindow(a: Date | undefined, b: Date | undefined): boolean 
 }
 
 /**
+ * `next` の `resetAt` が `current` より確実に古い（= 別ウィンドウの遅延到着観測である）と
+ * 判定できるか。両方の `resetAt` が分かる場合のみ判定でき、片方でも読めなければ false
+ * （古いとは断定しない）を返す。
+ */
+function isOlderRateLimitWindow(next: Date | undefined, current: Date | undefined): boolean {
+  if (next === undefined || current === undefined) return false;
+  return next.getTime() < current.getTime();
+}
+
+/**
  * 新しく観測したレート制限残量を、それまでの観測値へ単調減少で取り込む。
  *
  * owner 横断探索は複数の GitHub リクエストを並行して発行するため、レスポンスは発行順ではなく
@@ -189,17 +199,27 @@ function sameRateLimitWindow(a: Date | undefined, b: Date | undefined): boolean 
  * 採用せず、より保守的な（小さい）既存の値を残す。ウィンドウが変わった
  * （{@link sameRateLimitWindow} が false）場合は、新しいウィンドウの値として無条件に採用する。
  *
+ * ただし「ウィンドウが変わった」を resetAt の不一致だけで判定すると、リセット直後の並行
+ * リクエストで別の問題が起きる。新ウィンドウ（補充済み・resetAt が新しい）の応答が先に届いて
+ * 採用された後、旧ウィンドウ（resetAt が古い・remaining: 0 かもしれない）に対する遅延応答が
+ * 届くと、両者の resetAt が異なるだけで「新しいウィンドウの値」として無条件採用してしまい、
+ * 有効な新ウィンドウの観測を陳腐化した旧ウィンドウの値で上書きしてしまう。両方の resetAt が
+ * 分かっており、かつ `next` が `current` より古い（{@link isOlderRateLimitWindow}）場合は、
+ * 遅延到着した旧ウィンドウの観測とみなして棄却する。
+ *
  * `current` が無ければ（まだ 1 件も観測していなければ）`next` をそのまま採用する。
  */
 export function mergeObservedRateLimit(
   current: ObservedRateLimit | undefined,
   next: ObservedRateLimit,
 ): ObservedRateLimit {
-  if (
-    current === undefined ||
-    !sameRateLimitWindow(current.resetAt, next.resetAt) ||
-    next.remaining < current.remaining
-  ) {
+  if (current === undefined) {
+    return next;
+  }
+  if (isOlderRateLimitWindow(next.resetAt, current.resetAt)) {
+    return current;
+  }
+  if (!sameRateLimitWindow(current.resetAt, next.resetAt) || next.remaining < current.remaining) {
     return next;
   }
   return current;
