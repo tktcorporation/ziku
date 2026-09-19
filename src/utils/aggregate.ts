@@ -52,6 +52,14 @@ import type { FileClassification } from "./merge/types";
 import type { ZikuConfigStatus } from "./merge/sync-plan";
 import { withZikuConfigStatus, zikuConfigStatus } from "./merge/sync-plan";
 import { absPath } from "./paths";
+import {
+  DEFAULT_MAX_CANDIDATES,
+  DEFAULT_RECENT_PUSH_DAYS,
+  cannotAffordRemainingCandidates,
+  candidateLimitFromRemaining,
+  rateLimitSkipReason,
+} from "./rate-limit-budget";
+import type { RateLimitDetection, RateLimitGate } from "./rate-limit-budget";
 import { analyzeSync } from "./sync-analysis";
 import type { SyncHashes } from "./sync-analysis";
 import { resolveSyncScope } from "./sync-scope";
@@ -118,56 +126,6 @@ export interface AggregateOptions {
 }
 
 const DEFAULT_CONCURRENCY = 4;
-
-/**
- * レート制限の残量から事前の候補数上限を算出する際（{@link resolveCandidateLimit}）に使う
- * 安全マージン。単位は GitHub API リクエスト数（{@link ESTIMATED_REQUESTS_PER_CANDIDATE} で
- * 候補数へ変換する前の値）。
- *
- * owner 一覧取得・テンプレートの正規名解決など、候補ごとの処理以外にもこのスキャン中に
- * GitHub API 呼び出しが発生するため、残量をそのまま候補数の上限にすると、それらの
- * 呼び出し分だけ超過しうる。実行中の動的ブレーキ（{@link evaluateCandidate}）はこのマージンを
- * 使わない。候補処理が始まる前の準備段階の消費はここで既に見込み済みであり、動的ブレーキの
- * 判定でも重ねて差し引くと、候補数が事前算出の上限どおりで準備段階の消費が少なかった正常な
- * シナリオでも初回候補から誤って発動する。
- */
-const RATE_LIMIT_SAFETY_MARGIN = 10;
-
-/**
- * 候補 1 件を最後まで処理するのに実際にかかる GitHub API リクエスト数の下限見積もり。
- * `resolveCandidateLimit` の候補数上限算出と、実行中の動的ブレーキ（{@link evaluateCandidate}）
- * の両方が、「候補 1 件 = リクエスト 1 回」という過小評価を避けるためにこの係数で割る。
- *
- * 内訳（`evaluateCandidate` → `processCandidate` の経路で 1 候補ごとに必ず発生する呼び出し）:
- * 1. lock.json の初回取得（ふるい用、`readCandidateLock`）
- * 2. commit SHA の解決（`resolveCandidateRef`）
- * 3. 固定した commit での lock.json 再取得（`readCandidateLock`）
- * 4. 利用リポジトリ内容のダウンロード（`processCandidate` → `classifyAgainstTemplate` →
- *    `acquireTempTemplate` が使う giget の `download()`。候補ごとに commit SHA 固定でダウンロード
- *    URL が変わるため常にコールドキャッシュになり、etag 確認の `HEAD` と実体取得の `GET` で
- *    2 リクエストを消費する）
- *
- * 1〜3 で 3 リクエスト、4 で 2 リクエストの計 5。
- *
- * `since` フィルタ指定時のコミット日時取得など、これを超える呼び出しが発生するケースも
- * あるため、あくまで下限の見積もりであることに注意。
- */
-const ESTIMATED_REQUESTS_PER_CANDIDATE = 5;
-
-/**
- * 候補数上限を呼び出し側が明示指定しなかったときの既定値。
- * owner 配下を全量問い合わせるのを避けるための既定値であり、レート制限の残量から
- * 算出した上限がこれより大きくても、明示指定が無ければこの値で頭打ちにする
- * （{@link resolveCandidateLimit}）。
- */
-const DEFAULT_MAX_CANDIDATES = 30;
-
-/**
- * 候補に含める push 日時の下限を呼び出し側が明示指定しなかったときの既定値（日数）。
- * owner 配下を全量問い合わせるのを避けるための既定値。暦月の厳密な計算はせず、
- * 固定の日数で計算する（{@link recentPushSinceIso}）。
- */
-const DEFAULT_RECENT_PUSH_DAYS = 90;
 
 /** `days` 日前の時刻を ISO 8601（UTC）文字列にする。`listOwnerRepos` の `pushedSince` に渡す。 */
 function recentPushSinceIso(days: number): string {
@@ -461,10 +419,7 @@ function resolveCandidateLimit(
 ): Effect.Effect<number, ZikuFailure> {
   return match(rateLimitStatus)
     .with({ _tag: "Resolved" }, (r) => {
-      const derived = Math.floor(
-        Math.max(0, r.status.remaining - RATE_LIMIT_SAFETY_MARGIN) /
-          ESTIMATED_REQUESTS_PER_CANDIDATE,
-      );
+      const derived = candidateLimitFromRemaining(r.status.remaining);
       if (derived <= 0) {
         return Effect.fail(
           zikuFailure({
@@ -483,30 +438,6 @@ function resolveCandidateLimit(
     .with({ _tag: "Unresolved" }, () => Effect.succeed(userMaxCandidates ?? DEFAULT_MAX_CANDIDATES))
     .exhaustive();
 }
-
-/**
- * レート制限を検知した経緯。呼び出し側が読む理由文（{@link rateLimitSkipReason}）を
- * 実際に起きたことと一致させるために区別する。
- *
- * - `observed`: GitHub から実際に 403/429 のレート制限応答を受け取った
- *   （{@link tryGitHubGated} 経由、または `processCandidate` がテンプレート/リポジトリ内容の
- *   ダウンロード失敗から検知した場合）。
- * - `preemptive`: 403 をまだ受け取っておらず、直近のレスポンスヘッダーから観測した残量
- *   （`getObservedRateLimitRemaining`）だけで「このまま候補を処理すると枯渇する」と
- *   見積もり、自発的に止まった（{@link evaluateCandidate} の動的ブレーキ）。
- */
-type RateLimitDetection =
-  | { readonly _tag: "observed"; readonly resetAt: Date | undefined }
-  | { readonly _tag: "preemptive"; readonly resetAt: Date | undefined };
-
-/**
- * owner 横断のスキャン全体で共有する、レート制限を検知したかどうかの状態。
- *
- * 「検知したか」と「resetAt」を別々のフィールドに分けると、未検知なのに resetAt を
- * 持つような組み合わせを型が許してしまう。検知済みのときだけ resetAt を持つ形にするため
- * `Option` で包む。
- */
-type RateLimitGate = Ref.Ref<Option.Option<RateLimitDetection>>;
 
 /**
  * `tryGitHub` にレート制限ゲートを重ねる。
@@ -550,32 +481,6 @@ function githubRateLimitedFailure(resetAt: Date | undefined): ZikuFailure {
     authenticated: getGitHubToken() !== undefined,
     resetAt,
   });
-}
-
-/**
- * ゲートが立っている状態で候補の処理に入ったときの `skipped` 理由文。
- *
- * 実際に 403/429 を受け取った（`observed`）のか、まだ受け取っておらず観測残量からの
- * 予防的な打ち切り（`preemptive`）なのかで文言を分ける。後者は「このまま続けると
- * 危険と判断して自発的に止めた」ことが伝わらないと、実際にはまだ枠が残っていたかも
- * しれないのに GitHub 側から拒否されたと読める。
- *
- * リセットまでの残り時間を分単位で示す部分は `errors.ts` の `describeQuotaReset` と
- * 同じ考え方だが、新しい依存を増やさずここに書く。
- */
-function rateLimitSkipReason(detection: RateLimitDetection): string {
-  const verb = match(detection)
-    .with({ _tag: "observed" }, () => "GitHub API rate limit reached")
-    .with(
-      { _tag: "preemptive" },
-      () => "Stopped short of the GitHub API rate limit based on the observed remaining quota",
-    )
-    .exhaustive();
-  if (detection.resetAt === undefined) {
-    return `${verb}; not checking further repositories in this scan.`;
-  }
-  const minutes = Math.max(0, Math.ceil((detection.resetAt.getTime() - Date.now()) / 60000));
-  return `${verb}; not checking further repositories in this scan (resets in ~${minutes} min).`;
 }
 
 /**
@@ -840,21 +745,13 @@ function evaluateCandidate(
     }
 
     // 実際に 403 を受け取る前に、直近のレスポンスヘッダーから観測した残量で先読みする。
-    // 自分自身とまだ処理していない候補の分を、候補 1 件あたりの想定リクエスト数
-    // （{@link ESTIMATED_REQUESTS_PER_CANDIDATE}）で見積もり、まかなえなければこの候補以降は
-    // 新規リクエストを送らず、既存の事後ゲートへ「検知済み」として合流させる。以降の候補処理は
+    // まかなえなければ（{@link cannotAffordRemainingCandidates}）この候補以降は新規リクエストを
+    // 送らず、既存の事後ゲートへ「検知済み」として合流させる。以降の候補処理は
     // evaluateCandidate 冒頭の早期打ち切りにそのまま乗る。
-    //
-    // ここでは `RATE_LIMIT_SAFETY_MARGIN` を引かない。事前の候補数上限算出
-    // （{@link resolveCandidateLimit}）が同じマージンを既に 1 回差し引いており、その分は
-    // 候補処理が始まる前の準備段階（`isOrganization`・`listOwnerRepos` の一覧取得・
-    // `resolveTemplateRef` の識別解決など）の消費を見込むバッファとして確保済みだから。
-    // ここでも同じマージンを重ねて要求すると、候補数が事前算出の上限どおりで準備段階の消費が
-    // 少なかった正常なシナリオでも、初回候補から誤ってブレーキが発動する。
     const observed = getObservedRateLimitRemaining();
     if (
       observed !== undefined &&
-      observed.remaining < (remainingAfter + 1) * ESTIMATED_REQUESTS_PER_CANDIDATE
+      cannotAffordRemainingCandidates(observed.remaining, remainingAfter)
     ) {
       const detection: RateLimitDetection = { _tag: "preemptive", resetAt: observed.resetAt };
       yield* Ref.set(rateLimitGate, Option.some(detection));

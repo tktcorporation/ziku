@@ -17,7 +17,14 @@ import { blobShaSchema, commitShaSchema } from "../modules/schemas";
 import { log } from "../ui/renderer";
 import { transportTextToBytes } from "./file-content";
 import { lsRemoteCommitSha, lsRemoteDefaultBranch } from "./git-remote";
+import { mergeObservedRateLimit } from "./rate-limit-budget";
+import type { ObservedRateLimit, RateLimitStatus } from "./rate-limit-budget";
 import { ZIKU_CONFIG_FILE } from "./ziku-config";
+
+// レート制限予算のドメイン定義（型・純粋関数）は `rate-limit-budget.ts` に集約されているが、
+// GitHub API を呼ぶこのファイルの関数（`fetchRateLimitStatus` 等）のシグネチャに登場するため、
+// このファイルからも参照できるよう re-export する。
+export type { ObservedRateLimit, RateLimitStatus };
 
 export interface PushOptions {
   owner: string;
@@ -638,12 +645,6 @@ export function resetGitHubRequestState(): void {
  */
 let observedRateLimit: ObservedRateLimit | undefined;
 
-/** {@link observeRateLimitHeaders} が記録する、直近に観測したレート制限の状態。 */
-export interface ObservedRateLimit {
-  readonly remaining: number;
-  readonly resetAt: Date | undefined;
-}
-
 /**
  * 直近に観測したレート制限の残量を返す。
  *
@@ -674,35 +675,16 @@ function readHeaderValue(headers: unknown, name: string): string | undefined {
 }
 
 /**
- * 2 つの `resetAt` が同じレート制限リセットウィンドウを指しているとみなせるか。
- *
- * 両方とも読めた場合はエポック値そのもので比較する。片方だけ読めない場合は、ウィンドウの
- * 同一性を確認できないので「異なる」に倒す（新しい観測値をそのまま採用する側へ）。両方とも
- * 読めない場合は同一性を確認する手立てが無いが、単調減少の想定自体はウィンドウが分からなくても
- * 成り立つため、`observeRateLimitHeaders` 側の「同じウィンドウ」の扱い（残量が既存より小さい
- * ときだけ採用）に委ねる。
- */
-function sameRateLimitWindow(a: Date | undefined, b: Date | undefined): boolean {
-  if (a === undefined && b === undefined) return true;
-  if (a === undefined || b === undefined) return false;
-  return a.getTime() === b.getTime();
-}
-
-/**
  * GitHub のレスポンスヘッダーから、レート制限の残量を観測して記録する。
  *
  * `x-ratelimit-remaining` は成功レスポンスにも乗るため、実際に 403 を受け取る前に
  * 枯渇の兆候へ気づける。ヘッダーが無い・数値としてパースできない場合は何もしない
  * （直前の観測値を「情報が無い」で上書きしない）。
  *
- * `aggregate.ts` の owner 横断探索は複数の GitHub リクエストを並行して発行するため、
- * レスポンスは発行順ではなく完了順に届く。後から発行した（実際には残量が少ない）
- * リクエストが先に完了して小さい値を記録した後、先に発行したが完了が遅かった
- * リクエスト（届いた時点では既に古い、値としては大きい観測）が無条件で上書きすると、
- * 動的ブレーキが実際より楽観的な残量を見てしまう。同じリセットウィンドウ内では残量は
- * 単調減少するはずなので、新しい観測値が既存より大きければ採用せず、より保守的な
- * （小さい）既存の値を残す。ウィンドウが変わった（{@link sameRateLimitWindow} が false）
- * 場合は、新しいウィンドウの値として無条件に採用する。
+ * 新しい観測値を採用するかどうかの判定（単調減少マージ）は {@link mergeObservedRateLimit}
+ * に委ねる。`aggregate.ts` の owner 横断探索は複数の GitHub リクエストを並行して発行するため、
+ * レスポンスは発行順ではなく完了順に届き、届いた順にそのまま上書きすると動的ブレーキが
+ * 実際より楽観的な残量を見てしまう。
  */
 function observeRateLimitHeaders(headers: unknown): void {
   const remainingHeader = readHeaderValue(headers, "x-ratelimit-remaining");
@@ -713,15 +695,8 @@ function observeRateLimitHeaders(headers: unknown): void {
   const resetHeader = readHeaderValue(headers, "x-ratelimit-reset");
   const resetEpoch = resetHeader !== undefined ? Number(resetHeader) : Number.NaN;
   const resetAt = Number.isFinite(resetEpoch) ? new Date(resetEpoch * 1000) : undefined;
-  const next: ObservedRateLimit = { remaining, resetAt };
 
-  if (
-    observedRateLimit === undefined ||
-    !sameRateLimitWindow(observedRateLimit.resetAt, resetAt) ||
-    remaining < observedRateLimit.remaining
-  ) {
-    observedRateLimit = next;
-  }
+  observedRateLimit = mergeObservedRateLimit(observedRateLimit, { remaining, resetAt });
 }
 
 /** `GET /rate_limit` のレスポンス。必要フィールドのみ */
@@ -755,14 +730,6 @@ function isUsableRateLimitCore(
     typeof core.remaining === "number" &&
     typeof core.reset === "number"
   );
-}
-
-/** GitHub API のレート制限（`core` リソース）の現在値。 */
-export interface RateLimitStatus {
-  readonly limit: number;
-  readonly remaining: number;
-  readonly resetAt: Date | undefined;
-  readonly authenticated: boolean;
 }
 
 /** {@link fetchRateLimitStatus} の結果。失敗の分け方は {@link GitHubLookupFailure} と同じ。 */
