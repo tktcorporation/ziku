@@ -15,15 +15,18 @@
  *   pnpm agent-adapters:generate
  *   pnpm agent-adapters:check
  */
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -69,12 +72,29 @@ function writeText(path: string, content: string): void {
 }
 
 /**
- * 生成物間で差分が出ないよう、フォーマッタに依存せず決定的な JSON 文字列を返す。
- * `pnpm install` だけで揃う Node 組み込み機能のみで完結させ、この生成器自体を
- * 外部ツール（vp / oxfmt 等）の有無に依存させない。
+ * `pnpm run format:check`（oxfmt）と生成物が食い違わないよう、この repo 自身の
+ * oxfmt（`pnpm install` で必ず入る devDependency）に通してから書き込む。oxfmt は
+ * 短い配列を 1 行にまとめるなど `JSON.stringify` とは異なる整形をするため、素の
+ * stringify のままでは `format:check` と `agent-adapters:check` が互いに
+ * 直前の出力を「差分あり」と検出し合う。
  */
 function stableStringify(value: unknown): string {
-  return `${JSON.stringify(value, null, 2)}\n`;
+  const raw = `${JSON.stringify(value, null, 2)}\n`;
+  const dir = mkdtempSync(join(tmpdir(), "agent-adapters-fmt-"));
+  const tempPath = join(dir, "content.json");
+  try {
+    writeFileSync(tempPath, raw);
+    const result = spawnSync("pnpm", ["exec", "oxfmt", "--write", tempPath], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    });
+    if (result.status !== 0) {
+      throw new Error(`oxfmt failed: ${result.stderr || result.stdout || "unknown error"}`);
+    }
+    return readFileSync(tempPath, "utf8");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 function listFiles(dir: string, suffix: string): string[] {

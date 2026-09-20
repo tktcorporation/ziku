@@ -40,6 +40,8 @@
     "lint": "oxlint . && ast-grep scan",
     "lint:changesets": "bash scripts/validate-changesets.sh",
     "lint:fix": "oxlint --fix .",
+    "agent-adapters:generate": "pnpm tsx scripts/generate-agent-adapters.ts",
+    "agent-adapters:check": "pnpm tsx scripts/generate-agent-adapters.ts --check",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
     "typecheck": "oxlint --type-aware --type-check",
