@@ -75,6 +75,6 @@
     ".cursor/run-shared-hook.ts",
     ".cursor/rules/*.mdc",
     "scripts/generate-agent-adapters.ts",
-    ".claude/guides/tools/cursor.md"
+    ".claude/guides/tools/cursor.md",
   ],
 }

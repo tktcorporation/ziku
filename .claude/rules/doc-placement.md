@@ -1,5 +1,5 @@
 ---
-paths: ['**/*.md', '**/*.mdx', 'docs/**', '.config/docs-lifecycle.json']
+paths: ["**/*.md", "**/*.mdx", "docs/**", ".config/docs-lifecycle.json"]
 ---
 
 # ドキュメントの置き場所（コード近接を優先する）
