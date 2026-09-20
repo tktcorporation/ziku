@@ -32,7 +32,7 @@ pr-deep-review（本スキル）→  「この実装は仕様通りで、技術�
 
 **使わなくてよい場面**: typo 修正・フォーマットのみ・1行の自明な設定変更など、周辺文脈を読む必要が無いほど自明な変更（`codex review --uncommitted` で足りる）。
 
-**`.claude/rules/pr-self-review.md` との関係**: `gh pr create` 前のフックは `codex review --uncommitted` の実行を2回記録することを要求する。本スキルはそれを代替しない。本スキルで見つけた指摘を直した後も、フックを満たすには別途 `codex review` を回すこと。本スキルは「技術的な深さ」を追加するものであり、既存ゲートの置き換えではない。
+**`.claude/rules/pr-self-review.md` との関係**: `gh pr create` 前のゲートは、`pr-review-loop` のラウンドを指摘が収束するまで記録することで満たす。本スキルはそのループの 1 ラウンド分のレビュー手順で、ループ自体（収束判定・記録・codex を挟むラウンド）は `pr-review-loop` が担う。
 
 ## 手順
 
@@ -43,10 +43,12 @@ pr-deep-review（本スキル）→  「この実装は仕様通りで、技術�
 gh pr view <PR番号> --json title,body,files,baseRefName,headRefName
 gh pr diff <PR番号>
 
-# ローカルブランチ / 未コミット
-git fetch origin main
-git diff origin/main...HEAD --stat
-git diff origin/main...HEAD
+# ローカルブランチ / 未コミット (default branch 名は repo により main / master 等で異なるため origin/HEAD から動的に取得する)
+# origin/HEAD が未設定なら一度だけ: git remote set-head origin --auto
+default_branch="$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's@^origin/@@')"
+git fetch origin "$default_branch"
+git diff "origin/$default_branch"...HEAD --stat
+git diff "origin/$default_branch"...HEAD
 
 # 関連イシューがあれば本文も取る（Step 2 の基準線になる）
 gh issue view <イシュー番号> --json title,body
@@ -174,4 +176,4 @@ pr-impact-review・pr-first-reader-check と同様、**結論を先頭に**。`.
 
 - `@.claude/rules/conclusion-only-output.md`: 結論だけを書き、検証の過程・対比・自己言及を本文に残さない
 - `@.claude/rules/agent-work-discipline.md`: 読んでいないファイルについて指摘を書かない（捏造禁止）
-- `@.claude/rules/pr-self-review.md`: `gh pr create` 前の `codex review` 2回ゲートとは別物。置き換えない
+- `@.claude/rules/pr-self-review.md`: `gh pr create` 前のゲート。本スキルは `pr-review-loop` の 1 ラウンドとしてこれに組み込まれる

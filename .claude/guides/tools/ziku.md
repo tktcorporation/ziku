@@ -4,7 +4,7 @@
 
 ## なぜ使うのか
 
-複数のリポジトリで同じ Claude Code 設定（共通スキル・hook・rule）を使い回したい。各リポジトリで手コピーするとすぐにズレるため、テンプレートを単一の正本（source of truth）にして `ziku` で配布・取り込みする。
+複数のリポジトリで同じエージェント設定（共通スキル・hook・rule、および Cursor / Codex 向けアダプタ）を使い回したい。各リポジトリで手コピーするとすぐにズレるため、テンプレートを単一の正本（source of truth）にして `ziku` で配布・取り込みする。
 
 ## 設定ファイル
 
@@ -25,7 +25,8 @@
 
 ## 落とし穴
 
-- **wildcard include は直下のみ**: `.claude/hooks/*.sh` や `.claude/rules/*.md` はサブディレクトリにマッチしない。プロジェクト固有ファイル（テンプレに流したくないもの）は `hooks/project/` `rules/data-analysis/` のようにサブディレクトリへ退避して同期対象から外す。
+- **wildcard include は直下のみ**: `.claude/hooks/*.ts` や `.claude/rules/*.md`、`.cursor/rules/*.mdc` はサブディレクトリにマッチしない。プロジェクト固有ファイル（テンプレに流したくないもの）は `hooks/project/` `rules/project/` / `.cursor/rules/project/` のようにサブディレクトリへ退避して同期対象から外す。
+- **Cursor / Codex アダプタも track する**: `.claude/hooks/manifest.json`・生成スクリプト・`.cursor/` / `.codex/` のアダプタは共有設定の一部。配線の手編集はせず `pnpm agent-adapters:generate` で揃える（手順は `.claude/guides/tools/cursor.md`）。
 - **社内固有の呼称をテンプレに流さない**: push するファイルから社内限定の略語・呼称を排除し、架空例に置き換えてから push する（初見レビュアーに通じる状態を保つ）。
 - `pull` の auto-merge はローカルの差分を巻き込むことがある。push 前に `status` で差分を確認する。
 

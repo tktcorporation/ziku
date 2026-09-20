@@ -97,5 +97,23 @@
       }
     }
   ],
-  "ignorePatterns": ["node_modules", "dist", "/docs"]
+  "ignorePatterns": [
+    "node_modules",
+    "dist",
+    "/docs",
+    // ziku でテンプレートから同期される独立ツール群。それぞれ own tsconfig / bunfig を
+    // 持つ独立サブプロジェクトで、bun ランタイムの `.ts` 拡張子付き import や Bun
+    // グローバルを前提に書かれており、root の tsconfig (include: src/**/*) の対象外。
+    // ルート側の strict な complexity / no-shadow 等はこれらの慣習に合わないため、
+    // root の lint/type-check スコープから外す。
+    ".claude/hooks",
+    ".cursor",
+    ".codex",
+    ".devcontainer",
+    "scripts/docs-lifecycle",
+    "tools/agent-fleet",
+    // bun test ランナー専用（`bun:test` import・`import.meta.dir` 前提）で、
+    // 同じ理由により root の type-check 対象外。
+    ".claude/skills/structured-doc-writing/scripts/docflow.test.ts"
+  ]
 }

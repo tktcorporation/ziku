@@ -166,7 +166,7 @@ changeset を使うリポジトリでは、依存更新が **runtime artifact（
 ## Phase 5: セルフレビュー & CI
 
 - [`.claude/rules/ci-workflow.md`](../../rules/ci-workflow.md): push 前に `.github/workflows/` の push/PR トリガーの run コマンドをローカルで通す（lint / test / knip / build）。
-- [`.claude/rules/pr-self-review.md`](../../rules/pr-self-review.md): PR 作成前にセルフレビュー 2 回。lockfile 差分・override の追加/削除・受容記録の編集は特に丁寧に見る。
+- [`.claude/rules/pr-self-review.md`](../../rules/pr-self-review.md): PR 作成前にレビューループを収束まで回す。lockfile 差分・override の追加/削除・受容記録の編集は特に丁寧に見る。
 - [`.claude/rules/codex-pairing.md`](../../rules/codex-pairing.md): push 前に `codex review` でセカンドオピニオンを取る（サンドボックスフラグ要件もここ）。
 
 ## Phase 6: 報告

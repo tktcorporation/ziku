@@ -34,7 +34,7 @@ paths:
 
 ---
 
-## 原則 1: Evergreen — 時間が経っても腐らない
+## 原則 1: Evergreen（時間が経っても腐らない）
 
 ### 書く: 現在の WHY
 
@@ -72,7 +72,7 @@ paths:
 
 ---
 
-## 原則 2: Why-First — Context-rich, Intent-revealing
+## 原則 2: Why-First（Context-rich, Intent-revealing）
 
 ### Explain Why, not What
 
@@ -92,7 +92,7 @@ function getUser() { ... }
 const owner = resource.owner ?? null;
 ```
 
-### Context-rich — 背景・制約・意図を含める
+### Context-rich（背景・制約・意図を含める）
 
 「なぜこの方法か」「なぜこの順序か」「なぜこの値か」を残す。読者が「？」となる箇所だけでよい。
 
@@ -119,7 +119,7 @@ const SECONDS_PER_DAY = 86400;
 
 ---
 
-## 原則 3: SSOT — Single Source of Truth
+## 原則 3: SSOT（Single Source of Truth）
 
 ### 同じ情報を複数箇所に書かない
 
@@ -143,7 +143,7 @@ const SECONDS_PER_DAY = 86400;
 
 ---
 
-## 原則 4: Reader-Friendly — 読者の負荷を最小化
+## 原則 4: Reader-Friendly（読者の負荷を最小化）
 
 ### Principle of Least Astonishment（驚き最小の原則）
 
@@ -188,7 +188,7 @@ const SECONDS_PER_DAY = 86400;
 - 受動態より能動態（「処理される」より「X が処理する」）
 - 二重否定を避ける（「無効化されていない」→「有効である」）
 
-### Scannable Writing — 流し読みできる構造
+### Scannable Writing（流し読みできる構造）
 
 長い段落は読まれない。**見出し・箇条書き・短文・表** で構造化する。
 
@@ -199,7 +199,7 @@ const SECONDS_PER_DAY = 86400;
 | 表で対比          | 「A は X、B は Y、C は Z」と散文で対比 |
 | 1 文 1 主張       | 「〇〇で△△が□□し、また◇◇」             |
 
-### Cognitive Load Reduction — 認知負荷を下げる
+### Cognitive Load Reduction（認知負荷を下げる）
 
 - **一文一意**: 一つの文に複数の主張を詰め込まない
 - **文脈を明示**: 「これ」「それ」が何を指すか曖昧にしない
@@ -252,8 +252,8 @@ const SECONDS_PER_DAY = 86400;
 
 - 時間依存表現を検知する project の構造化 lint ルール (例: ast-grep)
 - 履歴・担当者参照を検知する project の構造化 lint ルール (例: ast-grep)
-- project の post-edit doc-lint hook — `.md` 編集後に違反検知
-- `.claude/skills/evergreen-writing` — 文書執筆タスク時のセルフチェック skill
+- project の post-edit doc-lint hook：`.md` 編集後に違反検知
+- `.claude/skills/evergreen-writing`：文書執筆タスク時のセルフチェック skill
 
 ---
 

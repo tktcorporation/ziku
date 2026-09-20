@@ -1,0 +1,14 @@
+# oxfmt は .gitignore に加えてこのファイルも読む。
+# 意図的に壊れた JSON を使う agent-fleet のテスト用 fixture はパース不能なので、
+# フォーマッタの対象から外す（テスト対象そのものであり、直す対象ではない）。
+tools/agent-fleet/test/fixtures/claude-jobs/broken/state.json
+
+# ziku でテンプレートから同期される独立ツール群。.oxlintrc.json の ignorePatterns と
+# 同じ理由（own tsconfig / bunfig を持つ独立サブプロジェクト）で、root の oxfmt
+# スタイルの対象からも外す。
+.claude/hooks
+.cursor
+.codex
+.devcontainer
+scripts/docs-lifecycle
+tools/agent-fleet

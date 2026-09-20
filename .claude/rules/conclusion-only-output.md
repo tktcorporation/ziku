@@ -75,4 +75,4 @@
 
 ## 関連
 
-- `agent-communication.md` — 作業中の進捗報告と、会話での応答の長さ
+- `agent-communication.md`：作業中の進捗報告と、会話での応答の長さ

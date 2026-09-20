@@ -67,4 +67,4 @@ union の分岐を条件文で書くと、値が増えたときに漏れても�
 
 ## 関連
 
-- `error-handling.md` — 起きた失敗の表現と伝播
+- `error-handling.md`：起きた失敗の表現と伝播

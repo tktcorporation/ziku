@@ -12,9 +12,9 @@
 2. 自分のタスクと無関係な変更が存在 → worktree を切って作業開始
 3. 判断がつかない → worktree を切る（安全側に倒す）
 
-## 作成場所（CRITICAL — hook で強制）
+## 作成場所（CRITICAL）
 
-**Worktree は必ず、作業対象の git リポジトリの `.claude/worktrees/` 配下に作成すること。**
+**Worktree は必ず、作業対象の git リポジトリの `.claude/worktrees/` 配下に作成すること。** この配置は hook では強制されておらず、Automode とレビューで守る規約になる。
 
 ### 推奨: `EnterWorktree` ツールを使う
 
@@ -45,7 +45,7 @@ git worktree add .claude/worktrees/<タスク名> -b <ブランチ名> "origin/$
 ```
 
 ```bash
-# 間違い（hook でブロックされる）
+# 間違い（このルールに反する）
 git worktree add .worktrees/<タスク名> ...
 git worktree add /tmp/<タスク名> ...
 ```
@@ -69,6 +69,10 @@ HEAD やトピックブランチから切ると、他の作業の未マージコ
 ## 作成後の依存インストール
 
 worktree は元のチェックアウトの `node_modules` を共有しない。作成後に無ければ依存をインストールしてから作業を始める。
+
+## `.claude/hooks/*.ts` 自体を worktree で変更するとき
+
+`CLAUDE_PROJECT_DIR` は worktree に入っても主チェックアウトを指したままで、`settings.json` の hook コマンドはこの変数経由でスクリプトを呼ぶ。worktree 側のスクリプトを編集しても、そのセッションの hook 実行は主チェックアウト側の古いスクリプトのままになる。動作確認は hook を経由させず、スクリプトを直接 `bun` で実行するか、専用の一時ディレクトリで検証する。変更が主チェックアウトの `.claude/hooks/` に反映される（マージ後）まで、そのセッションの hook 実行には現れない。
 
 ## 他チームが所有するリポジトリの `.gitignore` は触らない
 
