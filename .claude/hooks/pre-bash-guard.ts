@@ -323,11 +323,15 @@ if ((hasLsof && hasKill) || hasFuserKill)
   block(
     'lsof+kill / fuser+kill はdevcontainerを巻き込みます。ps aux --sort=-%mem | head でPIDを確認し、kill <PID> で個別に止めてください。',
   );
+// git worktree add の -b/-B <branch> と --reason <string> は値を伴うオプション。
+// 先に読み飛ばさないと、値の方を先頭位置引数（パス）と誤認識する。
+const WORKTREE_ADD_VALUED_FLAGS = ['-b', '-B', '--reason'];
 for (const entry of commands) {
   if (!entry.direct || entry.name !== 'git') continue;
   const target = gitTarget(entry);
   if (wordValue(target.subcommand) !== 'worktree' || wordValue(target.args[0]) !== 'add') continue;
-  const path = wordValue(target.args[1]);
+  const positional = positionalOf(target.args.slice(1), WORKTREE_ADD_VALUED_FLAGS);
+  const path = wordValue(positional[0]);
   if (path === undefined || !path.startsWith('.claude/worktrees/'))
     block('worktreeは.claude/worktrees/配下に作成してください。');
 }

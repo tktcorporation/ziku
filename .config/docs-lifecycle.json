@@ -25,6 +25,7 @@
   "referencePrefixes": ["docs/"],
   "referenceIgnoreFrom": [
     "scripts/docs-lifecycle/__tests__/**",
+    "scripts/lib/docs-lifecycle/__tests__/**",
     ".changeset/*.md",
     "**/CHANGELOG.md"
   ]
