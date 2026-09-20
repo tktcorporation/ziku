@@ -53,5 +53,5 @@ PR を作る前に、本文だけでなく **差分に含まれるコメント/d
 - `@.claude/skills/technical-writing-style/SKILL.md`: LLM 口調排除・論証の厳密さ・段落構成・冗長排除など文章作法全般。
 - `@.claude/rules/conclusion-only-output.md`: 過程・対比・自己言及を本文に残さない（確定した結論と根拠だけ）。
 - `@.claude/rules/agent-work-discipline.md`: 対外成果物で内輪語を使わない／AI の返信は AI らしく。
-- `@.claude/rules/pr-self-review.md`: PR 作成前のセルフレビュー（codex review を2回）。
+- `@.claude/rules/pr-self-review.md`: PR 作成前のレビューループ（収束まで回す）。
 - `@.claude/rules/ci-workflow.md`: push 前の CI 再現と、PR 作成後の CI 監視。
