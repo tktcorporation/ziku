@@ -1,5 +1,11 @@
 # @tktco/ziku
 
+## 2.2.1
+
+### Patch Changes
+
+- [#115](https://github.com/tktcorporation/ziku/pull/115) [`185a82a`](https://github.com/tktcorporation/ziku/commit/185a82a5783ade788cc65d88c59d4bb5769d9e0d) Thanks [@tktcorporation](https://github.com/tktcorporation)! - `ziku aggregate` のレート制限ゲートは、記録された resetAt が既に過去で、かつ観測済みのより新しいウィンドウより古いと判定できる場合、それを陳腐化した検知とみなしてクリアしていた。ただし新しいウィンドウの観測自体が残量ゼロ（補充直後に別の並行リクエストで即座に使い切られた等、GitHub は成功レスポンスで残量ゼロを返しうる）なら、ウィンドウが新しいというだけでクリアしてはいけない。現在のクォータが実際に枯渇していることを示す直接の証拠を無視して問い合わせを再開し、再びレート制限のバーストを起こしうるため。新しい観測が実際に枠を残している場合に限ってクリアするようにした。
+
 ## 2.2.0
 
 ### Minor Changes
